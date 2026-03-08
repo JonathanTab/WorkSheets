@@ -1,0 +1,15 @@
+# top-most EditorConfig file
+root = true
+
+[*]
+# Indentation settings
+indent_style = space
+indent_size = 4
+
+# Newline and character settings
+end_of_line = lf
+charset = utf-8
+
+# Whitespace settings
+trim_trailing_whitespace = true
+insert_final_newline = true

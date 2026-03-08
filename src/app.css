@@ -1,0 +1,56 @@
+/* Import Tailwind CSS */
+@import "tailwindcss";
+
+@theme {
+  /* Brand */
+  --color-primary: #007AFF; /*#2563eb modern blue */
+  --color-primary-hover: #1d4ed8;
+  --color-primary-soft: #dbeafe;
+
+  /* Background hierarchy */
+  --color-bg: #fafafa;
+  --color-bg-secondary: #f2f2f7;
+  --color-bg-tertiary: #e4e4e7;
+  --color-bg-elevated: #ffffff;
+
+  /* Surface layers */
+  --color-surface: #ffffff;
+  --color-surface-secondary: #fafafa;
+  --color-surface-tertiary: #f4f4f5;
+
+  /* Text */
+  --color-text: #18181b;
+  --color-text-secondary: #3c3c43;
+  --color-text-tertiary: #71717a;
+  --color-text-muted: #a1a1aa;
+  --color-text-inverse: #ffffff;
+
+  /* Borders */
+  --color-border: #c6c6c8;
+  --color-border-strong: #d4d4d8;
+
+  --color-separator: #ddd;
+
+  /* Subtle fills (badges, pills, hover surfaces) */
+  --color-fill: #f4f4f5;
+  --color-fill-secondary: #e4e4e7;
+  --color-fill-tertiary: #d4d4d8;
+
+  /* Focus */
+  --color-focus-ring: rgb(37 99 235 / 0.35);
+
+  /* Grid specific */
+  --grid-bg: var(--color-surface);
+  --header-bg: var(--color-bg-secondary);
+  --header-hover: var(--color-fill);
+  --header-selected: var(--color-primary-soft);
+  --header-selected-text: var(--color-primary);
+  --header-text: var(--color-text-tertiary);
+  --cell-bg: var(--color-surface);
+  --cell-hover: var(--color-fill);
+  --cell-selected: var(--color-primary-soft);
+  --cell-border: var(--color-border);
+  --anchor-border: var(--color-primary);
+  --text-color: var(--color-text);
+  --input-bg: var(--color-surface);
+}

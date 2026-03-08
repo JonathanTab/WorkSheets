@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Subtle texture for the paper background -->
+    <filter id="paper-texture">
+      <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="5" result="noise"/>
+      <feDiffuseLighting in="noise" lighting-color="#FDFBF7" surfaceScale="2">
+        <feDistantLight azimuth="45" elevation="60"/>
+      </feDiffuseLighting>
+    </filter>
+    
+    <!-- Shadow for depth -->
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#2F3E33" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+
+  <!-- 1. Base: Rounded Square Container -->
+  <rect width="512" height="512" rx="100" fill="#FDFBF7" filter="url(#shadow)"/>
+  
+  <!-- 2. Paper Edge Effect -->
+  <rect x="20" y="20" width="472" height="472" rx="80" fill="#F9F6F0"/>
+  
+  <!-- 3. Header Bar (Deep Homestead Green) -->
+  <path d="M20 100 Q20 20 100 20 L412 20 Q492 20 492 100 L492 120 L20 120 Z" fill="#2F4F38"/>
+
+  <!-- 4. Grid Lines (Spreadsheet structure) -->
+  <g stroke="#E0DCD5" stroke-width="2">
+    <!-- Horizontal Lines -->
+    <line x1="20" y1="220" x2="492" y2="220"/>
+    <line x1="20" y1="320" x2="492" y2="320"/>
+    <line x1="20" y1="420" x2="492" y2="420"/>
+    
+    <!-- Vertical Line (Separating Checklist from Ledger) -->
+    <line x1="300" y1="120" x2="300" y2="492"/>
+  </g>
+
+  <!-- 5. Content: Checklist (Planning) -->
+  <g fill="none" stroke="#2F4F38" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Row 1: Checked -->
+    <rect x="60" y="155" width="40" height="40" rx="8" fill="#2F4F38" stroke="none"/>
+    <polyline points="68,175 78,185 92,160" stroke="#FDFBF7" stroke-width="6" fill="none"/>
+    
+    <!-- Row 2: Empty -->
+    <rect x="60" y="255" width="40" height="40" rx="8" stroke-width="6"/>
+  </g>
+
+  <!-- Text Placeholder Lines (Task Names) -->
+  <rect x="120" y="165" width="140" height="20" rx="10" fill="#D0CCC5"/>
+  <rect x="120" y="265" width="100" height="20" rx="10" fill="#D0CCC5"/>
+
+  <!-- 6. Content: Ledger Numbers (Power/Speed) -->
+  <g fill="#2F4F38">
+    <!-- Row 1 Numbers -->
+    <rect x="340" y="165" width="100" height="20" rx="10" opacity="0.8"/>
+    
+    <!-- Row 2 Numbers -->
+    <rect x="360" y="265" width="80" height="20" rx="10" opacity="0.5"/>
+  </g>
+
+  <!-- 7. Total Row (Ledger Bottom Line) -->
+  <line x1="300" y1="450" x2="480" y2="450" stroke="#2F4F38" stroke-width="6" stroke-linecap="round"/>
+  <rect x="340" y="360" width="120" height="24" rx="12" fill="#2F4F38"/>
+
+</svg>
