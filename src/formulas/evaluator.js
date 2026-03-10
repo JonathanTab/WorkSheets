@@ -12,10 +12,11 @@ import { getFunction, isError, FormulaError } from './functions.js';
  * Evaluate an AST node
  * @param {Object} ast - The AST node to evaluate
  * @param {Function} getCellValue - Function to get cell value: (row, col) => value
- * @param {Object} options - Additional options
+ * @param {Object} context - Evaluation context (e.g. { rep: 2 } for repeaters)
+ * @param {Map<string,Function>|null} customFunctions - Extra function registry (TABLE_* etc.)
  * @returns {any} - The computed value
  */
-export function evaluate(ast, getCellValue, options = {}) {
+export function evaluate(ast, getCellValue, context = {}, customFunctions = null) {
     if (!ast) return null;
 
     // Handle errors propagating
@@ -38,18 +39,22 @@ export function evaluate(ast, getCellValue, options = {}) {
             return evaluateRange(ast, getCellValue);
 
         case NodeType.BINARY_OP:
-            return evaluateBinaryOp(ast, getCellValue, options);
+            return evaluateBinaryOp(ast, getCellValue, context, customFunctions);
 
         case NodeType.UNARY_OP:
-            return evaluateUnaryOp(ast, getCellValue, options);
+            return evaluateUnaryOp(ast, getCellValue, context, customFunctions);
 
         case NodeType.FUNCTION_CALL:
-            return evaluateFunctionCall(ast, getCellValue, options);
+            return evaluateFunctionCall(ast, getCellValue, context, customFunctions);
 
         case NodeType.SHEET_REF:
             // For now, treat sheet refs as errors
             // TODO: Implement multi-sheet support
             return FormulaError.REF;
+
+        case NodeType.REP_VAR:
+            // $rep variable – returns the current repetition index (0-based)
+            return context?.rep ?? 0;
 
         default:
             return FormulaError.VALUE;
@@ -118,13 +123,13 @@ function evaluateRange(ast, getCellValue) {
 /**
  * Evaluate a binary operation
  */
-function evaluateBinaryOp(ast, getCellValue, options) {
-    const left = evaluate(ast.left, getCellValue, options);
+function evaluateBinaryOp(ast, getCellValue, context, customFunctions) {
+    const left = evaluate(ast.left, getCellValue, context, customFunctions);
 
     // Short-circuit for errors
     if (isError(left)) return left;
 
-    const right = evaluate(ast.right, getCellValue, options);
+    const right = evaluate(ast.right, getCellValue, context, customFunctions);
 
     // Short-circuit for errors
     if (isError(right)) return right;
@@ -132,8 +137,14 @@ function evaluateBinaryOp(ast, getCellValue, options) {
     switch (ast.op) {
         case '+': {
             // Try to convert string numbers to actual numbers for addition
-            const leftNum = typeof left === 'string' && left.trim() !== '' && !isNaN(Number(left)) ? Number(left) : left;
-            const rightNum = typeof right === 'string' && right.trim() !== '' && !isNaN(Number(right)) ? Number(right) : right;
+            const leftNum =
+                typeof left === 'string' && left.trim() !== '' && !isNaN(Number(left))
+                    ? Number(left)
+                    : left;
+            const rightNum =
+                typeof right === 'string' && right.trim() !== '' && !isNaN(Number(right))
+                    ? Number(right)
+                    : right;
 
             if (typeof leftNum === 'number' && typeof rightNum === 'number') {
                 return leftNum + rightNum;
@@ -227,8 +238,8 @@ function evaluateBinaryOp(ast, getCellValue, options) {
 /**
  * Evaluate a unary operation
  */
-function evaluateUnaryOp(ast, getCellValue, options) {
-    const operand = evaluate(ast.operand, getCellValue, options);
+function evaluateUnaryOp(ast, getCellValue, context, customFunctions) {
+    const operand = evaluate(ast.operand, getCellValue, context, customFunctions);
 
     if (isError(operand)) return operand;
 
@@ -253,10 +264,23 @@ function evaluateUnaryOp(ast, getCellValue, options) {
 /**
  * Evaluate a function call
  */
-function evaluateFunctionCall(ast, getCellValue, options) {
+function evaluateFunctionCall(ast, getCellValue, context, customFunctions) {
     const funcDef = getFunction(ast.name);
 
     if (!funcDef) {
+        // Fall through to custom functions before returning an error
+        const customFn = customFunctions?.get(ast.name.toUpperCase());
+        if (customFn) {
+            const evaluatedArgs = ast.args.map((arg) =>
+                evaluate(arg, getCellValue, context, customFunctions),
+            );
+            try {
+                return customFn(...evaluatedArgs);
+            } catch (err) {
+                console.error(`Error evaluating custom function ${ast.name}:`, err);
+                return FormulaError.ERROR;
+            }
+        }
         return FormulaError.NAME;
     }
 
@@ -272,11 +296,13 @@ function evaluateFunctionCall(ast, getCellValue, options) {
     // Evaluate arguments
     // For functions that need ranges, we don't evaluate the argument
     // We check if the function wants raw AST nodes
-    const evaluatedArgs = ast.args.map(arg => evaluate(arg, getCellValue, options));
+    const evaluatedArgs = ast.args.map((arg) =>
+        evaluate(arg, getCellValue, context, customFunctions),
+    );
 
     // Call the function
     try {
-        return funcDef.call(evaluatedArgs, { getCellValue, ...options });
+        return funcDef.call(evaluatedArgs, { getCellValue, ...context });
     } catch (err) {
         console.error(`Error evaluating function ${ast.name}:`, err);
         return FormulaError.ERROR;
@@ -287,13 +313,15 @@ function evaluateFunctionCall(ast, getCellValue, options) {
  * Evaluate a formula string
  * @param {string} formula - The formula string (with or without leading =)
  * @param {Function} getCellValue - Function to get cell value
+ * @param {Object} [context] - Optional evaluation context
+ * @param {Map<string,Function>|null} [customFunctions] - Optional custom function registry
  * @returns {any} - The computed value or error
  */
-export function evaluateFormula(formula, getCellValue) {
+export function evaluateFormula(formula, getCellValue, context = {}, customFunctions = null) {
     try {
         const ast = parseFormula(formula);
         if (!ast) return null;
-        return evaluate(ast, getCellValue);
+        return evaluate(ast, getCellValue, context, customFunctions);
     } catch (err) {
         console.error('Error parsing/evaluating formula:', err);
         return FormulaError.ERROR;

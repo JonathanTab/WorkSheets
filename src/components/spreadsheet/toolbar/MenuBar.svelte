@@ -9,6 +9,8 @@
         clipboardManager,
         selectionState,
     } from "../../../stores/spreadsheet/index.js";
+    import TableCreateDialog from "../features/TableCreateDialog.svelte";
+    import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
 
     // File menu items (most are stubbed)
     const fileItems = [
@@ -137,6 +139,26 @@
         },
     ];
 
+    // Merge handlers - must be declared before formatItems
+    let canMerge = $derived.by(() => {
+        const range = selectionState.range;
+        if (!range) return false;
+        return (
+            range.startRow !== range.endRow || range.startCol !== range.endCol
+        );
+    });
+
+    let canUnmerge = $derived.by(() => {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const anchor = selectionState.anchor;
+        if (!sheetStore?.mergeEngine || !anchor) return false;
+        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
+    });
+
+    // Dialog state for table/repeater creation
+    let showCreateTableDialog = $state(false);
+    let showCreateRepeaterDialog = $state(false);
+
     // Insert menu items
     const insertItems = [
         {
@@ -156,6 +178,19 @@
         {
             label: "Column Right",
             action: () => insertColumnRight(),
+        },
+        { divider: true },
+        {
+            label: "Table",
+            action: () => (showCreateTableDialog = true),
+            icon: "⊞",
+            disabled: !selectionState.range,
+        },
+        {
+            label: "Repeater",
+            action: () => (showCreateRepeaterDialog = true),
+            icon: "↻",
+            disabled: !selectionState.range,
         },
         { divider: true },
         {
@@ -186,6 +221,17 @@
             label: "Underline",
             action: () => applyFormat("underline", true),
             shortcut: "Ctrl+U",
+        },
+        { divider: true },
+        {
+            label: "Merge Cells",
+            action: () => mergeSelectedCells(),
+            disabled: !canMerge,
+        },
+        {
+            label: "Unmerge Cells",
+            action: () => unmergeSelectedCells(),
+            disabled: !canUnmerge,
         },
         { divider: true },
         {
@@ -273,6 +319,25 @@
         if (!sheetStore || !range) return;
         sheetStore.insertColumnAt(range.endCol + 1);
     }
+
+    function mergeSelectedCells() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range || !canMerge) return;
+        sheetStore.mergeCells(
+            range.startRow,
+            range.startCol,
+            range.endRow,
+            range.endCol,
+        );
+    }
+
+    function unmergeSelectedCells() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const anchor = selectionState.anchor;
+        if (!sheetStore || !anchor) return;
+        sheetStore.unmergeCells(anchor.row, anchor.col);
+    }
 </script>
 
 <div class="menu-bar">
@@ -283,10 +348,20 @@
     <MenuDropdown label="Format" items={formatItems} />
 </div>
 
+{#if showCreateTableDialog}
+    <TableCreateDialog onClose={() => (showCreateTableDialog = false)} />
+{/if}
+
+{#if showCreateRepeaterDialog}
+    <RepeaterCreateDialog onClose={() => (showCreateRepeaterDialog = false)} />
+{/if}
+
 <style>
     .menu-bar {
         display: flex;
         align-items: center;
-        gap: 2px;
+        height: 28px;
+        background: var(--color-surface);
+        border-bottom: 1px solid var(--color-border);
     }
 </style>

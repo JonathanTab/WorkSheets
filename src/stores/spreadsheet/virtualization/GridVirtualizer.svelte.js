@@ -119,33 +119,44 @@ export class GridVirtualizer {
         });
     });
 
+    // Reactive pane plans
+    cornerPlan = $derived.by(() => {
+        this.#rowMetrics.version;
+        this.#colMetrics.version;
+        return this.#computeCornerPlan();
+    });
+
+    topPlan = $derived.by(() => {
+        this.#rowMetrics.version;
+        this.#colMetrics.version;
+        return this.#computeTopPlan();
+    });
+
+    leftPlan = $derived.by(() => {
+        this.#rowMetrics.version;
+        this.#colMetrics.version;
+        return this.#computeLeftPlan();
+    });
+
+    bodyPlan = $derived.by(() => {
+        this.#rowMetrics.version;
+        this.#colMetrics.version;
+        return this.#computeBodyPlan();
+    });
+
     // Full render plan: stable shape, reactive recomputation
     renderPlan = $derived.by(() => {
-        // Explicitly touch versions so size metadata updates force recompute.
-        const _rowVersion = this.#rowMetrics.version;
-        const _colVersion = this.#colMetrics.version;
-        _rowVersion;
-        _colVersion;
-
-        const frozenHeight = this.frozenHeight;
-        const frozenWidth = this.frozenWidth;
-
-        const cornerPlan = this.#computeCornerPlan();
-        const topPlan = this.#computeTopPlan();
-        const leftPlan = this.#computeLeftPlan();
-        const bodyPlan = this.#computeBodyPlan();
-
         return {
             plans: {
-                corner: cornerPlan,
-                top: topPlan,
-                left: leftPlan,
-                body: bodyPlan
+                corner: this.cornerPlan,
+                top: this.topPlan,
+                left: this.leftPlan,
+                body: this.bodyPlan
             },
             totalWidth: this.totalWidth,
             totalHeight: this.totalHeight,
-            frozenWidth,
-            frozenHeight,
+            frozenWidth: this.frozenWidth,
+            frozenHeight: this.frozenHeight,
             bodyViewportWidth: this.bodyViewportWidth,
             bodyViewportHeight: this.bodyViewportHeight
         };
@@ -583,6 +594,23 @@ export class GridVirtualizer {
         }
 
         return { scrollTop: newScrollTop, scrollLeft: newScrollLeft };
+    }
+
+    /**
+     * Get the pixel rect for a cell range, relative to grid content origin.
+     * Used to position viewport-mode panels.
+     * @param {number} startRow
+     * @param {number} startCol
+     * @param {number} endRow
+     * @param {number} endCol
+     * @returns {{ x: number, y: number, width: number, height: number }}
+     */
+    getCellRangeRect(startRow, startCol, endRow, endCol) {
+        const x = this.#colMetrics.offsetOf(startCol);
+        const y = this.#rowMetrics.offsetOf(startRow);
+        const width = this.#colMetrics.offsetOf(endCol + 1) - x;
+        const height = this.#rowMetrics.offsetOf(endRow + 1) - y;
+        return { x, y, width, height };
     }
 
     /**

@@ -53,4 +53,53 @@
   --anchor-border: var(--color-primary);
   --text-color: var(--color-text);
   --input-bg: var(--color-surface);
+
+  /* Table feature */
+  --table-header-bg: #f1f5f9;
+  --table-header-text: #334155;
+  --table-header-border: #94a3b8;
+  --table-header-hover: #e2e8f0;
+  --table-sort-color: #3b82f6;
+  --table-entry-bg: #f8fafc;
+  --entry-error-bg: #fef2f2;
+  --required-color: #ef4444;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --muted: #64748b;
+  --surface-bg: #ffffff;
+  --placeholder-color: #94a3b8;
+}
+
+/* ── Print styles ────────────────────────────────────────────────────────── */
+
+.print-preview {
+  display: none;
+}
+
+@media print {
+  /* Hide the entire app shell when printing */
+  .app-shell,
+  .toolbar,
+  .formula-bar,
+  .sheet-tabs,
+  nav {
+    display: none !important;
+  }
+
+  /* Show the print preview */
+  .print-preview {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    background: white;
+    z-index: 9999;
+    overflow: visible;
+  }
+
+  /* Reset margins for print */
+  body {
+    margin: 0;
+    padding: 0;
+    background: white;
+  }
 }

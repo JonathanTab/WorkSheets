@@ -25,6 +25,7 @@ const TokenType = {
     COMMA: 'COMMA',
     COLON: 'COLON',
     SHEET_REF: 'SHEET_REF',
+    REP_VAR: 'REP_VAR',
     EOF: 'EOF'
 };
 
@@ -37,7 +38,8 @@ export const NodeType = {
     BINARY_OP: 'BinaryOp',
     UNARY_OP: 'UnaryOp',
     FUNCTION_CALL: 'FunctionCall',
-    SHEET_REF: 'SheetRef'
+    SHEET_REF: 'SheetRef',
+    REP_VAR: 'RepVar'
 };
 
 /**
@@ -141,15 +143,18 @@ class Tokenizer {
             } else if (/[a-zA-Z_]/.test(char)) {
                 tokens.push(this.readIdentifier());
             } else if (char === '$') {
-                // Absolute reference - read the rest
+                // Absolute reference OR $rep variable
                 this.advance();
                 let result = '$';
-                while (this.currentChar && /[a-zA-Z0-9]/.test(this.currentChar)) {
+                while (this.currentChar && /[a-zA-Z0-9_]/.test(this.currentChar)) {
                     result += this.currentChar;
                     this.advance();
                 }
-                // Check for sheet reference
-                if (this.currentChar === '!') {
+                // $rep is the repeater index variable
+                if (result.toLowerCase() === '$rep') {
+                    tokens.push({ type: TokenType.REP_VAR, value: '$rep' });
+                } else if (this.currentChar === '!') {
+                    // Sheet reference like $Sheet1!A1
                     this.advance();
                     tokens.push({ type: TokenType.SHEET_REF, value: result });
                 } else {
@@ -413,6 +418,12 @@ export class Parser {
         // Function call
         if (token.type === TokenType.FUNCTION) {
             return this.parseFunctionCall(token.value);
+        }
+
+        // $rep repetition variable
+        if (token.type === TokenType.REP_VAR) {
+            this.advance();
+            return { type: NodeType.REP_VAR };
         }
 
         // Parenthesized expression

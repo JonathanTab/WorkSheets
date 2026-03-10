@@ -1,7 +1,14 @@
 <script>
     import { onMount, onDestroy } from "svelte";
 
-    let { label = "", items = [], disabled = false } = $props();
+    let {
+        label = "",
+        icon = null,
+        title = "",
+        items = [],
+        disabled = false,
+        children = null,
+    } = $props();
 
     let open = $state(false);
     let buttonRef = $state(null);
@@ -78,12 +85,20 @@
         aria-haspopup="true"
         aria-expanded={open}
     >
-        {label}
+        {#if icon}
+            <span class="icon">{icon}</span>
+        {/if}
+        {#if label}
+            {label}
+        {/if}
         <span class="arrow">▾</span>
     </button>
 
     {#if open}
-        <div bind:this={dropdownRef} class="dropdown-panel">
+        <div bind:this={dropdownRef} class="dropdown-panel" {title}>
+            {#if children}
+                {@render children()}
+            {/if}
             {#each items as item, i}
                 {#if item.divider}
                     <div class="divider"></div>

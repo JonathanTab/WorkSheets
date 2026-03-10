@@ -58,10 +58,20 @@ export const CELL_KEYS = {
 export const CELL_TYPES = {
     TEXT: 'text',
     NUMBER: 'number',
+    CURRENCY: 'currency',
+    PERCENT: 'percent',
     DATE: 'date',
+    TIME: 'time',
+    DATETIME: 'datetime',
     BOOLEAN: 'boolean',
+    CHECKBOX: 'checkbox',
+    EMAIL: 'email',
+    URL: 'url',
+    RATING: 'rating',
     ERROR: 'error'
 };
+
+export const CELL_TYPE_CONFIG_KEY = 'ct';
 
 // Horizontal alignment options
 export const H_ALIGN = {

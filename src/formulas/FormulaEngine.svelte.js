@@ -34,6 +34,9 @@ export class FormulaEngine {
     /** @type {Set<string>} */
     #pendingChanges = new Set();
 
+    /** @type {Map<string, Function>} Custom function registry (e.g. TABLE_* functions) */
+    #customFunctions = new Map();
+
     // Reactive computed values - key: "row,col" -> value: computed result
     // This is Svelte 5 reactive state, so UI updates automatically
     computedValues = $state({});
@@ -48,6 +51,43 @@ export class FormulaEngine {
      */
     setCellValueGetter(fn) {
         this.#getCellValue = fn;
+    }
+
+    /**
+     * Register a custom function (e.g. TABLE_GET, TABLE_CUMSUM)
+     * @param {string} name - Function name (case-insensitive)
+     * @param {Function} fn - Implementation function(...args): any
+     */
+    registerFunction(name, fn) {
+        this.#customFunctions.set(name.toUpperCase(), fn);
+    }
+
+    /**
+     * Unregister a custom function
+     * @param {string} name
+     */
+    unregisterFunction(name) {
+        this.#customFunctions.delete(name.toUpperCase());
+    }
+
+    /**
+     * Evaluate a cell's formula with an optional context (e.g. $rep value for repeaters)
+     * @param {number} row
+     * @param {number} col
+     * @param {Object} [context] - Context object: { rep?: number }
+     * @returns {any}
+     */
+    evaluateWithContext(row, col, context = {}) {
+        const formulaInfo = this.#graph.getFormula(row, col);
+        if (!formulaInfo?.ast) {
+            return this.#getCellValue ? this.#getCellValue(row, col) : null;
+        }
+        const getCellValueWithComputed = (r, c) => {
+            const k = cellKey(r, c);
+            if (k in this.computedValues) return this.computedValues[k];
+            return this.#getCellValue ? this.#getCellValue(r, c) : null;
+        };
+        return evaluate(formulaInfo.ast, getCellValueWithComputed, context, this.#customFunctions);
     }
 
     /**

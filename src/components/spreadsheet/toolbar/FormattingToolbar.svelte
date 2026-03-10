@@ -7,6 +7,8 @@
     import ColorPicker from "./ColorPicker.svelte";
     import BorderPicker from "./BorderPicker.svelte";
     import AlignmentPicker from "./AlignmentPicker.svelte";
+    import MenuDropdown from "./MenuDropdown.svelte";
+    import CellTypeConfigurator from "./CellTypeConfigurator.svelte";
 
     // Font size options
     const fontSizes = [
@@ -140,6 +142,20 @@
         applyFormatting("horizontalAlign", align);
     }
 
+    function handleCellTypeChange(config) {
+        const range = selectionState.range;
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!range || !sheetStore) return;
+
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = range.startRow; r <= range.endRow; r++) {
+                for (let c = range.startCol; c <= range.endCol; c++) {
+                    sheetStore.setCellTypeConfig(r, c, config);
+                }
+            }
+        });
+    }
+
     // Print handler
     function handlePrint() {
         window.print();
@@ -178,6 +194,44 @@
 
     // Has selection
     let hasSelection = $derived(!!selectionState.range);
+
+    // Merge state
+    let canMerge = $derived.by(() => {
+        const range = selectionState.range;
+        if (!range) return false;
+        return (
+            range.startRow !== range.endRow || range.startCol !== range.endCol
+        );
+    });
+
+    let isMergedCell = $derived.by(() => {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const anchor = selectionState.anchor;
+        if (!sheetStore?.mergeEngine || !anchor) return false;
+        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
+    });
+
+    function toggleMerge() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
+
+        if (isMergedCell) {
+            // Unmerge
+            const anchor = selectionState.anchor;
+            if (anchor) {
+                sheetStore.unmergeCells(anchor.row, anchor.col);
+            }
+        } else if (canMerge) {
+            // Merge
+            const range = selectionState.range;
+            sheetStore.mergeCells(
+                range.startRow,
+                range.startCol,
+                range.endRow,
+                range.endCol,
+            );
+        }
+    }
 </script>
 
 <div class="formatting-toolbar">
@@ -330,6 +384,30 @@
             value={selectedFormatting?.horizontalAlign || "left"}
             onchange={handleAlignmentChange}
         />
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Cell Type -->
+    <div class="toolbar-group">
+        <MenuDropdown icon="123" title="Cell Type">
+            <CellTypeConfigurator {selectionState} />
+        </MenuDropdown>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Merge Cells -->
+    <div class="toolbar-group">
+        <button
+            class="toolbar-btn"
+            class:active={isMergedCell}
+            onclick={toggleMerge}
+            disabled={!canMerge && !isMergedCell}
+            title={isMergedCell ? "Unmerge Cells" : "Merge Cells"}
+        >
+            ⊞
+        </button>
     </div>
 
     <!-- Spacer -->

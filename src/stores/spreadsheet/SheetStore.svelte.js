@@ -13,7 +13,13 @@
  */
 import * as Y from 'yjs';
 import { createCellYMap } from './schema.js';
-import { CELL_KEYS, DEFAULT_ROW_COUNT, DEFAULT_COL_COUNT } from './constants.js';
+import {
+    CELL_KEYS,
+    CELL_TYPE_CONFIG_KEY,
+    DEFAULT_ROW_COUNT,
+    DEFAULT_COL_COUNT
+} from './constants.js';
+import { MergeEngine } from './features/MergeEngine.svelte.js';
 
 // Frozen empty object for non-existent cells (prevents allocation churn)
 const EMPTY_CELL = Object.freeze({ v: undefined, exists: false });
@@ -52,7 +58,7 @@ export class SheetStore {
     // --- Reactive Cell Data ---
     // Key: "row,col" -> Value: Cell Object { v, style, exists }
     // Note: v contains either a raw value OR a formula string (starting with "=")
-    cells = $state({});
+    cells = $state(new Map());
 
     // --- Reactive Border Version ---
     // Incremented when borders change to trigger re-renders
@@ -62,6 +68,10 @@ export class SheetStore {
     // Incremented when row heights or column widths change for cache invalidation
     rowMetaVersion = $state(0);
     colMetaVersion = $state(0);
+
+    // --- Merge Engine ---
+    /** @type {MergeEngine} */
+    mergeEngine = null;
 
     /**
      * Create a SheetStore
@@ -80,6 +90,9 @@ export class SheetStore {
 
         // 2. Setup Observers (Push updates to state)
         this.#setupObservers();
+
+        // 3. Initialize MergeEngine (reactive merge index)
+        this.mergeEngine = new MergeEngine(sheet, ydoc);
     }
 
     // --- Initialization & Sync ---
@@ -98,11 +111,11 @@ export class SheetStore {
     }
 
     #syncAllCells() {
-        // Build initial state object from Y.Map
-        const newCells = {};
+        // Build initial state map from Y.Map
+        const newCells = new Map();
 
         this.#cells.forEach((cellYMap, key) => {
-            newCells[key] = this.#processCellYMap(cellYMap);
+            newCells.set(key, this.#processCellYMap(cellYMap));
         });
 
         // Assign to reactive state
@@ -116,6 +129,7 @@ export class SheetStore {
         return {
             v: cellMap.get(CELL_KEYS.VALUE),
             t: cellMap.get(CELL_KEYS.TYPE),
+            ct: cellMap.get(CELL_TYPE_CONFIG_KEY),
             // Formatting
             fontFamily: cellMap.get('fontFamily'),
             fontSize: cellMap.get('fontSize'),
@@ -157,10 +171,10 @@ export class SheetStore {
                 if (change.action === 'add' || change.action === 'update') {
                     const cellYMap = this.#cells.get(key);
                     if (cellYMap) {
-                        this.cells[key] = this.#processCellYMap(cellYMap);
+                        this.cells.set(key, this.#processCellYMap(cellYMap));
                     }
                 } else if (change.action === 'delete') {
-                    delete this.cells[key];
+                    this.cells.delete(key);
                 }
             });
         };
@@ -175,7 +189,7 @@ export class SheetStore {
 
                     const cellYMap = this.#cells.get(cellKey);
                     if (cellYMap) {
-                        this.cells[cellKey] = this.#processCellYMap(cellYMap);
+                        this.cells.set(cellKey, this.#processCellYMap(cellYMap));
                     }
                 }
             }
@@ -211,7 +225,7 @@ export class SheetStore {
      */
     getCell(row, col) {
         const key = `${row},${col}`;
-        return this.cells[key] || EMPTY_CELL;
+        return this.cells.get(key) || EMPTY_CELL;
     }
 
     /**
@@ -343,6 +357,61 @@ export class SheetStore {
         });
     }
 
+    /**
+     * Get effective cell type config merging col -> row -> cell
+     * @param {number} row
+     * @param {number} col
+     * @returns {Object|null}
+     */
+    getCellTypeConfig(row, col) {
+        const cell = this.getCell(row, col);
+        if (cell.ct) return cell.ct;
+
+        const rowMeta = this.#sheet.get('rowMeta');
+        const rMeta = rowMeta?.get(String(row));
+        if (rMeta?.has(CELL_TYPE_CONFIG_KEY)) return rMeta.get(CELL_TYPE_CONFIG_KEY);
+
+        const colMeta = this.#sheet.get('colMeta');
+        const cMeta = colMeta?.get(String(col));
+        if (cMeta?.has(CELL_TYPE_CONFIG_KEY)) return cMeta.get(CELL_TYPE_CONFIG_KEY);
+
+        return null;
+    }
+
+    /**
+     * Set cell-level type config
+     * @param {number} row
+     * @param {number} col
+     * @param {Object} ct
+     */
+    setCellTypeConfig(row, col, ct) {
+        this.setCellProperties(row, col, { [CELL_TYPE_CONFIG_KEY]: ct });
+    }
+
+    /**
+     * Set column-level type config
+     * @param {number} col
+     * @param {Object} ct
+     */
+    setColTypeConfig(col, ct) {
+        let colMeta = this.#sheet.get('colMeta');
+        if (!colMeta) {
+            colMeta = new Y.Map();
+            this.#sheet.set('colMeta', colMeta);
+        }
+
+        this.#ydoc.transact(() => {
+            let meta = colMeta.get(String(col));
+            if (!meta) {
+                meta = new Y.Map();
+                colMeta.set(String(col), meta);
+            }
+            if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
+            else meta.set(CELL_TYPE_CONFIG_KEY, ct);
+        });
+        this.colMetaVersion++;
+    }
+
     // --- Sheet Property Setters ---
 
     setName(name) { this.#sheet.set('name', name); }
@@ -401,7 +470,12 @@ export class SheetStore {
             // 3. Shift row metadata
             this.#shiftRowMetaForInsert(rowIndex);
 
-            // 4. Increment rowCount
+            // 4. Shift features (merges, tables, repeaters)
+            this.mergeEngine.shiftAxes('row', rowIndex, 1);
+            this.#shiftTables('row', rowIndex, 1);
+            this.#shiftRepeaters('row', rowIndex, 1);
+
+            // 5. Increment rowCount
             const currentRowCount = this.#sheet.get('rowCount') ?? DEFAULT_ROW_COUNT;
             this.#sheet.set('rowCount', currentRowCount + 1);
         });
@@ -445,7 +519,12 @@ export class SheetStore {
             // 3. Shift column metadata
             this.#shiftColMetaForInsert(colIndex);
 
-            // 4. Increment colCount
+            // 4. Shift features
+            this.mergeEngine.shiftAxes('col', colIndex, 1);
+            this.#shiftTables('col', colIndex, 1);
+            this.#shiftRepeaters('col', colIndex, 1);
+
+            // 5. Increment colCount
             const currentColCount = this.#sheet.get('colCount') ?? DEFAULT_COL_COUNT;
             this.#sheet.set('colCount', currentColCount + 1);
         });
@@ -501,7 +580,12 @@ export class SheetStore {
             // 4. Shift row metadata
             this.#shiftRowMetaForDelete(rowIndex);
 
-            // 5. Decrement rowCount
+            // 5. Shift features
+            this.mergeEngine.shiftAxes('row', rowIndex, -1);
+            this.#shiftTables('row', rowIndex, -1);
+            this.#shiftRepeaters('row', rowIndex, -1);
+
+            // 6. Decrement rowCount
             const currentRowCount = this.#sheet.get('rowCount') ?? DEFAULT_ROW_COUNT;
             this.#sheet.set('rowCount', Math.max(1, currentRowCount - 1));
         });
@@ -557,7 +641,12 @@ export class SheetStore {
             // 4. Shift column metadata
             this.#shiftColMetaForDelete(colIndex);
 
-            // 5. Decrement colCount
+            // 5. Shift features
+            this.mergeEngine.shiftAxes('col', colIndex, -1);
+            this.#shiftTables('col', colIndex, -1);
+            this.#shiftRepeaters('col', colIndex, -1);
+
+            // 6. Decrement colCount
             const currentColCount = this.#sheet.get('colCount') ?? DEFAULT_COL_COUNT;
             this.#sheet.set('colCount', Math.max(1, currentColCount - 1));
         });
@@ -1043,6 +1132,117 @@ export class SheetStore {
     }
 
     /**
+     * Shift tables coordinates
+     * @param {'row'|'col'} axis
+     * @param {number} atIndex
+     * @param {number} delta
+     */
+    #shiftTables(axis, atIndex, delta) {
+        const tables = this.#sheet.get('tables');
+        if (!tables) return;
+
+        const startKey = axis === 'row' ? 'startRow' : 'startCol';
+        const vpStartKey = axis === 'row' ? 'vpStartRow' : 'vpStartCol';
+        const vpEndKey = axis === 'row' ? 'vpEndRow' : 'vpEndCol';
+
+        tables.forEach((tm) => {
+            const mode = tm.get('mode') ?? 'inline';
+            const start = tm.get(startKey);
+
+            if (delta > 0) {
+                if (start >= atIndex) tm.set(startKey, start + delta);
+            } else {
+                if (start > atIndex) tm.set(startKey, start + delta);
+                else if (start === atIndex && axis === 'col') {
+                    // Column deletion might affect table width, but we don't have endCol for inline
+                }
+            }
+
+            if (mode === 'viewport') {
+                const vpStart = tm.get(vpStartKey);
+                const vpEnd = tm.get(vpEndKey);
+                if (vpStart === undefined || vpEnd === undefined) return;
+
+                if (delta > 0) {
+                    if (vpStart >= atIndex) {
+                        tm.set(vpStartKey, vpStart + delta);
+                        tm.set(vpEndKey, vpEnd + delta);
+                    } else if (vpEnd >= atIndex) {
+                        tm.set(vpEndKey, vpEnd + delta);
+                    }
+                } else {
+                    if (vpStart > atIndex) {
+                        tm.set(vpStartKey, vpStart + delta);
+                        tm.set(vpEndKey, vpEnd + delta);
+                    } else if (vpStart <= atIndex && vpEnd >= atIndex) {
+                        tm.set(vpEndKey, Math.max(vpStart, vpEnd + delta));
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Shift repeaters coordinates
+     * @param {'row'|'col'} axis
+     * @param {number} atIndex
+     * @param {number} delta
+     */
+    #shiftRepeaters(axis, atIndex, delta) {
+        const repeaters = this.#sheet.get('repeaters');
+        if (!repeaters) return;
+
+        const startKey = axis === 'row' ? 'templateStartRow' : 'templateStartCol';
+        const endKey = axis === 'row' ? 'templateEndRow' : 'templateEndCol';
+        const vpStartKey = axis === 'row' ? 'vpStartRow' : 'vpStartCol';
+        const vpEndKey = axis === 'row' ? 'vpEndRow' : 'vpEndCol';
+
+        repeaters.forEach((rm) => {
+            const mode = rm.get('mode') ?? 'inline';
+            const start = rm.get(startKey);
+            const end = rm.get(endKey);
+
+            if (delta > 0) {
+                if (start >= atIndex) {
+                    rm.set(startKey, start + delta);
+                    rm.set(endKey, end + delta);
+                } else if (end >= atIndex) {
+                    rm.set(endKey, end + delta);
+                }
+            } else {
+                if (start > atIndex) {
+                    rm.set(startKey, start + delta);
+                    rm.set(endKey, end + delta);
+                } else if (start <= atIndex && end >= atIndex) {
+                    rm.set(endKey, Math.max(start, end + delta));
+                }
+            }
+
+            if (mode === 'viewport') {
+                const vpStart = rm.get(vpStartKey);
+                const vpEnd = rm.get(vpEndKey);
+                if (vpStart === undefined || vpEnd === undefined) return;
+
+                if (delta > 0) {
+                    if (vpStart >= atIndex) {
+                        rm.set(vpStartKey, vpStart + delta);
+                        rm.set(vpEndKey, vpEnd + delta);
+                    } else if (vpEnd >= atIndex) {
+                        rm.set(vpEndKey, vpEnd + delta);
+                    }
+                } else {
+                    if (vpStart > atIndex) {
+                        rm.set(vpStartKey, vpStart + delta);
+                        rm.set(vpEndKey, vpEnd + delta);
+                    } else if (vpStart <= atIndex && vpEnd >= atIndex) {
+                        rm.set(vpEndKey, Math.max(vpStart, vpEnd + delta));
+                    }
+                }
+            }
+        });
+    }
+
+    /**
      * Get row height (returns default if not set)
      * @param {number} rowIndex
      * @returns {number}
@@ -1121,26 +1321,41 @@ export class SheetStore {
     // --- Merges ---
 
     /**
-     * Get all merges
-     * @returns {Array<Object>}
+     * Merge a rectangular range of cells.
+     * @param {number} startRow
+     * @param {number} startCol
+     * @param {number} endRow
+     * @param {number} endCol
      */
-    getMerges() {
-        const merges = this.#sheet.get('merges');
-        return merges ? merges.toArray() : [];
+    mergeCells(startRow, startCol, endRow, endCol) {
+        this.mergeEngine.mergeCells(startRow, startCol, endRow, endCol);
     }
 
     /**
-     * Find merge containing a cell
+     * Unmerge the merge whose primary cell is at (startRow, startCol).
+     * @param {number} startRow
+     * @param {number} startCol
+     */
+    unmergeCells(startRow, startCol) {
+        this.mergeEngine.unmergeCells(startRow, startCol);
+    }
+
+    /**
+     * Get all merges (reactive, from MergeEngine)
+     * @returns {Array<Object>}
+     */
+    getMerges() {
+        return this.mergeEngine.merges;
+    }
+
+    /**
+     * Find merge containing a cell (O(1) via MergeEngine index)
      * @param {number} row
      * @param {number} col
      * @returns {Object | null}
      */
     getMergeAt(row, col) {
-        const merges = this.getMerges();
-        return merges.find(m =>
-            row >= m.startRow && row <= m.endRow &&
-            col >= m.startCol && col <= m.endCol
-        ) || null;
+        return this.mergeEngine.getMergeAt(row, col);
     }
 
     // --- Conditional Formats ---
@@ -1294,6 +1509,7 @@ export class SheetStore {
      * Cleanup when no longer needed
      */
     destroy() {
+        this.mergeEngine?.destroy();
         if (this.#cleanup) {
             this.#cleanup();
             this.#cleanup = null;

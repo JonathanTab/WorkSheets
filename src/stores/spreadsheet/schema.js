@@ -9,6 +9,11 @@
  * - sheets: Y.Map<sheetId, Y.Map> - Collection of sheets
  * - sheetOrder: Y.Array<string> - Ordered list of sheet IDs
  * - namedRanges: Y.Map<name, Y.Map> - Named range definitions
+ *
+ * ## Sheet Structure additions (v3):
+ * - tables: Y.Map<tableId, Y.Map> - DB-style table regions
+ * - repeaters: Y.Map<repeaterId, Y.Map> - Repeated cell template regions
+ * - printSettings: Y.Map - Print configuration
  */
 import * as Y from 'yjs';
 import {
@@ -64,8 +69,17 @@ export function createSheetYMap(ydoc, id, name, options = {}) {
     // Value: { style, width, color }
     sheet.set('borders', new Y.Map());
 
-    // Merges (Y.Array of plain objects)
+    // Merges (Y.Array of plain objects: { startRow, startCol, endRow, endCol })
     sheet.set('merges', new Y.Array());
+
+    // Tables (Y.Map<tableId, Y.Map>) - DB-style table regions
+    sheet.set('tables', new Y.Map());
+
+    // Repeaters (Y.Map<repeaterId, Y.Map>) - repeated cell template regions
+    sheet.set('repeaters', new Y.Map());
+
+    // Print settings (Y.Map)
+    sheet.set('printSettings', new Y.Map());
 
     // Conditional formatting rules (Y.Array<Y.Map>)
     sheet.set('conditionalFormats', new Y.Array());
@@ -115,6 +129,10 @@ export function createCellYMap(initialData = {}) {
         cell.set('protected', initialData.protected);
     }
 
+    if (initialData.ct !== undefined) {
+        cell.set('ct', initialData.ct);
+    }
+
     // Formatting properties
     const formattingKeys = [
         'fontFamily', 'fontSize', 'bold', 'italic', 'underline',
@@ -129,6 +147,107 @@ export function createCellYMap(initialData = {}) {
     });
 
     return cell;
+}
+
+/**
+ * Create a table Y.Map with initial structure
+ * @param {string} id - Table ID
+ * @param {string} name - Table name
+ * @param {Object} [options]
+ * @returns {Y.Map}
+ */
+export function createTableYMap(id, name, options = {}) {
+    const table = new Y.Map();
+    table.set('id', id);
+    table.set('name', name);
+    table.set('mode', options.mode ?? 'inline');
+
+    // Inline mode: the table starts at startRow in the sheet, spans startCol..endCol
+    table.set('startRow', options.startRow ?? 0);
+    table.set('startCol', options.startCol ?? 0);
+    table.set('endCol', options.endCol ?? (options.startCol ?? 0));
+
+    // Viewport mode: anchored to a cell range in the sheet
+    if (options.mode === 'viewport') {
+        table.set('vpStartRow', options.vpStartRow ?? 0);
+        table.set('vpStartCol', options.vpStartCol ?? 0);
+        table.set('vpEndRow', options.vpEndRow ?? 10);
+        table.set('vpEndCol', options.vpEndCol ?? 5);
+    }
+
+    // Column definitions (Y.Array of Y.Maps)
+    table.set('columns', new Y.Array());
+
+    // Row data (Y.Array of Y.Maps: colId -> value)
+    table.set('rows', new Y.Array());
+
+    // Sort state
+    table.set('sortColId', null);
+    table.set('sortDir', 'asc');
+
+    // Active filters (Y.Map<colId, Y.Map { type, op, value }>)
+    table.set('filters', new Y.Map());
+
+    return table;
+}
+
+/**
+ * Create a table column definition Y.Map
+ * @param {Object} options
+ * @returns {Y.Map}
+ */
+export function createTableColumnYMap(options = {}) {
+    const col = new Y.Map();
+    col.set('id', options.id ?? `col-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+    col.set('name', options.name ?? '');
+    col.set('dataType', options.dataType ?? 'text');
+    col.set('required', options.required ?? false);
+    col.set('sortOrder', options.sortOrder ?? 0);
+    col.set('conditionalFormats', new Y.Array());
+    col.set('width', options.width ?? null);
+    col.set('formula', options.formula ?? null); // computed column formula (uses $row)
+
+    if (options.dataValidation) {
+        const dv = new Y.Map();
+        Object.entries(options.dataValidation).forEach(([k, v]) => dv.set(k, v));
+        col.set('dataValidation', dv);
+    }
+
+    return col;
+}
+
+/**
+ * Create a repeater Y.Map
+ * @param {string} id - Repeater ID
+ * @param {string} name - Repeater name
+ * @param {Object} [options]
+ * @returns {Y.Map}
+ */
+export function createRepeaterYMap(id, name, options = {}) {
+    const rep = new Y.Map();
+    rep.set('id', id);
+    rep.set('name', name);
+    rep.set('mode', options.mode ?? 'inline');
+
+    // Template cell range in the sheet (the "template" is rep 0)
+    rep.set('templateStartRow', options.templateStartRow ?? 0);
+    rep.set('templateEndRow', options.templateEndRow ?? 0);
+    rep.set('templateStartCol', options.templateStartCol ?? 0);
+    rep.set('templateEndCol', options.templateEndCol ?? 0);
+
+    rep.set('direction', options.direction ?? 'vertical'); // 'vertical' | 'horizontal'
+    rep.set('count', options.count ?? 1);  // total repetitions (including template = rep 0)
+    rep.set('gap', options.gap ?? 0);      // empty rows/cols between repetitions
+
+    // Viewport mode: anchored to a cell range in the sheet
+    if (options.mode === 'viewport') {
+        rep.set('vpStartRow', options.vpStartRow ?? 0);
+        rep.set('vpStartCol', options.vpStartCol ?? 0);
+        rep.set('vpEndRow', options.vpEndRow ?? 10);
+        rep.set('vpEndCol', options.vpEndCol ?? 5);
+    }
+
+    return rep;
 }
 
 /**
@@ -199,7 +318,16 @@ export const spreadsheetSchema = {
 
         // Check if already initialized
         if (root.has('metadata') && root.has('sheets')) {
-            return; // Already initialized
+            // Migrate existing sheets to add new fields if missing (v3)
+            const sheets = root.get('sheets');
+            if (sheets) {
+                sheets.forEach((sheet) => {
+                    if (!sheet.has('tables')) sheet.set('tables', new Y.Map());
+                    if (!sheet.has('repeaters')) sheet.set('repeaters', new Y.Map());
+                    if (!sheet.has('printSettings')) sheet.set('printSettings', new Y.Map());
+                });
+            }
+            return;
         }
 
         initializeDocument(ydoc);

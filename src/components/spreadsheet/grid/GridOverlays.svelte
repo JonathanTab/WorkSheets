@@ -6,6 +6,11 @@
      * so all positions are relative to the pane's row/col range origins.
      */
 
+    import { segmentFormula } from "../../../formulas/reference-highlighter.js";
+    import { editSessionState } from "../../../stores/spreadsheet/index.js";
+    import FormulaValuePopup from "../FormulaValuePopup.svelte";
+    import PickerEditor from "../cellTypes/PickerEditor.svelte";
+
     let {
         virtualizer,
         selectionState,
@@ -15,7 +20,9 @@
         isEditing = false,
         editRow = -1,
         editCol = -1,
-        editValue = $bindable(""),
+        editValue = "",
+        onEditInput,
+        onEditSelect,
         onCommitEdit,
         onCancelEdit,
     } = $props();
@@ -111,7 +118,15 @@
         };
     });
 
+    let pickerMode = $derived(editSessionState.pickerMode);
+    let isFormulaMode = $derived(isEditing && editValue?.startsWith("="));
+    let formulaSegments = $derived(
+        isFormulaMode ? segmentFormula(editValue ?? "") : [],
+    );
+
     function handleEditBlur() {
+        // Don't commit on blur if we're in picker mode, as pickers handle their own lifecycle
+        if (pickerMode) return;
         onCommitEdit?.(editValue);
     }
 
@@ -128,6 +143,10 @@
             onCommitEdit?.(editValue);
             selectionState?.moveSelection(0, e.shiftKey ? -1 : 1);
         }
+    }
+
+    function handlePickerCommit(val) {
+        onCommitEdit?.(val);
     }
 
     export function focusEditor() {
@@ -155,14 +174,61 @@
             class="cell-editor"
             style="top:{editorBounds.top}px; left:{editorBounds.left}px; width:{editorBounds.width}px; height:{editorBounds.height}px;"
         >
-            <input
-                type="text"
-                class="cell-edit-input"
-                bind:value={editValue}
-                bind:this={cellEditInputEl}
-                onblur={handleEditBlur}
-                onkeydown={handleEditKeydown}
-            />
+            {#if pickerMode}
+                <PickerEditor
+                    type={pickerMode}
+                    value={editValue}
+                    on:change={(e) => onEditInput?.(e.detail)}
+                    on:commit={(e) => handlePickerCommit(e.detail)}
+                    on:cancel={onCancelEdit}
+                    on:blur={handleEditBlur}
+                />
+            {:else}
+                <input
+                    type="text"
+                    class="cell-edit-input"
+                    bind:this={cellEditInputEl}
+                    value={editValue}
+                    oninput={(e) => {
+                        const target = /** @type {HTMLInputElement} */ (
+                            e.target
+                        );
+                        onEditInput?.(
+                            target.value,
+                            target.selectionStart,
+                            target.selectionEnd,
+                        );
+                    }}
+                    onselect={(e) => {
+                        const target = /** @type {HTMLInputElement} */ (
+                            e.target
+                        );
+                        onEditSelect?.(
+                            target.selectionStart,
+                            target.selectionEnd,
+                        );
+                    }}
+                    onblur={handleEditBlur}
+                    onkeydown={handleEditKeydown}
+                />
+            {/if}
+            {#if isFormulaMode}
+                <div class="formula-overlay" aria-hidden="true">
+                    {#each formulaSegments as segment}
+                        {#if segment.color}
+                            <span
+                                style="color: {segment.color}; font-weight: 600;"
+                                >{segment.text}</span
+                            >
+                        {:else if segment.type === "FUNCTION"}
+                            <span class="formula-function">{segment.text}</span>
+                        {:else}
+                            <span>{segment.text}</span>
+                        {/if}
+                    {/each}
+                </div>
+                <FormulaValuePopup formula={editValue} visible={true} />
+            {/if}
         </div>
     {/if}
 </div>
@@ -209,5 +275,46 @@
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
         color: var(--text-color, #1e293b);
+        position: relative;
+        z-index: 2;
+        box-sizing: border-box;
+    }
+
+    .cell-editor:has(.cell-edit-input) {
+        position: absolute;
+    }
+
+    .cell-editor:has(.cell-edit-input) .cell-edit-input {
+        font-family: monospace;
+    }
+
+    .cell-editor:has(.cell-edit-input) .formula-overlay {
+        position: absolute;
+        inset: 0;
+        padding: 0 4px;
+        font-size: 0.8125rem;
+        line-height: normal;
+        pointer-events: none;
+        white-space: pre;
+        overflow: hidden;
+        font-family: monospace;
+        z-index: 1;
+        color: var(--text-color, #1e293b);
+        background: var(--input-bg, #ffffff);
+        outline: 2px solid var(--editor-outline, #3b82f6);
+    }
+
+    .cell-editor:has(.cell-edit-input) .formula-function {
+        font-weight: 600;
+        color: var(--function-color, #7c3aed);
+    }
+
+    .cell-editor:has(.cell-edit-input) .cell-edit-input {
+        caret-color: var(--text-color, #1e293b);
+    }
+
+    .cell-editor:has(.formula-overlay) .cell-edit-input {
+        color: transparent;
+        background: transparent;
     }
 </style>

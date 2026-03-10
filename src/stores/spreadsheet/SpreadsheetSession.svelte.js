@@ -20,6 +20,9 @@ import { SheetStore } from './SheetStore.svelte.js';
 import { spreadsheetSchema, createSheetYMap } from './schema.js';
 import { SCHEMA_VERSION, META_KEYS, CELL_KEYS } from './constants.js';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
+import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
+import { TableManager } from './features/TableManager.svelte.js';
+import { RepeaterEngine } from './features/RepeaterEngine.svelte.js';
 
 /**
  * SpreadsheetSession class
@@ -62,6 +65,15 @@ export class SpreadsheetSession {
 
     /** @type {Function | null} Cleanup for formula engine observer */
     #cleanupFormulaObserver = null;
+
+    /** @type {SheetRenderContext | null} */
+    renderContext = $state.raw(null);
+
+    /** @type {TableManager | null} */
+    tableManager = $state.raw(null);
+
+    /** @type {RepeaterEngine | null} */
+    repeaterEngine = $state.raw(null);
 
     /** @type {Function | null} Cleanup for undo manager observer */
     #cleanupUndoObserver = null;
@@ -178,6 +190,18 @@ export class SpreadsheetSession {
 
                 // Initialize formula engine for the active sheet
                 this.#initializeFormulaEngine(activeSheet);
+
+                // Create SheetRenderContext (after formula engine is ready)
+                this.renderContext = new SheetRenderContext(this.activeSheetStore, ydoc, this);
+
+                // Initialize TableManager and wire into renderContext + formula engine
+                this.tableManager = new TableManager(activeSheet, ydoc);
+                this.renderContext.tableManager = this.tableManager;
+                this.tableManager.registerFunctions(this.formulaEngine);
+
+                // Initialize RepeaterEngine and wire into renderContext
+                this.repeaterEngine = new RepeaterEngine(activeSheet, ydoc);
+                this.renderContext.repeaterEngine = this.repeaterEngine;
             }
             console.log('[SpreadsheetSession] Undo manager set up');
 
@@ -231,6 +255,24 @@ export class SpreadsheetSession {
         if (this.formulaEngine) {
             this.formulaEngine.clear();
             this.formulaEngine = null;
+        }
+
+        // Cleanup TableManager
+        if (this.tableManager) {
+            this.tableManager.destroy();
+            this.tableManager = null;
+        }
+
+        // Cleanup RepeaterEngine
+        if (this.repeaterEngine) {
+            this.repeaterEngine.destroy();
+            this.repeaterEngine = null;
+        }
+
+        // Cleanup SheetRenderContext
+        if (this.renderContext) {
+            this.renderContext.destroy();
+            this.renderContext = null;
         }
 
         // Cleanup SheetStore
@@ -506,6 +548,18 @@ export class SpreadsheetSession {
                 this.#cleanupFormulaObserver = null;
             }
             this.#initializeFormulaEngine(sheet);
+
+            // Recreate feature engines for the new sheet
+            if (this.tableManager) { this.tableManager.destroy(); }
+            if (this.repeaterEngine) { this.repeaterEngine.destroy(); }
+            if (this.renderContext) { this.renderContext.destroy(); }
+
+            this.renderContext = new SheetRenderContext(this.activeSheetStore, this.ydoc, this);
+            this.tableManager = new TableManager(sheet, this.ydoc);
+            this.repeaterEngine = new RepeaterEngine(sheet, this.ydoc);
+            this.renderContext.tableManager = this.tableManager;
+            this.renderContext.repeaterEngine = this.repeaterEngine;
+            this.tableManager.registerFunctions(this.formulaEngine);
         }
     }
 

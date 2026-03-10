@@ -1,18 +1,14 @@
 <script>
     import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
-    import { formulaEditState } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+    import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { segmentFormula } from "../../formulas/reference-highlighter.js";
     import { untrack } from "svelte";
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
 
     let { selectedCell = null, onEdit } = $props();
 
-    let isEditing = $state(false);
-    let editValue = $state("");
     let previousCellKey = $state(null); // Track previous cell to detect actual cell changes
     let editInputEl = $state(null);
-    let containerEl = $state(null);
-    let editingCell = $state(null); // Track which cell we're editing (row, col)
 
     // Cell reference (e.g., "A1", "B23")
     let cellRef = $derived(
@@ -46,59 +42,37 @@
         );
     });
 
+    let isEditing = $derived(editSessionState.isEditing);
+    let editValue = $derived(editSessionState.draft);
+
     // Check if we're editing a formula
-    let isFormulaMode = $derived(isEditing && editValue.startsWith("="));
+    let isFormulaMode = $derived(isEditing && editValue?.startsWith("="));
 
     // Get colored segments for formula display
     let formulaSegments = $derived(
         isFormulaMode ? segmentFormula(editValue) : [],
     );
 
-    // Get reference colors for highlighting in grid
-    let referenceColors = $derived(formulaEditState.getReferenceColors());
-
     function startEdit() {
+        if (!selectedCell) return;
+
         // When starting to edit, show the raw value (formula if present)
-        editValue = editStartValue();
-        isEditing = true;
-
-        // Track which cell we're editing
-        if (selectedCell) {
-            editingCell = { row: selectedCell.row, col: selectedCell.col };
-
-            // Update the global formula edit state
-            formulaEditState.startEditing(
-                selectedCell.row,
-                selectedCell.col,
-                editValue,
-            );
-        }
-
-        // Set up callbacks for cell reference insertion
-        formulaEditState.setInsertRefCallback(insertReference);
-        formulaEditState.setFocusCallback(() => editInputEl?.focus());
-
-        // Focus the input after it renders
-        setTimeout(() => editInputEl?.focus(), 0);
+        editSessionState.beginEdit(
+            selectedCell.row,
+            selectedCell.col,
+            editStartValue(),
+            "formulaBar",
+        );
     }
 
     function commitEdit() {
-        // Don't compare to originalValue - just commit what's in the input
-        // This avoids issues with the value being recomputed during edit
-        if (editValue !== undefined && editValue !== null && editingCell) {
-            // Pass the cell we were editing, not the current selection
-            onEdit(editValue, editingCell.row, editingCell.col);
-        }
-        isEditing = false;
-        editingCell = null;
-        formulaEditState.stopEditing();
+        const payload = editSessionState.commit();
+        if (!payload) return;
+        onEdit?.(payload.value, payload.row, payload.col);
     }
 
     function cancelEdit() {
-        editValue = displayValue();
-        isEditing = false;
-        editingCell = null;
-        formulaEditState.stopEditing();
+        editSessionState.cancel();
     }
 
     function handleKeydown(e) {
@@ -112,105 +86,34 @@
     }
 
     function handleInput(e) {
-        editValue = e.target.value;
-        formulaEditState.updateValue(editValue, e.target.selectionStart);
+        editSessionState.updateDraft(
+            e.target.value,
+            e.target.selectionStart,
+            e.target.selectionEnd,
+        );
     }
 
     function handleSelect(e) {
-        formulaEditState.cursorPosition = e.target.selectionStart;
+        editSessionState.setCursor(
+            e.target.selectionStart,
+            e.target.selectionEnd,
+        );
     }
 
-    // Find all reference positions in a formula string
-    function findReferencePositions(formula) {
-        const positions = [];
-        if (!formula) return positions;
+    $effect(() => {
+        editSessionState.setFocusHandle("formulaBar", () =>
+            editInputEl?.focus(),
+        );
+        return () => {
+            editSessionState.clearFocusHandle("formulaBar");
+        };
+    });
 
-        const content = formula.startsWith("=") ? formula.slice(1) : formula;
-        const offset = formula.startsWith("=") ? 1 : 0;
-
-        // Match ranges first (A1:B5)
-        const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
-        let match;
-
-        // Find ranges and mark their positions
-        const rangePositions = [];
-        while ((match = rangeRegex.exec(content)) !== null) {
-            rangePositions.push({
-                start: match.index,
-                end: match.index + match[0].length,
-            });
-            positions.push({
-                start: match.index + offset,
-                end: match.index + match[0].length + offset,
-                text: match[0],
-            });
+    $effect(() => {
+        if (isEditing && editSessionState.surface === "formulaBar") {
+            editSessionState.requestFocus("formulaBar");
         }
-
-        // Match individual cell refs (A1) that aren't part of ranges
-        const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
-        while ((match = cellRegex.exec(content)) !== null) {
-            const isInRange = rangePositions.some(
-                (r) => match.index >= r.start && match.index < r.end,
-            );
-            if (!isInRange) {
-                positions.push({
-                    start: match.index + offset,
-                    end: match.index + match[0].length + offset,
-                    text: match[0],
-                });
-            }
-        }
-
-        return positions.sort((a, b) => a.start - b.start);
-    }
-
-    // Insert a cell reference at current cursor position, replacing existing reference if cursor is within one
-    function insertReference(ref) {
-        if (!editInputEl) return;
-
-        const cursorPos = editInputEl.selectionStart;
-        const value = editValue;
-
-        // Find all references in the formula
-        const refPositions = findReferencePositions(value);
-
-        // Check if cursor is within or at the end of an existing reference
-        let existingRef = null;
-        for (const pos of refPositions) {
-            // Cursor is within this reference or at its end
-            if (cursorPos >= pos.start && cursorPos <= pos.end) {
-                existingRef = pos;
-                break;
-            }
-        }
-
-        let newValue;
-        let newCursorPos;
-
-        if (existingRef) {
-            // Replace the existing reference
-            newValue =
-                value.substring(0, existingRef.start) +
-                ref +
-                value.substring(existingRef.end);
-            newCursorPos = existingRef.start + ref.length;
-        } else {
-            // Insert at cursor position (existing behavior)
-            const end = editInputEl.selectionEnd;
-            newValue =
-                value.substring(0, cursorPos) + ref + value.substring(end);
-            newCursorPos = cursorPos + ref.length;
-        }
-
-        editValue = newValue;
-
-        // Update the edit input value and cursor
-        editInputEl.value = newValue;
-        editInputEl.setSelectionRange(newCursorPos, newCursorPos);
-
-        // Update the formula edit state
-        formulaEditState.updateValue(newValue, newCursorPos);
-    }
+    });
 
     // Reset edit value ONLY when the cell actually changes (not on every reactive update)
     $effect(() => {
@@ -218,8 +121,8 @@
         if (newKey !== previousCellKey) {
             // Cell selection changed - update the edit value
             untrack(() => {
-                if (!isEditing) {
-                    editValue = editStartValue();
+                if (!isEditing && selectedCell) {
+                    // keep local display in sync only when idle
                 }
             });
             previousCellKey = newKey;
@@ -253,13 +156,13 @@
         </button>
     </div>
     <div class="divider"></div>
-    <div class="formula-input" bind:this={containerEl}>
+    <div class="formula-input">
         {#if isEditing}
             <div class="edit-container" class:has-formula={isFormulaMode}>
                 <input
                     type="text"
-                    bind:value={editValue}
                     bind:this={editInputEl}
+                    value={editValue}
                     onkeydown={handleKeydown}
                     onblur={commitEdit}
                     oninput={handleInput}
