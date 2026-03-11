@@ -3,13 +3,12 @@
      * Grid.svelte — Canvas-based spreadsheet grid
      *
      * Architecture:
-     *   1. scroll-proxy   (z:1) — native scrollbars, pointer-events:auto
-     *   2. <canvas>        (z:2) — all cell rendering, pointer-events:none
-     *   3. dom-overlay     (z:3) — headers, selection border, anchor border,
+     *   1. <canvas>        (z:2) — all cell rendering, pointer-events:none
+     *   2. dom-overlay     (z:3) — headers, selection border, anchor border,
      *                              editor (GridOverlays), filter popovers,
      *                              entry-cell inputs, viewport panels
-     *   4. event-layer     (z:4) — transparent div over cell area,
-     *                              captures mouse → HitTestEngine → handlers
+     *   3. event-layer     (z:4) — native scroll container over cell area,
+     *                              captures scroll + mouse → HitTestEngine
      */
     import { onMount, onDestroy, untrack } from "svelte";
     import {
@@ -1015,14 +1014,6 @@
                     e.preventDefault();
                 }
                 break;
-            default:
-                if (anchor && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-                    beginCellEdit(anchor.row, anchor.col, {
-                        seedText: e.key,
-                        surface: "grid",
-                    });
-                    e.preventDefault();
-                }
         }
     }
 
@@ -1351,9 +1342,12 @@
     ]);
 
     // ─── Spacer ───────────────────────────────────────────────────────────────
+    // The event-layer starts at (HEADER_WIDTH, HEADER_HEIGHT), so the spacer
+    // only needs to cover totalWidth × totalHeight — no header offset needed.
+    // This makes native scrollLeft/scrollTop map 1:1 to virtualizer values.
     function spacerStyle() {
         if (!renderPlan) return "";
-        return `width:${renderPlan.totalWidth + HEADER_WIDTH}px; height:${renderPlan.totalHeight + HEADER_HEIGHT}px;`;
+        return `width:${renderPlan.totalWidth}px; height:${renderPlan.totalHeight}px;`;
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -1402,20 +1396,15 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="grid-root" bind:this={containerEl}>
-    <!-- ── 1. Scroll proxy (native scrollbars) ── -->
-    <div class="scroll-proxy" bind:this={scrollEl} onscroll={handleScroll}>
-        <div class="scroll-spacer" style={spacerStyle()}></div>
-    </div>
-
     {#if renderPlan && virtualizer}
-        <!-- ── 2. Canvas layer (all cell rendering) ── -->
+        <!-- ── 1. Canvas layer (all cell rendering) ── -->
         <canvas
             bind:this={canvasEl}
             class="grid-canvas"
             style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none;"
         ></canvas>
 
-        <!-- ── 3. DOM overlay layer ── -->
+        <!-- ── 2. DOM overlay layer ── -->
         <div class="dom-overlay-layer">
             <!-- Corner (select-all) -->
             <div
@@ -1563,15 +1552,30 @@
         </div>
         <!-- end dom-overlay-layer -->
 
-        <!-- ── 4. Event capture layer (transparent, over cell area only) ── -->
+        <!-- ── 3. Event layer — native scroll container + mouse capture ── -->
+        <!--
+            This element serves dual purpose:
+            1. overflow:scroll → native scrollbars, browser-physics momentum,
+               flick/throw inertia, touch pan, and overscroll-behavior:contain
+               prevents the scroll chain from reaching the body (no bounce).
+            2. mouse event handlers → HitTestEngine → cell interactions.
+
+            Spacer size: totalWidth × totalHeight (no +HEADER offsets because
+            this element starts at HEADER_WIDTH / HEADER_HEIGHT already).
+            Native scrollLeft/scrollTop map 1:1 to virtualizer.scrollLeft/Top.
+        -->
         <div
             class="event-layer"
+            bind:this={scrollEl}
             style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; right:0; bottom:0; z-index:4; cursor:{currentCursor};"
+            onscroll={handleScroll}
             onmousedown={handleEventLayerMouseDown}
             onmousemove={handleEventLayerMouseMove}
             ondblclick={handleEventLayerDblClick}
             oncontextmenu={handleEventLayerContextMenu}
-        ></div>
+        >
+            <div class="scroll-spacer" style={spacerStyle()}></div>
+        </div>
     {/if}
 </div>
 
@@ -1603,19 +1607,7 @@
         background: var(--grid-bg, #fff);
     }
 
-    /* ── Scroll proxy ── */
-    .scroll-proxy {
-        position: absolute;
-        inset: 0;
-        overflow: auto;
-        z-index: 1;
-        /* Invisible but scrollable */
-    }
-    .scroll-spacer {
-        pointer-events: none;
-    }
-
-    /* ── Canvas (z:2) ── */
+    /* ── Canvas (z:1 inside grid-root, but below overlays) ── */
     .grid-canvas {
         z-index: 2;
         display: block; /* prevent inline baseline gap */
@@ -1630,10 +1622,46 @@
         overflow: hidden;
     }
 
-    /* ── Event capture layer (z:4) ── */
+    /* ── Event layer (z:4) — native scroll container ── */
     .event-layer {
-        background: transparent;
+        overflow: scroll;
+        /* Contain scroll so it never bubbles to the body (no overscroll bounce) */
+        overscroll-behavior: contain;
+        /* Allow touch pan gestures — the browser will natively scroll this element */
+        touch-action: pan-x pan-y;
         pointer-events: auto;
+        /* Firefox thin scrollbar */
+        scrollbar-width: thin;
+        scrollbar-color: rgba(0, 0, 0, 0.3) transparent;
+    }
+
+    /* WebKit/Chrome/Safari scrollbars on the event layer */
+    .event-layer::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+    .event-layer::-webkit-scrollbar-thumb {
+        background: rgba(0, 0, 0, 0.3);
+        border-radius: 5px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
+    }
+    .event-layer::-webkit-scrollbar-thumb:hover {
+        background: rgba(0, 0, 0, 0.5);
+        border: 2px solid transparent;
+        background-clip: padding-box;
+    }
+    .event-layer::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .event-layer::-webkit-scrollbar-corner {
+        background: transparent;
+    }
+
+    /* Scroll spacer — sets the scrollable content size; invisible */
+    .scroll-spacer {
+        pointer-events: none;
+        user-select: none;
     }
 
     /* ── Corner cell ── */
