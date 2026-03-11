@@ -9,8 +9,76 @@
         clipboardManager,
         selectionState,
     } from "../../../stores/spreadsheet/index.js";
+    import { CanvasPrintEngine } from "../../../stores/spreadsheet/rendering/CanvasPrintEngine.js";
+    import { AxisMetrics } from "../../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
+    import {
+        ROW_HEIGHT,
+        COL_WIDTH,
+    } from "../../../stores/spreadsheetStore.svelte.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
+
+    let isExportingPDF = $state(false);
+
+    /** Build AxisMetrics from sheetStore metadata for PDF export. */
+    function buildMetricsForPrint(sheetStore) {
+        const rowM = new AxisMetrics(sheetStore.defaultRowHeight ?? ROW_HEIGHT);
+        rowM.setCount(sheetStore.rowCount);
+        const rowMeta = sheetStore.getYMap()?.get("rowMeta");
+        const heights = new Map();
+        if (rowMeta) {
+            rowMeta.forEach((meta, key) => {
+                const h = meta.get("height");
+                if (h !== undefined) heights.set(parseInt(key, 10), h);
+            });
+        }
+        rowM.loadOverrides(heights);
+
+        const colM = new AxisMetrics(sheetStore.defaultColWidth ?? COL_WIDTH);
+        colM.setCount(sheetStore.colCount);
+        const colMeta = sheetStore.getYMap()?.get("colMeta");
+        const widths = new Map();
+        if (colMeta) {
+            colMeta.forEach((meta, key) => {
+                const w = meta.get("width");
+                if (w !== undefined) widths.set(parseInt(key, 10), w);
+            });
+        }
+        colM.loadOverrides(widths);
+
+        return { rowMetrics: rowM, colMetrics: colM };
+    }
+
+    async function exportPDF() {
+        if (isExportingPDF) return;
+        const renderContext = spreadsheetSession.renderContext;
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!renderContext || !sheetStore) {
+            alert("No active sheet to export.");
+            return;
+        }
+        isExportingPDF = true;
+        try {
+            const { rowMetrics, colMetrics } = buildMetricsForPrint(sheetStore);
+            const engine = new CanvasPrintEngine();
+            await engine.downloadPDF(
+                {
+                    printSettings: {},
+                    renderContext,
+                    sheetStore,
+                    session: spreadsheetSession,
+                    rowMetrics,
+                    colMetrics,
+                },
+                `${sheetStore.name ?? "sheet"}.pdf`,
+            );
+        } catch (err) {
+            console.error("PDF export failed:", err);
+            alert("PDF export failed. See console for details.");
+        } finally {
+            isExportingPDF = false;
+        }
+    }
 
     // File menu items (most are stubbed)
     const fileItems = [
@@ -35,7 +103,12 @@
             action: () => alert("Save as - not implemented"),
         },
         { divider: true },
-        { label: "Print", action: () => window.print(), shortcut: "Ctrl+P" },
+        {
+            label: isExportingPDF ? "Exporting PDF…" : "Export as PDF",
+            icon: "📄",
+            action: exportPDF,
+            shortcut: "Ctrl+P",
+        },
         { divider: true },
         {
             label: "Close",
