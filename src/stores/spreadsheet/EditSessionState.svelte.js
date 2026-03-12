@@ -31,6 +31,21 @@ export class EditSessionState {
     /** @type {'date' | 'time' | 'datetime-local' | null} */
     pickerMode = $state(null);
 
+    /**
+     * When editing a rich-text cell, holds the raw run array as the edit value.
+     * null when editing plain text.
+     * @type {Array|null}
+     */
+    richTextValue = $state(null);
+
+    /**
+     * Callback set by the rich text editor component so the toolbar can
+     * apply inline formatting to the current selection.
+     * Signature: (prop: string, value: any) => void
+     * @type {Function|null}
+     */
+    richFormatApplier = null;
+
     /** @type {Map<string, Function>} */
     #focusHandles = new Map();
 
@@ -107,11 +122,13 @@ export class EditSessionState {
      * @param {Object} [options]
      */
     beginEdit(row, col, initialValue = '', surface = 'grid', options = {}) {
-        const text = toText(initialValue);
+        const isRichArray = Array.isArray(initialValue) && initialValue.length > 0 && typeof initialValue[0] === 'object';
+        const text = isRichArray ? initialValue.map(r => r.t).join('') : toText(initialValue);
 
         this.phase = 'editing';
         this.cell = { row, col };
         this.draft = text;
+        this.richTextValue = isRichArray ? initialValue : null;
         this.cursorStart = text.length;
         this.cursorEnd = text.length;
         this.surface = surface;
@@ -222,6 +239,8 @@ export class EditSessionState {
         this.phase = 'idle';
         this.cell = null;
         this.draft = '';
+        this.richTextValue = null;
+        this.richFormatApplier = null;
         this.cursorStart = 0;
         this.cursorEnd = 0;
         this.surface = 'grid';

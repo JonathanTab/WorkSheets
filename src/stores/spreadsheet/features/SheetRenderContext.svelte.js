@@ -9,11 +9,10 @@
  *   REGULAR           - ordinary spreadsheet cell
  *   MERGE_PRIMARY     - top-left cell of a merged region (render with span)
  *   MERGE_SHADOW      - non-primary cell inside a merge (skip rendering)
- *   TABLE_HEADER      - inline table column-header row (Phase 2)
- *   TABLE_ENTRY       - inline table entry row (Phase 2)
- *   TABLE_DATA        - inline table data row (Phase 2)
- *   REPEATER          - cell produced by an inline repeater (Phase 3)
- *   VIEWPORT_OCCUPIED - cell inside a viewport-mode table/repeater anchor (Phase 2/3)
+ *   TABLE_HEADER      - inline table column-header row
+ *   TABLE_ENTRY       - inline table entry row
+ *   TABLE_DATA        - inline table data row
+ *   REPEATER          - cell produced by an inline repeater
  *
  * ## Growth plan
  * Phases 2 and 3 set `this.tableManager` and `this.repeaterEngine` after
@@ -74,6 +73,29 @@ function measureTextWidth(text, cell = {}) {
     return width;
 }
 
+// ─── Type inference ──────────────────────────────────────────────────────────
+
+/**
+ * Infer a display-only cell type config from a raw value.
+ * Never stored in Yjs — used only for rendering.
+ *
+ * Rules (conservative — only when we're confident):
+ *   boolean        → checkbox
+ *   http(s):// URL → url
+ *
+ * Numbers and dates are NOT auto-inferred here to avoid unintended formatting
+ * changes; alignment for raw numbers is handled separately in CellPaintData.
+ *
+ * @param {any} value
+ * @returns {{ type: string } | null}
+ */
+function inferCellType(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'boolean') return { type: 'checkbox' };
+    if (typeof value === 'string' && /^https?:\/\//i.test(value)) return { type: 'url' };
+    return null;
+}
+
 // ─── Cell type constants (exported so VirtualPane can switch on them) ────────
 
 export const CELL_TYPE = Object.freeze({
@@ -84,7 +106,6 @@ export const CELL_TYPE = Object.freeze({
     TABLE_ENTRY: 'TABLE_ENTRY',
     TABLE_DATA: 'TABLE_DATA',
     REPEATER: 'REPEATER',
-    VIEWPORT_OCCUPIED: 'VIEWPORT_OCCUPIED'
 });
 
 export class SheetRenderContext {
@@ -135,14 +156,6 @@ export class SheetRenderContext {
      * @returns {string} One of CELL_TYPE.*
      */
     getCellType(row, col) {
-        // ── Phase 2+: viewport-mode panels occupy cell ranges ─────────────
-        if (this.tableManager?.isViewportCell(row, col)) {
-            return CELL_TYPE.VIEWPORT_OCCUPIED;
-        }
-        if (this.repeaterEngine?.isViewportCell(row, col)) {
-            return CELL_TYPE.VIEWPORT_OCCUPIED;
-        }
-
         // ── Phase 2+: inline table regions ───────────────────────────────
         if (this.tableManager) {
             const tt = this.tableManager.getCellTableType(row, col);
@@ -263,13 +276,17 @@ export class SheetRenderContext {
     }
 
     /**
-     * Get effective cell type config
+     * Get effective cell type config — explicit first, then inferred from value.
+     * Inferred configs are never stored in Yjs; they exist only for display.
      * @param {number} row
      * @param {number} col
      * @returns {Object|null}
      */
     getCellTypeConfig(row, col) {
-        return this.#sheetStore.getCellTypeConfig(row, col);
+        const explicit = this.#sheetStore.getCellTypeConfig(row, col);
+        if (explicit) return explicit;
+        const cell = this.#sheetStore.getCell(row, col);
+        return cell.exists ? inferCellType(cell.v) : null;
     }
 
     /**
@@ -320,58 +337,6 @@ export class SheetRenderContext {
      */
     get effectiveColCount() {
         return this.#sheetStore.colCount;
-    }
-
-    // ─── Viewport panels (Phase 2+) ──────────────────────────────────────────
-
-    /**
-     * Descriptors for all viewport-mode table/repeater panels to render
-     * as overlays in Grid.svelte.
-     * @returns {Array<{ type: 'table'|'repeater', store: any, startRow: number, startCol: number, endRow: number, endCol: number }>}
-     */
-    get viewportPanels() {
-        /** @type {Array<{ type: 'table'|'repeater', store: any, startRow: number, startCol: number, endRow: number, endCol: number }>} */
-        const panels = [];
-        if (this.tableManager) {
-            for (const table of this.tableManager.viewportTables) {
-                panels.push({
-                    type: 'table',
-                    store: table,
-                    startRow: table.vpStartRow,
-                    startCol: table.vpStartCol,
-                    endRow: table.vpEndRow,
-                    endCol: table.vpEndCol
-                });
-            }
-        }
-        if (this.repeaterEngine) {
-            for (const rep of this.repeaterEngine.viewportRepeaters) {
-                panels.push({
-                    type: 'repeater',
-                    store: rep,
-                    startRow: rep.vpStartRow,
-                    startCol: rep.vpStartCol,
-                    endRow: rep.vpEndRow,
-                    endCol: rep.vpEndCol
-                });
-            }
-        }
-        return panels;
-    }
-
-    /**
-     * Inline table headers that have scrolled off the top and need a sticky overlay.
-     * Returns descriptors for Grid.svelte to render sticky header elements.
-     *
-     * @param {number} scrollTop - current vertical scroll offset in px
-     * @param {number} frozenHeight - height of frozen rows in px
-     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} rowMetrics
-     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
-     * @returns {Array<{ table, leftPx, widthPx, heightPx }>}
-     */
-    getStickyTableHeaders(scrollTop, frozenHeight, rowMetrics, colMetrics) {
-        if (!this.tableManager) return [];
-        return this.tableManager.getStickyHeaders(scrollTop, frozenHeight, rowMetrics, colMetrics);
     }
 
     // ─── Sheetstore passthrough (for components that need raw cell data) ──────

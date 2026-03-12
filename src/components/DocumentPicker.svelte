@@ -12,28 +12,32 @@
         renameDocument,
     } from "../stores/spreadsheetStore.svelte.js";
 
-    // storage.ready is a proper Svelte writable store
-    // Use $ prefix to auto-subscribe
     let ready = $state(false);
     let files = $state([]);
 
-    // Subscribe to storage.ready store
+    // Single effect: subscribe to storage.ready, and immediately subscribe to
+    // drive.files inside the same callback when ready fires. This avoids the
+    // Svelte 5 cross-effect race condition where a second $effect reading
+    // `ready` could run before the first $effect's state update propagates.
     $effect(() => {
-        const unsubscribe = storage.ready.subscribe((r) => {
+        let filesUnsub = null;
+
+        const readyUnsub = storage.ready.subscribe((r) => {
             ready = r;
+            if (r) {
+                // storage.ready.subscribe fires synchronously with the current
+                // value, so this runs immediately when storage is already ready.
+                if (filesUnsub) filesUnsub();
+                filesUnsub = storage.drive.files.subscribe((f) => {
+                    files = f;
+                });
+            }
         });
-        return unsubscribe;
-    });
 
-    // Subscribe to files store when storage is ready
-    $effect(() => {
-        if (!ready) return;
-
-        // Storage is initialized, safe to access drive.files
-        const unsubscribe = storage.drive.files.subscribe((f) => {
-            files = f;
-        });
-        return unsubscribe;
+        return () => {
+            readyUnsub();
+            if (filesUnsub) filesUnsub();
+        };
     });
 
     // Derive documents from files reactively - only Yjs files, sorted by title

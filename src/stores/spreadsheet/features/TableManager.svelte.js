@@ -19,7 +19,7 @@
  */
 
 import * as Y from "yjs";
-import { TableStore } from "./TableStore.svelte.js";
+import { TableStore, TABLE_ACCENT_COLORS } from "./TableStore.svelte.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 
 /** Extra buffer rows below the last data row so the table feels "infinite" */
@@ -40,6 +40,12 @@ export class TableManager {
 
     /** Reactive list of all table IDs (for iteration in templates) */
     tableList = $state([]);
+
+    /**
+     * Incremented every time #rebuildRowIndex() runs.
+     * Grid tracks this to trigger repaints when table data changes.
+     */
+    tableVersion = $state(0);
 
     /**
      * O(1) lookup: row → { table: TableStore, rowType: string, dataIndex: number }
@@ -86,16 +92,25 @@ export class TableManager {
         const store = new TableStore(tableYMap, this.#ydoc);
         this.stores.set(tableId, store);
         this.tableList = [...this.tableList, tableId];
-        // Rebuild index when this table's row count changes
-        // Using a micro-effect pattern via store observers
+        // Rebuild index when this table's row count changes.
+        // CRITICAL: use observeDeep for rows so this fires AFTER TableStore's own
+        // observeDeep (which updates store.rows / sortedFilteredRows). Since TableStore
+        // attaches its observeDeep first (in its constructor), ours fires second,
+        // ensuring sortedFilteredRows is up-to-date when we rebuild the index.
         const rebuildOnChange = () => this.#rebuildRowIndex();
-        // We observe the rows Y.Array of this table for simplicity
         const rowArr = tableYMap.get("rows");
         if (rowArr) {
-            rowArr.observe(rebuildOnChange);
-            this.#observers.push(() => rowArr.unobserve(rebuildOnChange));
+            rowArr.observeDeep(rebuildOnChange);
+            this.#observers.push(() => rowArr.unobserveDeep(rebuildOnChange));
+        }
+        // Observe filters Y.Map for filter changes that affect sortedFilteredRows.length
+        const filtersYMap = tableYMap.get("filters");
+        if (filtersYMap) {
+            filtersYMap.observeDeep(rebuildOnChange);
+            this.#observers.push(() => filtersYMap.unobserveDeep(rebuildOnChange));
         }
         // Also observe top-level for startRow/startCol changes
+        // This fires after TableStore's top-level observer (same attachment order)
         tableYMap.observe(rebuildOnChange);
         this.#observers.push(() => tableYMap.unobserve(rebuildOnChange));
     }
@@ -112,10 +127,10 @@ export class TableManager {
     #rebuildRowIndex() {
         this.#rowIndex.clear();
         for (const table of this.stores.values()) {
-            if (table.mode !== "inline") continue;
             const headerRow = table.startRow;
             const entryRow = table.startRow + 1;
             const dataStart = table.startRow + 2;
+            // sortedFilteredRows is $derived — always up-to-date when read here
             const dataCount = table.sortedFilteredRows.length;
 
             const addEntry = (row, entry) => {
@@ -142,6 +157,7 @@ export class TableManager {
                 });
             }
         }
+        this.tableVersion++;
     }
 
     // ─── SheetRenderContext API ───────────────────────────────────────────────
@@ -218,90 +234,42 @@ export class TableManager {
     }
 
     /**
-     * Whether this (row, col) is inside a viewport-mode table's anchor area.
-     * @param {number} row
-     * @param {number} col
-     * @returns {boolean}
-     */
-    isViewportCell(row, col) {
-        for (const table of this.stores.values()) {
-            if (table.mode !== "viewport") continue;
-            if (
-                row >= table.vpStartRow &&
-                row <= table.vpEndRow &&
-                col >= table.vpStartCol &&
-                col <= table.vpEndCol
-            ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * For Grid.svelte sticky headers: return descriptors for inline table headers
-     * that have scrolled past the top.
-     */
-    getStickyHeaders(scrollTop, frozenHeight, rowMetrics, colMetrics) {
-        const result = [];
-        for (const table of this.stores.values()) {
-            if (table.mode !== "inline") continue;
-            if (!rowMetrics || !colMetrics) continue;
-            const headerY = rowMetrics.offsetOf(table.startRow);
-            if (scrollTop + frozenHeight > headerY + rowMetrics.sizeOf(table.startRow)) {
-                const leftPx = colMetrics.offsetOf(table.startCol);
-                const rightPx = colMetrics.offsetOf(table.endCol + 1);
-                result.push({
-                    table,
-                    leftPx,
-                    widthPx: rightPx - leftPx,
-                    heightPx: rowMetrics.sizeOf(table.startRow),
-                });
-            }
-        }
-        return result;
-    }
-
-    /**
      * Maximum sheet row occupied by any inline table (used for effectiveRowCount).
      */
     get maxInlineTableRow() {
         let max = 0;
         for (const table of this.stores.values()) {
-            if (table.mode !== "inline") continue;
             const last = table.startRow + 2 + table.sortedFilteredRows.length + BUFFER_ROWS;
             if (last > max) max = last;
         }
         return max;
     }
 
-    /**
-     * All viewport-mode tables (for overlay rendering in Grid.svelte).
-     */
-    get viewportTables() {
-        return [...this.stores.values()].filter((t) => t.mode === "viewport");
-    }
-
     // ─── Table CRUD ───────────────────────────────────────────────────────────
 
     /**
      * Create a new inline table.
-     * @param {{ name?: string, startRow: number, startCol: number, columns: Array<{id,name,type?,required?}>, mode?: string, vpStartRow?: number, vpStartCol?: number, vpEndRow?: number, vpEndCol?: number }} opts
+     * @param {{ name?: string, accentColor?: string, startRow: number, startCol: number, columns: Array<{id:string, name:string, type?:string, required?:boolean, hAlign?:string, isNonEntry?:boolean, formula?:string}> }} opts
      * @returns {string} tableId
      */
     createTable(opts) {
         if (!this.#tablesYMap) return "";
         const tableId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+        // Auto-assign accent color from palette based on current table count
+        const accentColor = opts.accentColor ??
+            TABLE_ACCENT_COLORS[this.tableList.length % TABLE_ACCENT_COLORS.length];
+
         this.#ydoc.transact(() => {
             const tm = new Y.Map();
             tm.set("id", tableId);
             tm.set("name", opts.name ?? "Table");
-            tm.set("mode", opts.mode ?? "inline");
+            tm.set("mode", "inline");
             tm.set("startRow", opts.startRow);
             tm.set("startCol", opts.startCol);
             tm.set("sortColId", null);
             tm.set("sortDir", "asc");
+            tm.set("accentColor", accentColor);
 
             const colArr = new Y.Array();
             for (const c of opts.columns ?? []) {
@@ -310,18 +278,14 @@ export class TableManager {
                 cm.set("name", c.name);
                 cm.set("type", c.type ?? "text");
                 cm.set("required", c.required ?? false);
+                if (c.hAlign) cm.set("hAlign", c.hAlign);
+                if (c.isNonEntry) cm.set("isNonEntry", true);
+                if (c.formula) cm.set("formula", c.formula);
                 colArr.push([cm]);
             }
             tm.set("columns", colArr);
             tm.set("rows", new Y.Array());
             tm.set("filters", new Y.Map());
-
-            if (opts.mode === "viewport") {
-                tm.set("vpStartRow", opts.vpStartRow ?? opts.startRow);
-                tm.set("vpStartCol", opts.vpStartCol ?? opts.startCol);
-                tm.set("vpEndRow", opts.vpEndRow ?? opts.startRow + 10);
-                tm.set("vpEndCol", opts.vpEndCol ?? opts.startCol + (opts.columns?.length ?? 1));
-            }
 
             this.#tablesYMap.set(tableId, tm);
         });

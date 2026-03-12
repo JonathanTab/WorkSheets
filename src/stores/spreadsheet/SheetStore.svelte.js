@@ -13,6 +13,7 @@
  */
 import * as Y from 'yjs';
 import { createCellYMap } from './schema.js';
+import { isRichText, stripRunProp, RUN_STYLE_PROP_MAP } from './richText.js';
 import {
     CELL_KEYS,
     CELL_TYPE_CONFIG_KEY,
@@ -59,6 +60,13 @@ export class SheetStore {
     // Key: "row,col" -> Value: Cell Object { v, style, exists }
     // Note: v contains either a raw value OR a formula string (starting with "=")
     cells = $state(new Map());
+
+    /**
+     * Incremented whenever any cell is added, updated, or deleted.
+     * Grid tracks this (not the Map reference) because Svelte 5 doesn't
+     * track Map.set/delete mutations unless you read Map contents in the effect.
+     */
+    cellsVersion = $state(0);
 
     // --- Reactive Border Version ---
     // Incremented when borders change to trigger re-renders
@@ -149,7 +157,45 @@ export class SheetStore {
     }
 
     #setupObservers() {
-        // 1. Observe Sheet Props
+        // 5-pre. Targeted rowMeta / colMeta observers for remote resize syncing.
+        //
+        // Strategy: observe each meta Y.Map DIRECTLY rather than using a broad
+        // observeDeep on #sheet (which would fire for every cell change).
+        //   - If the map already exists at construction time, attach immediately.
+        //   - If it is created later (first resize), the sheetObserver detects the
+        //     new key and attaches the observer then.
+        //   - For local writes, setRowHeight/setColWidth still increment the version
+        //     counter manually (synchronous, before the next microtask); the same
+        //     increment from the observer is a harmless no-op because the $effect in
+        //     Grid is idempotent.
+        let rowMetaMap = null;
+        let colMetaMap = null;
+
+        const rowMetaHandler = () => { this.rowMetaVersion++; };
+        const colMetaHandler = () => { this.colMetaVersion++; };
+
+        const tryAttachRowMeta = () => {
+            const map = this.#sheet.get('rowMeta');
+            if (map && map !== rowMetaMap) {
+                if (rowMetaMap) rowMetaMap.unobserveDeep(rowMetaHandler);
+                rowMetaMap = map;
+                rowMetaMap.observeDeep(rowMetaHandler);
+            }
+        };
+        const tryAttachColMeta = () => {
+            const map = this.#sheet.get('colMeta');
+            if (map && map !== colMetaMap) {
+                if (colMetaMap) colMetaMap.unobserveDeep(colMetaHandler);
+                colMetaMap = map;
+                colMetaMap.observeDeep(colMetaHandler);
+            }
+        };
+
+        // Attach to any maps that already exist (e.g. doc loaded with prior resizes).
+        tryAttachRowMeta();
+        tryAttachColMeta();
+
+        // 1. Observe Sheet Props (and detect first-time creation of meta maps)
         const sheetObserver = (event) => {
             // Directly update reactive properties
             if (event.keysChanged.has('name')) this.name = this.#sheet.get('name');
@@ -161,6 +207,11 @@ export class SheetStore {
             if (event.keysChanged.has('defaultColWidth')) this.defaultColWidth = this.#sheet.get('defaultColWidth');
             if (event.keysChanged.has('hidden')) this.hidden = this.#sheet.get('hidden') ?? false;
             if (event.keysChanged.has('tabColor')) this.tabColor = this.#sheet.get('tabColor');
+            // Detect when rowMeta/colMeta are first added to the sheet (e.g. from a
+            // remote peer doing the first resize, or on first local resize before the
+            // transaction fires our own handlers).
+            if (event.keysChanged.has('rowMeta')) tryAttachRowMeta();
+            if (event.keysChanged.has('colMeta')) tryAttachColMeta();
         };
         this.#sheet.observe(sheetObserver);
 
@@ -177,10 +228,12 @@ export class SheetStore {
                     this.cells.delete(key);
                 }
             });
+            this.cellsVersion++;
         };
 
         // 3. Observe cell content changes deeply (for property updates within cells)
         const cellContentObserver = (events) => {
+            let changed = false;
             for (const event of events) {
                 // Check if this is a change to a cell's content (not the cells map itself)
                 if (event.path.length > 0 && event.target !== this.#cells) {
@@ -190,9 +243,11 @@ export class SheetStore {
                     const cellYMap = this.#cells.get(cellKey);
                     if (cellYMap) {
                         this.cells.set(cellKey, this.#processCellYMap(cellYMap));
+                        changed = true;
                     }
                 }
             }
+            if (changed) this.cellsVersion++;
         };
 
         this.#cells.observe(cellObserver);
@@ -211,6 +266,8 @@ export class SheetStore {
             this.#cells.unobserve(cellObserver);
             this.#cells.unobserveDeep(cellContentObserver);
             this.#borders.unobserve(bordersObserver);
+            if (rowMetaMap) rowMetaMap.unobserveDeep(rowMetaHandler);
+            if (colMetaMap) colMetaMap.unobserveDeep(colMetaHandler);
         };
     }
 
@@ -341,6 +398,19 @@ export class SheetStore {
                     if (v === undefined) cellMap.delete(k);
                     else cellMap.set(k, v);
                 }
+                // When applying whole-cell formatting to a rich-text cell, strip
+                // run-level overrides for that property so the cell-level value wins.
+                const runPropKey = RUN_STYLE_PROP_MAP[Object.keys(props)[0]];
+                if (runPropKey) {
+                    const currentValue = cellMap.get(CELL_KEYS.VALUE);
+                    if (isRichText(currentValue)) {
+                        const stripped = Object.keys(props).reduce((runs, cellProp) => {
+                            const rk = RUN_STYLE_PROP_MAP[cellProp];
+                            return rk ? stripRunProp(runs, rk) : runs;
+                        }, currentValue);
+                        cellMap.set(CELL_KEYS.VALUE, stripped);
+                    }
+                }
             }
         });
     }
@@ -389,6 +459,98 @@ export class SheetStore {
     }
 
     /**
+     * Get row-level formatting properties (from rowMeta).
+     * Returns null if none set.
+     * @param {number} rowIndex
+     * @returns {Object|null}
+     */
+    getRowFormatting(rowIndex) {
+        const rowMeta = this.#sheet.get('rowMeta');
+        if (!rowMeta) return null;
+        const meta = rowMeta.get(String(rowIndex));
+        if (!meta) return null;
+        const fmt = {};
+        const keys = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'strikethrough',
+            'color', 'backgroundColor', 'horizontalAlign', 'verticalAlign', 'wrapText'];
+        let hasAny = false;
+        for (const k of keys) {
+            if (meta.has(k)) { fmt[k] = meta.get(k); hasAny = true; }
+        }
+        return hasAny ? fmt : null;
+    }
+
+    /**
+     * Set row-level formatting properties (written to rowMeta).
+     * Pass null for a property value to remove it.
+     * @param {number} rowIndex
+     * @param {Object} props
+     */
+    setRowFormatting(rowIndex, props) {
+        let rowMeta = this.#sheet.get('rowMeta');
+        if (!rowMeta) {
+            rowMeta = new Y.Map();
+            this.#sheet.set('rowMeta', rowMeta);
+        }
+        this.#ydoc.transact(() => {
+            let meta = rowMeta.get(String(rowIndex));
+            if (!meta) {
+                meta = new Y.Map();
+                rowMeta.set(String(rowIndex), meta);
+            }
+            for (const [k, v] of Object.entries(props)) {
+                if (v === null || v === undefined) meta.delete(k);
+                else meta.set(k, v);
+            }
+        });
+    }
+
+    /**
+     * Get column-level formatting properties (from colMeta).
+     * Returns null if none set.
+     * @param {number} colIndex
+     * @returns {Object|null}
+     */
+    getColFormatting(colIndex) {
+        const colMeta = this.#sheet.get('colMeta');
+        if (!colMeta) return null;
+        const meta = colMeta.get(String(colIndex));
+        if (!meta) return null;
+        const fmt = {};
+        const keys = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'strikethrough',
+            'color', 'backgroundColor', 'horizontalAlign', 'verticalAlign', 'wrapText'];
+        let hasAny = false;
+        for (const k of keys) {
+            if (meta.has(k)) { fmt[k] = meta.get(k); hasAny = true; }
+        }
+        return hasAny ? fmt : null;
+    }
+
+    /**
+     * Set column-level formatting properties (written to colMeta).
+     * Pass null for a property value to remove it.
+     * @param {number} colIndex
+     * @param {Object} props
+     */
+    setColFormatting(colIndex, props) {
+        let colMeta = this.#sheet.get('colMeta');
+        if (!colMeta) {
+            colMeta = new Y.Map();
+            this.#sheet.set('colMeta', colMeta);
+        }
+        this.#ydoc.transact(() => {
+            let meta = colMeta.get(String(colIndex));
+            if (!meta) {
+                meta = new Y.Map();
+                colMeta.set(String(colIndex), meta);
+            }
+            for (const [k, v] of Object.entries(props)) {
+                if (v === null || v === undefined) meta.delete(k);
+                else meta.set(k, v);
+            }
+        });
+    }
+
+    /**
      * Set column-level type config
      * @param {number} col
      * @param {Object} ct
@@ -409,7 +571,9 @@ export class SheetStore {
             if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
             else meta.set(CELL_TYPE_CONFIG_KEY, ct);
         });
-        this.colMetaVersion++;
+        // colMetaVersion is incremented by the colMetaHandler (observeDeep on
+        // colMeta) when the transaction above commits — covers both local and
+        // remote changes with no manual increment needed.
     }
 
     // --- Sheet Property Setters ---
@@ -1275,9 +1439,9 @@ export class SheetStore {
             }
             meta.set('height', height);
         });
-
-        // Increment version for position cache invalidation
-        this.rowMetaVersion++;
+        // rowMetaVersion is incremented by the rowMetaHandler (observeDeep on
+        // rowMeta) when the transaction above commits — covers both local and
+        // remote changes with no manual increment needed.
     }
 
     /**
@@ -1313,9 +1477,9 @@ export class SheetStore {
             }
             meta.set('width', width);
         });
-
-        // Increment version for position cache invalidation
-        this.colMetaVersion++;
+        // colMetaVersion is incremented by the colMetaHandler (observeDeep on
+        // colMeta) when the transaction above commits — covers both local and
+        // remote changes with no manual increment needed.
     }
 
     // --- Merges ---

@@ -3,7 +3,8 @@
         spreadsheetSession,
         selectionState,
     } from "../../../stores/spreadsheetStore.svelte.js";
-    import { clipboardManager } from "../../../stores/spreadsheet/index.js";
+    import { clipboardManager, editSessionState } from "../../../stores/spreadsheet/index.js";
+    import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import ColorPicker from "./ColorPicker.svelte";
     import BorderPicker from "./BorderPicker.svelte";
     import AlignmentPicker from "./AlignmentPicker.svelte";
@@ -25,14 +26,55 @@
         { value: "Courier New", label: "Courier New" },
     ];
 
+    /** Maximum cells to sample when computing mixed formatting state */
+    const MAX_SAMPLE_CELLS = 200;
+
     // Derived: Get formatting state for selected cells
     let selectedFormatting = $derived.by(() => {
-        const range = selectionState.range;
         const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!range || !sheetStore) {
-            return null;
+        if (!sheetStore) return null;
+
+        const mode = selectionState.selectionMode;
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+
+        // For whole-axis modes, read from the axis-level formatting
+        if (mode === "rows" && selectionState.selectedRows) {
+            const { start, end } = selectionState.selectedRows;
+            // Sample formatting from the first selected row
+            const rowFmt = sheetStore.getRowFormatting?.(start) ?? {};
+            return {
+                bold: rowFmt.bold ?? null,
+                italic: rowFmt.italic ?? null,
+                underline: rowFmt.underline ?? null,
+                fontSize: rowFmt.fontSize ?? null,
+                fontFamily: rowFmt.fontFamily ?? null,
+                color: rowFmt.color ?? null,
+                backgroundColor: rowFmt.backgroundColor ?? null,
+                horizontalAlign: rowFmt.horizontalAlign ?? null,
+            };
         }
 
+        if (mode === "cols" && selectionState.selectedCols) {
+            const { start } = selectionState.selectedCols;
+            const colFmt = sheetStore.getColFormatting?.(start) ?? {};
+            return {
+                bold: colFmt.bold ?? null,
+                italic: colFmt.italic ?? null,
+                underline: colFmt.underline ?? null,
+                fontSize: colFmt.fontSize ?? null,
+                fontFamily: colFmt.fontFamily ?? null,
+                color: colFmt.color ?? null,
+                backgroundColor: colFmt.backgroundColor ?? null,
+                horizontalAlign: colFmt.horizontalAlign ?? null,
+            };
+        }
+
+        // For range/all mode: sample from cells (limited to avoid hang)
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return null;
+
+        const renderContext = spreadsheetSession.renderContext;
         const props = {};
         const keys = [
             "bold",
@@ -46,29 +88,109 @@
         ];
 
         for (const key of keys) {
-            const values = new Set();
-            for (let r = range.startRow; r <= range.endRow; r++) {
-                for (let c = range.startCol; c <= range.endCol; c++) {
-                    const cell = sheetStore.getCell(r, c);
-                    values.add(cell[key] ?? null);
-                }
-            }
-            // If all values are the same, use that value; otherwise "mixed"
-            props[key] = values.size === 1 ? [...values][0] : "mixed";
+            props[key] = { values: new Set(), count: 0 };
         }
 
-        return props;
+        let sampled = 0;
+        outer: for (
+            let r = eff.startRow;
+            r <= eff.endRow && sampled < MAX_SAMPLE_CELLS;
+            r++
+        ) {
+            for (
+                let c = eff.startCol;
+                c <= eff.endCol && sampled < MAX_SAMPLE_CELLS;
+                c++
+            ) {
+                // Skip table/repeater cells as they don't use sheet formatting
+                const ct = renderContext?.getCellType(r, c);
+                if (
+                    ct === CELL_TYPE.TABLE_HEADER ||
+                    ct === CELL_TYPE.TABLE_ENTRY ||
+                    ct === CELL_TYPE.TABLE_DATA ||
+                    ct === CELL_TYPE.VIEWPORT_OCCUPIED
+                )
+                    continue;
+
+                const cell = sheetStore.getCell(r, c);
+                for (const key of keys) {
+                    props[key].values.add(cell[key] ?? null);
+                    props[key].count++;
+                }
+                sampled++;
+            }
+        }
+
+        const result = {};
+        for (const key of keys) {
+            const { values } = props[key];
+            result[key] = values.size === 1 ? [...values][0] : "mixed";
+        }
+        return result;
     });
 
-    // Helper: Apply formatting to all selected cells
+    /**
+     * Apply formatting to the selection.
+     * For whole-axis modes, uses setRowFormatting/setColFormatting.
+     * For range mode, iterates cells (skipping table/viewport cells).
+     */
     function applyFormatting(property, value) {
-        const range = selectionState.range;
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!range || !sheetStore) return;
+        // When editing a rich-text cell with a text selection, apply inline formatting
+        if (editSessionState.richTextValue != null && editSessionState.richFormatApplier) {
+            const propMap = {
+                bold: ['fontWeight', 'bold'],
+                italic: ['fontStyle', 'italic'],
+                underline: ['underline', null],
+                strikethrough: ['strikethrough', null],
+                color: ['color', value],
+                fontSize: ['fontSize', value],
+            };
+            const mapped = propMap[property];
+            if (mapped) {
+                editSessionState.richFormatApplier(mapped[0], mapped[1] ?? value);
+                return;
+            }
+        }
 
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
+
+        const mode = selectionState.selectionMode;
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+
+        if (mode === "rows" && selectionState.selectedRows) {
+            const { start, end } = selectionState.selectedRows;
+            for (let r = start; r <= end; r++) {
+                sheetStore.setRowFormatting?.(r, { [property]: value });
+            }
+            return;
+        }
+
+        if (mode === "cols" && selectionState.selectedCols) {
+            const { start, end } = selectionState.selectedCols;
+            for (let c = start; c <= end; c++) {
+                sheetStore.setColFormatting?.(c, { [property]: value });
+            }
+            return;
+        }
+
+        // Range / all mode — iterate cells, skip table cells
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+
+        const renderContext = spreadsheetSession.renderContext;
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = range.startRow; r <= range.endRow; r++) {
-                for (let c = range.startCol; c <= range.endCol; c++) {
+            for (let r = eff.startRow; r <= eff.endRow; r++) {
+                for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (
+                        ct === CELL_TYPE.TABLE_HEADER ||
+                        ct === CELL_TYPE.TABLE_ENTRY ||
+                        ct === CELL_TYPE.TABLE_DATA ||
+                        ct === CELL_TYPE.VIEWPORT_OCCUPIED
+                    )
+                        continue;
                     sheetStore.setCellProperties(r, c, { [property]: value });
                 }
             }
@@ -143,13 +265,38 @@
     }
 
     function handleCellTypeChange(config) {
-        const range = selectionState.range;
         const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!range || !sheetStore) return;
+        if (!sheetStore) return;
 
+        const mode = selectionState.selectionMode;
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+
+        // For whole-column mode, use setColTypeConfig
+        if (mode === "cols" && selectionState.selectedCols) {
+            const { start, end } = selectionState.selectedCols;
+            for (let c = start; c <= end; c++) {
+                sheetStore.setColTypeConfig(c, config);
+            }
+            return;
+        }
+
+        // For range/row/all: set on individual cells
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+
+        const renderContext = spreadsheetSession.renderContext;
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = range.startRow; r <= range.endRow; r++) {
-                for (let c = range.startCol; c <= range.endCol; c++) {
+            for (let r = eff.startRow; r <= eff.endRow; r++) {
+                for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (
+                        ct === CELL_TYPE.TABLE_HEADER ||
+                        ct === CELL_TYPE.TABLE_ENTRY ||
+                        ct === CELL_TYPE.TABLE_DATA ||
+                        ct === CELL_TYPE.VIEWPORT_OCCUPIED
+                    )
+                        continue;
                     sheetStore.setCellTypeConfig(r, c, config);
                 }
             }
@@ -192,16 +339,19 @@
         }
     }
 
-    // Has selection
-    let hasSelection = $derived(!!selectionState.range);
+    // Has selection (works for all selectionMode values)
+    let hasSelection = $derived(selectionState.anchor !== null);
 
-    // Merge state
+    // Merge state — only valid for range mode
     let canMerge = $derived.by(() => {
-        const range = selectionState.range;
-        if (!range) return false;
-        return (
-            range.startRow !== range.endRow || range.startCol !== range.endCol
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return false;
+        const eff = selectionState.effectiveRange(
+            sheetStore.rowCount,
+            sheetStore.colCount,
         );
+        if (!eff) return false;
+        return eff.startRow !== eff.endRow || eff.startCol !== eff.endCol;
     });
 
     let isMergedCell = $derived.by(() => {
@@ -222,14 +372,16 @@
                 sheetStore.unmergeCells(anchor.row, anchor.col);
             }
         } else if (canMerge) {
-            // Merge
+            // Merge using the range selection only
             const range = selectionState.range;
-            sheetStore.mergeCells(
-                range.startRow,
-                range.startCol,
-                range.endRow,
-                range.endCol,
-            );
+            if (range) {
+                sheetStore.mergeCells(
+                    range.startRow,
+                    range.startCol,
+                    range.endRow,
+                    range.endCol,
+                );
+            }
         }
     }
 </script>

@@ -3,7 +3,7 @@
      * TableHeaderCell - Column header for an inline or sticky table header
      *
      * Renders the column name, sort indicator (▲/▼ when this column is sorted),
-     * and a filter toggle button. Clicking the sort area cycles asc → desc → clear.
+     * and a filter toggle button.
      */
 
     import TableFilterPopover from "./TableFilterPopover.svelte";
@@ -17,17 +17,6 @@
 
     // Filter popover state
     let showFilterPopover = $state(false);
-
-    function handleSortClick() {
-        if (!col || !table) return;
-        if (!isSorted) {
-            table.setSort(col.id, "asc");
-        } else if (sortDir === "asc") {
-            table.setSort(col.id, "desc");
-        } else {
-            table.clearSort();
-        }
-    }
 
     function handleFilterClick(e) {
         e.stopPropagation();
@@ -46,7 +35,7 @@
     style="width:{width}px; height:{height}px;"
     title={col?.name ?? ""}
 >
-    <button class="sort-area" onclick={handleSortClick} type="button">
+    <button class="sort-area" type="button">
         <span class="col-name">{col?.name ?? ""}</span>
         {#if sortIcon}
             <span class="sort-icon">{sortIcon}</span>
@@ -96,16 +85,11 @@
         padding: 0 4px;
         background: none;
         border: none;
-        cursor: pointer;
         font-size: 12px;
         font-weight: 600;
         color: var(--table-header-text, #334155);
         min-width: 0;
         height: 100%;
-    }
-
-    .sort-area:hover {
-        background: var(--table-header-hover, #e2e8f0);
     }
 
     .col-name {

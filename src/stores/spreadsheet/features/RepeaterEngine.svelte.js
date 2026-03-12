@@ -33,6 +33,8 @@ export class RepeaterStore {
     #repYMap;
     /** @type {import('yjs').Doc} */
     #ydoc;
+    /** @type {Function | null} */
+    #onChanged;
     /** @type {Function[]} */
     #observers = [];
 
@@ -51,12 +53,6 @@ export class RepeaterStore {
     direction = $state("vertical"); // 'vertical' | 'horizontal'
     count = $state(1); // total reps (0-based, so count=3 → $rep 0,1,2)
     gap = $state(0); // empty rows (vertical) or cols (horizontal) between reps
-
-    // ── Viewport anchor (viewport mode only) ──────────────────────────────────
-    vpStartRow = $state(0);
-    vpStartCol = $state(0);
-    vpEndRow = $state(0);
-    vpEndCol = $state(0);
 
     // ── Derived geometry ──────────────────────────────────────────────────────
     get templateRows() {
@@ -91,10 +87,12 @@ export class RepeaterStore {
     /**
      * @param {import('yjs').Map} repYMap
      * @param {import('yjs').Doc} ydoc
+     * @param {Function | null} [onChanged] Called when any config changes (used by RepeaterEngine to bump version)
      */
-    constructor(repYMap, ydoc) {
+    constructor(repYMap, ydoc, onChanged = null) {
         this.#repYMap = repYMap;
         this.#ydoc = ydoc;
+        this.#onChanged = onChanged;
         this.#syncFromYjs();
         this.#observeYjs();
     }
@@ -113,14 +111,13 @@ export class RepeaterStore {
         this.direction = m.get("direction") ?? "vertical";
         this.count = m.get("count") ?? 1;
         this.gap = m.get("gap") ?? 0;
-        this.vpStartRow = m.get("vpStartRow") ?? 0;
-        this.vpStartCol = m.get("vpStartCol") ?? 0;
-        this.vpEndRow = m.get("vpEndRow") ?? 0;
-        this.vpEndCol = m.get("vpEndCol") ?? 0;
     }
 
     #observeYjs() {
-        const obs = () => this.#syncFromYjs();
+        const obs = () => {
+            this.#syncFromYjs();
+            this.#onChanged?.();
+        };
         this.#repYMap.observe(obs);
         this.#observers.push(() => this.#repYMap.unobserve(obs));
     }
@@ -136,8 +133,6 @@ export class RepeaterStore {
      * @returns {{ repIndex: number, templateRow: number, templateCol: number } | null}
      */
     getCellContext(row, col) {
-        if (this.mode !== "inline") return null;
-
         if (this.direction === "vertical") {
             // Column must be in range
             if (col < this.templateStartCol || col > this.templateEndCol) return null;
@@ -188,6 +183,14 @@ export class RepeaterStore {
         this.#ydoc.transact(() => this.#repYMap.set("gap", gap));
     }
 
+    setDirection(direction) {
+        this.#ydoc.transact(() => this.#repYMap.set("direction", direction));
+    }
+
+    setName(name) {
+        this.#ydoc.transact(() => this.#repYMap.set("name", name));
+    }
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     destroy() {
@@ -211,6 +214,12 @@ export class RepeaterEngine {
 
     /** Reactive list of repeater IDs */
     storeList = $state([]);
+
+    /**
+     * Incremented whenever any repeater is added, removed, or its config changes.
+     * Grid tracks this to trigger repaints when repeater structure changes.
+     */
+    repeaterVersion = $state(0);
 
     /**
      * @param {import('yjs').Map} sheet  The sheet Y.Map
@@ -244,9 +253,10 @@ export class RepeaterEngine {
 
     #addStore(repId, repYMap) {
         if (this.stores.has(repId)) return;
-        const store = new RepeaterStore(repYMap, this.#ydoc);
+        const store = new RepeaterStore(repYMap, this.#ydoc, () => this.repeaterVersion++);
         this.stores.set(repId, store);
         this.storeList = [...this.storeList, repId];
+        this.repeaterVersion++;
     }
 
     #removeStore(repId) {
@@ -255,6 +265,7 @@ export class RepeaterEngine {
             store.destroy();
             this.stores.delete(repId);
             this.storeList = this.storeList.filter((id) => id !== repId);
+            this.repeaterVersion++;
         }
     }
 
@@ -269,29 +280,10 @@ export class RepeaterEngine {
      */
     getCellRepeaterContext(row, col) {
         for (const store of this.stores.values()) {
-            if (store.mode !== "inline") continue;
             const ctx = store.getCellContext(row, col);
             if (ctx) return { repeater: store, ...ctx };
         }
         return null;
-    }
-
-    /**
-     * Returns true if (row, col) is inside a viewport-mode repeater anchor.
-     */
-    isViewportCell(row, col) {
-        for (const store of this.stores.values()) {
-            if (store.mode !== "viewport") continue;
-            if (
-                row >= store.vpStartRow &&
-                row <= store.vpEndRow &&
-                col >= store.vpStartCol &&
-                col <= store.vpEndCol
-            ) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -334,7 +326,6 @@ export class RepeaterEngine {
     get maxInlineExtentRow() {
         let max = 0;
         for (const store of this.stores.values()) {
-            if (store.mode !== "inline") continue;
             if (store.direction === "vertical" && store.inlineEndRow > max) {
                 max = store.inlineEndRow;
             }
@@ -342,21 +333,13 @@ export class RepeaterEngine {
         return max;
     }
 
-    /**
-     * All viewport-mode repeaters.
-     */
-    get viewportRepeaters() {
-        return [...this.stores.values()].filter((s) => s.mode === "viewport");
-    }
-
     // ─── Repeater CRUD ────────────────────────────────────────────────────────
 
     /**
-     * Create a new repeater.
-     * @param {{ name?: string, mode?: string, templateStartRow: number, templateEndRow: number,
+     * Create a new inline repeater.
+     * @param {{ name?: string, templateStartRow: number, templateEndRow: number,
      *           templateStartCol: number, templateEndCol: number,
-     *           direction?: string, count?: number, gap?: number,
-     *           vpStartRow?: number, vpStartCol?: number, vpEndRow?: number, vpEndCol?: number }} opts
+     *           direction?: string, count?: number, gap?: number }} opts
      * @returns {string} repeaterId
      */
     createRepeater(opts) {
@@ -367,7 +350,7 @@ export class RepeaterEngine {
             const rm = new Y.Map();
             rm.set("id", repId);
             rm.set("name", opts.name ?? "Repeater");
-            rm.set("mode", opts.mode ?? "inline");
+            rm.set("mode", "inline");
             rm.set("templateStartRow", opts.templateStartRow);
             rm.set("templateEndRow", opts.templateEndRow);
             rm.set("templateStartCol", opts.templateStartCol);
@@ -375,12 +358,6 @@ export class RepeaterEngine {
             rm.set("direction", opts.direction ?? "vertical");
             rm.set("count", opts.count ?? 1);
             rm.set("gap", opts.gap ?? 0);
-            if (opts.mode === "viewport") {
-                rm.set("vpStartRow", opts.vpStartRow ?? opts.templateStartRow);
-                rm.set("vpStartCol", opts.vpStartCol ?? opts.templateStartCol);
-                rm.set("vpEndRow", opts.vpEndRow ?? opts.templateEndRow + 10);
-                rm.set("vpEndCol", opts.vpEndCol ?? opts.templateEndCol);
-            }
             this.#repeatersYMap.set(repId, rm);
         });
 

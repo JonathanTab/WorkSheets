@@ -139,6 +139,11 @@ export class AxisMetrics {
     }
 
     sizeOf(index) {
+        // Reading this.version registers a reactive dependency in any Svelte 5
+        // reactive context (template block, $derived, $effect) so that callers
+        // automatically re-run whenever sizes change.
+        // eslint-disable-next-line no-unused-expressions
+        this.version;
         if (index < 0 || index >= this.#count) return this.#defaultSize;
         if (this.#tempOverrides.has(index)) return this.#tempOverrides.get(index);
         if (this.#committedOverrides.has(index)) return this.#committedOverrides.get(index);
@@ -146,6 +151,9 @@ export class AxisMetrics {
     }
 
     offsetOf(index) {
+        // Same reactive-dependency trick as sizeOf().
+        // eslint-disable-next-line no-unused-expressions
+        this.version;
         if (index <= 0) return 0;
         if (index >= this.#count) return this.#totalSize;
 

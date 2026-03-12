@@ -25,7 +25,6 @@
     let direction = $state("vertical"); // 'vertical' | 'horizontal'
     let count = $state(3);
     let gap = $state(0);
-    let mode = $state("inline"); // 'inline' | 'viewport'
 
     // Selection dimensions
     let templateRows = $derived(
@@ -35,13 +34,40 @@
         selection ? selection.endCol - selection.startCol + 1 : 0,
     );
 
-    // Position the dialog near the selection
+    // Position the dialog near the selection with boundary detection
     let dialogStyle = $derived.by(() => {
         if (!selection) return "";
-        // Position below the selection end
-        const top = Math.min(selection.endRow + 2, 20) * 24 + 30;
-        const left = selection.startCol * 80 + 50;
-        return `position: fixed; top: ${Math.min(top, window.innerHeight - 350)}px; left: ${Math.min(left, window.innerWidth - 300)}px; z-index: 1000;`;
+
+        const dialogWidth = 320;
+        const dialogHeight = 380;
+        const margin = 16;
+
+        // Calculate initial position (below the selection)
+        let top = (selection.endRow + 2) * 24 + 30;
+        let left = selection.startCol * 80 + 50;
+
+        // Clamp to viewport bounds
+        const maxX = window.innerWidth - dialogWidth - margin;
+        const maxY = window.innerHeight - dialogHeight - margin;
+
+        // Check right edge
+        if (left > maxX) {
+            left = maxX;
+        }
+        // Check left edge
+        if (left < margin) {
+            left = margin;
+        }
+        // Check bottom edge - if would go off screen, position above selection instead
+        if (top > maxY) {
+            top = selection.startRow * 24 - dialogHeight - margin;
+            // If still off screen, clamp to top
+            if (top < margin) {
+                top = margin;
+            }
+        }
+
+        return `position: fixed; top: ${Math.round(top)}px; left: ${Math.round(left)}px; z-index: 1000;`;
     });
 
     // Generate repeater number
@@ -61,7 +87,6 @@
 
         spreadsheetSession.repeaterEngine.createRepeater({
             name: repeaterName,
-            mode: mode,
             templateStartRow: selection.startRow,
             templateEndRow: selection.endRow,
             templateStartCol: selection.startCol,
@@ -69,10 +94,6 @@
             direction: direction,
             count: count,
             gap: gap,
-            vpStartRow: mode === "viewport" ? selection.startRow : undefined,
-            vpStartCol: mode === "viewport" ? selection.startCol : undefined,
-            vpEndRow: mode === "viewport" ? selection.endRow + 10 : undefined,
-            vpEndCol: mode === "viewport" ? selection.endCol : undefined,
         });
 
         onClose();
@@ -182,26 +203,6 @@
                             onclick={() => (gap = Math.min(50, gap + 1))}
                         >
                             +
-                        </button>
-                    </div>
-                </div>
-
-                <div class="form-row">
-                    <label>Mode</label>
-                    <div class="toggle-group">
-                        <button
-                            class="toggle-btn"
-                            class:active={mode === "inline"}
-                            onclick={() => (mode = "inline")}
-                        >
-                            Inline
-                        </button>
-                        <button
-                            class="toggle-btn"
-                            class:active={mode === "viewport"}
-                            onclick={() => (mode = "viewport")}
-                        >
-                            Viewport
                         </button>
                     </div>
                 </div>

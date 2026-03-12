@@ -34,9 +34,13 @@ const DEFAULT_THEME = {
     filterIconColor: '#94a3b8',
     filterActiveColor: '#3b82f6',
     urlColor: '#1a73e8',
+    zebraFill: 'rgba(0,0,0,0.018)',
+    formulaColBg: 'rgba(139,92,246,0.04)',
+    accentBarWidth: 3,
 };
 
 const FILTER_BTN_WIDTH = 20; // CSS px, area reserved for filter icon on the right
+const TYPE_ICON_WIDTH = 18; // CSS px, area for type icon badge
 
 export class CanvasRenderer {
     /** @type {HTMLCanvasElement | OffscreenCanvas | null} */
@@ -222,9 +226,31 @@ export class CanvasRenderer {
         if (width <= 0 || height <= 0) return;
 
         // 1. Background
-        const bgColor = cell.bgColor || this.#theme.cellBg;
-        ctx.fillStyle = bgColor;
-        ctx.fillRect(x, y, width, height);
+        let bgColor = cell.bgColor || this.#theme.cellBg;
+
+        // Zebra striping for table data rows
+        if (cell.zebraRow && !cell.bgColor) {
+            // Draw base color first, then overlay
+            ctx.fillStyle = this.#theme.cellBg;
+            ctx.fillRect(x, y, width, height);
+            ctx.fillStyle = this.#theme.zebraFill;
+            ctx.fillRect(x, y, width, height);
+        } else {
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(x, y, width, height);
+        }
+
+        // Formula column subtle tint
+        if (cell.isFormulaCol) {
+            ctx.fillStyle = this.#theme.formulaColBg;
+            ctx.fillRect(x, y, width, height);
+        }
+
+        // Repeater copy cells (non-template): subtle overlay to hint read-only
+        if (cell.isRepeaterCopy) {
+            ctx.fillStyle = 'rgba(124,58,237,0.028)';
+            ctx.fillRect(x, y, width, height);
+        }
 
         // 2. Selection fill (semi-transparent overlay)
         if (cell.selected) {
@@ -250,17 +276,26 @@ export class CanvasRenderer {
             this.#paintCustomBorders(ctx, cell.borders, x, y, width, height);
         }
 
-        // 5. Formula highlight border
+        // 5. Table left accent bar (first column of each table row)
+        if (cell.isFirstTableCol && cell.tableAccentColor) {
+            const bw = this.#theme.accentBarWidth;
+            ctx.fillStyle = cell.tableAccentColor;
+            ctx.fillRect(x, y, bw, height);
+        }
+
+        // 6. Formula highlight border
         if (cell.formulaHighlight) {
             ctx.strokeStyle = cell.formulaHighlight;
             ctx.lineWidth = 2;
             ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
         }
 
-        // 6. Content — clip to cell interior before drawing
+        // 7. Content — clip to cell interior before drawing
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x + 1, y + 1, width - 2, height - 2);
+        // Offset clip left for accent bar
+        const clipLeft = cell.isFirstTableCol ? this.#theme.accentBarWidth : 0;
+        ctx.rect(x + 1 + clipLeft, y + 1, width - 2 - clipLeft, height - 2);
         ctx.clip();
 
         this.#paintCellContent(ctx, cell);
@@ -323,6 +358,11 @@ export class CanvasRenderer {
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      */
     #paintTextContent(ctx, cell) {
+        if (cell.richTextRuns) {
+            this.#paintRichTextContent(ctx, cell);
+            return;
+        }
+
         const text = cell.displayValue;
         if (text === '' || text == null) return;
 
@@ -382,6 +422,113 @@ export class CanvasRenderer {
     }
 
     /**
+     * Paint rich-text run array with per-run font/color/decorations.
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {import('./CellPaintData.js').CellPaintItem} cell
+     */
+    #paintRichTextContent(ctx, cell) {
+        const runs = cell.richTextRuns;
+        if (!runs || runs.length === 0) return;
+
+        const { x, y, width, height } = cell;
+        const pad = 4;
+        const hAlign = cell.hAlign || 'left';
+        const vAlign = cell.vAlign || 'middle';
+        const defaultFontSize = cell.fontSize || this.#theme.defaultFontSize;
+        const defaultFamily = cell.fontFamily || this.#theme.defaultFontFamily;
+        const defaultColor = cell.textColor || this.#theme.defaultText;
+        const defaultBold = cell.bold || false;
+        const defaultItalic = cell.italic || false;
+        const defaultUnderline = cell.underline || false;
+        const defaultStrikethrough = cell.strikethrough || false;
+
+        // Split runs into visual lines (by \n within run text)
+        const lines = [[]];
+        for (const run of runs) {
+            const parts = run.t.split('\n');
+            for (let i = 0; i < parts.length; i++) {
+                if (i > 0) lines.push([]);
+                if (parts[i]) lines[lines.length - 1].push({ ...run, t: parts[i] });
+            }
+        }
+
+        const lineHeight = defaultFontSize * 1.5;
+        const totalTextH = lines.length * lineHeight;
+
+        let startY;
+        if (vAlign === 'top') startY = y + pad + defaultFontSize / 2;
+        else if (vAlign === 'bottom') startY = y + height - pad - totalTextH + lineHeight / 2;
+        else startY = y + (height - totalTextH) / 2 + lineHeight / 2;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x + 1, y + 1, width - 2, height - 2);
+        ctx.clip();
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+
+        for (let li = 0; li < lines.length; li++) {
+            const lineRuns = lines[li];
+            const lineY = startY + li * lineHeight;
+
+            // Measure line width for alignment
+            let lineW = 0;
+            for (const run of lineRuns) {
+                ctx.font = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
+                lineW += ctx.measureText(run.t).width;
+            }
+
+            let runX;
+            if (hAlign === 'right') runX = x + width - pad - lineW;
+            else if (hAlign === 'center') runX = x + (width - lineW) / 2;
+            else runX = x + pad;
+
+            for (const run of lineRuns) {
+                const font = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
+                ctx.font = font;
+                const color = run.c || defaultColor;
+                ctx.fillStyle = color;
+                ctx.fillText(run.t, runX, lineY);
+
+                const tw = ctx.measureText(run.t).width;
+                const doUnderline = run.u !== undefined ? run.u : defaultUnderline;
+                const doStrike = run.s !== undefined ? run.s : defaultStrikethrough;
+
+                if (doUnderline || doStrike) {
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 1;
+                    if (doUnderline) {
+                        ctx.beginPath();
+                        ctx.moveTo(runX, lineY + defaultFontSize / 2 + 2);
+                        ctx.lineTo(runX + tw, lineY + defaultFontSize / 2 + 2);
+                        ctx.stroke();
+                    }
+                    if (doStrike) {
+                        ctx.beginPath();
+                        ctx.moveTo(runX, lineY);
+                        ctx.lineTo(runX + tw, lineY);
+                        ctx.stroke();
+                    }
+                }
+
+                runX += tw;
+            }
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Build a CSS font string for a single rich-text run, falling back to cell defaults.
+     */
+    #buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic) {
+        const bold = run.b !== undefined ? run.b : defaultBold;
+        const italic = run.i !== undefined ? run.i : defaultItalic;
+        const size = run.f || defaultSize;
+        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${size}px ${defaultFamily}`;
+    }
+
+    /**
      * @param {CanvasRenderingContext2D} ctx
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      */
@@ -396,20 +543,39 @@ export class CanvasRenderer {
 
     /**
      * Internal table header cell painter (shared between pane cells and sticky headers).
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {{colName:string, sortIcon:string, filterActive:boolean, x:number, y:number, width:number, height:number, typeIcon?:string, isFormula?:boolean, accentColor?:string, isFirstCol?:boolean}} opts
      */
     #paintTableHeaderCell(ctx, opts) {
-        const { colName, sortIcon, filterActive, x, y, width, height } = opts;
+        const {
+            colName, sortIcon, filterActive,
+            x, y, width, height,
+            typeIcon, isFormula,
+            accentColor = '#3b82f6',
+            isFirstCol = false,
+        } = opts;
 
         // Background
         ctx.fillStyle = this.#theme.tableHeaderBg;
         ctx.fillRect(x, y, width, height);
 
-        // Bottom border (thicker)
+        // Accent top border (2px)
+        ctx.fillStyle = accentColor;
+        ctx.fillRect(x, y, width, 2);
+
+        // Left accent bar for first column
+        if (isFirstCol) {
+            const bw = this.#theme.accentBarWidth;
+            ctx.fillStyle = accentColor;
+            ctx.fillRect(x, y, bw, height);
+        }
+
+        // Bottom border (thicker, muted)
         ctx.strokeStyle = this.#theme.tableHeaderBorder;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(x, y + height - 1);
-        ctx.lineTo(x + width, y + height - 1);
+        ctx.moveTo(x, y + height - 0.75);
+        ctx.lineTo(x + width, y + height - 0.75);
         ctx.stroke();
         ctx.lineWidth = 1;
 
@@ -420,38 +586,60 @@ export class CanvasRenderer {
         ctx.lineTo(x + width - 0.5, y + height);
         ctx.stroke();
 
-        const pad = 4;
+        const pad = isFirstCol ? this.#theme.accentBarWidth + 3 : 4;
         const filterAreaW = FILTER_BTN_WIDTH;
-        const textAreaW = width - pad * 2 - filterAreaW;
+        // Reserve space for type icon badge (right of column name, left of filter)
+        const typeIconW = typeIcon ? TYPE_ICON_WIDTH : 0;
+        const textAreaW = width - pad - filterAreaW - typeIconW - 2;
 
         ctx.textBaseline = 'middle';
         const textY = y + height / 2;
 
-        // Column name (bold)
-        ctx.font = `600 12px ${this.#theme.defaultFontFamily}`;
+        // Column name (semi-bold)
+        ctx.font = `600 11px ${this.#theme.defaultFontFamily}`;
         ctx.fillStyle = this.#theme.tableHeaderText;
         ctx.textAlign = 'left';
 
-        // Clip text to text area
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x + pad, y, textAreaW, height);
+        ctx.rect(x + pad, y, Math.max(0, textAreaW), height);
         ctx.clip();
         ctx.fillText(colName, x + pad, textY);
         ctx.restore();
 
-        // Sort icon (small, right-aligned before filter btn)
+        // Type icon badge (small pill right of column name area)
+        if (typeIcon && typeIconW > 0) {
+            const bx = x + width - filterAreaW - typeIconW;
+            const bw2 = typeIconW - 2;
+            const bh = 12;
+            const by = y + (height - bh) / 2;
+
+            // Badge background
+            ctx.fillStyle = isFormula ? 'rgba(139,92,246,0.12)' : 'rgba(59,130,246,0.1)';
+            ctx.beginPath();
+            ctx.roundRect(bx, by, bw2, bh, 2);
+            ctx.fill();
+
+            // Badge text
+            ctx.font = `500 9px ${this.#theme.defaultFontFamily}`;
+            ctx.fillStyle = isFormula ? '#7c3aed' : '#475569';
+            ctx.textAlign = 'center';
+            ctx.fillText(isFormula ? 'fx' : typeIcon, bx + bw2 / 2, by + bh / 2);
+        }
+
+        // Sort icon
         if (sortIcon) {
-            ctx.font = `bold 9px ${this.#theme.defaultFontFamily}`;
-            ctx.fillStyle = this.#theme.sortIconColor;
-            ctx.textAlign = 'right';
-            ctx.fillText(sortIcon, x + width - filterAreaW - 2, textY);
+            const sortColor = accentColor ?? this.#theme.sortIconColor;
+            ctx.font = `bold 8px ${this.#theme.defaultFontFamily}`;
+            ctx.fillStyle = sortColor;
+            ctx.textAlign = 'center';
+            ctx.fillText(sortIcon, x + width - filterAreaW + 1, textY - 1);
         }
 
         // Filter icon
         ctx.font = `11px ${this.#theme.defaultFontFamily}`;
-        ctx.fillStyle = filterActive ? this.#theme.filterActiveColor : this.#theme.filterIconColor;
-        ctx.globalAlpha = filterActive ? 1 : 0.6;
+        ctx.fillStyle = filterActive ? (accentColor ?? this.#theme.filterActiveColor) : this.#theme.filterIconColor;
+        ctx.globalAlpha = filterActive ? 1 : 0.5;
         ctx.textAlign = 'center';
         ctx.fillText('☰', x + width - filterAreaW / 2, textY);
         ctx.globalAlpha = 1;
@@ -462,14 +650,27 @@ export class CanvasRenderer {
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      */
     #paintTableEntryContent(ctx, cell) {
+        const { x, y, width, height } = cell;
+        const accentBarOffset = cell.isFirstTableCol ? this.#theme.accentBarWidth : 0;
+
+        if (cell.isNonEntryCol) {
+            // Formula column — show 'fx' indicator
+            ctx.font = `600 10px ${this.#theme.defaultFontFamily}`;
+            ctx.fillStyle = 'rgba(139,92,246,0.5)';
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            ctx.fillText('fx', x + width / 2, y + height / 2);
+            return;
+        }
+
         const text = cell.placeholderText;
         if (!text) return;
 
-        ctx.font = `italic 12px ${this.#theme.defaultFontFamily}`;
+        ctx.font = `italic 11px ${this.#theme.defaultFontFamily}`;
         ctx.fillStyle = this.#theme.entryPlaceholderText;
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'left';
-        ctx.fillText(text, cell.x + 4, cell.y + cell.height / 2);
+        ctx.fillText(text, x + 4 + accentBarOffset, y + height / 2);
     }
 
     /**

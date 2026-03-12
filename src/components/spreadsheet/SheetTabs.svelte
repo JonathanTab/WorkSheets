@@ -2,6 +2,7 @@
     import { openModal, closeModal } from "../../lib/ui/modalStore.svelte.js";
     import RenameSheetModal from "../modals/RenameSheetModal.svelte";
     import DeleteSheetModal from "../modals/DeleteSheetModal.svelte";
+    import SelectionStats from "./SelectionStats.svelte";
 
     let {
         sheets = [],
@@ -79,6 +80,7 @@
     <button class="add-sheet-btn" onclick={handleAddSheet} title="Add sheet">
         +
     </button>
+    <SelectionStats />
 </div>
 
 <style>

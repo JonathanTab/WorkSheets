@@ -14,13 +14,55 @@
  *   tableYMap.get('sortColId')   → string|null
  *   tableYMap.get('sortDir')     → 'asc'|'desc'
  *   tableYMap.get('filters')     → Y.Map<colId, { op, value }>
+ *   tableYMap.get('accentColor') → string  (CSS hex, e.g. '#3b82f6')
+ *
+ * ## Column definition (Y.Map fields)
+ *   id, name, type, required,
+ *   hAlign, textColor, bgColor, width,
+ *   isNonEntry, formula,
+ *   conditionalFormats (JSON string)
  *
  * ## Cumulative-sum cache
  *   getCumulativeSum(colId, upToIndex) uses a per-column Float64Array.
  *   Mark dirty from index i with #markCumDirty(colId, i).
+ *
+ * ## Formula columns
+ *   A column with isNonEntry=true and a formula string is a computed column.
+ *   Supported formulas:
+ *     CUMSUM(colId)   → running sum up to current row
+ *     SUM(colId)      → total sum of column
+ *     AVG(colId)      → average of column
+ *     ROW             → 0-based display index
+ *     ROW1            → 1-based display index
+ *     {colId}         → value of another column in same row (for arithmetic)
+ *   Complex formulas: {price} * {qty} — arithmetic over column values
  */
 
 import * as Y from "yjs";
+
+/** Accent color palette (cycles by table count) */
+export const TABLE_ACCENT_COLORS = [
+    '#3b82f6', // blue
+    '#10b981', // emerald
+    '#f59e0b', // amber
+    '#8b5cf6', // violet
+    '#ef4444', // red
+    '#06b6d4', // cyan
+    '#ec4899', // pink
+    '#84cc16', // lime
+];
+
+/** Maps column type → display icon glyph */
+export const COLUMN_TYPE_ICONS = {
+    text: 'A',
+    number: '#',
+    currency: '$',
+    percent: '%',
+    date: '📅',
+    checkbox: '✓',
+    rating: '★',
+    url: '🔗',
+};
 
 export class TableStore {
     /** @type {import('yjs').Map} */
@@ -36,11 +78,12 @@ export class TableStore {
     id = $state("");
     name = $state("Table");
     mode = $state("inline"); // 'inline' | 'viewport'
+    accentColor = $state("#3b82f6");
 
     // ── Inline position ──────────────────────────────────────────────────────
     startRow = $state(0); // row of header
     startCol = $state(0); // first col
-    endCol = $state(0); // last col  (derived from column count on init)
+    endCol = $state(0);   // last col  (derived from column count on init)
 
     // ── Viewport position (viewport mode only) ───────────────────────────────
     vpStartRow = $state(0);
@@ -49,7 +92,17 @@ export class TableStore {
     vpEndCol = $state(0);
 
     // ── Schema & data ────────────────────────────────────────────────────────
-    columns = $state([]); // plain objects: { id, name, type, required }
+    /**
+     * @type {Array<{
+     *   id: string, name: string, type: string, required: boolean,
+     *   hAlign: 'left'|'center'|'right',
+     *   textColor: string|null, bgColor: string|null,
+     *   width: number|null,
+     *   isNonEntry: boolean, formula: string|null,
+     *   conditionalFormats: Array<{condition:string,value:any,style:{backgroundColor?:string,color?:string,bold?:boolean}}>
+     * }>}
+     */
+    columns = $state([]);
     rows = $state([]); // plain objects: colId → value
 
     // ── Sort / filter ─────────────────────────────────────────────────────────
@@ -57,38 +110,41 @@ export class TableStore {
     sortDir = $state("asc");
     filters = $state({}); // colId → { op: '='|'>'|'<'|'contains'|..., value }
 
+    // ── Insert sort (sort inserted rows by a column on entry) ─────────────────
+    insertSortColId = $state(null);
+    insertSortDir = $state("asc");
+
     // ── Derived sorted+filtered view ──────────────────────────────────────────
+    // Raw rows are appended at the end (O(1) efficiency).
+    // For display, we reverse so newest rows appear at top.
+    // "Bottom" of raw array = oldest = bottom of display.
+    // "Top" of raw array (end) = newest = top of display.
     sortedFilteredRows = $derived.by(() => {
-        let result = [...this.rows];
+        // Reverse raw rows so newest (last appended) appears first
+        let result = [...this.rows].reverse();
 
         // Apply filters
         for (const [colId, f] of Object.entries(this.filters)) {
             result = result.filter((row) => {
                 const v = row[colId];
                 switch (f.op) {
-                    case "=":
-                        return v == f.value;
-                    case "<>":
-                        return v != f.value;
-                    case ">":
-                        return Number(v) > Number(f.value);
-                    case "<":
-                        return Number(v) < Number(f.value);
-                    case ">=":
-                        return Number(v) >= Number(f.value);
-                    case "<=":
-                        return Number(v) <= Number(f.value);
-                    case "contains":
-                        return String(v ?? "")
-                            .toLowerCase()
-                            .includes(String(f.value).toLowerCase());
-                    default:
-                        return true;
+                    case "=": return v == f.value;
+                    case "<>": return v != f.value;
+                    case ">": return Number(v) > Number(f.value);
+                    case "<": return Number(v) < Number(f.value);
+                    case ">=": return Number(v) >= Number(f.value);
+                    case "<=": return Number(v) <= Number(f.value);
+                    case "contains": return String(v ?? "").toLowerCase().includes(String(f.value).toLowerCase());
+                    case "notcontains": return !String(v ?? "").toLowerCase().includes(String(f.value).toLowerCase());
+                    case "startswith": return String(v ?? "").toLowerCase().startsWith(String(f.value).toLowerCase());
+                    case "empty": return v == null || v === "";
+                    case "notempty": return v != null && v !== "";
+                    default: return true;
                 }
             });
         }
 
-        // Apply sort
+        // Apply sort (overrides the default newest-first order)
         if (this.sortColId) {
             const col = this.sortColId;
             const dir = this.sortDir === "desc" ? -1 : 1;
@@ -116,7 +172,7 @@ export class TableStore {
     entryErrors = $state({});
 
     // ── Cumulative sum cache ──────────────────────────────────────────────────
-    #cumCache = new Map(); // colId → Float64Array
+    #cumCache = new Map();     // colId → Float64Array
     #cumDirtyFrom = new Map(); // colId → first dirty index
 
     /**
@@ -137,6 +193,7 @@ export class TableStore {
         this.id = m.get("id") ?? "";
         this.name = m.get("name") ?? "Table";
         this.mode = m.get("mode") ?? "inline";
+        this.accentColor = m.get("accentColor") ?? "#3b82f6";
         this.startRow = m.get("startRow") ?? 0;
         this.startCol = m.get("startCol") ?? 0;
         this.vpStartRow = m.get("vpStartRow") ?? 0;
@@ -145,6 +202,8 @@ export class TableStore {
         this.vpEndCol = m.get("vpEndCol") ?? 0;
         this.sortColId = m.get("sortColId") ?? null;
         this.sortDir = m.get("sortDir") ?? "asc";
+        this.insertSortColId = m.get("insertSortColId") ?? null;
+        this.insertSortDir = m.get("insertSortDir") ?? "asc";
         this.#syncColumns();
         this.#syncRows();
         this.#syncFilters();
@@ -159,7 +218,27 @@ export class TableStore {
             this.columns = [];
             return;
         }
-        this.columns = arr.toArray().map((c) => (c.toJSON ? c.toJSON() : { ...c }));
+        this.columns = arr.toArray().map((c) => {
+            const raw = c.toJSON ? c.toJSON() : { ...c };
+            // Parse conditionalFormats if stored as JSON string
+            if (typeof raw.conditionalFormats === "string") {
+                try { raw.conditionalFormats = JSON.parse(raw.conditionalFormats); } catch { raw.conditionalFormats = []; }
+            }
+            // Ensure defaults
+            return {
+                id: raw.id ?? "",
+                name: raw.name ?? "",
+                type: raw.type ?? "text",
+                required: raw.required ?? false,
+                hAlign: raw.hAlign ?? null,
+                textColor: raw.textColor ?? null,
+                bgColor: raw.bgColor ?? null,
+                width: raw.width ?? null,
+                isNonEntry: raw.isNonEntry ?? false,
+                formula: raw.formula ?? null,
+                conditionalFormats: Array.isArray(raw.conditionalFormats) ? raw.conditionalFormats : [],
+            };
+        });
         this.endCol = this.startCol + this.columns.length - 1;
     }
 
@@ -182,11 +261,12 @@ export class TableStore {
     #observeYjs() {
         const m = this.#tableYMap;
 
-        // Top-level map observer (id, name, mode, position, sort fields)
+        // Top-level map observer (id, name, mode, position, sort fields, accentColor)
         const topObs = () => {
             this.id = m.get("id") ?? this.id;
             this.name = m.get("name") ?? this.name;
             this.mode = m.get("mode") ?? this.mode;
+            this.accentColor = m.get("accentColor") ?? this.accentColor;
             this.startRow = m.get("startRow") ?? this.startRow;
             this.startCol = m.get("startCol") ?? this.startCol;
             this.vpStartRow = m.get("vpStartRow") ?? this.vpStartRow;
@@ -195,6 +275,8 @@ export class TableStore {
             this.vpEndCol = m.get("vpEndCol") ?? this.vpEndCol;
             this.sortColId = m.get("sortColId") ?? null;
             this.sortDir = m.get("sortDir") ?? "asc";
+            this.insertSortColId = m.get("insertSortColId") ?? null;
+            this.insertSortDir = m.get("insertSortDir") ?? "asc";
         };
         m.observe(topObs);
         this.#observers.push(() => m.unobserve(topObs));
@@ -203,8 +285,8 @@ export class TableStore {
         const colArr = m.get("columns");
         if (colArr) {
             const colObs = () => this.#syncColumns();
-            colArr.observe(colObs);
-            this.#observers.push(() => colArr.unobserve(colObs));
+            colArr.observeDeep(colObs);
+            this.#observers.push(() => colArr.unobserveDeep(colObs));
         }
 
         // Rows observer (deep – catches cell-level edits too)
@@ -228,7 +310,9 @@ export class TableStore {
 
     /**
      * Insert a row of data.
-     * If table is sorted, insert at the correct sorted position.
+     * Appends to end of raw array (O(1)) - newest rows appear at top of display.
+     * If insertSort is configured, finds the position closest to display-top that
+     * maintains sort order (i.e., the highest raw index where value fits).
      * @param {Object} rowData  colId → value
      */
     insertRow(rowData) {
@@ -237,29 +321,50 @@ export class TableStore {
 
         this.#ydoc.transact(() => {
             const yRow = new Y.Map();
+            // Only store user-entry columns (skip formula columns)
             for (const [k, v] of Object.entries(rowData)) {
+                const colDef = this.columns.find(c => c.id === k);
+                if (colDef?.isNonEntry) continue; // don't store computed values
                 yRow.set(k, v);
             }
-            // If sorted, find insertion position via binary search
-            if (this.sortColId) {
-                const sorted = this.sortedFilteredRows;
-                const col = this.sortColId;
-                const val = rowData[col];
-                let lo = 0;
-                let hi = sorted.length;
-                while (lo < hi) {
-                    const mid = (lo + hi) >> 1;
-                    const mv = sorted[mid][col];
-                    const cmp =
-                        typeof val === "number" && typeof mv === "number"
-                            ? val - mv
-                            : String(val).localeCompare(String(mv));
-                    if ((this.sortDir === "asc" ? cmp : -cmp) <= 0) hi = mid;
-                    else lo = mid + 1;
+
+            // Default: append to end (O(1)) - newest appears at display top
+            let insertAt = rowArr.length;
+
+            // If insertSort is configured, find position closest to display-top
+            // that maintains sort order. Since display is reversed, "display top"
+            // means the highest raw index that satisfies the sort condition.
+            if (this.insertSortColId) {
+                const colId = this.insertSortColId;
+                const dir = this.insertSortDir === "desc" ? -1 : 1;
+                const newVal = rowData[colId];
+
+                // Scan from beginning (oldest/bottom) to find where new value fits.
+                // We want the highest index where sort order is maintained.
+                // For ascending: insert after all values <= newVal
+                // For descending: insert after all values >= newVal
+                for (let i = 0; i < rowArr.length; i++) {
+                    const rv = rowArr.get(i)?.get?.(colId);
+                    const cmp = (() => {
+                        if (rv == null && newVal == null) return 0;
+                        if (rv == null) return 1;
+                        if (newVal == null) return -1;
+                        if (typeof rv === "number" && typeof newVal === "number")
+                            return rv - newVal;
+                        return String(rv).localeCompare(String(newVal));
+                    })();
+                    // For ascending (dir=1): stop when existing > new (cmp > 0)
+                    // For descending (dir=-1): stop when existing < new (cmp < 0, so dir*cmp > 0)
+                    if (dir * cmp > 0) {
+                        insertAt = i;
+                        break;
+                    }
+                    // Otherwise, this position is valid, keep looking for a higher index
                 }
-                // lo is the position in sorted view; map back to raw row index
-                // For simplicity, just push to end (sort derived view handles order)
-                rowArr.push([yRow]);
+            }
+
+            if (insertAt >= 0 && insertAt < rowArr.length) {
+                rowArr.insert(insertAt, [yRow]);
             } else {
                 rowArr.push([yRow]);
             }
@@ -278,7 +383,6 @@ export class TableStore {
         const rowArr = this.#tableYMap.get("rows");
         if (!rowArr) return;
 
-        // We need to find the raw index in rows[] that matches the sorted row
         const sortedRow = this.sortedFilteredRows[displayIndex];
         if (!sortedRow) return;
 
@@ -300,6 +404,10 @@ export class TableStore {
         const rowArr = this.#tableYMap.get("rows");
         if (!rowArr) return;
 
+        // Block updates to formula columns
+        const colDef = this.columns.find(c => c.id === colId);
+        if (colDef?.isNonEntry) return;
+
         const sortedRow = this.sortedFilteredRows[displayIndex];
         if (!sortedRow) return;
 
@@ -312,6 +420,172 @@ export class TableStore {
                 yRow.set(colId, value);
                 this.#markCumDirty(colId, displayIndex);
             }
+        });
+    }
+
+    // ─── Schema mutation API ──────────────────────────────────────────────────
+
+    /**
+     * Rename a column.
+     * @param {string} colId
+     * @param {string} newName
+     */
+    renameColumn(colId, newName) {
+        const colArr = this.#tableYMap.get("columns");
+        if (!colArr) return;
+        this.#ydoc.transact(() => {
+            for (let i = 0; i < colArr.length; i++) {
+                const cm = colArr.get(i);
+                if (cm?.get?.("id") === colId) {
+                    cm.set("name", newName);
+                    break;
+                }
+            }
+        });
+    }
+
+    /**
+     * Update multiple properties of a column at once.
+     * @param {string} colId
+     * @param {Object} changes - Partial column definition
+     */
+    updateColumnDef(colId, changes) {
+        const colArr = this.#tableYMap.get("columns");
+        if (!colArr) return;
+        this.#ydoc.transact(() => {
+            for (let i = 0; i < colArr.length; i++) {
+                const cm = colArr.get(i);
+                if (cm?.get?.("id") === colId) {
+                    for (const [key, value] of Object.entries(changes)) {
+                        if (key === "conditionalFormats") {
+                            // Store arrays as JSON string
+                            cm.set(key, JSON.stringify(value));
+                        } else if (value === null || value === undefined) {
+                            cm.delete(key);
+                        } else {
+                            cm.set(key, value);
+                        }
+                    }
+                    break;
+                }
+            }
+        });
+    }
+
+    /**
+     * Set or clear a column formula (makes it a computed non-entry column).
+     * @param {string} colId
+     * @param {string|null} formula  null to clear
+     */
+    setColumnFormula(colId, formula) {
+        if (formula) {
+            this.updateColumnDef(colId, { isNonEntry: true, formula });
+        } else {
+            this.updateColumnDef(colId, { isNonEntry: false, formula: null });
+        }
+    }
+
+    /**
+     * Insert a new column at a given index.
+     * @param {number} atIndex
+     * @param {{ id?: string, name: string, type?: string, required?: boolean }} colDef
+     * @returns {string} the new column's id
+     */
+    insertColumn(atIndex, colDef) {
+        const colArr = this.#tableYMap.get("columns");
+        if (!colArr) return "";
+
+        const colId = colDef.id ?? `col${Date.now()}`;
+
+        this.#ydoc.transact(() => {
+            const cm = new Y.Map();
+            cm.set("id", colId);
+            cm.set("name", colDef.name ?? "Column");
+            cm.set("type", colDef.type ?? "text");
+            cm.set("required", colDef.required ?? false);
+            cm.set("isNonEntry", colDef.isNonEntry ?? false);
+            if (colDef.formula) cm.set("formula", colDef.formula);
+            if (colDef.hAlign) cm.set("hAlign", colDef.hAlign);
+
+            const insertAt = Math.max(0, Math.min(atIndex, colArr.length));
+            colArr.insert(insertAt, [cm]);
+        });
+
+        return colId;
+    }
+
+    /**
+     * Delete a column by ID.
+     * @param {string} colId
+     */
+    deleteColumn(colId) {
+        const colArr = this.#tableYMap.get("columns");
+        const rowArr = this.#tableYMap.get("rows");
+        if (!colArr) return;
+
+        this.#ydoc.transact(() => {
+            // Find and remove the column definition
+            for (let i = 0; i < colArr.length; i++) {
+                const cm = colArr.get(i);
+                if (cm?.get?.("id") === colId) {
+                    colArr.delete(i, 1);
+                    break;
+                }
+            }
+            // Remove that column's data from all rows
+            if (rowArr) {
+                for (let i = 0; i < rowArr.length; i++) {
+                    const row = rowArr.get(i);
+                    if (row?.has?.(colId)) {
+                        row.delete(colId);
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Move a column from one index to another.
+     * @param {number} fromIndex
+     * @param {number} toIndex
+     */
+    reorderColumns(fromIndex, toIndex) {
+        const colArr = this.#tableYMap.get("columns");
+        if (!colArr || fromIndex === toIndex) return;
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= colArr.length || toIndex >= colArr.length) return;
+
+        this.#ydoc.transact(() => {
+            // Read all column maps
+            const colMaps = [];
+            for (let i = 0; i < colArr.length; i++) {
+                colMaps.push(colArr.get(i));
+            }
+            // Remove and re-insert
+            const [moved] = colMaps.splice(fromIndex, 1);
+            colMaps.splice(toIndex, 0, moved);
+            // Delete all and re-push in new order
+            colArr.delete(0, colArr.length);
+            colArr.push(colMaps);
+        });
+    }
+
+    /**
+     * Rename the table itself.
+     * @param {string} newName
+     */
+    rename(newName) {
+        this.#ydoc.transact(() => {
+            this.#tableYMap.set("name", newName);
+        });
+    }
+
+    /**
+     * Set the accent color of the table.
+     * @param {string} color  CSS hex string
+     */
+    setAccentColor(color) {
+        this.#ydoc.transact(() => {
+            this.#tableYMap.set("accentColor", color);
         });
     }
 
@@ -328,6 +602,28 @@ export class TableStore {
         this.#ydoc.transact(() => {
             this.#tableYMap.set("sortColId", null);
             this.#tableYMap.set("sortDir", "asc");
+        });
+    }
+
+    setInsertSort(colId, dir = "asc") {
+        this.#ydoc.transact(() => {
+            this.#tableYMap.set("insertSortColId", colId);
+            this.#tableYMap.set("insertSortDir", dir);
+        });
+    }
+
+    clearInsertSort() {
+        this.#ydoc.transact(() => {
+            this.#tableYMap.set("insertSortColId", null);
+            this.#tableYMap.set("insertSortDir", "asc");
+        });
+    }
+
+    /** Update startRow and startCol (move table to new grid position). */
+    moveTo(startRow, startCol) {
+        this.#ydoc.transact(() => {
+            this.#tableYMap.set("startRow", startRow);
+            this.#tableYMap.set("startCol", startCol);
         });
     }
 
@@ -348,6 +644,15 @@ export class TableStore {
         this.#ydoc.transact(() => fm.delete(colId));
     }
 
+    clearAllFilters() {
+        const fm = this.#tableYMap.get("filters");
+        if (!fm) return;
+        this.#ydoc.transact(() => {
+            const keys = [...fm.keys()];
+            for (const k of keys) fm.delete(k);
+        });
+    }
+
     // ─── Entry form ───────────────────────────────────────────────────────────
 
     setEntryValue(colId, value) {
@@ -361,6 +666,7 @@ export class TableStore {
     commitEntry() {
         const errors = {};
         for (const col of this.columns) {
+            if (col.isNonEntry) continue; // skip formula columns
             if (col.required && (this.entryBuffer[col.id] === undefined || this.entryBuffer[col.id] === "")) {
                 errors[col.id] = "Required";
             }
@@ -382,12 +688,23 @@ export class TableStore {
 
     // ─── Query API ────────────────────────────────────────────────────────────
 
+    /**
+     * Get value at display index for a column.
+     * For formula columns, evaluates the formula.
+     * @param {number} displayIndex
+     * @param {string} colId
+     * @returns {any}
+     */
     getValue(displayIndex, colId) {
+        const colDef = this.columns.find(c => c.id === colId);
+        if (colDef?.isNonEntry && colDef.formula) {
+            return this.#evaluateFormula(colDef.formula, displayIndex);
+        }
         return this.sortedFilteredRows[displayIndex]?.[colId];
     }
 
     getColumn(colId) {
-        return this.sortedFilteredRows.map((r) => r[colId]);
+        return this.sortedFilteredRows.map((_, i) => this.getValue(i, colId));
     }
 
     getRowCount() {
@@ -414,6 +731,7 @@ export class TableStore {
             const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
             let running = startVal;
             for (let i = dirtyFrom; i < n; i++) {
+                // Use raw row value (not getValue which could recurse for formula cols)
                 running += Number(rows[i]?.[colId]) || 0;
                 cache[i] = running;
             }
@@ -422,6 +740,73 @@ export class TableStore {
         }
 
         return cache[clampedIdx] ?? 0;
+    }
+
+    // ─── Formula evaluation ───────────────────────────────────────────────────
+
+    /**
+     * Evaluate a column formula for a specific row.
+     * Supported:
+     *   CUMSUM(colId)    → running sum up to rowIndex
+     *   SUM(colId)       → total sum of column
+     *   AVG(colId)       → average of column
+     *   COUNT            → total row count
+     *   ROW              → 0-based index
+     *   ROW1             → 1-based index
+     *   {colId}          → value of another column in same row
+     *   Arithmetic: {price} * {qty}, {amount} + 10, etc.
+     *
+     * @param {string} formula
+     * @param {number} rowIndex  display index
+     * @returns {any}
+     */
+    #evaluateFormula(formula, rowIndex) {
+        try {
+            let expr = formula.trim();
+
+            // CUMSUM(colId) shorthand
+            const cumsumMatch = expr.match(/^CUMSUM\(([^)]+)\)$/i);
+            if (cumsumMatch) {
+                return this.getCumulativeSum(cumsumMatch[1].trim(), rowIndex);
+            }
+
+            // SUM(colId)
+            const sumMatch = expr.match(/^SUM\(([^)]+)\)$/i);
+            if (sumMatch) {
+                return this.getColumn(sumMatch[1].trim()).reduce((a, v) => a + (Number(v) || 0), 0);
+            }
+
+            // AVG(colId)
+            const avgMatch = expr.match(/^AVG\(([^)]+)\)$/i);
+            if (avgMatch) {
+                const col = this.getColumn(avgMatch[1].trim());
+                const nums = col.map(v => Number(v)).filter(v => !isNaN(v));
+                return nums.length ? nums.reduce((a, v) => a + v, 0) / nums.length : 0;
+            }
+
+            // COUNT
+            if (/^COUNT$/i.test(expr)) {
+                return this.getRowCount();
+            }
+
+            // ROW1 (1-based)
+            expr = expr.replace(/\bROW1\b/g, String(rowIndex + 1));
+            // ROW (0-based)
+            expr = expr.replace(/\bROW\b/g, String(rowIndex));
+
+            // {colId} → column value
+            expr = expr.replace(/\{([^}]+)\}/g, (_match, colId) => {
+                const val = this.sortedFilteredRows[rowIndex]?.[colId.trim()];
+                return val == null ? '0' : String(Number(val) || 0);
+            });
+
+            // Evaluate arithmetic expression
+            // eslint-disable-next-line no-new-func
+            const result = new Function(`"use strict"; return (${expr});`)();
+            return typeof result === 'number' && !isNaN(result) ? result : null;
+        } catch {
+            return null;
+        }
     }
 
     #markCumDirty(colId, fromIndex) {
@@ -440,6 +825,27 @@ export class TableStore {
     columnForSheetCol(sheetCol) {
         const idx = sheetCol - this.startCol;
         return this.columns[idx] ?? null;
+    }
+
+    /**
+     * Export table data as a CSV string.
+     * @returns {string}
+     */
+    exportCSV() {
+        const rows = this.sortedFilteredRows;
+        const cols = this.columns;
+        const escape = (v) => {
+            const s = v == null ? '' : String(v);
+            if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+                return `"${s.replace(/"/g, '""')}"`;
+            }
+            return s;
+        };
+        const header = cols.map(c => escape(c.name)).join(',');
+        const body = rows.map(r =>
+            cols.map(c => escape(this.getValue(rows.indexOf(r), c.id))).join(',')
+        ).join('\n');
+        return header + '\n' + body;
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────

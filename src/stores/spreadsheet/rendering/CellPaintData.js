@@ -19,6 +19,8 @@
 
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
+import { COLUMN_TYPE_ICONS } from '../features/TableStore.svelte.js';
+import { isRichText, richTextToPlain } from '../richText.js';
 
 /**
  * @typedef {Object} CellPaintItem
@@ -45,25 +47,30 @@ import { CellTypeRegistry } from '../cellTypes/index.js';
  * @property {boolean} [wrapText]
  * @property {any} [rawValue]          For checkbox (boolean), rating (number)
  * @property {number} [ratingMax]      For rating cells
- * @property {{colName:string,sortIcon:string,hasFilter:boolean,filterActive:boolean}} [tableHeaderInfo]
+ * @property {{colName:string,sortIcon:string,hasFilter:boolean,filterActive:boolean,typeIcon?:string,isFormula?:boolean,accentColor?:string,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
  * @property {string} [placeholderText] For table entry cells
+ * @property {boolean} [isNonEntryCol]  For table entry cells — formula columns
  * @property {{top?,right?,bottom?,left?}} [borders]
+ * @property {string} [formulaHighlight] Formula edit mode reference highlight color
+ * @property {boolean} [isFirstTableCol] True for the leftmost column in a table
+ * @property {string} [tableAccentColor] Table's accent color
+ * @property {boolean} [isFormulaCol]   True for computed/formula columns
+ * @property {boolean} [zebraRow]       True for even data rows (zebra striping)
+ * @property {boolean} [isRepeaterCopy] True for non-template repeater cells (visual dimming)
+ * @property {Array|null} [richTextRuns] Rich-text run array when cell value is rich text
  */
 
 /**
- * Whether a cell is within a selection range.
+ * Whether a cell is within the selection (supports all selectionMode values).
  * @param {number} row
  * @param {number} col
- * @param {{startRow:number,endRow:number,startCol:number,endCol:number}|null} selection
+ * @param {import('../SelectionState.svelte.js').SelectionState|null} selectionState
+ * @param {number} rowCount
+ * @param {number} colCount
  */
-function isInSelection(row, col, selection) {
-    if (!selection) return false;
-    return (
-        row >= selection.startRow &&
-        row <= selection.endRow &&
-        col >= selection.startCol &&
-        col <= selection.endCol
-    );
+function isInSelection(row, col, selectionState, rowCount, colCount) {
+    if (!selectionState) return false;
+    return selectionState.isSelected(row, col, rowCount, colCount);
 }
 
 /**
@@ -134,8 +141,9 @@ export function buildPaneData(params) {
     }
 
     const effectiveSheetStore = renderContext?.sheetStore ?? sheetStore;
-    const selection = selectionState?.range ?? null;
     const anchor = selectionState?.anchor ?? null;
+    const rowCount = effectiveSheetStore?.rowCount ?? 0;
+    const colCount = effectiveSheetStore?.colCount ?? 0;
 
     /** @type {CellPaintItem[]} */
     const cells = [];
@@ -184,7 +192,7 @@ export function buildPaneData(params) {
                 }
             }
 
-            const selected = isInSelection(r, c, selection);
+            const selected = isInSelection(r, c, selectionState, rowCount, colCount);
             const isAnchor = anchor?.row === r && anchor?.col === c;
 
             // ── Table cell types ──────────────────────────────────────────────
@@ -199,6 +207,14 @@ export function buildPaneData(params) {
                 const colIndex = info.table.colIndexForSheetCol(c);
                 const colDef = info.table.columns?.[colIndex] ?? null;
 
+                // Build a ct-compatible config object from column type string
+                const colCt = colDef?.type ? { type: colDef.type } : null;
+
+                // Column index within the table (first col = 0)
+                const isFirstCol = colIndex === 0;
+                const isLastCol = colIndex === (info.table.columns.length - 1);
+                const accentColor = info.table.accentColor ?? '#3b82f6';
+
                 /** @type {CellPaintItem} */
                 const item = {
                     row: r, col: c,
@@ -207,6 +223,8 @@ export function buildPaneData(params) {
                     renderType: 'text',
                     bgColor: null,
                     borders: null,
+                    isFirstTableCol: isFirstCol,
+                    tableAccentColor: accentColor,
                 };
 
                 if (cellType === CELL_TYPE.TABLE_HEADER) {
@@ -217,39 +235,60 @@ export function buildPaneData(params) {
                         sortIcon: info.table.sortColId === colDef?.id
                             ? (info.table.sortDir === 'asc' ? '▲' : '▼')
                             : '',
-                        hasFilter: !!(colDef?.id && info.table.filters?.get?.(colDef.id)),
-                        filterActive: !!(colDef?.id && info.table.filters?.get?.(colDef.id)),
+                        hasFilter: !!(colDef?.id && info.table.filters?.[colDef.id]),
+                        filterActive: !!(colDef?.id && info.table.filters?.[colDef.id]),
+                        typeIcon: colDef?.type ? (COLUMN_TYPE_ICONS[colDef.type] ?? 'A') : 'A',
+                        isFormula: colDef?.isNonEntry ?? false,
+                        accentColor,
+                        isFirstCol,
+                        isLastCol,
                     };
                 } else if (cellType === CELL_TYPE.TABLE_ENTRY) {
                     item.renderType = 'table_entry';
                     item.bgColor = '#f8fafc';
-                    item.placeholderText = colDef?.name ?? '';
+                    item.placeholderText = colDef?.isNonEntry ? '=' : (colDef?.name ?? '');
+                    item.isNonEntryCol = colDef?.isNonEntry ?? false;
                 } else {
                     // TABLE_DATA
-                    const ct = colDef?.ct;
                     const rawValue = (colDef && info.dataIndex >= 0)
                         ? info.table.getValue(info.dataIndex, colDef.id)
                         : null;
 
-                    if (ct?.type === 'checkbox') {
+                    const colType = colDef?.type ?? 'text';
+
+                    if (colType === 'checkbox') {
                         item.renderType = 'checkbox';
                         item.rawValue = !!rawValue;
-                    } else if (ct?.type === 'rating') {
+                    } else if (colType === 'rating') {
                         item.renderType = 'rating';
                         item.rawValue = Number(rawValue) || 0;
-                        item.ratingMax = ct.max || 5;
+                        item.ratingMax = 5; // default; can be extended per-column
                     } else {
                         item.renderType = 'text';
-                        const dispV = ct
-                            ? CellTypeRegistry.formatValue(ct, rawValue)
+                        const dispV = colCt
+                            ? CellTypeRegistry.formatValue(colCt, rawValue)
                             : (rawValue != null ? String(rawValue) : '');
                         item.displayValue = dispV;
-                        // Default alignment for numbers
-                        if (ct?.type === 'number' || ct?.type === 'currency' || ct?.type === 'percent') {
+                        // Column-level alignment (column def overrides type default)
+                        if (colDef?.hAlign) {
+                            item.hAlign = colDef.hAlign;
+                        } else if (colType === 'number' || colType === 'currency' || colType === 'percent') {
                             item.hAlign = 'right';
                         } else {
                             item.hAlign = 'left';
                         }
+                    }
+
+                    // Column-level color overrides
+                    if (colDef?.bgColor) item.bgColor = colDef.bgColor;
+                    if (colDef?.textColor) item.textColor = colDef.textColor;
+
+                    // Formula column indicator
+                    item.isFormulaCol = colDef?.isNonEntry ?? false;
+
+                    // Zebra striping (even rows get a subtle tint)
+                    if (info.dataIndex % 2 === 0 && !item.bgColor) {
+                        item.zebraRow = true;
                     }
 
                     // Conditional formatting for table data cells
@@ -270,12 +309,12 @@ export function buildPaneData(params) {
             }
 
             // ── Regular / Merge / Repeater cells ──────────────────────────────
-            const mappedRow = cellType === CELL_TYPE.REPEATER
-                ? (renderContext?.repeaterEngine?.getCellRepeaterContext(r, c)?.templateRow ?? r)
-                : r;
-            const mappedCol = cellType === CELL_TYPE.REPEATER
-                ? (renderContext?.repeaterEngine?.getCellRepeaterContext(r, c)?.templateCol ?? c)
-                : c;
+            const repeaterCtx = cellType === CELL_TYPE.REPEATER
+                ? renderContext?.repeaterEngine?.getCellRepeaterContext(r, c)
+                : null;
+            const isRepeaterCopy = !!(repeaterCtx && repeaterCtx.repIndex > 0);
+            const mappedRow = repeaterCtx ? repeaterCtx.templateRow : r;
+            const mappedCol = repeaterCtx ? repeaterCtx.templateCol : c;
 
             const sheetCell = effectiveSheetStore?.getCell(mappedRow, mappedCol);
 
@@ -289,8 +328,8 @@ export function buildPaneData(params) {
                 dispV = sheetCell?.v ?? '';
             }
 
-            // Cell type config
-            const ct = renderContext?.getCellTypeConfig(r, c);
+            // Cell type config — for repeater cells use template cell coords
+            const ct = renderContext?.getCellTypeConfig(mappedRow, mappedCol);
             const descriptor = ct ? CellTypeRegistry.get(ct.type) : null;
 
             /** @type {CellPaintItem} */
@@ -312,6 +351,7 @@ export function buildPaneData(params) {
                 vAlign: 'middle',
                 wrapText: false,
                 borders: null,
+                isRepeaterCopy,
             };
 
             // Determine render type
@@ -329,11 +369,22 @@ export function buildPaneData(params) {
                 item.displayValue = dispV != null ? String(dispV) : '';
             } else {
                 item.renderType = 'text';
-                item.displayValue = dispV != null ? String(dispV) : '';
+                if (isRichText(dispV)) {
+                    item.richTextRuns = dispV;
+                    item.displayValue = richTextToPlain(dispV);
+                } else {
+                    item.displayValue = dispV != null ? String(dispV) : '';
+                }
 
                 // Apply type-level alignment defaults
                 if (ct?.type === 'number' || ct?.type === 'currency' || ct?.type === 'percent') {
                     item.hAlign = 'right';
+                } else if (!ct) {
+                    // No explicit type — infer right-align for raw numeric values
+                    const rawVal = sheetCell?.v;
+                    if (typeof rawVal === 'number') {
+                        item.hAlign = 'right';
+                    }
                 }
                 // Underline for URL type default
                 if (descriptor?.defaultStyle?.()) {
@@ -343,7 +394,38 @@ export function buildPaneData(params) {
                 }
             }
 
-            // Apply cell formatting from SheetStore
+            // Apply formatting: col-level → row-level → cell-level (cell wins)
+            // Col-level formatting (lowest priority)
+            const colFmt = effectiveSheetStore?.getColFormatting?.(mappedCol);
+            if (colFmt) {
+                if (colFmt.backgroundColor) item.bgColor = colFmt.backgroundColor;
+                if (colFmt.color) item.textColor = colFmt.color;
+                if (colFmt.bold) item.bold = true;
+                if (colFmt.italic) item.italic = true;
+                if (colFmt.underline) item.underline = true;
+                if (colFmt.strikethrough) item.strikethrough = true;
+                if (colFmt.fontSize) item.fontSize = colFmt.fontSize;
+                if (colFmt.fontFamily) item.fontFamily = colFmt.fontFamily;
+                if (colFmt.horizontalAlign) item.hAlign = colFmt.horizontalAlign;
+                if (colFmt.verticalAlign) item.vAlign = colFmt.verticalAlign;
+                if (colFmt.wrapText) item.wrapText = true;
+            }
+            // Row-level formatting (overrides col)
+            const rowFmt = effectiveSheetStore?.getRowFormatting?.(mappedRow);
+            if (rowFmt) {
+                if (rowFmt.backgroundColor) item.bgColor = rowFmt.backgroundColor;
+                if (rowFmt.color) item.textColor = rowFmt.color;
+                if (rowFmt.bold) item.bold = true;
+                if (rowFmt.italic) item.italic = true;
+                if (rowFmt.underline) item.underline = true;
+                if (rowFmt.strikethrough) item.strikethrough = true;
+                if (rowFmt.fontSize) item.fontSize = rowFmt.fontSize;
+                if (rowFmt.fontFamily) item.fontFamily = rowFmt.fontFamily;
+                if (rowFmt.horizontalAlign) item.hAlign = rowFmt.horizontalAlign;
+                if (rowFmt.verticalAlign) item.vAlign = rowFmt.verticalAlign;
+                if (rowFmt.wrapText) item.wrapText = true;
+            }
+            // Cell-level formatting (highest priority, overrides row/col)
             if (sheetCell?.exists) {
                 if (sheetCell.backgroundColor) item.bgColor = sheetCell.backgroundColor;
                 if (sheetCell.color) item.textColor = sheetCell.color;

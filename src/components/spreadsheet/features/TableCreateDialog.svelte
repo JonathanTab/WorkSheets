@@ -21,7 +21,6 @@
 
     // Form state
     let tableName = $state("Table1");
-    let mode = $state("inline"); // 'inline' | 'viewport'
     let hasHeaderRow = $state(true);
 
     // Column definitions derived from selection
@@ -61,13 +60,40 @@
         return letter;
     }
 
-    // Position the dialog near the selection
+    // Position the dialog near the selection with boundary detection
     let dialogStyle = $derived.by(() => {
         if (!selection) return "";
-        // Position below the selection end
-        const top = Math.min(selection.endRow + 2, 20) * 24 + 30; // approximate pixel position
-        const left = selection.startCol * 80 + 50; // approximate pixel position
-        return `position: fixed; top: ${Math.min(top, window.innerHeight - 300)}px; left: ${Math.min(left, window.innerWidth - 300)}px; z-index: 1000;`;
+
+        const dialogWidth = 320;
+        const dialogHeight = 300;
+        const margin = 16;
+
+        // Calculate initial position (below the selection)
+        let top = (selection.endRow + 2) * 24 + 30;
+        let left = selection.startCol * 80 + 50;
+
+        // Clamp to viewport bounds
+        const maxX = window.innerWidth - dialogWidth - margin;
+        const maxY = window.innerHeight - dialogHeight - margin;
+
+        // Check right edge
+        if (left > maxX) {
+            left = maxX;
+        }
+        // Check left edge
+        if (left < margin) {
+            left = margin;
+        }
+        // Check bottom edge - if would go off screen, position above selection instead
+        if (top > maxY) {
+            top = selection.startRow * 24 - dialogHeight - margin;
+            // If still off screen, clamp to top
+            if (top < margin) {
+                top = margin;
+            }
+        }
+
+        return `position: fixed; top: ${Math.round(top)}px; left: ${Math.round(left)}px; z-index: 1000;`;
     });
 
     // Generate table number
@@ -99,14 +125,9 @@
 
         spreadsheetSession.tableManager.createTable({
             name: tableName,
-            mode: mode,
             startRow: startRow,
             startCol: startCol,
             columns: columns,
-            vpStartRow: mode === "viewport" ? selection.startRow : undefined,
-            vpStartCol: mode === "viewport" ? selection.startCol : undefined,
-            vpEndRow: mode === "viewport" ? selection.endRow : undefined,
-            vpEndCol: mode === "viewport" ? selection.endCol : undefined,
         });
 
         onClose();
@@ -148,26 +169,6 @@
                         bind:value={tableName}
                         placeholder="Table name"
                     />
-                </div>
-
-                <div class="form-row">
-                    <label>Mode</label>
-                    <div class="toggle-group">
-                        <button
-                            class="toggle-btn"
-                            class:active={mode === "inline"}
-                            onclick={() => (mode = "inline")}
-                        >
-                            Inline
-                        </button>
-                        <button
-                            class="toggle-btn"
-                            class:active={mode === "viewport"}
-                            onclick={() => (mode = "viewport")}
-                        >
-                            Viewport
-                        </button>
-                    </div>
                 </div>
 
                 <div class="form-row">

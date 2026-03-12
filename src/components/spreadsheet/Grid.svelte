@@ -38,12 +38,13 @@
     import ColHeaders from "./grid/ColHeaders.svelte";
     import RowHeaders from "./grid/RowHeaders.svelte";
     import ContextMenu from "./ContextMenu.svelte";
-    import TableViewport from "./features/TableViewport.svelte";
-    import RepeaterViewport from "./features/RepeaterViewport.svelte";
     import TableFilterPopover from "./features/TableFilterPopover.svelte";
     import TableEntryCell from "./features/TableEntryCell.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "./features/RepeaterCreateDialog.svelte";
+    import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
+    import TableEditPanel from "./features/TableEditPanel.svelte";
+    import TableColumnPanel from "./features/TableColumnPanel.svelte";
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
     let containerEl = $state(null);
@@ -73,8 +74,170 @@
     // ─── Overlay state ────────────────────────────────────────────────────────
     /** @type {{ table:any, colId:string|null, left:number, top:number }|null} */
     let activeFilterPopover = $state(null);
+
+    // ─── Filter popover position (with boundary detection) ───────────────────
+    let filterPopoverPosition = $state(null);
+
+    /**
+     * Calculate position for filter popover, ensuring it stays within viewport.
+     */
+    function calculateFilterPopoverPosition(cellLeft, cellTop, cellWidth) {
+        if (!containerEl) return { left: cellLeft, top: cellTop };
+
+        const containerRect = containerEl.getBoundingClientRect();
+        const popoverWidth = 240; // max-width from TableFilterPopover styles
+        const popoverHeight = 300; // approximate height
+        const margin = 8;
+
+        let left = cellLeft;
+        let top = cellTop;
+
+        // Check right edge - if popover would go off right side, align to right edge of cell
+        const rightEdge = left + popoverWidth;
+        const containerRight = containerRect.width;
+        if (rightEdge > containerRight - margin) {
+            left = cellLeft + cellWidth - popoverWidth;
+        }
+
+        // Check left edge
+        if (left < margin) {
+            left = margin;
+        }
+
+        // Check bottom edge - if would go off screen, position above the header instead
+        const bottomEdge = top + popoverHeight;
+        const containerBottom = containerRect.height;
+        if (bottomEdge > containerBottom - margin) {
+            // Position above the header row (top is already at header bottom)
+            top = cellTop - popoverHeight - 24 - margin; // 24 is approx header height
+            // If still too low, clamp to available space
+            if (top < margin) {
+                top = margin;
+            }
+        }
+
+        return { left: Math.round(left), top: Math.round(top) };
+    }
+
+    // ─── Edit panel position (with boundary detection) ────────────────────────
+    /** @type {{ x: number, y: number }|null} */
+    let editPanelPosition = $state(null);
+    let editPanelEl = $state(null);
+
+    /**
+     * Calculate position for edit panel, ensuring it stays within viewport.
+     * @param {'table'|'repeater'} type
+     * @param {any} store
+     * @returns {{ x: number, y: number }}
+     */
+    function calculateEditPanelPosition(type, store) {
+        if (!containerEl || !virtualizer || !renderPlan) return { x: 0, y: 0 };
+
+        const containerRect = containerEl.getBoundingClientRect();
+        const panelWidth = type === "table" ? 250 : 240;
+        const panelMaxHeight = window.innerHeight * 0.8;
+        const margin = 8;
+
+        let anchorRight, anchorTop;
+
+        if (type === "repeater") {
+            const rect = rangeOutlineStyle(
+                store.templateStartRow,
+                store.templateStartCol,
+                store.inlineEndRow,
+                store.inlineEndCol,
+            );
+            if (!rect) return { x: 0, y: 0 };
+            anchorRight = rect.left + rect.width;
+            anchorTop = rect.top;
+        } else {
+            const endRow = store.startRow + 1 + store.sortedFilteredRows.length;
+            const rect = rangeOutlineStyle(
+                store.startRow,
+                store.startCol,
+                endRow,
+                store.endCol,
+            );
+            if (!rect) return { x: 0, y: 0 };
+            anchorRight = rect.left + rect.width;
+            anchorTop = rect.top;
+        }
+
+        // Adjusted position (below the settings button)
+        let x = anchorRight;
+        let y = anchorTop + 26;
+
+        // Check right edge - if panel would go off right side, flip to left
+        const rightEdge = x + panelWidth;
+        const containerRight = containerRect.width;
+        if (rightEdge > containerRight - margin) {
+            // Flip to left side of the anchor
+            x = anchorRight - panelWidth - margin;
+        }
+
+        // Check left edge
+        if (x < margin) {
+            x = margin;
+        }
+
+        // Check bottom edge
+        const bottomEdge = y + panelMaxHeight;
+        const containerBottom = containerRect.height;
+        if (bottomEdge > containerBottom - margin) {
+            // Try to position above the anchor instead
+            y = anchorTop - panelMaxHeight - margin;
+            // If still too low, just clamp to bottom
+            if (y + panelMaxHeight > containerBottom - margin) {
+                y = containerBottom - panelMaxHeight - margin;
+            }
+        }
+
+        // Check top edge
+        if (y < margin) {
+            y = margin;
+        }
+
+        return { x: Math.round(x), y: Math.round(y) };
+    }
+
+    // Recalculate position when activeEditPanel changes
+    $effect(() => {
+        if (activeEditPanel && containerEl && virtualizer && renderPlan) {
+            editPanelPosition = calculateEditPanelPosition(
+                activeEditPanel.type,
+                activeEditPanel.store,
+            );
+        } else {
+            editPanelPosition = null;
+        }
+    });
+
+    // Recalculate filter popover position when it changes
+    $effect(() => {
+        if (activeFilterPopover && containerEl && virtualizer) {
+            const cellWidth = virtualizer.getColWidth(
+                activeFilterPopover.table.startCol +
+                    activeFilterPopover.table.columns.findIndex(
+                        (c) => c.id === activeFilterPopover.colId,
+                    ),
+            );
+            filterPopoverPosition = calculateFilterPopoverPosition(
+                activeFilterPopover.left,
+                activeFilterPopover.top,
+                cellWidth,
+            );
+        } else {
+            filterPopoverPosition = null;
+        }
+    });
     /** @type {{ table:any, colIndex:number, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
     let focusedEntryCell = $state(null);
+    /** @type {{ table:any, dataIndex:number, colDef:any, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
+    let focusedTableDataCell = $state(null);
+    /** @type {{ type: 'table'|'repeater', store:any }|null} */
+    let activeEditPanel = $state(null);
+    /** @type {{ table:any, colId:string, left:number, top:number }|null} */
+    let activeColumnConfig = $state(null);
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -91,6 +254,8 @@
     let selection = $derived(selectionState.range);
     let anchor = $derived(selectionState.anchor);
     let isFormulaEditMode = $derived(editSessionState.isFormulaMode);
+    let rowCount = $derived(sheetStore?.rowCount ?? 0);
+    let colCount = $derived(sheetStore?.colCount ?? 0);
 
     let hasLoggedZeroViewportWarning = $state(false);
 
@@ -182,12 +347,20 @@
 
     // ─── Main repaint trigger ─────────────────────────────────────────────────
     $effect(() => {
-        // Touch reactive dependencies to track them
-        const _cells = sheetStore?.cells;
+        // Touch reactive dependencies to track them.
+        // NOTE: we track cellsVersion (not sheetStore.cells) because Svelte 5 does
+        // not detect Map.set/delete mutations via a plain reference read.
+        const _cellsVer = sheetStore?.cellsVersion;
         const _borders = sheetStore?.bordersVersion;
         const _mergeVer = renderContext?.mergeEngine?.version;
+        // Table and repeater version counters trigger repaints on structure changes
+        const _tableVer = renderContext?.tableManager?.tableVersion;
+        const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
         const _plan = renderPlan;
         const _sel = selectionState.range;
+        const _selMode = selectionState.selectionMode;
+        const _selRows = selectionState.selectedRows;
+        const _selCols = selectionState.selectedCols;
         const _anch = selectionState.anchor;
         const _editing = editSessionState.isEditing;
         const _formula = formulaEditState?.currentValue;
@@ -370,26 +543,43 @@
 
     // ─── DOM overlay position deriveds ────────────────────────────────────────
     let selectionBorderStyle = $derived.by(() => {
-        if (!selection || !virtualizer || !renderPlan) return null;
+        // Use the merge-expanded range for the selection border
+        const eff = expandedRange;
+        if (!eff || !virtualizer || !renderPlan) return null;
         const isSingle =
-            selection.startRow === selection.endRow &&
-            selection.startCol === selection.endCol;
+            eff.startRow === eff.endRow && eff.startCol === eff.endCol;
         if (isSingle) return null; // anchor border covers single-cell case
 
-        const left = cellContainerLeft(selection.startCol);
-        const top = cellContainerTop(selection.startRow);
+        const left = cellContainerLeft(eff.startCol);
+        const top = cellContainerTop(eff.startRow);
         const right =
-            cellContainerLeft(selection.endCol) +
-            virtualizer.getColWidth(selection.endCol);
+            cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
         const bottom =
-            cellContainerTop(selection.endRow) +
-            virtualizer.getRowHeight(selection.endRow);
+            cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
 
         return `left:${left}px; top:${top}px; width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
     });
 
     let anchorBorderStyle = $derived.by(() => {
         if (!anchor || !virtualizer || !renderPlan) return null;
+
+        // If the anchor is inside a merge, draw the border around the full merge span
+        const mergeEngine = renderContext?.mergeEngine;
+        if (mergeEngine?.isMergeCell(anchor.row, anchor.col)) {
+            const merge = mergeEngine.getMergeAt(anchor.row, anchor.col);
+            if (merge) {
+                const left = cellContainerLeft(merge.startCol);
+                const top = cellContainerTop(merge.startRow);
+                let width = 0;
+                for (let c = merge.startCol; c <= merge.endCol; c++)
+                    width += virtualizer.getColWidth(c);
+                let height = 0;
+                for (let r = merge.startRow; r <= merge.endRow; r++)
+                    height += virtualizer.getRowHeight(r);
+                return `left:${left}px; top:${top}px; width:${width}px; height:${height}px;`;
+            }
+        }
+
         const left = cellContainerLeft(anchor.col);
         const top = cellContainerTop(anchor.row);
         const width = virtualizer.getColWidth(anchor.col);
@@ -411,6 +601,82 @@
         };
     });
 
+    // ─── Range outline + edit button (table / repeater) ──────────────────────
+
+    /**
+     * Build a CSS position style string spanning row/col ranges.
+     */
+    function rangeOutlineStyle(startRow, startCol, endRow, endCol) {
+        if (!virtualizer || !renderPlan) return null;
+        const left = cellContainerLeft(startCol);
+        const top = cellContainerTop(startRow);
+        const right =
+            cellContainerLeft(endCol) + virtualizer.getColWidth(endCol);
+        const bottom =
+            cellContainerTop(endRow) + virtualizer.getRowHeight(endRow);
+        const w = Math.max(0, right - left);
+        const h = Math.max(0, bottom - top);
+        if (w <= 0 || h <= 0) return null;
+        return { left, top, width: w, height: h };
+    }
+
+    /**
+     * Insert button info for the active entry row.
+     * Shown below the entry row when the user is focused on an entry cell.
+     */
+    let entryInsertButtonInfo = $derived.by(() => {
+        if (!focusedEntryCell || !virtualizer || !renderPlan) return null;
+        const tbl = focusedEntryCell.table;
+        const entryRow = tbl.startRow + 1;
+        const top =
+            cellContainerTop(entryRow) + virtualizer.getRowHeight(entryRow);
+        const left = cellContainerLeft(tbl.startCol);
+        let width = 0;
+        for (let c = tbl.startCol; c <= tbl.endCol; c++) {
+            width += virtualizer.getColWidth(c);
+        }
+        return { table: tbl, top, left, width };
+    });
+
+    /**
+     * All visible table outlines (subtle, always-on, pointer-events:none).
+     */
+    let allTableOutlines = $derived.by(() => {
+        if (!renderContext?.tableManager || !virtualizer || !renderPlan)
+            return [];
+        const result = [];
+        for (const table of renderContext.tableManager.stores.values()) {
+            const endRow = table.startRow + 1 + table.sortedFilteredRows.length;
+            const rect = rangeOutlineStyle(
+                table.startRow,
+                table.startCol,
+                endRow,
+                table.endCol,
+            );
+            if (rect) result.push({ table, rect });
+        }
+        return result;
+    });
+
+    /**
+     * All visible repeater outlines (subtle, always-on, pointer-events:none).
+     */
+    let allRepeaterOutlines = $derived.by(() => {
+        if (!renderContext?.repeaterEngine || !virtualizer || !renderPlan)
+            return [];
+        const result = [];
+        for (const rep of renderContext.repeaterEngine.stores.values()) {
+            const rect = rangeOutlineStyle(
+                rep.templateStartRow,
+                rep.templateStartCol,
+                rep.inlineEndRow,
+                rep.inlineEndCol,
+            );
+            if (rect) result.push({ repeater: rep, rect });
+        }
+        return result;
+    });
+
     // ─── Column header helper ─────────────────────────────────────────────────
     function colHeader(col) {
         let header = "";
@@ -422,22 +688,77 @@
         return header;
     }
 
+    /**
+     * Expand a selection range to fully encompass every merged region it overlaps.
+     * Iterates until stable (handles chains of merges).
+     * @param {{startRow,endRow,startCol,endCol}|null} range
+     * @param {import('../../stores/spreadsheet/features/MergeEngine.svelte.js').MergeEngine|null|undefined} mergeEngine
+     * @returns {{startRow,endRow,startCol,endCol}|null}
+     */
+    function expandRangeForMerges(range, mergeEngine) {
+        if (!range || !mergeEngine || mergeEngine.merges.length === 0)
+            return range;
+        let { startRow, endRow, startCol, endCol } = range;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const m of mergeEngine.merges) {
+                if (
+                    m.startRow <= endRow &&
+                    m.endRow >= startRow &&
+                    m.startCol <= endCol &&
+                    m.endCol >= startCol
+                ) {
+                    if (m.startRow < startRow) {
+                        startRow = m.startRow;
+                        changed = true;
+                    }
+                    if (m.endRow > endRow) {
+                        endRow = m.endRow;
+                        changed = true;
+                    }
+                    if (m.startCol < startCol) {
+                        startCol = m.startCol;
+                        changed = true;
+                    }
+                    if (m.endCol > endCol) {
+                        endCol = m.endCol;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        return { startRow, endRow, startCol, endCol };
+    }
+
+    /**
+     * For a cell click: if the cell is inside a merge, return the primary cell coords.
+     * Otherwise return the original coords.
+     */
+    function snapToMergePrimary(row, col) {
+        const mergeEngine = renderContext?.mergeEngine;
+        if (!mergeEngine) return { row, col };
+        const merge = mergeEngine.getMergeAt(row, col);
+        if (merge) return { row: merge.startRow, col: merge.startCol };
+        return { row, col };
+    }
+
+    // Expanded range for selection border (covers all touched merges)
+    let expandedRange = $derived.by(() => {
+        if (selectionState.selectionMode !== "range") return null;
+        const range = selectionState.range;
+        if (!range) return null;
+        return expandRangeForMerges(range, renderContext?.mergeEngine) ?? range;
+    });
+
     function isSelected(row, col) {
-        if (!selection) return false;
-        return (
-            row >= selection.startRow &&
-            row <= selection.endRow &&
-            col >= selection.startCol &&
-            col <= selection.endCol
-        );
+        return selectionState.isSelected(row, col, rowCount, colCount);
     }
     function isRowSelected(row) {
-        if (!selection) return false;
-        return row >= selection.startRow && row <= selection.endRow;
+        return selectionState.isRowHighlighted(row);
     }
     function isColSelected(col) {
-        if (!selection) return false;
-        return col >= selection.startCol && col <= selection.endCol;
+        return selectionState.isColHighlighted(col);
     }
 
     // ─── Event layer handlers ─────────────────────────────────────────────────
@@ -545,7 +866,33 @@
             focusedEntryCell = null;
         }
 
+        // Close table data cell edit if clicking elsewhere
+        if (
+            focusedTableDataCell &&
+            (focusedTableDataCell.row !== row ||
+                focusedTableDataCell.col !== col)
+        ) {
+            focusedTableDataCell = null;
+        }
+
         const cellType = renderContext?.getCellType(row, col);
+
+        // ── REPEATER non-template: block editing, just select ─────────────────
+        if (cellType === CELL_TYPE.REPEATER) {
+            const repCtx =
+                renderContext?.repeaterEngine?.getCellRepeaterContext(row, col);
+            if (repCtx && repCtx.repIndex > 0) {
+                // Non-template repetition — not editable
+                if (!e.shiftKey) {
+                    selectionState.startSelection(row, col);
+                    selectionState.endSelection();
+                } else if (anchor) {
+                    selectionState.extendSelection(row, col);
+                }
+                return;
+            }
+            // repIndex === 0 — template cell, falls through to regular editing
+        }
 
         // ── TABLE_HEADER: sort or filter popover ─────────────────────────────
         if (cellType === CELL_TYPE.TABLE_HEADER) {
@@ -594,15 +941,23 @@
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table) {
-                const colIndex = info.table.colIndexForSheetCol?.(col) ?? 0;
+                let colIndex = info.table.colIndexForSheetCol?.(col) ?? 0;
+                // If clicked on formula col, jump to first editable col
+                if (info.table.columns?.[colIndex]?.isNonEntry) {
+                    const firstEditable = info.table.columns.findIndex(
+                        (c) => !c.isNonEntry,
+                    );
+                    if (firstEditable >= 0) colIndex = firstEditable;
+                }
+                const sheetCol = info.table.startCol + colIndex;
                 focusedEntryCell = {
                     table: info.table,
                     colIndex,
                     row,
-                    col,
-                    left: cellContainerLeft(col),
+                    col: sheetCol,
+                    left: cellContainerLeft(sheetCol),
                     top: cellContainerTop(row),
-                    width: virtualizer.getColWidth(col),
+                    width: virtualizer.getColWidth(sheetCol),
                     height: virtualizer.getRowHeight(row),
                 };
             }
@@ -615,21 +970,23 @@
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                const ct = info.colDef.ct;
-                if (ct?.type === "checkbox") {
+                const colType = info.colDef.type;
+                if (colType === "checkbox") {
                     const cur = info.table.getValue(
                         info.dataIndex,
                         info.colDef.id,
                     );
                     info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
+                    // Force canvas repaint for table cell data changes
+                    untrack(() => renderScheduler?.invalidateAll());
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
                     return;
                 }
-                if (ct?.type === "rating") {
+                if (colType === "rating") {
                     const cellLeft = cellContainerLeft(col);
                     const cellWidth = virtualizer.getColWidth(col);
-                    const max = ct.max || 5;
+                    const max = 5;
                     const relX = Math.max(
                         0,
                         e.clientX -
@@ -645,6 +1002,8 @@
                         info.colDef.id,
                         newVal,
                     );
+                    // Force canvas repaint for table cell data changes
+                    untrack(() => renderScheduler?.invalidateAll());
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
                     return;
@@ -658,7 +1017,9 @@
         } else {
             // Handle special cell type clicks (checkbox toggle, rating)
             if (handleRegularCellClick(row, col, e)) return;
-            selectionState.startSelection(row, col);
+            // Snap to merge primary so anchor always lands on the top-left cell
+            const snapped = snapToMergePrimary(row, col);
+            selectionState.startSelection(snapped.row, snapped.col);
         }
     }
 
@@ -718,7 +1079,74 @@
     }
 
     function handleCellDoubleClick(row, col) {
+        const cellType = renderContext?.getCellType(row, col);
+
+        // ── REPEATER non-template: not editable ───────────────────────────────
+        if (cellType === CELL_TYPE.REPEATER) {
+            const repCtx =
+                renderContext?.repeaterEngine?.getCellRepeaterContext(row, col);
+            if (repCtx && repCtx.repIndex > 0) return; // block edit
+        }
+
+        // ── TABLE_DATA: show inline cell editor overlay ───────────────────────
+        if (cellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                const colType = info.colDef.type;
+                // Checkbox/rating handled by single click; formula columns not editable
+                if (
+                    colType !== "checkbox" &&
+                    colType !== "rating" &&
+                    !info.colDef.isNonEntry
+                ) {
+                    selectionState.startSelection(row, col);
+                    selectionState.endSelection();
+                    focusedTableDataCell = {
+                        table: info.table,
+                        dataIndex: info.dataIndex,
+                        colDef: info.colDef,
+                        row,
+                        col,
+                        left: cellContainerLeft(col),
+                        top: cellContainerTop(row),
+                        width: virtualizer.getColWidth(col),
+                        height: virtualizer.getRowHeight(row),
+                    };
+                }
+            }
+            return;
+        }
+
+        // ── TABLE_HEADER / TABLE_ENTRY: no plain-text editing ────────────────
+        if (
+            cellType === CELL_TYPE.TABLE_HEADER ||
+            cellType === CELL_TYPE.TABLE_ENTRY
+        ) {
+            return;
+        }
+
         beginCellEdit(row, col, { surface: "grid" });
+    }
+
+    /** Commit an inline table data cell edit. */
+    function commitTableDataEdit(value) {
+        if (!focusedTableDataCell) return;
+        const { table, dataIndex, colDef } = focusedTableDataCell;
+        // Coerce value to correct type
+        let typedValue = value;
+        const colType = colDef.type;
+        if (
+            colType === "number" ||
+            colType === "currency" ||
+            colType === "percent"
+        ) {
+            const n = parseFloat(value);
+            typedValue = isNaN(n) ? null : n;
+        }
+        table.updateCell(dataIndex, colDef.id, typedValue);
+        focusedTableDataCell = null;
+        // Force canvas repaint for table cell data changes
+        untrack(() => renderScheduler?.invalidateAll());
     }
 
     function handleCellContextMenu(row, col, e) {
@@ -761,11 +1189,29 @@
     function persistEdit(payload) {
         if (!payload || !sheetStore) return;
         const { row, col, value } = payload;
-        if (value.startsWith("=")) {
+        if (Array.isArray(value)) {
+            // Rich text run array
+            sheetStore.setCellValue(row, col, value);
+        } else if (typeof value === "string" && value.startsWith("=")) {
             sheetStore.setCellFormula(row, col, value);
         } else {
             sheetStore.setCellValue(row, col, value);
         }
+    }
+
+    /**
+     * Ctrl+Enter in a plain text cell: save as rich text with trailing newline,
+     * then immediately reopen the cell editor (now in rich text / contenteditable mode).
+     */
+    function handleCtrlEnter(currentText) {
+        if (!editSessionState.isEditing) return;
+        const { row, col } = editSessionState.cell;
+        // Save current text as rich text run array
+        const runs = currentText ? [{ t: currentText + "\n" }] : [{ t: "\n" }];
+        editSessionState.cancel();
+        sheetStore.setCellValue(row, col, runs);
+        // Reopen edit — cell now has rich text value so editor becomes contenteditable
+        beginCellEdit(row, col, { surface: "grid" });
     }
 
     function commitCurrentEdit() {
@@ -782,8 +1228,15 @@
         scrollToAnchor();
     }
 
-    function commitEdit() {
-        commitCurrentEdit();
+    function commitEdit(richValue = undefined) {
+        if (richValue !== undefined && editSessionState.isEditing) {
+            // Rich text editor passes parsed runs (or plain string) directly
+            const { row, col } = editSessionState.cell;
+            editSessionState.cancel();
+            persistEdit({ row, col, value: richValue });
+        } else {
+            commitCurrentEdit();
+        }
     }
     function cancelEdit() {
         editSessionState.cancel();
@@ -815,7 +1268,25 @@
         e.stopPropagation();
 
         let indices = [col];
-        if (selection && col >= selection.startCol && col <= selection.endCol) {
+        // For 'cols' mode, resize all selected columns
+        if (
+            selectionState.selectionMode === "cols" &&
+            selectionState.selectedCols &&
+            col >= selectionState.selectedCols.start &&
+            col <= selectionState.selectedCols.end
+        ) {
+            indices = [];
+            for (
+                let c = selectionState.selectedCols.start;
+                c <= selectionState.selectedCols.end;
+                c++
+            )
+                indices.push(c);
+        } else if (
+            selection &&
+            col >= selection.startCol &&
+            col <= selection.endCol
+        ) {
             indices = [];
             for (let c = selection.startCol; c <= selection.endCol; c++)
                 indices.push(c);
@@ -837,7 +1308,25 @@
         e.stopPropagation();
 
         let indices = [row];
-        if (selection && row >= selection.startRow && row <= selection.endRow) {
+        // For 'rows' mode, resize all selected rows
+        if (
+            selectionState.selectionMode === "rows" &&
+            selectionState.selectedRows &&
+            row >= selectionState.selectedRows.start &&
+            row <= selectionState.selectedRows.end
+        ) {
+            indices = [];
+            for (
+                let r = selectionState.selectedRows.start;
+                r <= selectionState.selectedRows.end;
+                r++
+            )
+                indices.push(r);
+        } else if (
+            selection &&
+            row >= selection.startRow &&
+            row <= selection.endRow
+        ) {
             indices = [];
             for (let r = selection.startRow; r <= selection.endRow; r++)
                 indices.push(r);
@@ -945,30 +1434,143 @@
             return;
         }
 
+        // Typing a printable character (no modifier) starts editing the selected cell
+        if (
+            e.key.length === 1 &&
+            !e.ctrlKey &&
+            !e.metaKey &&
+            !e.altKey &&
+            anchor
+        ) {
+            const anchorCellType = renderContext?.getCellType(
+                anchor.row,
+                anchor.col,
+            );
+            // Block typing into non-template repeater cells
+            if (anchorCellType === CELL_TYPE.REPEATER) {
+                const repCtx =
+                    renderContext?.repeaterEngine?.getCellRepeaterContext(
+                        anchor.row,
+                        anchor.col,
+                    );
+                if (repCtx && repCtx.repIndex > 0) {
+                    e.preventDefault();
+                    return;
+                }
+            }
+            // Block typing into table structural cells
+            if (
+                anchorCellType === CELL_TYPE.TABLE_DATA ||
+                anchorCellType === CELL_TYPE.TABLE_HEADER ||
+                anchorCellType === CELL_TYPE.TABLE_ENTRY
+            ) {
+                e.preventDefault();
+                return;
+            }
+
+            beginCellEdit(anchor.row, anchor.col, {
+                seedText: e.key,
+                surface: "grid",
+            });
+            e.preventDefault();
+            return;
+        }
+
         switch (e.key) {
             case "ArrowUp":
-                selectionState.moveSelection(-1, 0, e.shiftKey);
+                selectionState.moveSelection(
+                    -1,
+                    0,
+                    e.shiftKey,
+                    rowCount,
+                    colCount,
+                );
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowDown":
-                selectionState.moveSelection(1, 0, e.shiftKey);
+                selectionState.moveSelection(
+                    1,
+                    0,
+                    e.shiftKey,
+                    rowCount,
+                    colCount,
+                );
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowLeft":
-                selectionState.moveSelection(0, -1, e.shiftKey);
+                selectionState.moveSelection(
+                    0,
+                    -1,
+                    e.shiftKey,
+                    rowCount,
+                    colCount,
+                );
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowRight":
-                selectionState.moveSelection(0, 1, e.shiftKey);
+                selectionState.moveSelection(
+                    0,
+                    1,
+                    e.shiftKey,
+                    rowCount,
+                    colCount,
+                );
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "Enter":
-                if (anchor)
-                    beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
+                if (anchor) {
+                    const anchorCellType = renderContext?.getCellType(
+                        anchor.row,
+                        anchor.col,
+                    );
+                    // TABLE_DATA: open the inline editor overlay
+                    if (anchorCellType === CELL_TYPE.TABLE_DATA) {
+                        const info = renderContext?.tableManager?.getCellInfo(
+                            anchor.row,
+                            anchor.col,
+                        );
+                        if (info?.table && info.colDef) {
+                            const colType = info.colDef.type;
+                            // Checkbox/rating handled by single click; formula columns not editable
+                            if (
+                                colType !== "checkbox" &&
+                                colType !== "rating" &&
+                                !info.colDef.isNonEntry
+                            ) {
+                                focusedTableDataCell = {
+                                    table: info.table,
+                                    dataIndex: info.dataIndex,
+                                    colDef: info.colDef,
+                                    row: anchor.row,
+                                    col: anchor.col,
+                                    left: cellContainerLeft(anchor.col),
+                                    top: cellContainerTop(anchor.row),
+                                    width: virtualizer.getColWidth(anchor.col),
+                                    height: virtualizer.getRowHeight(
+                                        anchor.row,
+                                    ),
+                                };
+                            }
+                        }
+                    }
+                    // TABLE_HEADER / TABLE_ENTRY: block the regular editor
+                    else if (
+                        anchorCellType === CELL_TYPE.TABLE_HEADER ||
+                        anchorCellType === CELL_TYPE.TABLE_ENTRY
+                    ) {
+                        // No action - don't open any editor
+                    }
+                    // Regular cells: open the standard cell editor
+                    else {
+                        beginCellEdit(anchor.row, anchor.col, {
+                            surface: "grid",
+                        });
+                    }
+                }
                 e.preventDefault();
                 break;
             case "Delete":
@@ -1039,47 +1641,78 @@
             );
     }
 
+    /**
+     * Clear cell values in the current selection.
+     * Uses effectiveRange (works for all selectionModes).
+     * Skips TABLE_DATA/TABLE_HEADER/TABLE_ENTRY/VIEWPORT_OCCUPIED cells
+     * since those manage their own data.
+     * Iterates only existing cells to avoid scanning millions of empty ones.
+     */
     function clearSelection() {
-        if (!selection || !sheetStore) return;
-        for (let r = selection.startRow; r <= selection.endRow; r++)
-            for (let c = selection.startCol; c <= selection.endCol; c++)
-                sheetStore.clearCell(r, c);
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+        // Iterate only cells that actually exist (sparse map)
+        sheetStore.cells.forEach((_cell, key) => {
+            const [r, c] = key.split(",").map(Number);
+            if (r < eff.startRow || r > eff.endRow) return;
+            if (c < eff.startCol || c > eff.endCol) return;
+            // Skip table/repeater/viewport cells
+            const ct = renderContext?.getCellType(r, c);
+            if (
+                ct === CELL_TYPE.TABLE_HEADER ||
+                ct === CELL_TYPE.TABLE_ENTRY ||
+                ct === CELL_TYPE.TABLE_DATA ||
+                ct === CELL_TYPE.VIEWPORT_OCCUPIED
+            )
+                return;
+            sheetStore.clearCell(r, c);
+        });
     }
 
     // ─── Row / Column insert / delete ─────────────────────────────────────────
     function insertRowAbove() {
-        if (sheetStore && selection) sheetStore.insertRowAt(selection.startRow);
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (eff) sheetStore.insertRowAt(eff.startRow);
     }
     function insertRowBelow() {
-        if (sheetStore && selection)
-            sheetStore.insertRowAt(selection.endRow + 1);
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (eff) sheetStore.insertRowAt(eff.endRow + 1);
     }
     function insertColumnLeft() {
-        if (sheetStore && selection)
-            sheetStore.insertColumnAt(selection.startCol);
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (eff) sheetStore.insertColumnAt(eff.startCol);
     }
     function insertColumnRight() {
-        if (sheetStore && selection)
-            sheetStore.insertColumnAt(selection.endCol + 1);
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (eff) sheetStore.insertColumnAt(eff.endCol + 1);
     }
 
     function deleteSelectedRows() {
-        if (!sheetStore || !selection) return;
-        for (let row = selection.endRow; row >= selection.startRow; row--)
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+        for (let row = eff.endRow; row >= eff.startRow; row--)
             sheetStore.deleteRowAt(row);
     }
     function deleteSelectedColumns() {
-        if (!sheetStore || !selection) return;
-        for (let col = selection.endCol; col >= selection.startCol; col--)
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+        for (let col = eff.endCol; col >= eff.startCol; col--)
             sheetStore.deleteColumnAt(col);
     }
 
     // ─── Merge ────────────────────────────────────────────────────────────────
-    let canMerge = $derived(
-        selection &&
-            (selection.startRow !== selection.endRow ||
-                selection.startCol !== selection.endCol),
-    );
+    let canMerge = $derived.by(() => {
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return false;
+        return eff.startRow !== eff.endRow || eff.startCol !== eff.endCol;
+    });
     let isMergePrimary = $derived.by(() => {
         if (!anchor || !sheetStore?.mergeEngine) return false;
         return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
@@ -1100,6 +1733,90 @@
             anchor.col,
         );
     });
+
+    // ─── Entry cell Tab navigation ────────────────────────────────────────────
+
+    /**
+     * Move the focused entry cell to a different column index in the same table.
+     * Skips formula columns (isNonEntry).
+     */
+    function focusEntryCol(table, colIndex) {
+        if (!table || !virtualizer || !renderPlan) return;
+        const cols = table.columns;
+        if (!cols?.length) return;
+        const clampedIdx = Math.max(0, Math.min(colIndex, cols.length - 1));
+        const sheetCol = table.startCol + clampedIdx;
+        const entryRow = table.startRow + 1;
+        focusedEntryCell = {
+            table,
+            colIndex: clampedIdx,
+            row: entryRow,
+            col: sheetCol,
+            left: cellContainerLeft(sheetCol),
+            top: cellContainerTop(entryRow),
+            width: virtualizer.getColWidth(sheetCol),
+            height: virtualizer.getRowHeight(entryRow),
+        };
+    }
+
+    /**
+     * Commit the current entry and focus the first editable entry cell.
+     * Called by Enter key and the Insert button.
+     */
+    function commitEntryAndRefocus() {
+        if (!focusedEntryCell) return;
+        const { table } = focusedEntryCell;
+        const success = table.commitEntry();
+        if (success !== false) {
+            // Find first editable column
+            const firstIdx = table.columns.findIndex((c) => !c.isNonEntry);
+            if (firstIdx >= 0) {
+                focusEntryCol(table, firstIdx);
+            } else {
+                focusedEntryCell = null;
+            }
+        }
+    }
+
+    /**
+     * Tab to the next non-formula entry column; wraps around and commits on last.
+     */
+    function entryTabNext() {
+        if (!focusedEntryCell) return;
+        const { table, colIndex } = focusedEntryCell;
+        const cols = table.columns;
+        // Find next editable column
+        for (let i = 1; i <= cols.length; i++) {
+            const nextIdx = (colIndex + i) % cols.length;
+            if (nextIdx < colIndex) {
+                // Wrapped around — commit entry and refocus first
+                commitEntryAndRefocus();
+                return;
+            }
+            if (!cols[nextIdx]?.isNonEntry) {
+                focusEntryCol(table, nextIdx);
+                return;
+            }
+        }
+        // All columns are formula — commit
+        commitEntryAndRefocus();
+    }
+
+    /**
+     * Shift+Tab to the previous non-formula entry column.
+     */
+    function entryTabPrev() {
+        if (!focusedEntryCell) return;
+        const { table, colIndex } = focusedEntryCell;
+        const cols = table.columns;
+        for (let i = 1; i <= cols.length; i++) {
+            const prevIdx = (colIndex - i + cols.length) % cols.length;
+            if (!cols[prevIdx]?.isNonEntry) {
+                focusEntryCol(table, prevIdx);
+                return;
+            }
+        }
+    }
 
     function tableInsertRow() {
         if (tableCellInfo?.rowType === "data")
@@ -1143,21 +1860,48 @@
             );
     }
 
+    // Whether any selection exists (works for all modes)
+    let hasAnySelection = $derived(anchor !== null);
+
     let selectionType = $derived.by(() => {
+        const mode = selectionState.selectionMode;
+        if (mode === "rows") return "row";
+        if (mode === "cols") return "column";
+        if (mode === "all") return "all";
         if (!selection || !sheetStore) return "none";
         const isSingle =
             selection.startRow === selection.endRow &&
             selection.startCol === selection.endCol;
-        const isFullRow =
-            selection.startCol === 0 &&
-            selection.endCol === sheetStore.colCount - 1;
-        const isFullCol =
-            selection.startRow === 0 &&
-            selection.endRow === sheetStore.rowCount - 1;
         if (isSingle) return "cell";
-        if (isFullRow) return "row";
-        if (isFullCol) return "column";
         return "range";
+    });
+
+    // Row/col counts for context menu labels (works for all modes)
+    let effSelRowCount = $derived.by(() => {
+        if (
+            selectionState.selectionMode === "rows" &&
+            selectionState.selectedRows
+        )
+            return (
+                selectionState.selectedRows.end -
+                selectionState.selectedRows.start +
+                1
+            );
+        if (selectionState.selectionMode === "all") return rowCount;
+        return selection ? selection.endRow - selection.startRow + 1 : 1;
+    });
+    let effSelColCount = $derived.by(() => {
+        if (
+            selectionState.selectionMode === "cols" &&
+            selectionState.selectedCols
+        )
+            return (
+                selectionState.selectedCols.end -
+                selectionState.selectedCols.start +
+                1
+            );
+        if (selectionState.selectionMode === "all") return colCount;
+        return selection ? selection.endCol - selection.startCol + 1 : 1;
     });
 
     let contextMenuItems = $derived([
@@ -1166,14 +1910,14 @@
             icon: "✂",
             shortcut: "Ctrl+X",
             action: cutSelection,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label: "Copy",
             icon: "📋",
             shortcut: "Ctrl+C",
             action: copySelection,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label: "Paste",
@@ -1236,72 +1980,170 @@
             label: "Insert Row Above",
             icon: "⬆",
             action: insertRowAbove,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label: "Insert Row Below",
             icon: "⬇",
             action: insertRowBelow,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label: "Insert Column Left",
             icon: "⬅",
             action: insertColumnLeft,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label: "Insert Column Right",
             icon: "➡",
             action: insertColumnRight,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         { divider: true },
         {
             label:
-                selectionType === "row"
-                    ? `Delete ${selection?.endRow - selection?.startRow + 1} Rows`
+                selectionType === "row" || selectionType === "all"
+                    ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
                     : "Delete Row",
             icon: "🗑",
             action: deleteSelectedRows,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         {
             label:
-                selectionType === "column"
-                    ? `Delete ${selection?.endCol - selection?.startCol + 1} Columns`
+                selectionType === "column" || selectionType === "all"
+                    ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
                     : "Delete Column",
             icon: "🗑",
             action: deleteSelectedColumns,
-            disabled: !selection,
+            disabled: !hasAnySelection,
         },
         ...(tableCellInfo
             ? [
                   { divider: true },
-                  { label: "Table Actions", icon: "⊞", disabled: true },
+                  {
+                      label: `⊞ ${tableCellInfo.table.name}`,
+                      disabled: true,
+                  },
+                  // Row operations (when in data row)
                   ...(tableCellInfo.rowType === "data"
                       ? [
-                            { label: "Insert Row", action: tableInsertRow },
-                            { label: "Delete Row", action: tableDeleteRow },
+                            {
+                                label: "Delete This Row",
+                                icon: "🗑",
+                                action: tableDeleteRow,
+                            },
+                            { divider: true },
                         ]
                       : []),
+                  // Entry row operations
+                  ...(tableCellInfo.rowType === "entry"
+                      ? [
+                            {
+                                label: "Commit Entry (Enter)",
+                                action: () => tableCellInfo.table.commitEntry(),
+                            },
+                            {
+                                label: "Clear Entry (Esc)",
+                                action: () => tableCellInfo.table.clearEntry(),
+                            },
+                            { divider: true },
+                        ]
+                      : []),
+                  // Column operations (when colDef exists)
                   ...(tableCellInfo.colDef
                       ? [
-                            { label: "Sort Ascending", action: tableSortAsc },
-                            { label: "Sort Descending", action: tableSortDesc },
-                            { label: "Clear Sort", action: tableClearSort },
+                            {
+                                label: "Sort A→Z",
+                                action: tableSortAsc,
+                                icon: "▲",
+                            },
+                            {
+                                label: "Sort Z→A",
+                                action: tableSortDesc,
+                                icon: "▼",
+                            },
+                            {
+                                label: "Clear Sort",
+                                action: tableClearSort,
+                                disabled: !tableCellInfo.table.sortColId,
+                            },
+                            { divider: true },
+                            {
+                                label: "Configure Column…",
+                                icon: "⚙",
+                                action: () => {
+                                    if (
+                                        tableCellInfo?.colDef &&
+                                        anchor &&
+                                        virtualizer
+                                    ) {
+                                        activeColumnConfig = {
+                                            table: tableCellInfo.table,
+                                            colId: tableCellInfo.colDef.id,
+                                            left: cellContainerLeft(anchor.col),
+                                            top:
+                                                cellContainerTop(
+                                                    tableCellInfo.table
+                                                        .startRow,
+                                                ) +
+                                                virtualizer.getRowHeight(
+                                                    tableCellInfo.table
+                                                        .startRow,
+                                                ),
+                                        };
+                                    }
+                                },
+                            },
+                            { divider: true },
                         ]
                       : []),
+                  // Table-wide operations
+                  {
+                      label: "Add Row",
+                      icon: "+",
+                      action: () => tableCellInfo.table.insertRow({}),
+                  },
+                  {
+                      label: "Configure Table ⊞",
+                      action: () => {
+                          if (tableCellInfo) {
+                              activeEditPanel =
+                                  activeEditPanel?.store === tableCellInfo.table
+                                      ? null
+                                      : {
+                                            type: "table",
+                                            store: tableCellInfo.table,
+                                        };
+                          }
+                      },
+                  },
                   { label: "Delete Table", icon: "🗑", action: tableDelete },
               ]
             : []),
         ...(repeaterContext
             ? [
                   { divider: true },
-                  { label: "Repeater Actions", icon: "↻", disabled: true },
                   {
-                      label: `Repetitions: ${repeaterContext.repeater.count}`,
+                      label: `↻ ${repeaterContext.repeater.name}`,
                       disabled: true,
+                  },
+                  {
+                      label: "Repeater Settings…",
+                      icon: "⚙",
+                      action: () => {
+                          if (repeaterContext) {
+                              activeEditPanel =
+                                  activeEditPanel?.store ===
+                                  repeaterContext.repeater
+                                      ? null
+                                      : {
+                                            type: "repeater",
+                                            store: repeaterContext.repeater,
+                                        };
+                          }
+                      },
                   },
                   {
                       label: "+1 Repetition",
@@ -1464,6 +2306,118 @@
                 <div class="anchor-border" style={anchorBorderStyle}></div>
             {/if}
 
+            <!-- Always-visible repeater outlines (all repeaters, subtle) -->
+            {#each allRepeaterOutlines as { repeater: rep, rect }}
+                <div
+                    class="range-outline range-outline--repeater"
+                    class:range-outline--active={repeaterContext?.repeater ===
+                        rep}
+                    style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
+                ></div>
+                <!-- Settings button anchored to top-right of repeater range -->
+                {@const btnLeft = rect.left + rect.width}
+                {@const btnTop = rect.top}
+                <button
+                    class="feature-settings-btn feature-settings-btn--repeater"
+                    style="left:{btnLeft}px; top:{btnTop}px;"
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        activeEditPanel =
+                            activeEditPanel?.store === rep
+                                ? null
+                                : { type: "repeater", store: rep };
+                    }}
+                    title="Repeater settings: {rep.name}"
+                    aria-label="Repeater settings">↻</button
+                >
+            {/each}
+
+            <!-- Always-visible table outlines (all tables, subtle) -->
+            {#each allTableOutlines as { table: tbl, rect }}
+                <div
+                    class="range-outline range-outline--table"
+                    class:range-outline--active={tableCellInfo?.table === tbl}
+                    style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
+                ></div>
+                <!-- Settings button anchored to top-right of table header row -->
+                {@const btnLeft =
+                    cellContainerLeft(tbl.endCol) +
+                    (virtualizer?.getColWidth(tbl.endCol) ?? 0)}
+                <button
+                    class="feature-settings-btn feature-settings-btn--table"
+                    style="left:{btnLeft}px; top:{cellContainerTop(
+                        tbl.startRow,
+                    )}px;"
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        activeEditPanel =
+                            activeEditPanel?.store === tbl
+                                ? null
+                                : { type: "table", store: tbl };
+                    }}
+                    title="Table settings: {tbl.name}"
+                    aria-label="Table settings">⊞</button
+                >
+            {/each}
+
+            <!-- Edit panel (repeater or table settings) -->
+            {#if activeEditPanel && editPanelPosition}
+                <div
+                    class="edit-panel-anchor"
+                    style="left:{editPanelPosition.x}px; top:{editPanelPosition.y}px;"
+                >
+                    {#if activeEditPanel.type === "repeater"}
+                        <RepeaterEditPanel
+                            repeater={activeEditPanel.store}
+                            repeaterEngine={spreadsheetSession.repeaterEngine}
+                            onClose={() => (activeEditPanel = null)}
+                        />
+                    {:else if activeEditPanel.type === "table"}
+                        <TableEditPanel
+                            table={activeEditPanel.store}
+                            tableManager={spreadsheetSession.tableManager}
+                            onClose={() => (activeEditPanel = null)}
+                        />
+                    {/if}
+                </div>
+            {/if}
+
+            <!-- TABLE_DATA inline cell edit overlay (shown on double-click) -->
+            {#if focusedTableDataCell}
+                {@const cellValue = focusedTableDataCell.table.getValue(
+                    focusedTableDataCell.dataIndex,
+                    focusedTableDataCell.colDef.id,
+                )}
+                <div
+                    class="table-data-edit-overlay"
+                    style="position:absolute; left:{focusedTableDataCell.left}px; top:{focusedTableDataCell.top}px; width:{focusedTableDataCell.width}px; height:{focusedTableDataCell.height}px; z-index:22;"
+                >
+                    <input
+                        type="text"
+                        class="table-data-edit-input"
+                        value={cellValue != null ? String(cellValue) : ""}
+                        onblur={(e) =>
+                            commitTableDataEdit(
+                                /** @type {HTMLInputElement} */ (e.target)
+                                    .value,
+                            )}
+                        onkeydown={(e) => {
+                            if (e.key === "Enter" || e.key === "Tab") {
+                                e.stopPropagation();
+                                commitTableDataEdit(
+                                    /** @type {HTMLInputElement} */ (e.target)
+                                        .value,
+                                );
+                            } else if (e.key === "Escape") {
+                                e.stopPropagation();
+                                focusedTableDataCell = null;
+                            }
+                        }}
+                        autofocus
+                    />
+                </div>
+            {/if}
+
             <!-- Cell editor (GridOverlays: input + formula overlay + FormulaValuePopup) -->
             <GridOverlays
                 bind:this={overlaysRef}
@@ -1474,13 +2428,14 @@
                 onEditSelect={handleEditSelect}
                 onCommitEdit={commitEdit}
                 onCancelEdit={cancelEdit}
+                onCtrlEnter={handleCtrlEnter}
             />
 
             <!-- Table filter popovers -->
-            {#if activeFilterPopover}
+            {#if activeFilterPopover && filterPopoverPosition}
                 <div
                     class="filter-popover-anchor"
-                    style="position:absolute; left:{activeFilterPopover.left}px; top:{activeFilterPopover.top}px; z-index:50;"
+                    style="position:absolute; left:{filterPopoverPosition.left}px; top:{filterPopoverPosition.top}px; z-index:50;"
                 >
                     <TableFilterPopover
                         table={activeFilterPopover.table}
@@ -1501,54 +2456,55 @@
                         colIndex={focusedEntryCell.colIndex}
                         width={focusedEntryCell.width}
                         height={focusedEntryCell.height}
+                        onTabNext={entryTabNext}
+                        onTabPrev={entryTabPrev}
+                        onCommit={commitEntryAndRefocus}
+                    />
+                </div>
+                <!-- Floating Insert button below the entry row -->
+                {#if entryInsertButtonInfo}
+                    <div
+                        class="entry-insert-bar"
+                        style="position:absolute; left:{entryInsertButtonInfo.left}px; top:{entryInsertButtonInfo.top}px; width:{entryInsertButtonInfo.width}px; z-index:23;"
+                    >
+                        <button
+                            class="entry-insert-btn"
+                            onclick={commitEntryAndRefocus}
+                            title="Insert row (Enter)"
+                            aria-label="Insert row"
+                        >
+                            ↵ Insert
+                        </button>
+                        <button
+                            class="entry-clear-btn"
+                            onclick={() => {
+                                focusedEntryCell.table.clearEntry();
+                                focusedEntryCell = null;
+                            }}
+                            title="Clear entry (Escape)"
+                            aria-label="Clear entry"
+                        >
+                            ✕
+                        </button>
+                    </div>
+                {/if}
+            {/if}
+
+            <!-- Column config panel (floating, from context menu or header badge click) -->
+            {#if activeColumnConfig}
+                <div
+                    class="col-config-anchor"
+                    style="position:absolute; left:{activeColumnConfig.left}px; top:{activeColumnConfig.top}px; z-index:60; pointer-events:auto;"
+                >
+                    <TableColumnPanel
+                        table={activeColumnConfig.table}
+                        colId={activeColumnConfig.colId}
+                        onClose={() => (activeColumnConfig = null)}
                     />
                 </div>
             {/if}
 
-            <!-- Viewport-mode table/repeater panels (keep as DOM) -->
-            {#if renderContext}
-                {#each renderContext.viewportPanels ?? [] as panel}
-                    {@const rect = virtualizer.getCellRangeRect(
-                        panel.startRow,
-                        panel.startCol,
-                        panel.endRow,
-                        panel.endCol,
-                    )}
-                    {#if rect}
-                        {@const isFrozenRow =
-                            panel.startRow < virtualizer.frozenRows}
-                        {@const isFrozenCol =
-                            panel.startCol < virtualizer.frozenCols}
-                        <div
-                            class="viewport-panel"
-                            style="position:absolute;
-                                   left:{HEADER_WIDTH +
-                                rect.x -
-                                (isFrozenCol ? 0 : virtualizer.scrollLeft)}px;
-                                   top:{HEADER_HEIGHT +
-                                rect.y -
-                                (isFrozenRow ? 0 : virtualizer.scrollTop)}px;
-                                   width:{rect.width}px; height:{rect.height}px;
-                                   z-index:20; overflow:hidden; pointer-events:auto;"
-                        >
-                            {#if panel.type === "table"}
-                                <TableViewport
-                                    table={panel.store}
-                                    width={rect.width}
-                                    height={rect.height}
-                                />
-                            {:else if panel.type === "repeater"}
-                                <RepeaterViewport
-                                    repeater={panel.store}
-                                    session={spreadsheetSession}
-                                    width={rect.width}
-                                    height={rect.height}
-                                />
-                            {/if}
-                        </div>
-                    {/if}
-                {/each}
-            {/if}
+            <!-- (Viewport mode removed — all tables/repeaters are inline) -->
         </div>
         <!-- end dom-overlay-layer -->
 
@@ -1613,11 +2569,11 @@
         display: block; /* prevent inline baseline gap */
     }
 
-    /* ── DOM overlay layer (z:3) ── */
+    /* ── DOM overlay layer (z:5) ── */
     .dom-overlay-layer {
         position: absolute;
         inset: 0;
-        z-index: 3;
+        z-index: 5;
         pointer-events: none; /* children opt in via pointer-events:auto */
         overflow: hidden;
     }
@@ -1715,6 +2671,164 @@
 
     /* ── Filter popover anchor ── */
     .filter-popover-anchor {
+        pointer-events: auto;
+    }
+
+    /* ── Range outlines (repeater / table, always visible) ── */
+    .range-outline {
+        position: absolute;
+        box-sizing: border-box;
+        pointer-events: none;
+        border-radius: 2px;
+        z-index: 8; /* below selection border */
+        transition: opacity 0.15s;
+    }
+
+    .range-outline--repeater {
+        border: 1px solid rgba(124, 58, 237, 0.35);
+        background: rgba(124, 58, 237, 0.02);
+    }
+
+    .range-outline--repeater.range-outline--active {
+        border: 2px dashed rgba(124, 58, 237, 0.6);
+        background: rgba(124, 58, 237, 0.03);
+    }
+
+    .range-outline--table {
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        background: rgba(59, 130, 246, 0.015);
+    }
+
+    .range-outline--table.range-outline--active {
+        border: 2px dashed rgba(59, 130, 246, 0.55);
+        background: rgba(59, 130, 246, 0.025);
+    }
+
+    /* ── Feature settings buttons (per table / repeater) ── */
+    .feature-settings-btn {
+        position: absolute;
+        z-index: 15;
+        width: 20px;
+        height: 20px;
+        border-radius: 3px;
+        border: 1px solid;
+        background: var(--cell-bg, #fff);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        line-height: 1;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        pointer-events: auto;
+        transition: all 0.1s;
+        opacity: 0.6;
+    }
+
+    .feature-settings-btn:hover {
+        opacity: 1;
+        transform: scale(1.1);
+    }
+
+    .feature-settings-btn--repeater {
+        color: #7c3aed;
+        border-color: rgba(124, 58, 237, 0.4);
+    }
+    .feature-settings-btn--repeater:hover {
+        background: #ede9fe;
+        border-color: #7c3aed;
+    }
+
+    .feature-settings-btn--table {
+        color: #3b82f6;
+        border-color: rgba(59, 130, 246, 0.4);
+    }
+    .feature-settings-btn--table:hover {
+        background: #eff6ff;
+        border-color: #3b82f6;
+    }
+
+    /* ── Edit panel anchor ── */
+    .edit-panel-anchor {
+        position: absolute;
+        z-index: 55;
+        pointer-events: auto;
+    }
+
+    /* ── Table data cell inline edit overlay ── */
+    .table-data-edit-overlay {
+        pointer-events: auto;
+        overflow: hidden;
+    }
+
+    .table-data-edit-input {
+        width: 100%;
+        height: 100%;
+        border: none;
+        padding: 0 4px;
+        font-size: 0.8125rem;
+        outline: 2px solid #3b82f6;
+        background: var(--input-bg, #ffffff);
+        color: var(--text-color, #1e293b);
+        box-sizing: border-box;
+    }
+
+    /* ── Entry insert bar (below entry row, shown when entry cell is focused) ── */
+    .entry-insert-bar {
+        pointer-events: auto;
+        display: flex;
+        align-items: stretch;
+        gap: 0;
+        height: 24px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+
+    .entry-insert-btn {
+        flex: 1;
+        border: 1px solid #3b82f6;
+        background: #eff6ff;
+        color: #1d4ed8;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        border-radius: 0 0 0 4px;
+        transition: background 0.1s;
+        box-sizing: border-box;
+        padding: 0 8px;
+    }
+
+    .entry-insert-btn:hover {
+        background: #dbeafe;
+    }
+
+    .entry-clear-btn {
+        width: 26px;
+        border: 1px solid #e2e8f0;
+        border-left: none;
+        background: var(--cell-bg, #fff);
+        color: #94a3b8;
+        cursor: pointer;
+        font-size: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 0 0 4px 0;
+        transition: all 0.1s;
+        box-sizing: border-box;
+    }
+
+    .entry-clear-btn:hover {
+        background: #fef2f2;
+        border-color: #fca5a5;
+        color: #dc2626;
+    }
+
+    /* ── Column config panel anchor ── */
+    .col-config-anchor {
         pointer-events: auto;
     }
 </style>
