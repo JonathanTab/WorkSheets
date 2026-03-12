@@ -9,6 +9,9 @@
     let connectionStatus = $state("disconnected");
     let syncTimeout = null;
     let currentDocId = $state.raw(null); // Track which doc we've set up listeners for
+    let providerPollInterval = null; // Polling for provider availability
+    let connectionPollInterval = null; // Polling for connection status
+    let listenerCleanup = null; // Cleanup for provider listeners
 
     // Helper to set status only if it actually changes
     function setStatus(newStatus) {
@@ -22,43 +25,89 @@
         if (!docId) return null;
 
         // Access runtime via storage.core.runtime (not storage.runtime)
-        const runtime = getDocManager()?.core?.runtime;
-        if (!runtime) return null;
+        const storage = getDocManager();
+        if (!storage) {
+            console.log(
+                "[ConnectionStatus] getProvider: storage not available",
+            );
+            return null;
+        }
 
-        return runtime.activeDocs.get(docId)?.provider;
+        const core = storage.core;
+        if (!core) {
+            console.log("[ConnectionStatus] getProvider: core not available");
+            return null;
+        }
+
+        const runtime = core.runtime;
+        if (!runtime) {
+            console.log(
+                "[ConnectionStatus] getProvider: runtime not available",
+            );
+            return null;
+        }
+
+        const activeDoc = runtime.activeDocs.get(docId);
+        if (!activeDoc) {
+            console.log(
+                "[ConnectionStatus] getProvider: docId not in activeDocs",
+                docId,
+                "activeDocs:",
+                [...runtime.activeDocs.keys()],
+            );
+            return null;
+        }
+
+        return activeDoc.provider;
     }
 
-    // Track connection status changes
-    function setupProviderListeners(docId) {
-        const provider = getProvider(docId);
-        if (!provider) {
-            setStatus("disconnected");
-            return () => {};
+    // Clear all timers and listeners
+    function clearAllTimers() {
+        if (syncTimeout) {
+            clearTimeout(syncTimeout);
+            syncTimeout = null;
         }
-
-        // Set initial status
-        if (provider.wsconnected) {
-            setStatus("connected");
-        } else if (provider.wsconnecting) {
-            setStatus("connecting");
-        } else {
-            setStatus("disconnected");
+        if (providerPollInterval) {
+            clearInterval(providerPollInterval);
+            providerPollInterval = null;
         }
+        if (connectionPollInterval) {
+            clearInterval(connectionPollInterval);
+            connectionPollInterval = null;
+        }
+        if (listenerCleanup) {
+            listenerCleanup();
+            listenerCleanup = null;
+        }
+    }
 
-        // Listen for status changes
+    // Set up listeners when we have a provider
+    function setupProviderListeners(provider, docId) {
+        console.log(
+            "[ConnectionStatus] Setting up listeners for provider, initial state - wsconnected:",
+            provider.wsconnected,
+            "wsconnecting:",
+            provider.wsconnecting,
+        );
+
+        // Set up event listeners FIRST to avoid race conditions
         const handleStatus = (event) => {
+            console.log("[ConnectionStatus] Status event:", event.status);
             if (event.status === "connected") {
                 setStatus("connected");
             } else if (event.status === "connecting") {
                 setStatus("connecting");
-            } else {
+            } else if (event.status === "disconnected") {
                 setStatus("disconnected");
             }
         };
 
         // Listen for sync events (data being exchanged)
         const handleSync = (isSynced) => {
+            console.log("[ConnectionStatus] Sync event:", isSynced);
             if (isSynced) {
+                // When sync completes, we're connected
+                setStatus("connected");
                 triggerSyncing();
             }
         };
@@ -76,13 +125,170 @@
             ydoc.on("update", handleUpdate);
         }
 
-        return () => {
+        // Return cleanup function
+        listenerCleanup = () => {
+            console.log("[ConnectionStatus] Cleaning up provider listeners");
             provider.off("status", handleStatus);
             provider.off("sync", handleSync);
             if (ydoc) {
                 ydoc.off("update", handleUpdate);
             }
         };
+
+        // NOW check current status after listeners are set up
+        // Check wsconnected first
+        if (provider.wsconnected) {
+            console.log("[ConnectionStatus] Provider already connected");
+            setStatus("connected");
+        } else {
+            // Not connected yet - show connecting state
+            console.log(
+                "[ConnectionStatus] Provider not connected, wsconnecting:",
+                provider.wsconnecting,
+            );
+            setStatus("connecting");
+
+            // Set up polling to detect connection state changes
+            // This is a safety net in case events are missed
+            let pollAttempts = 0;
+            const maxPollAttempts = 100; // 10 seconds (100 * 100ms)
+            let notConnectingCount = 0; // Count consecutive "not connecting" states
+
+            connectionPollInterval = setInterval(() => {
+                pollAttempts++;
+
+                // Log every 10 attempts (1 second)
+                if (pollAttempts % 10 === 0) {
+                    // Also check the underlying WebSocket if available
+                    const ws = provider.ws;
+                    const wsState = ws
+                        ? {
+                              readyState: ws.readyState,
+                              readyStateText:
+                                  ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][
+                                      ws.readyState
+                                  ] || "UNKNOWN",
+                          }
+                        : "no ws";
+
+                    console.log(
+                        "[ConnectionStatus] Polling... attempt",
+                        pollAttempts,
+                        "wsconnected:",
+                        provider.wsconnected,
+                        "wsconnecting:",
+                        provider.wsconnecting,
+                        "ws:",
+                        wsState,
+                    );
+                }
+
+                // Check both y-websocket flags AND underlying WebSocket state
+                const ws = provider.ws;
+                const isWsOpen = ws && ws.readyState === WebSocket.OPEN;
+
+                if (provider.wsconnected || isWsOpen) {
+                    console.log(
+                        "[ConnectionStatus] Poll detected connection (wsconnected:",
+                        provider.wsconnected,
+                        "isWsOpen:",
+                        isWsOpen,
+                        ")",
+                    );
+                    setStatus("connected");
+                    clearInterval(connectionPollInterval);
+                    connectionPollInterval = null;
+                } else if (!provider.wsconnecting && !isWsOpen) {
+                    // Not connecting and not connected
+                    notConnectingCount++;
+
+                    // If we've been "not connecting" for 3 seconds (30 attempts),
+                    // the WebSocket failed to establish or was disconnected
+                    if (notConnectingCount >= 30) {
+                        console.log(
+                            "[ConnectionStatus] WebSocket not connecting for 3+ seconds, assuming disconnected",
+                        );
+                        setStatus("disconnected");
+                        clearInterval(connectionPollInterval);
+                        connectionPollInterval = null;
+                    }
+                } else {
+                    // Is connecting, reset the counter
+                    notConnectingCount = 0;
+                }
+
+                if (pollAttempts >= maxPollAttempts) {
+                    // Timed out
+                    console.log(
+                        "[ConnectionStatus] Connection poll timeout after",
+                        pollAttempts * 100,
+                        "ms. Final state - wsconnected:",
+                        provider.wsconnected,
+                        "wsconnecting:",
+                        provider.wsconnecting,
+                    );
+                    clearInterval(connectionPollInterval);
+                    connectionPollInterval = null;
+                    // Set to whatever the current state actually is
+                    if (provider.wsconnected) {
+                        setStatus("connected");
+                    } else {
+                        setStatus("disconnected");
+                    }
+                }
+            }, 100);
+        }
+    }
+
+    // Track connection status changes
+    function setupForDocId(docId) {
+        // Clear any existing state
+        clearAllTimers();
+
+        if (!docId) {
+            setStatus("disconnected");
+            return;
+        }
+
+        // Check if provider already exists
+        const provider = getProvider(docId);
+
+        if (provider) {
+            console.log("[ConnectionStatus] Provider exists immediately");
+            setupProviderListeners(provider, docId);
+        } else {
+            console.log(
+                "[ConnectionStatus] Provider not found, polling for availability",
+            );
+            setStatus("connecting"); // Show connecting while we wait for provider
+
+            // Poll for provider availability
+            let attempts = 0;
+            const maxAttempts = 50; // 5 seconds max
+
+            providerPollInterval = setInterval(() => {
+                attempts++;
+                const newProvider = getProvider(docId);
+
+                if (newProvider) {
+                    console.log(
+                        "[ConnectionStatus] Provider found after",
+                        attempts * 100,
+                        "ms",
+                    );
+                    clearInterval(providerPollInterval);
+                    providerPollInterval = null;
+                    setupProviderListeners(newProvider, docId);
+                } else if (attempts >= maxAttempts) {
+                    console.log(
+                        "[ConnectionStatus] Timed out waiting for provider",
+                    );
+                    clearInterval(providerPollInterval);
+                    providerPollInterval = null;
+                    setStatus("disconnected");
+                }
+            }, 100);
+        }
     }
 
     // Trigger syncing state with a timeout
@@ -118,38 +324,41 @@
         }, 500);
     }
 
-    // Cleanup helper
-    function cleanup() {
-        if (syncTimeout) {
-            clearTimeout(syncTimeout);
-            syncTimeout = null;
-        }
-    }
+    // Track previous docId to detect changes
+    let previousDocId = null;
 
     // Reactive effect to setup listeners when docId changes
-    // Only track docId - everything else should be untracked
     $effect(() => {
-        // Track docId reactively - this is the ONLY dependency
         const docId = spreadsheetSession.docId;
 
-        // Skip if docId hasn't actually changed (prevents re-setup on unrelated updates)
-        if (docId === currentDocId) {
+        // Use previousDocId to detect actual changes (not reactive)
+        if (docId === previousDocId) {
             return;
         }
 
-        // Cleanup previous listeners
-        cleanup();
+        console.log(
+            "[ConnectionStatus] docId changed from",
+            previousDocId,
+            "to",
+            docId,
+        );
 
-        // Update current doc ID
+        // Update previous docId BEFORE setting up (to avoid effect re-trigger)
+        previousDocId = docId;
         currentDocId = docId;
 
-        // Setup new listeners in untracked context
-        const cleanupFn = untrack(() => setupProviderListeners(docId));
+        // Clear any existing timers from previous setup
+        clearAllTimers();
 
-        // Return cleanup function - Svelte 5 calls this on re-run or destroy
+        // Setup in untracked context
+        untrack(() => setupForDocId(docId));
+    });
+
+    // Cleanup on component destroy using $effect with no dependencies
+    $effect(() => {
         return () => {
-            cleanup();
-            if (cleanupFn) cleanupFn();
+            console.log("[ConnectionStatus] Component destroy cleanup");
+            clearAllTimers();
         };
     });
 
