@@ -13,7 +13,7 @@
  */
 import * as Y from 'yjs';
 import { createCellYMap } from './schema.js';
-import { isRichText, stripRunProp, RUN_STYLE_PROP_MAP } from './richText.js';
+import { isRichText, isRichTextArray, stripRunProp, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
 import {
     CELL_KEYS,
     CELL_TYPE_CONFIG_KEY,
@@ -399,11 +399,18 @@ export class SheetStore {
                     else cellMap.set(k, v);
                 }
                 // When applying whole-cell formatting to a rich-text cell, strip
-                // run-level overrides for that property so the cell-level value wins.
-                const runPropKey = RUN_STYLE_PROP_MAP[Object.keys(props)[0]];
-                if (runPropKey) {
+                // inline overrides for that property so the cell-level value wins.
+                const hasMappedProp = Object.keys(props).some(p => RUN_STYLE_PROP_MAP[p]);
+                if (hasMappedProp) {
                     const currentValue = cellMap.get(CELL_KEYS.VALUE);
                     if (isRichText(currentValue)) {
+                        // New HTML string format
+                        const stripped = Object.keys(props).reduce((html, cellProp) => {
+                            return RUN_STYLE_PROP_MAP[cellProp] ? stripHtmlProp(html, cellProp) : html;
+                        }, currentValue);
+                        cellMap.set(CELL_KEYS.VALUE, stripped);
+                    } else if (isRichTextArray(currentValue)) {
+                        // Legacy run-array format
                         const stripped = Object.keys(props).reduce((runs, cellProp) => {
                             const rk = RUN_STYLE_PROP_MAP[cellProp];
                             return rk ? stripRunProp(runs, rk) : runs;

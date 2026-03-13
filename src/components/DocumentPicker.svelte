@@ -2,6 +2,7 @@
     import Card from "../lib/ui/Card.svelte";
     import Button from "../lib/ui/Button.svelte";
     import { openModal, closeModal } from "../lib/ui/modalStore.svelte.js";
+    import { spreadsheet, edit, trash, plus } from "../lib/icons/index.js";
     import CreateDocumentModal from "./modals/CreateDocumentModal.svelte";
     import DeleteConfirmModal from "./modals/DeleteConfirmModal.svelte";
     import RenameDocumentModal from "./modals/RenameDocumentModal.svelte";
@@ -106,8 +107,7 @@
                 Collaborative Spreadsheets
             </p>
         </div>
-        <Button onclick={handleCreateDocument}>
-            <span class="mr-2">+</span>
+        <Button onclick={handleCreateDocument} icon={plus} iconPosition="left">
             New Spreadsheet
         </Button>
     </div>
@@ -119,13 +119,16 @@
         </div>
     {:else if documents.length === 0}
         <div class="empty-state">
-            <div class="empty-icon">📊</div>
+            <div class="empty-icon">{@html spreadsheet}</div>
             <h2 class="text-lg font-medium mb-2">No spreadsheets yet</h2>
             <p class="text-text-muted mb-4">
                 Create your first spreadsheet to get started
             </p>
-            <Button onclick={handleCreateDocument}>
-                <span class="mr-2">+</span>
+            <Button
+                onclick={handleCreateDocument}
+                icon={plus}
+                iconPosition="left"
+            >
                 Create Spreadsheet
             </Button>
         </div>
@@ -137,7 +140,7 @@
                     onclick={() => handleOpenDocument(doc.id)}
                 >
                     <div class="card-content">
-                        <div class="document-icon">📊</div>
+                        <div class="document-icon">{@html spreadsheet}</div>
                         <h3 class="font-medium truncate">{doc.title}</h3>
                         <p class="text-text-muted text-sm">
                             {doc.owned
@@ -150,7 +153,7 @@
                                 onclick={(e) => handleRenameDocument(doc.id, e)}
                                 title="Rename"
                             >
-                                ✏️
+                                {@html edit}
                             </button>
                             {#if doc.owned}
                                 <button
@@ -159,7 +162,7 @@
                                         handleDeleteDocument(doc.id, e)}
                                     title="Delete"
                                 >
-                                    🗑️
+                                    {@html trash}
                                 </button>
                             {/if}
                         </div>
@@ -266,6 +269,9 @@
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.875rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .action-btn:hover {

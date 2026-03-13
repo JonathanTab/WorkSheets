@@ -125,8 +125,8 @@
     .color-button {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 2px 4px;
+        gap: 3px;
+        padding: 3px 4px;
         background: transparent;
         border: none;
         border-radius: 4px;
@@ -137,28 +137,36 @@
         background: var(--color-fill);
     }
 
+    .color-button:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
+    }
+
     .color-swatch {
-        width: 18px;
-        height: 18px;
+        width: 16px;
+        height: 16px;
         border: 1px solid var(--color-border);
         border-radius: 3px;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
     }
 
     .arrow {
         font-size: 0.5rem;
-        opacity: 0.6;
+        opacity: 0.4;
     }
 
     .color-panel {
         position: absolute;
         top: 100%;
         left: 0;
-        margin-top: 4px;
+        margin-top: 2px;
         padding: 8px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow:
+            0 1px 3px rgba(0, 0, 0, 0.08),
+            0 4px 12px rgba(0, 0, 0, 0.12);
         z-index: 1000;
     }
 
@@ -178,7 +186,8 @@
     }
 
     .preset-color:hover {
-        transform: scale(1.1);
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
     }
 
     .preset-color.selected {
@@ -196,13 +205,13 @@
     }
 
     .custom-label {
-        font-size: 0.75rem;
-        color: var(--color-text-tertiary);
+        font-size: 0.6875rem;
+        color: var(--color-text-muted);
     }
 
     .custom-input {
-        width: 32px;
-        height: 24px;
+        width: 28px;
+        height: 22px;
         padding: 0;
         border: 1px solid var(--color-border);
         border-radius: 4px;

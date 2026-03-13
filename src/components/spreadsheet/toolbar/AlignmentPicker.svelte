@@ -1,10 +1,16 @@
 <script>
+    import {
+        alignLeft,
+        alignCenter,
+        alignRight,
+    } from "../../../lib/icons/index.js";
+
     let { value = "left", onchange = undefined } = $props();
 
     const alignments = [
-        { id: "left", icon: "≡", label: "Align Left" },
-        { id: "center", icon: "☰", label: "Align Center" },
-        { id: "right", icon: "≡", label: "Align Right" },
+        { id: "left", icon: alignLeft, label: "Align Left" },
+        { id: "center", icon: alignCenter, label: "Align Center" },
+        { id: "right", icon: alignRight, label: "Align Right" },
     ];
 
     function handleSelect(alignId) {
@@ -20,12 +26,8 @@
             onclick={() => handleSelect(align.id)}
             title={align.label}
         >
-            <span
-                class="align-icon"
-                class:centered={align.id === "center"}
-                class:right={align.id === "right"}
-            >
-                {align.icon}
+            <span class="align-icon">
+                {@html align.icon}
             </span>
         </button>
     {/each}
@@ -35,25 +37,27 @@
     .alignment-picker {
         display: flex;
         align-items: center;
-        gap: 2px;
+        gap: 1px;
     }
 
     .align-button {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 28px;
-        height: 28px;
+        width: 26px;
+        height: 26px;
         padding: 0;
         background: transparent;
         border: none;
         border-radius: 4px;
         cursor: pointer;
         color: var(--color-text-secondary);
+        transition: all 0.08s ease;
     }
 
     .align-button:hover {
         background: var(--color-fill);
+        color: var(--color-text);
     }
 
     .align-button.selected {
@@ -61,13 +65,18 @@
         color: var(--color-primary);
     }
 
+    .align-button:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
+    }
+
     .align-icon {
-        font-size: 1rem;
+        font-size: 0.875rem;
         font-weight: bold;
         display: flex;
         align-items: center;
         justify-content: flex-start;
-        width: 16px;
+        width: 14px;
     }
 
     .align-icon.centered {

@@ -2,8 +2,14 @@
     import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { segmentFormula } from "../../formulas/reference-highlighter.js";
+    import {
+        isRichText,
+        isRichTextArray,
+        richTextToPlain,
+    } from "../../stores/spreadsheet/richText.js";
     import { untrack } from "svelte";
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
+    import { close, check } from "../../lib/icons/index.js";
 
     let { selectedCell = null, onEdit } = $props();
 
@@ -22,14 +28,17 @@
         selectedCell ? `${selectedCell.row},${selectedCell.col}` : null,
     );
 
-    // Display value - always show raw value (formula if present)
+    // Display value - show formula if present, plain text for rich text cells
     let displayValue = $derived(() => {
         if (!selectedCell) return "";
-        // Always show the raw value (formula string if it's a formula)
-        return spreadsheetSession.getCellEditValue(
+        const raw = spreadsheetSession.getCellEditValue(
             selectedCell.row,
             selectedCell.col,
         );
+        // Convert rich text to plain text for display in the formula bar
+        if (isRichText(raw) || isRichTextArray(raw))
+            return richTextToPlain(raw);
+        return raw;
     });
 
     // Edit value - show raw value (formula if present)
@@ -45,6 +54,18 @@
     let isEditing = $derived(editSessionState.isEditing);
     let editValue = $derived(editSessionState.draft);
 
+    // Check if selected cell contains rich text (whether editing or not)
+    let selectedCellHasRichText = $derived(() => {
+        if (!selectedCell) return false;
+        const rawVal = editStartValue();
+        return isRichText(rawVal) || isRichTextArray(rawVal);
+    });
+
+    // During editing, also check active edit session state
+    let hasRichText = $derived(
+        editSessionState.richTextValue !== null || selectedCellHasRichText(),
+    );
+
     // Check if we're editing a formula
     let isFormulaMode = $derived(isEditing && editValue?.startsWith("="));
 
@@ -56,16 +77,36 @@
     function startEdit() {
         if (!selectedCell) return;
 
-        // When starting to edit, show the raw value (formula if present)
-        editSessionState.beginEdit(
-            selectedCell.row,
-            selectedCell.col,
-            editStartValue(),
-            "formulaBar",
-        );
+        // Rich text cells must be edited in the cell editor, not the formula bar.
+        // Check both the active session state AND the raw cell value (when not yet editing).
+        const rawVal = editStartValue();
+        if (hasRichText || isRichText(rawVal) || isRichTextArray(rawVal))
+            return;
+
+        // If already editing this cell (on grid), switch surface to formula bar
+        if (
+            editSessionState.isEditingCell(selectedCell.row, selectedCell.col)
+        ) {
+            editSessionState.switchSurface("formulaBar", { focus: true });
+        } else {
+            // Otherwise, start a new edit on formula bar
+            editSessionState.beginEdit(
+                selectedCell.row,
+                selectedCell.col,
+                rawVal,
+                "formulaBar",
+            );
+        }
     }
 
     function commitEdit() {
+        // Rich text sessions are always committed by the cell's contenteditable editor.
+        // The formula bar must never commit the plain-text draft over a rich text value.
+        if (hasRichText) {
+            editSessionState.cancel();
+            return;
+        }
+
         const payload = editSessionState.commit();
         if (!payload) return;
         onEdit?.(payload.value, payload.row, payload.col);
@@ -139,32 +180,50 @@
         <button
             class="btn-cancel"
             onclick={cancelEdit}
-            disabled={!isEditing}
+            onmousedown={(e) => e.preventDefault()}
+            disabled={!isEditing || hasRichText}
             title="Cancel (Escape)"
             aria-label="Cancel edit"
         >
-            ✕
+            <span class="icon">{@html close}</span>
         </button>
         <button
             class="btn-accept"
             onclick={commitEdit}
-            disabled={!isEditing}
+            onmousedown={(e) => e.preventDefault()}
+            disabled={!isEditing || hasRichText}
             title="Accept (Enter)"
             aria-label="Accept edit"
         >
-            ✓
+            <span class="icon">{@html check}</span>
         </button>
     </div>
     <div class="divider"></div>
     <div class="formula-input">
-        {#if isEditing}
+        {#if selectedCellHasRichText()}
+            <!-- Show rich text notice when rich text cell is selected (regardless of editing) -->
+            <div class="edit-container rich-text-notice">
+                <span class="notice-text">
+                    Edit rich text formatting in the cell ⬇️
+                </span>
+            </div>
+        {:else if isEditing}
             <div class="edit-container" class:has-formula={isFormulaMode}>
                 <input
                     type="text"
                     bind:this={editInputEl}
                     value={editValue}
+                    onmousedown={(e) => {
+                        e.stopPropagation();
+                        // Switch to formula bar surface BEFORE blur fires on grid cell
+                        // This prevents the grid cell's blur handler from committing
+                        if (editSessionState.isEditing) {
+                            editSessionState.switchSurface("formulaBar", {
+                                focus: false,
+                            });
+                        }
+                    }}
                     onkeydown={handleKeydown}
-                    onblur={commitEdit}
                     oninput={handleInput}
                     onselect={handleSelect}
                     class="edit-input"
@@ -194,10 +253,18 @@
         {:else}
             <div
                 class="display-value"
-                onclick={startEdit}
+                onclick={(e) => {
+                    e.stopPropagation();
+                    startEdit();
+                }}
                 role="button"
                 tabindex="0"
-                onkeydown={(e) => e.key === "Enter" && startEdit()}
+                onkeydown={(e) => {
+                    if (e.key === "Enter") {
+                        e.stopPropagation();
+                        startEdit();
+                    }
+                }}
             >
                 {displayValue()}
             </div>
@@ -306,6 +373,26 @@
 
     .edit-container {
         position: relative;
+    }
+
+    .edit-container.rich-text-notice {
+        display: flex;
+        align-items: center;
+        padding: 0.25rem 0.5rem;
+        background: var(--info-bg, #eff6ff);
+        border: 2px solid var(--info-border, #3b82f6);
+        border-radius: 4px;
+        height: 28px;
+        box-sizing: border-box;
+    }
+
+    .notice-text {
+        font-size: 0.875rem;
+        color: var(--info-text, #1e40af);
+        font-style: italic;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .edit-input {

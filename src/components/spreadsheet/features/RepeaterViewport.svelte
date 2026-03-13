@@ -10,6 +10,8 @@
      * repeaters (scroll through repetitions) and vertical for horizontal ones.
      */
 
+    import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
+
     let {
         repeater,
         /** SpreadsheetSession for accessing cell values and formula engine */
@@ -51,6 +53,23 @@
         if (cell.bold) s.push("font-weight:bold");
         if (cell.italic) s.push("font-style:italic");
         if (cell.horizontalAlign) s.push(`text-align:${cell.horizontalAlign}`);
+
+        // Apply cell type default styles
+        const ct = session?.sheetStore?.getCellTypeConfig?.(
+            tStartRow + tRow,
+            tStartCol + tCol,
+        );
+        if (ct) {
+            const descriptor = CellTypeRegistry.get(ct.type);
+            if (descriptor?.defaultStyle) {
+                const defaultStyle = descriptor.defaultStyle(ct);
+                if (defaultStyle.underline && !cell.underline)
+                    s.push("text-decoration:underline");
+                if (defaultStyle.color && !cell.color)
+                    s.push(`color:${defaultStyle.color}`);
+            }
+        }
+
         return s.join(";");
     }
 
@@ -59,29 +78,43 @@
             tStartRow + tRow,
             tStartCol + tCol,
         )?.v;
+        let evalValue;
+
         if (typeof rawValue === "string" && rawValue.startsWith("=")) {
             if (repIndex === 0) {
-                return (
+                evalValue =
                     session?.getCellDisplayValue(
                         tStartRow + tRow,
                         tStartCol + tCol,
-                    ) ?? ""
-                );
+                    ) ?? "";
+            } else {
+                evalValue =
+                    session?.formulaEngine?.evaluateWithContext(
+                        tStartRow + tRow,
+                        tStartCol + tCol,
+                        {
+                            rep: repIndex,
+                        },
+                    ) ?? "";
             }
-            return (
-                session?.formulaEngine?.evaluateWithContext(
+        } else {
+            evalValue =
+                session?.getCellDisplayValue(
                     tStartRow + tRow,
                     tStartCol + tCol,
-                    {
-                        rep: repIndex,
-                    },
-                ) ?? ""
-            );
+                ) ?? "";
         }
-        return (
-            session?.getCellDisplayValue(tStartRow + tRow, tStartCol + tCol) ??
-            ""
+
+        // Apply cell type formatting
+        const ct = session?.sheetStore?.getCellTypeConfig?.(
+            tStartRow + tRow,
+            tStartCol + tCol,
         );
+        if (ct && evalValue !== "") {
+            return CellTypeRegistry.formatValue(ct, evalValue);
+        }
+
+        return evalValue;
     }
 </script>
 

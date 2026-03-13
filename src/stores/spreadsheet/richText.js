@@ -1,27 +1,19 @@
 /**
  * Rich text support for spreadsheet cells.
  *
- * A cell value (v) can be an array of "runs":
+ * NEW format: cell v field stores an HTML string when rich text is present.
+ *   e.g. "<span style=\"font-weight:bold\">Hello</span> world"
+ *
+ * LEGACY format (backward compat): array of run objects
  *   [{ t: string, b?: true, i?: true, u?: true, s?: true, c?: string, f?: number }]
  *
- * Where:
- *   t = text content (may contain \n for line breaks)
- *   b = bold override (true/false; undefined = inherit cell-level)
- *   i = italic override
- *   u = underline override
- *   s = strikethrough override
- *   c = color override (CSS color string)
- *   f = fontSize override (number in px)
- *
- * Cell-level formatting (bold, italic, color, etc.) serves as the default.
- * Run-level properties override the cell-level default for that run.
- * When whole-cell formatting is applied, run-level overrides for that
- * property are stripped so the cell-level value uniformly applies.
+ * isRichText(v)      → true for HTML strings (new format)
+ * isRichTextArray(v) → true for run arrays   (legacy format)
  */
 
 /**
  * Map from cell-level formatting property names to run-level property keys.
- * Only properties that have a run-level equivalent are listed here.
+ * Kept for legacy run-array handling.
  */
 export const RUN_STYLE_PROP_MAP = {
     bold: 'b',
@@ -33,31 +25,109 @@ export const RUN_STYLE_PROP_MAP = {
 };
 
 /**
- * Returns true if the value is a rich-text run array.
+ * Returns true if the value is a rich-text HTML string (new format).
+ * Detects presence of HTML tags produced by contenteditable formatting.
  * @param {any} v
  * @returns {boolean}
  */
 export function isRichText(v) {
+    return typeof v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(v);
+}
+
+/**
+ * Returns true if the value is a legacy rich-text run array.
+ * @param {any} v
+ * @returns {boolean}
+ */
+export function isRichTextArray(v) {
     return Array.isArray(v) && v.length > 0 && typeof v[0] === 'object' && 't' in v[0];
 }
 
 /**
- * Convert a rich-text run array to a plain string.
- * @param {Array} runs
+ * Convert a rich-text value (HTML string or legacy run array) to plain text.
+ * @param {any} v
  * @returns {string}
  */
-export function richTextToPlain(runs) {
-    return runs.map(r => r.t).join('');
+export function richTextToPlain(v) {
+    if (isRichTextArray(v)) return v.map(r => r.t).join('');
+    if (isRichText(v)) {
+        const el = document.createElement('div');
+        el.innerHTML = v;
+        return el.innerText || el.textContent || '';
+    }
+    return String(v ?? '');
 }
 
 /**
+ * Convert an HTML string to a run array (for canvas renderer).
+ * @param {string} htmlStr
+ * @returns {Array}
+ */
+export function htmlStringToRuns(htmlStr) {
+    const el = document.createElement('div');
+    el.innerHTML = htmlStr;
+    return htmlToRuns(el);
+}
+
+/**
+ * Strip a cell-level formatting property from all inline styles in an HTML string.
+ * Used when applying whole-cell formatting to a rich-text cell, so the cell-level
+ * value wins uniformly.
+ * @param {string} htmlStr
+ * @param {string} cellPropName  e.g. 'bold', 'italic', 'color', 'fontSize'
+ * @returns {string}
+ */
+export function stripHtmlProp(htmlStr, cellPropName) {
+    const el = document.createElement('div');
+    el.innerHTML = htmlStr;
+
+    el.querySelectorAll('[style]').forEach(node => {
+        if (cellPropName === 'bold') {
+            node.style.removeProperty('font-weight');
+        } else if (cellPropName === 'italic') {
+            node.style.removeProperty('font-style');
+        } else if (cellPropName === 'underline') {
+            const td = (node.style.textDecoration || '').replace(/\bunderline\b/g, '').trim();
+            if (td) node.style.textDecoration = td;
+            else node.style.removeProperty('text-decoration');
+        } else if (cellPropName === 'strikethrough') {
+            const td = (node.style.textDecoration || '').replace(/\bline-through\b/g, '').trim();
+            if (td) node.style.textDecoration = td;
+            else node.style.removeProperty('text-decoration');
+        } else if (cellPropName === 'color') {
+            node.style.removeProperty('color');
+        } else if (cellPropName === 'fontSize') {
+            node.style.removeProperty('font-size');
+        }
+        if (!node.getAttribute('style')) node.removeAttribute('style');
+    });
+
+    // Remove semantic tags whose meaning matches the stripped property
+    if (cellPropName === 'bold') {
+        el.querySelectorAll('b, strong').forEach(n => n.replaceWith(...n.childNodes));
+    } else if (cellPropName === 'italic') {
+        el.querySelectorAll('i, em').forEach(n => n.replaceWith(...n.childNodes));
+    } else if (cellPropName === 'underline') {
+        el.querySelectorAll('u').forEach(n => n.replaceWith(...n.childNodes));
+    } else if (cellPropName === 'strikethrough') {
+        el.querySelectorAll('s, strike').forEach(n => n.replaceWith(...n.childNodes));
+    }
+
+    // Clean up empty unstyled spans
+    el.querySelectorAll('span:not([style])').forEach(n => n.replaceWith(...n.childNodes));
+
+    return el.innerHTML;
+}
+
+// ─── Legacy run-array helpers (kept for backward compat) ──────────────────────
+
+/**
  * Convert rich-text runs to contenteditable HTML.
- * Each \n in a run becomes a new <div> block (browser contenteditable convention).
+ * Each \n in a run becomes a new <div> block.
  * @param {Array} runs
  * @returns {string}
  */
 export function runsToHtml(runs) {
-    // Split runs by \n to get logical lines
     const lines = [[]];
     for (const run of runs) {
         const parts = run.t.split('\n');
@@ -87,13 +157,12 @@ export function runsToHtml(runs) {
             if (styles.length) return `<span style="${styles.join(';')}">${text}</span>`;
             return text;
         }).join('');
-        // First line has no wrapper (contenteditable implicit first line)
         return lineIdx === 0 ? html : `<div>${html}</div>`;
     }).join('');
 }
 
 /**
- * Parse contenteditable DOM element into rich-text runs.
+ * Parse contenteditable DOM element into rich-text runs (legacy format).
  * @param {HTMLElement} el
  * @returns {Array}
  */
@@ -103,9 +172,7 @@ export function htmlToRuns(el) {
     function parseNode(node, style) {
         if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent;
-            if (text) {
-                pushRun(runs, text, style);
-            }
+            if (text) pushRun(runs, text, style);
             return;
         }
         if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -113,7 +180,6 @@ export function htmlToRuns(el) {
         const tag = node.tagName.toLowerCase();
         const childStyle = { ...style };
 
-        // Read inline styles
         const inlineStyle = node.style;
         if (inlineStyle.fontWeight === 'bold') childStyle.b = true;
         else if (inlineStyle.fontWeight === 'normal') childStyle.b = false;
@@ -124,7 +190,6 @@ export function htmlToRuns(el) {
         if (inlineStyle.color) childStyle.c = inlineStyle.color;
         if (inlineStyle.fontSize) childStyle.f = parseFloat(inlineStyle.fontSize);
 
-        // Semantic tags
         if (tag === 'b' || tag === 'strong') childStyle.b = true;
         if (tag === 'i' || tag === 'em') childStyle.i = true;
         if (tag === 'u') childStyle.u = true;
@@ -133,29 +198,18 @@ export function htmlToRuns(el) {
         if (tag === 'br') {
             pushRun(runs, '\n', {});
         } else if (tag === 'div' || tag === 'p') {
-            // Block element = new line (except the very first block which is the implicit first line)
             if (runs.length > 0) {
-                // Only add newline if the last character wasn't already a newline
                 const last = runs[runs.length - 1];
-                if (!last.t.endsWith('\n')) {
-                    pushRun(runs, '\n', {});
-                }
+                if (!last.t.endsWith('\n')) pushRun(runs, '\n', {});
             }
-            for (const child of node.childNodes) {
-                parseNode(child, childStyle);
-            }
+            for (const child of node.childNodes) parseNode(child, childStyle);
         } else {
-            for (const child of node.childNodes) {
-                parseNode(child, childStyle);
-            }
+            for (const child of node.childNodes) parseNode(child, childStyle);
         }
     }
 
-    for (const child of el.childNodes) {
-        parseNode(child, {});
-    }
+    for (const child of el.childNodes) parseNode(child, {});
 
-    // Trim trailing newline that browsers add
     if (runs.length > 0) {
         const last = runs[runs.length - 1];
         if (last.t === '\n') runs.pop();
@@ -169,10 +223,9 @@ export function htmlToRuns(el) {
 }
 
 /**
- * Strip a run-level style property from all runs (used when applying whole-cell formatting).
- * Returns new runs array (does not mutate).
+ * Strip a run-level style property from all runs (legacy array format).
  * @param {Array} runs
- * @param {string} runProp  e.g. 'b', 'i', 'c', 'f'
+ * @param {string} runProp
  * @returns {Array}
  */
 export function stripRunProp(runs, runProp) {

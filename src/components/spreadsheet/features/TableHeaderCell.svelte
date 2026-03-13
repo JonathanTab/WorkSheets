@@ -7,6 +7,7 @@
      */
 
     import TableFilterPopover from "./TableFilterPopover.svelte";
+    import { sortAsc, sortDesc, filter } from "../../../lib/icons/index.js";
 
     let { table, colIndex, width = 80, height = 24 } = $props();
 
@@ -27,7 +28,9 @@
         showFilterPopover = false;
     }
 
-    let sortIcon = $derived(isSorted ? (sortDir === "asc" ? "▲" : "▼") : "");
+    let sortIcon = $derived(
+        isSorted ? (sortDir === "asc" ? sortAsc : sortDesc) : null,
+    );
 </script>
 
 <div
@@ -38,7 +41,7 @@
     <button class="sort-area" type="button">
         <span class="col-name">{col?.name ?? ""}</span>
         {#if sortIcon}
-            <span class="sort-icon">{sortIcon}</span>
+            <span class="sort-icon">{@html sortIcon}</span>
         {/if}
     </button>
     {#if col?.required}
@@ -51,7 +54,7 @@
         title={hasFilter ? "Filter active" : "Add filter"}
         type="button"
     >
-        ☰
+        {@html filter}
     </button>
     {#if showFilterPopover}
         <div class="filter-popover-wrapper">
@@ -122,7 +125,7 @@
         border: none;
         border-radius: 3px;
         cursor: pointer;
-        font-size: 10px;
+        font-size: 12px;
         color: var(--color-text-secondary, #94a3b8);
         display: flex;
         align-items: center;

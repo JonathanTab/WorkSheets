@@ -7,7 +7,6 @@
      * - Direction (vertical/horizontal)
      * - Count (number of repetitions)
      * - Gap between repetitions
-     * - Mode (inline/viewport)
      */
 
     import {

@@ -9,6 +9,7 @@
      * the old Svelte component files are removed.
      */
     import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
+    import { star, starEmpty } from "../../../lib/icons/index.js";
 
     let { table, colIndex, dataIndex, width = 80, height = 24 } = $props();
 
@@ -129,8 +130,10 @@
                     class:active={i < ratingValue}
                     onmousedown={(e) => handleStarClick(e, i)}
                     role="button"
-                    tabindex="-1">★</span
+                    tabindex="-1"
                 >
+                    {@html i < ratingValue ? star : starEmpty}
+                </span>
             {/each}
         </div>
     {:else}

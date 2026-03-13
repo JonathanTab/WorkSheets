@@ -8,21 +8,45 @@
         items = [],
         disabled = false,
         children = null,
+        // Controlled mode for cursor-following behavior
+        isOpen = false,
+        onOpenChange = undefined,
+        menuId = undefined,
     } = $props();
 
-    let open = $state(false);
+    // Use controlled state if provided, otherwise internal state
+    let internalOpen = $state(false);
+    let open = $derived(onOpenChange !== undefined ? isOpen : internalOpen);
     let buttonRef = $state(null);
     let dropdownRef = $state(null);
     let activeSubmenu = $state(null);
+    let hoveredSubmenu = $state(null);
+
+    function setOpen(value) {
+        if (onOpenChange) {
+            onOpenChange(value, menuId);
+        } else {
+            internalOpen = value;
+        }
+    }
 
     function toggle() {
         if (disabled) return;
-        open = !open;
+        setOpen(!open);
     }
 
     function close() {
-        open = false;
+        setOpen(false);
         activeSubmenu = null;
+        hoveredSubmenu = null;
+    }
+
+    function handleMouseEnter() {
+        // If any menu is open (we're in controlled mode and some menu is open),
+        // open this menu on hover
+        if (onOpenChange && !disabled) {
+            setOpen(true);
+        }
     }
 
     function handleItemClick(item) {
@@ -34,6 +58,22 @@
         }
         close();
         item.action?.();
+    }
+
+    function handleItemMouseEnter(item) {
+        if (item.submenu && !item.disabled) {
+            hoveredSubmenu = item.label;
+            // Small delay before activating submenu
+            setTimeout(() => {
+                if (hoveredSubmenu === item.label) {
+                    activeSubmenu = item.label;
+                }
+            }, 100);
+        }
+    }
+
+    function handleItemMouseLeave() {
+        hoveredSubmenu = null;
     }
 
     function handleSubmenuClick(subItem) {
@@ -75,11 +115,12 @@
     });
 </script>
 
-<div class="menu-dropdown" class:open>
+<div class="menu-dropdown" class:open onmouseenter={handleMouseEnter}>
     <button
         bind:this={buttonRef}
         class="menu-button"
         class:disabled
+        class:active={open}
         {disabled}
         onclick={toggle}
         aria-haspopup="true"
@@ -91,7 +132,9 @@
         {#if label}
             {label}
         {/if}
-        <span class="arrow">▾</span>
+        {#if label || icon}
+            <span class="arrow">▾</span>
+        {/if}
     </button>
 
     {#if open}
@@ -109,10 +152,14 @@
                         class:has-submenu={item.submenu}
                         class:submenu-open={activeSubmenu === item.label}
                         onclick={() => handleItemClick(item)}
+                        onmouseenter={() => handleItemMouseEnter(item)}
+                        onmouseleave={handleItemMouseLeave}
                         disabled={item.disabled}
                     >
                         {#if item.icon}
-                            <span class="item-icon">{item.icon}</span>
+                            <span class="item-icon"
+                                >{#if item.isSvgIcon}{@html item.icon}{:else}{item.icon}{/if}</span
+                            >
                         {/if}
                         <span class="item-label">{item.label}</span>
                         {#if item.shortcut}
@@ -137,7 +184,7 @@
                                     >
                                         {#if subItem.icon}
                                             <span class="item-icon"
-                                                >{subItem.icon}</span
+                                                >{#if subItem.isSvgIcon}{@html subItem.icon}{:else}{subItem.icon}{/if}</span
                                             >
                                         {/if}
                                         <span class="item-label"
@@ -167,8 +214,8 @@
     .menu-button {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 0.25rem 0.5rem;
+        gap: 3px;
+        padding: 4px 8px;
         font-size: 0.8125rem;
         font-weight: 500;
         color: var(--color-text);
@@ -176,47 +223,56 @@
         border: none;
         border-radius: 4px;
         cursor: pointer;
-        transition: background 0.15s ease;
+        line-height: 1.4;
     }
 
     .menu-button:hover:not(.disabled) {
         background: var(--color-fill);
     }
 
-    .menu-button.open {
+    .menu-button.active {
         background: var(--color-fill-secondary);
+        color: var(--color-text);
     }
 
     .menu-button.disabled {
-        opacity: 0.5;
+        opacity: 0.4;
         cursor: not-allowed;
     }
 
+    .menu-button:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
+    }
+
     .arrow {
-        font-size: 0.625rem;
-        opacity: 0.6;
+        font-size: 0.5625rem;
+        opacity: 0.5;
+        margin-left: 1px;
     }
 
     .dropdown-panel {
         position: absolute;
         top: 100%;
         left: 0;
-        min-width: 180px;
-        margin-top: 4px;
-        padding: 4px 0;
+        min-width: 200px;
+        margin-top: 2px;
+        padding: 6px 0;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow:
+            0 1px 3px rgba(0, 0, 0, 0.08),
+            0 4px 12px rgba(0, 0, 0, 0.12);
         z-index: 1000;
     }
 
     .menu-item {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
         width: 100%;
-        padding: 6px 12px;
+        padding: 7px 12px;
         font-size: 0.8125rem;
         color: var(--color-text);
         background: transparent;
@@ -230,30 +286,44 @@
     }
 
     .menu-item.disabled {
-        opacity: 0.5;
+        opacity: 0.4;
         cursor: not-allowed;
     }
 
+    .menu-item:focus-visible {
+        outline: none;
+        background: var(--color-fill-secondary);
+    }
+
     .item-icon {
-        width: 16px;
+        width: 18px;
+        height: 18px;
+        font-size: 0.875rem;
         text-align: center;
         opacity: 0.7;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .item-label {
         flex: 1;
+        white-space: nowrap;
     }
 
     .shortcut {
-        font-size: 0.75rem;
-        color: var(--color-text-tertiary);
-        margin-left: 16px;
+        font-size: 0.6875rem;
+        color: var(--color-text-muted);
+        margin-left: 20px;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            monospace;
     }
 
     .divider {
         height: 1px;
         background: var(--color-border);
-        margin: 4px 8px;
+        margin: 6px 8px;
     }
 
     .has-submenu {
@@ -261,21 +331,25 @@
     }
 
     .submenu-arrow {
-        font-size: 0.625rem;
-        opacity: 0.6;
+        font-size: 0.5625rem;
+        opacity: 0.5;
         margin-left: auto;
+        flex-shrink: 0;
     }
 
     .submenu-panel {
         position: absolute;
         left: 100%;
-        top: 0;
-        min-width: 160px;
-        padding: 4px 0;
+        top: -6px;
+        min-width: 180px;
+        padding: 6px 0;
+        margin-left: 2px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow:
+            0 1px 3px rgba(0, 0, 0, 0.08),
+            0 4px 12px rgba(0, 0, 0, 0.12);
         z-index: 1001;
     }
 

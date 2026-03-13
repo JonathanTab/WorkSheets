@@ -12,6 +12,23 @@
      */
     import { onMount, onDestroy, untrack } from "svelte";
     import {
+        cut as cutIcon,
+        copy as copyIcon,
+        paste as pasteIcon,
+        trash as trashIcon,
+        settings as settingsIcon,
+        arrowUp,
+        arrowDown,
+        arrowLeft,
+        arrowRight,
+        merge as mergeIcon,
+        repeat as repeatIcon,
+        table as tableIcon,
+        plus as plusIcon,
+        close as closeIcon,
+        enter as enterIcon,
+    } from "../../lib/icons/index.js";
+    import {
         spreadsheetSession,
         selectionState,
         GridVirtualizer,
@@ -593,6 +610,24 @@
         const row = editSessionState.cell?.row;
         const col = editSessionState.cell?.col;
         if (row == null || col == null || row < 0 || col < 0) return null;
+
+        // If editing a merged cell, span the entire merged area
+        const mergeEngine = renderContext?.mergeEngine;
+        if (mergeEngine?.isMergePrimary(row, col)) {
+            const merge = mergeEngine.getMergeAt(row, col);
+            if (merge) {
+                const top = cellContainerTop(merge.startRow);
+                const left = cellContainerLeft(merge.startCol);
+                let width = 0;
+                for (let c = merge.startCol; c <= merge.endCol; c++)
+                    width += virtualizer.getColWidth(c);
+                let height = 0;
+                for (let r = merge.startRow; r <= merge.endRow; r++)
+                    height += virtualizer.getRowHeight(r);
+                return { top, left, width, height };
+            }
+        }
+
         return {
             top: cellContainerTop(row),
             left: cellContainerLeft(col),
@@ -1013,7 +1048,9 @@
 
         // ── Regular cell ──────────────────────────────────────────────────────
         if (e.shiftKey && anchor) {
-            selectionState.extendSelection(row, col);
+            // Snap shift-click to merge boundary too (extend to the primary cell)
+            const snapped = snapToMergePrimary(row, col);
+            selectionState.extendSelection(snapped.row, snapped.col);
         } else {
             // Handle special cell type clicks (checkbox toggle, rating)
             if (handleRegularCellClick(row, col, e)) return;
@@ -1079,6 +1116,16 @@
     }
 
     function handleCellDoubleClick(row, col) {
+        // Snap to merge primary so only the primary cell can be edited
+        const mergeEngine = renderContext?.mergeEngine;
+        if (mergeEngine?.isMergeCell(row, col)) {
+            const merge = mergeEngine.getMergeAt(row, col);
+            if (merge) {
+                row = merge.startRow;
+                col = merge.startCol;
+            }
+        }
+
         const cellType = renderContext?.getCellType(row, col);
 
         // ── REPEATER non-template: not editable ───────────────────────────────
@@ -1189,29 +1236,14 @@
     function persistEdit(payload) {
         if (!payload || !sheetStore) return;
         const { row, col, value } = payload;
-        if (Array.isArray(value)) {
-            // Rich text run array
-            sheetStore.setCellValue(row, col, value);
-        } else if (typeof value === "string" && value.startsWith("=")) {
+        if (typeof value === "string" && value.startsWith("=")) {
             sheetStore.setCellFormula(row, col, value);
         } else {
-            sheetStore.setCellValue(row, col, value);
+            // Parse the value according to the cell's current type config
+            const ct = sheetStore.getCellTypeConfig(row, col);
+            const parsedValue = CellTypeRegistry.parseInput(ct, value);
+            sheetStore.setCellValue(row, col, parsedValue);
         }
-    }
-
-    /**
-     * Ctrl+Enter in a plain text cell: save as rich text with trailing newline,
-     * then immediately reopen the cell editor (now in rich text / contenteditable mode).
-     */
-    function handleCtrlEnter(currentText) {
-        if (!editSessionState.isEditing) return;
-        const { row, col } = editSessionState.cell;
-        // Save current text as rich text run array
-        const runs = currentText ? [{ t: currentText + "\n" }] : [{ t: "\n" }];
-        editSessionState.cancel();
-        sheetStore.setCellValue(row, col, runs);
-        // Reopen edit — cell now has rich text value so editor becomes contenteditable
-        beginCellEdit(row, col, { surface: "grid" });
     }
 
     function commitCurrentEdit() {
@@ -1228,12 +1260,12 @@
         scrollToAnchor();
     }
 
-    function commitEdit(richValue = undefined) {
-        if (richValue !== undefined && editSessionState.isEditing) {
-            // Rich text editor passes parsed runs (or plain string) directly
+    function commitEdit(value = undefined) {
+        if (value !== undefined && editSessionState.isEditing) {
+            // Rich text / contenteditable passes value (HTML string or plain string) directly
             const { row, col } = editSessionState.cell;
             editSessionState.cancel();
-            persistEdit({ row, col, value: richValue });
+            persistEdit({ row, col, value });
         } else {
             commitCurrentEdit();
         }
@@ -1458,12 +1490,44 @@
                     return;
                 }
             }
-            // Block typing into table structural cells
+            // Block typing into table structural cells (headers and entry rows)
+            // TABLE_DATA cells: open inline editor with typed character as initial value
             if (
-                anchorCellType === CELL_TYPE.TABLE_DATA ||
                 anchorCellType === CELL_TYPE.TABLE_HEADER ||
                 anchorCellType === CELL_TYPE.TABLE_ENTRY
             ) {
+                e.preventDefault();
+                return;
+            }
+
+            // For TABLE_DATA cells, open the inline editor with the typed character
+            if (anchorCellType === CELL_TYPE.TABLE_DATA) {
+                const info = renderContext?.tableManager?.getCellInfo(
+                    anchor.row,
+                    anchor.col,
+                );
+                if (info?.table && info.colDef) {
+                    const colType = info.colDef.type;
+                    // Only allow typing for editable columns (not checkbox/rating/formula)
+                    if (
+                        colType !== "checkbox" &&
+                        colType !== "rating" &&
+                        !info.colDef.isNonEntry
+                    ) {
+                        focusedTableDataCell = {
+                            table: info.table,
+                            dataIndex: info.dataIndex,
+                            colDef: info.colDef,
+                            row: anchor.row,
+                            col: anchor.col,
+                            left: cellContainerLeft(anchor.col),
+                            top: cellContainerTop(anchor.row),
+                            width: virtualizer.getColWidth(anchor.col),
+                            height: virtualizer.getRowHeight(anchor.row),
+                            seedText: e.key, // Pass the typed character to initialize the editor
+                        };
+                    }
+                }
                 e.preventDefault();
                 return;
             }
@@ -1907,21 +1971,24 @@
     let contextMenuItems = $derived([
         {
             label: "Cut",
-            icon: "✂",
+            icon: cutIcon,
+            isSvgIcon: true,
             shortcut: "Ctrl+X",
             action: cutSelection,
             disabled: !hasAnySelection,
         },
         {
             label: "Copy",
-            icon: "📋",
+            icon: copyIcon,
+            isSvgIcon: true,
             shortcut: "Ctrl+C",
             action: copySelection,
             disabled: !hasAnySelection,
         },
         {
             label: "Paste",
-            icon: "📄",
+            icon: pasteIcon,
+            isSvgIcon: true,
             shortcut: "Ctrl+V",
             action: () => pasteSelection("full"),
         },
@@ -1954,7 +2021,8 @@
         { divider: true },
         {
             label: "Merge Cells",
-            icon: "⊞",
+            icon: mergeIcon,
+            isSvgIcon: true,
             action: () => {
                 if (selection && sheetStore)
                     sheetStore.mergeCells(
@@ -1968,7 +2036,8 @@
         },
         {
             label: "Unmerge Cells",
-            icon: "⊞",
+            icon: mergeIcon,
+            isSvgIcon: true,
             action: () => {
                 if (anchor && sheetStore)
                     sheetStore.unmergeCells(anchor.row, anchor.col);
@@ -1978,25 +2047,29 @@
         { divider: true },
         {
             label: "Insert Row Above",
-            icon: "⬆",
+            icon: arrowUp,
+            isSvgIcon: true,
             action: insertRowAbove,
             disabled: !hasAnySelection,
         },
         {
             label: "Insert Row Below",
-            icon: "⬇",
+            icon: arrowDown,
+            isSvgIcon: true,
             action: insertRowBelow,
             disabled: !hasAnySelection,
         },
         {
             label: "Insert Column Left",
-            icon: "⬅",
+            icon: arrowLeft,
+            isSvgIcon: true,
             action: insertColumnLeft,
             disabled: !hasAnySelection,
         },
         {
             label: "Insert Column Right",
-            icon: "➡",
+            icon: arrowRight,
+            isSvgIcon: true,
             action: insertColumnRight,
             disabled: !hasAnySelection,
         },
@@ -2006,7 +2079,8 @@
                 selectionType === "row" || selectionType === "all"
                     ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
                     : "Delete Row",
-            icon: "🗑",
+            icon: trashIcon,
+            isSvgIcon: true,
             action: deleteSelectedRows,
             disabled: !hasAnySelection,
         },
@@ -2015,7 +2089,8 @@
                 selectionType === "column" || selectionType === "all"
                     ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
                     : "Delete Column",
-            icon: "🗑",
+            icon: trashIcon,
+            isSvgIcon: true,
             action: deleteSelectedColumns,
             disabled: !hasAnySelection,
         },
@@ -2031,7 +2106,8 @@
                       ? [
                             {
                                 label: "Delete This Row",
-                                icon: "🗑",
+                                icon: trashIcon,
+                                isSvgIcon: true,
                                 action: tableDeleteRow,
                             },
                             { divider: true },
@@ -2119,7 +2195,12 @@
                           }
                       },
                   },
-                  { label: "Delete Table", icon: "🗑", action: tableDelete },
+                  {
+                      label: "Delete Table",
+                      icon: trashIcon,
+                      isSvgIcon: true,
+                      action: tableDelete,
+                  },
               ]
             : []),
         ...(repeaterContext
@@ -2157,7 +2238,8 @@
                   },
                   {
                       label: "Delete Repeater",
-                      icon: "🗑",
+                      icon: trashIcon,
+                      isSvgIcon: true,
                       action: repeaterDelete,
                   },
               ]
@@ -2382,12 +2464,15 @@
                 </div>
             {/if}
 
-            <!-- TABLE_DATA inline cell edit overlay (shown on double-click) -->
+            <!-- TABLE_DATA inline cell edit overlay (shown on Enter or typing) -->
             {#if focusedTableDataCell}
                 {@const cellValue = focusedTableDataCell.table.getValue(
                     focusedTableDataCell.dataIndex,
                     focusedTableDataCell.colDef.id,
                 )}
+                {@const initialValue =
+                    focusedTableDataCell.seedText ??
+                    (cellValue != null ? String(cellValue) : "")}
                 <div
                     class="table-data-edit-overlay"
                     style="position:absolute; left:{focusedTableDataCell.left}px; top:{focusedTableDataCell.top}px; width:{focusedTableDataCell.width}px; height:{focusedTableDataCell.height}px; z-index:22;"
@@ -2395,7 +2480,7 @@
                     <input
                         type="text"
                         class="table-data-edit-input"
-                        value={cellValue != null ? String(cellValue) : ""}
+                        value={initialValue}
                         onblur={(e) =>
                             commitTableDataEdit(
                                 /** @type {HTMLInputElement} */ (e.target)
@@ -2428,7 +2513,6 @@
                 onEditSelect={handleEditSelect}
                 onCommitEdit={commitEdit}
                 onCancelEdit={cancelEdit}
-                onCtrlEnter={handleCtrlEnter}
             />
 
             <!-- Table filter popovers -->
@@ -2484,7 +2568,7 @@
                             title="Clear entry (Escape)"
                             aria-label="Clear entry"
                         >
-                            ✕
+                            {@html closeIcon}
                         </button>
                     </div>
                 {/if}

@@ -1,4 +1,5 @@
 import { formulaEditState } from './FormulaEditState.svelte.js';
+import { isRichText, isRichTextArray, richTextToPlain, runsToHtml } from './richText.js';
 
 /**
  * EditSessionState - Canonical editing lifecycle for spreadsheet cells.
@@ -32,11 +33,27 @@ export class EditSessionState {
     pickerMode = $state(null);
 
     /**
-     * When editing a rich-text cell, holds the raw run array as the edit value.
-     * null when editing plain text.
-     * @type {Array|null}
+     * When editing a rich-text cell, holds the initial HTML string for the contenteditable.
+     * null when editing plain text (contenteditable is initialized from draft).
+     * @type {string|null}
      */
     richTextValue = $state(null);
+
+    /**
+     * Live HTML content of the contenteditable editor, kept in sync on every input
+     * and after every formatting operation. Used by commit() so that clicking away
+     * (which triggers commitCurrentEdit before the blur fires) still commits the
+     * correct rich HTML rather than the plain-text draft.
+     * @type {string|null}
+     */
+    liveRichHtml = $state(null);
+
+    /**
+     * The original value when editing began (HTML if rich text, plain text otherwise).
+     * Used to determine whether to return HTML or plain text on commit.
+     * @type {string|null}
+     */
+    originalValue = $state(null);
 
     /**
      * Callback set by the rich text editor component so the toolbar can
@@ -122,13 +139,28 @@ export class EditSessionState {
      * @param {Object} [options]
      */
     beginEdit(row, col, initialValue = '', surface = 'grid', options = {}) {
-        const isRichArray = Array.isArray(initialValue) && initialValue.length > 0 && typeof initialValue[0] === 'object';
-        const text = isRichArray ? initialValue.map(r => r.t).join('') : toText(initialValue);
+        let html = null;
+        let text = '';
+        if (isRichTextArray(initialValue)) {
+            // Legacy run-array: convert to HTML string
+            html = runsToHtml(initialValue);
+            text = richTextToPlain(initialValue);
+        } else if (isRichText(initialValue)) {
+            // New HTML string format
+            html = initialValue;
+            text = richTextToPlain(initialValue);
+        } else {
+            text = toText(initialValue);
+        }
 
         this.phase = 'editing';
         this.cell = { row, col };
+        // For rich text: store HTML for eventual commit, but draft stays as plain for display
+        // For plain text: draft is the actual value that will be committed
         this.draft = text;
-        this.richTextValue = isRichArray ? initialValue : null;
+        this.richTextValue = html;
+        // Store the original value so we can detect if it was modified
+        this.originalValue = isRichText(html) ? html : text;
         this.cursorStart = text.length;
         this.cursorEnd = text.length;
         this.surface = surface;
@@ -212,6 +244,8 @@ export class EditSessionState {
 
     /**
      * Commit current edit and return payload to persist.
+     * For rich text sessions, uses liveRichHtml (kept in sync by the contenteditable)
+     * so that commitCurrentEdit() always saves HTML, not just the plain-text draft.
      * @returns {{ row: number, col: number, value: string } | null}
      */
     commit() {
@@ -220,7 +254,7 @@ export class EditSessionState {
         const payload = {
             row: this.cell.row,
             col: this.cell.col,
-            value: this.draft
+            value: this.liveRichHtml ?? this.draft
         };
 
         this.#stopEditing();
@@ -240,6 +274,8 @@ export class EditSessionState {
         this.cell = null;
         this.draft = '';
         this.richTextValue = null;
+        this.liveRichHtml = null;
+        this.originalValue = null;
         this.richFormatApplier = null;
         this.cursorStart = 0;
         this.cursorEnd = 0;

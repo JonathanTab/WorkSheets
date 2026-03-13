@@ -374,9 +374,22 @@ export class CanvasRenderer {
         const pad = 4;
         const hAlign = cell.hAlign || 'left';
         const vAlign = cell.vAlign || 'middle';
+        const fontSize = cell.fontSize || this.#theme.defaultFontSize;
 
         ctx.textBaseline = 'middle';
-        const textY = this.#getTextY(y, height, vAlign);
+
+        // Calculate vertical position with better alignment for merged cells
+        let textY;
+        if (vAlign === 'top') {
+            // Position text top-aligned with padding, accounting for font size
+            textY = y + pad + fontSize / 2;
+        } else if (vAlign === 'bottom') {
+            // Position text bottom-aligned with padding
+            textY = y + height - pad - fontSize / 2;
+        } else {
+            // Middle (default)
+            textY = y + height / 2;
+        }
 
         let textX;
         if (hAlign === 'center') {
@@ -708,7 +721,16 @@ export class CanvasRenderer {
         ctx.textAlign = 'left';
 
         const textX = cell.x + 4;
-        const textY = this.#getTextY(cell.y, cell.height, cell.vAlign || 'middle');
+        const fontSize = cell.fontSize || this.#theme.defaultFontSize;
+        const vAlign = cell.vAlign || 'middle';
+        let textY;
+        if (vAlign === 'top') {
+            textY = cell.y + 4 + fontSize / 2;
+        } else if (vAlign === 'bottom') {
+            textY = cell.y + cell.height - 4 - fontSize / 2;
+        } else {
+            textY = cell.y + cell.height / 2;
+        }
 
         ctx.fillText(text, textX, textY);
 
@@ -733,20 +755,49 @@ export class CanvasRenderer {
      * @param {number} h
      */
     #paintCustomBorders(ctx, borders, x, y, w, h) {
-        const paintEdge = (edge, x1, y1, x2, y2) => {
+        const paintEdge = (edge, x1, y1, x2, y2, position = 'center') => {
             if (!edge) return;
             ctx.strokeStyle = edge.color || '#000000';
-            ctx.lineWidth = edge.width || 1;
+            const lineWidth = edge.width || 1;
+            ctx.lineWidth = lineWidth;
+
+            // Calculate offset based on line width to ensure proper positioning
+            // For lineWidth=1: offset=0.5 (center of pixel)
+            // For lineWidth>1: offset by half the width to position stroke outside the cell
+            const offset = lineWidth === 1 ? 0.5 : Math.ceil(lineWidth / 2);
+
+            // Adjust coordinates based on edge position
+            let adjustedX1 = x1, adjustedY1 = y1, adjustedX2 = x2, adjustedY2 = y2;
+
+            if (position === 'top') {
+                // Top edge: position above the cell (-offset)
+                adjustedY1 = y1 - (offset - 0.5);
+                adjustedY2 = y2 - (offset - 0.5);
+            } else if (position === 'bottom') {
+                // Bottom edge: position below the cell (+offset)
+                adjustedY1 = y1 + (offset - 0.5);
+                adjustedY2 = y2 + (offset - 0.5);
+            } else if (position === 'left') {
+                // Left edge: position left of the cell (-offset)
+                adjustedX1 = x1 - (offset - 0.5);
+                adjustedX2 = x2 - (offset - 0.5);
+            } else if (position === 'right') {
+                // Right edge: position right of the cell (+offset)
+                adjustedX1 = x1 + (offset - 0.5);
+                adjustedX2 = x2 + (offset - 0.5);
+            }
+
             ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
+            ctx.moveTo(adjustedX1, adjustedY1);
+            ctx.lineTo(adjustedX2, adjustedY2);
             ctx.stroke();
         };
 
-        if (borders.top) paintEdge(borders.top, x, y + 0.5, x + w, y + 0.5);
-        if (borders.right) paintEdge(borders.right, x + w - 0.5, y, x + w - 0.5, y + h);
-        if (borders.bottom) paintEdge(borders.bottom, x, y + h - 0.5, x + w, y + h - 0.5);
-        if (borders.left) paintEdge(borders.left, x + 0.5, y, x + 0.5, y + h);
+        // Paint borders with proper positioning for their edges
+        if (borders.top) paintEdge(borders.top, x, y, x + w, y, 'top');
+        if (borders.right) paintEdge(borders.right, x + w, y, x + w, y + h, 'right');
+        if (borders.bottom) paintEdge(borders.bottom, x, y + h, x + w, y + h, 'bottom');
+        if (borders.left) paintEdge(borders.left, x, y, x, y + h, 'left');
     }
 
     // ─── Private: font / text helpers ─────────────────────────────────────────
@@ -762,21 +813,6 @@ export class CanvasRenderer {
         const size = cell.fontSize || this.#theme.defaultFontSize;
         const family = cell.fontFamily || this.#theme.defaultFontFamily;
         return `${style} ${weight} ${size}px ${family}`;
-    }
-
-    /**
-     * Compute vertical baseline position for text in CSS pixels.
-     * @param {number} cellY
-     * @param {number} cellH
-     * @param {'top'|'middle'|'bottom'} vAlign
-     * @returns {number}
-     */
-    #getTextY(cellY, cellH, vAlign) {
-        switch (vAlign) {
-            case 'top': return cellY + 4;
-            case 'bottom': return cellY + cellH - 4;
-            default: return cellY + cellH / 2; // middle — textBaseline='middle'
-        }
     }
 }
 

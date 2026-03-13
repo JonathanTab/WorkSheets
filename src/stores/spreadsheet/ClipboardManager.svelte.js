@@ -119,6 +119,7 @@ class ClipboardManager {
             const rowData = [];
             for (let c = startCol; c <= endCol; c++) {
                 const cell = sheetStore.getCell(r, c);
+                const ct = sheetStore.getCellTypeConfig(r, c);
                 const cellData = {
                     // Raw value (what user entered)
                     v: cell.exists ? cell.v : null,
@@ -126,6 +127,8 @@ class ClipboardManager {
                     isFormula: cell.exists && cell.v && String(cell.v).startsWith('='),
                     // Computed display value
                     displayValue: cell.exists ? session.getCellDisplayValue(r, c) : null,
+                    // Cell type configuration
+                    ct: ct || null,
                     // Formatting properties
                     fontFamily: cell.fontFamily || null,
                     fontSize: cell.fontSize || null,
@@ -633,6 +636,11 @@ class ClipboardManager {
 
         if (Object.keys(props).length > 0) {
             sheetStore.setCellProperties(row, col, props);
+        }
+
+        // Apply cell type configuration
+        if (cell.ct) {
+            sheetStore.setCellTypeConfig(row, col, cell.ct);
         }
     }
 

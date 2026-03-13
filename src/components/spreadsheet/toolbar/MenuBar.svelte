@@ -6,6 +6,13 @@
         deleteDocument,
     } from "../../../stores/spreadsheetStore.svelte.js";
     import {
+        paste,
+        trash,
+        cut,
+        copy,
+        table,
+    } from "../../../lib/icons/index.js";
+    import {
         clipboardManager,
         selectionState,
     } from "../../../stores/spreadsheet/index.js";
@@ -19,6 +26,17 @@
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
 
     let isExportingPDF = $state(false);
+
+    // Shared state for cursor-following menu behavior
+    let openMenuId = $state(null);
+
+    function handleMenuOpenChange(isOpen, menuId) {
+        if (isOpen) {
+            openMenuId = menuId;
+        } else if (openMenuId === menuId) {
+            openMenuId = null;
+        }
+    }
 
     /** Build AxisMetrics from sheetStore metadata for PDF export. */
     function buildMetricsForPrint(sheetStore) {
@@ -105,7 +123,8 @@
         { divider: true },
         {
             label: isExportingPDF ? "Exporting PDF…" : "Export as PDF",
-            icon: "📄",
+            icon: paste,
+            isSvgIcon: true,
             action: exportPDF,
             shortcut: "Ctrl+P",
         },
@@ -136,19 +155,22 @@
             label: "Cut",
             action: () => handleCut(),
             shortcut: "Ctrl+X",
-            icon: "✂",
+            icon: cut,
+            isSvgIcon: true,
         },
         {
             label: "Copy",
             action: () => handleCopy(),
             shortcut: "Ctrl+C",
-            icon: "📋",
+            icon: copy,
+            isSvgIcon: true,
         },
         {
             label: "Paste",
             action: () => handlePaste(),
             shortcut: "Ctrl+V",
-            icon: "📄",
+            icon: paste,
+            isSvgIcon: true,
         },
         {
             label: "Paste Special",
@@ -187,7 +209,8 @@
             label: "Delete",
             action: () => handleDelete(),
             shortcut: "Del",
-            icon: "🗑",
+            icon: trash,
+            isSvgIcon: true,
         },
         {
             label: "Select All",
@@ -256,7 +279,8 @@
         {
             label: "Table",
             action: () => (showCreateTableDialog = true),
-            icon: "⊞",
+            icon: table,
+            isSvgIcon: true,
             disabled: !selectionState.range,
         },
         {
@@ -414,11 +438,41 @@
 </script>
 
 <div class="menu-bar">
-    <MenuDropdown label="File" items={fileItems} />
-    <MenuDropdown label="Edit" items={editItems} />
-    <MenuDropdown label="View" items={viewItems} />
-    <MenuDropdown label="Insert" items={insertItems} />
-    <MenuDropdown label="Format" items={formatItems} />
+    <MenuDropdown
+        label="File"
+        items={fileItems}
+        menuId="file"
+        isOpen={openMenuId === "file"}
+        onOpenChange={handleMenuOpenChange}
+    />
+    <MenuDropdown
+        label="Edit"
+        items={editItems}
+        menuId="edit"
+        isOpen={openMenuId === "edit"}
+        onOpenChange={handleMenuOpenChange}
+    />
+    <MenuDropdown
+        label="View"
+        items={viewItems}
+        menuId="view"
+        isOpen={openMenuId === "view"}
+        onOpenChange={handleMenuOpenChange}
+    />
+    <MenuDropdown
+        label="Insert"
+        items={insertItems}
+        menuId="insert"
+        isOpen={openMenuId === "insert"}
+        onOpenChange={handleMenuOpenChange}
+    />
+    <MenuDropdown
+        label="Format"
+        items={formatItems}
+        menuId="format"
+        isOpen={openMenuId === "format"}
+        onOpenChange={handleMenuOpenChange}
+    />
 </div>
 
 {#if showCreateTableDialog}
@@ -435,6 +489,6 @@
         align-items: center;
         height: 28px;
         background: var(--color-surface);
-        border-bottom: 1px solid var(--color-border);
+        flex-shrink: 0;
     }
 </style>

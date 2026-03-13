@@ -242,10 +242,11 @@ export class SheetRenderContext {
         const availableWidth = colWidth - padding;
 
         // If content fits, no overflow needed
-        if (textWidth <= availableWidth) return 0;
+        // Add 0.5px tolerance for sub-pixel rendering precision
+        if (textWidth <= availableWidth + 0.5) return 0;
 
         // Calculate how much extra width we need
-        const neededExtra = textWidth - availableWidth;
+        const neededExtra = Math.max(0, textWidth - availableWidth);
 
         // Scan adjacent empty cells to see how much we can use
         let availableExtra = 0;

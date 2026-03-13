@@ -20,7 +20,7 @@
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { COLUMN_TYPE_ICONS } from '../features/TableStore.svelte.js';
-import { isRichText, richTextToPlain } from '../richText.js';
+import { isRichText, isRichTextArray, richTextToPlain, htmlStringToRuns } from '../richText.js';
 
 /**
  * @typedef {Object} CellPaintItem
@@ -148,12 +148,19 @@ export function buildPaneData(params) {
     /** @type {CellPaintItem[]} */
     const cells = [];
 
+    // Track overflow extents for each row to skip shadow cells
+    // Map of row -> { cellCol: overflowRightX }
+    const overflowMap = new Map();
+
     for (let r = rowRange.start; r <= rowRange.end; r++) {
         const isFrozenRow = r < frozenRows;
         const y = isFrozenRow
             ? rowMetrics.offsetOf(r)
             : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
         const height = rowMetrics.sizeOf(r);
+
+        // Reset overflow tracker for this row
+        const rowOverflowMap = new Map();
 
         for (let c = colRange.start; c <= colRange.end; c++) {
             // ── Cell type dispatch ────────────────────────────────────────────
@@ -172,6 +179,23 @@ export function buildPaneData(params) {
                 ? colMetrics.offsetOf(c)
                 : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
             let width = colMetrics.sizeOf(c);
+
+            // Check for overflow-shadowed cells (same row, previous cols had overflow)
+            let isOverflowShadow = false;
+            for (const prevCol of rowOverflowMap.keys()) {
+                if (prevCol < c) {
+                    const overflowRightX = rowOverflowMap.get(prevCol);
+                    if (x < overflowRightX) {
+                        isOverflowShadow = true;
+                        break;
+                    }
+                }
+            }
+
+            // Skip rendering cells that are shadowed by overflow (they'll be covered by the overflow cell)
+            if (isOverflowShadow && cellType === CELL_TYPE.REGULAR) {
+                continue;
+            }
 
             // Merge span adjustments
             if (cellType === CELL_TYPE.MERGE_PRIMARY && renderContext) {
@@ -354,6 +378,12 @@ export function buildPaneData(params) {
                 isRepeaterCopy,
             };
 
+            // For merged primary cells, default to top vertical alignment (supports paragraph-style text)
+            // This can be overridden by explicit formatting
+            if (cellType === CELL_TYPE.MERGE_PRIMARY) {
+                item.vAlign = 'top';
+            }
+
             // Determine render type
             if (ct?.type === 'checkbox') {
                 item.renderType = 'checkbox';
@@ -369,11 +399,23 @@ export function buildPaneData(params) {
                 item.displayValue = dispV != null ? String(dispV) : '';
             } else {
                 item.renderType = 'text';
-                if (isRichText(dispV)) {
-                    item.richTextRuns = dispV;
-                    item.displayValue = richTextToPlain(dispV);
+
+                // Apply cell type formatting
+                let formattedValue = dispV;
+                if (ct && dispV != null && dispV !== '') {
+                    formattedValue = CellTypeRegistry.formatValue(ct, dispV);
+                }
+
+                if (isRichText(formattedValue)) {
+                    // New format: HTML string — convert to runs for canvas renderer
+                    item.richTextRuns = htmlStringToRuns(formattedValue);
+                    item.displayValue = richTextToPlain(formattedValue);
+                } else if (isRichTextArray(formattedValue)) {
+                    // Legacy format: run array — use directly
+                    item.richTextRuns = formattedValue;
+                    item.displayValue = richTextToPlain(formattedValue);
                 } else {
-                    item.displayValue = dispV != null ? String(dispV) : '';
+                    item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
 
                 // Apply type-level alignment defaults
@@ -441,16 +483,56 @@ export function buildPaneData(params) {
             }
 
             // Custom borders (sparse)
+            // For merged cells, get borders from the exterior edges of the merged region
             if (effectiveSheetStore) {
-                const b = effectiveSheetStore.getCellBorders(mappedRow, mappedCol);
-                if (b && (b.top || b.right || b.bottom || b.left)) {
-                    item.borders = b;
+                let borderRow = mappedRow;
+                let borderCol = mappedCol;
+                let endBorderRow = mappedRow;
+                let endBorderCol = mappedCol;
+
+                // For merged cells, adjust to exterior edges
+                if (cellType === CELL_TYPE.MERGE_PRIMARY && renderContext) {
+                    const span = renderContext.getMergeSpan(r, c);
+                    if (span) {
+                        // Exterior edges: use first row/col for top/left, last row/col for bottom/right
+                        endBorderRow = mappedRow + span.rowSpan - 1;
+                        endBorderCol = mappedCol + span.colSpan - 1;
+                    }
+                }
+
+                // Get borders from exterior edges
+                const borders = {
+                    top: effectiveSheetStore.getCellBorders(borderRow, borderCol).top,
+                    bottom: effectiveSheetStore.getCellBorders(endBorderRow, borderCol).bottom,
+                    left: effectiveSheetStore.getCellBorders(borderRow, borderCol).left,
+                    right: effectiveSheetStore.getCellBorders(borderRow, endBorderCol).right,
+                };
+
+                if (borders.top || borders.right || borders.bottom || borders.left) {
+                    item.borders = borders;
                 }
             }
 
             // Formula highlight color (for formula edit mode reference visualization)
             const hlColor = formulaEditState?.getCellHighlightColor(r, c);
             if (hlColor) item.formulaHighlight = hlColor;
+
+            // Cell spillover: extend width into adjacent empty cells for text cells without wrapping
+            if (
+                cellType === CELL_TYPE.REGULAR &&
+                item.renderType === 'text' &&
+                !item.wrapText &&
+                item.displayValue &&
+                renderContext
+            ) {
+                const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics);
+                if (overflowExtent > 0) {
+                    item.width += overflowExtent;
+                    // Track this overflow so we can skip shadow cells
+                    const overflowRightX = item.x + item.width;
+                    rowOverflowMap.set(c, overflowRightX);
+                }
+            }
 
             cells.push(item);
         }

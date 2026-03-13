@@ -1,5 +1,5 @@
 /**
- * RepeaterEngine - Manages all inline/viewport repeaters for a sheet
+ * RepeaterEngine - Manages all inline repeaters for a sheet
  *
  * A repeater is a group of template cells (templateStartRow..templateEndRow ×
  * templateStartCol..templateEndCol) that is repeated N times either vertically
@@ -9,10 +9,8 @@
  * ## Storage in Yjs
  *   sheet.get('repeaters') → Y.Map<repeaterId, Y.Map>
  *   Each repeater Y.Map:
- *     id, name, mode ('inline'|'viewport'),
- *     templateStartRow, templateEndRow, templateStartCol, templateEndCol,
- *     direction ('vertical'|'horizontal'), count (number), gap (number),
- *     vpStartRow, vpStartCol, vpEndRow, vpEndCol (viewport mode only)
+ *     id, name, templateStartRow, templateEndRow, templateStartCol, templateEndCol,
+ *     direction ('vertical'|'horizontal'), count (number), gap (number)
  *
  * ## Inline position arithmetic (vertical direction, gap=0):
  *   repIndex = floor((row - templateStartRow) / templateRows)
@@ -41,7 +39,6 @@ export class RepeaterStore {
     // ── Identity ──────────────────────────────────────────────────────────────
     id = $state("");
     name = $state("Repeater");
-    mode = $state("inline"); // 'inline' | 'viewport'
 
     // ── Template bounds ───────────────────────────────────────────────────────
     templateStartRow = $state(0);
@@ -103,7 +100,6 @@ export class RepeaterStore {
         const m = this.#repYMap;
         this.id = m.get("id") ?? "";
         this.name = m.get("name") ?? "Repeater";
-        this.mode = m.get("mode") ?? "inline";
         this.templateStartRow = m.get("templateStartRow") ?? 0;
         this.templateEndRow = m.get("templateEndRow") ?? 0;
         this.templateStartCol = m.get("templateStartCol") ?? 0;
@@ -350,7 +346,6 @@ export class RepeaterEngine {
             const rm = new Y.Map();
             rm.set("id", repId);
             rm.set("name", opts.name ?? "Repeater");
-            rm.set("mode", "inline");
             rm.set("templateStartRow", opts.templateStartRow);
             rm.set("templateEndRow", opts.templateEndRow);
             rm.set("templateStartCol", opts.templateStartCol);

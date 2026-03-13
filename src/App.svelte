@@ -1,5 +1,6 @@
 <script>
     import { onMount } from "svelte";
+    import { warning } from "./lib/icons/index.js";
     import AppShell from "./components/AppShell.svelte";
     import LoginModal from "./components/LoginModal.svelte";
     import InstallPrompt from "./components/InstallPrompt.svelte";
@@ -127,7 +128,7 @@
         </div>
     {:else if !initialized}
         <div class="error-overlay">
-            <p>⚠️ Failed to initialize workspace</p>
+            <p>{@html warning} Failed to initialize workspace</p>
             <button onclick={() => location.reload()}>Retry</button>
         </div>
     {:else}

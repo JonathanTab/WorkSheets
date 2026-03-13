@@ -1,6 +1,7 @@
 <script>
     import { spreadsheetSession } from "../../../stores/spreadsheetStore.svelte.js";
     import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
+    import { date, checkbox, star, link } from "../../../lib/icons/index.js";
 
     let { selectionState } = $props();
 
@@ -12,20 +13,51 @@
     let options = $state({});
 
     $effect(() => {
+        // Synchronize state from sheet when selection changes or cell data changes
         if (selection && sheetStore) {
+            // Track cellsVersion to react to any cell changes in the sheet
+            const _cellVer = sheetStore.cellsVersion;
+
+            // Always read fresh config from the sheet to ensure consistency
             const config = sheetStore.getCellTypeConfig(
                 selection.startRow,
                 selection.startCol,
             );
             currentType = config?.type || "text";
-            options = config ? { ...config } : {};
+            // Copy all properties except 'type'
+            options = config
+                ? Object.fromEntries(
+                      Object.entries(config).filter(([key]) => key !== "type"),
+                  )
+                : {};
         }
     });
+
+    function getDefaultOptionsForType(type) {
+        // Return type-appropriate default options when switching types
+        const defaults = {
+            number: { decimals: 2 },
+            currency: { decimals: 2, symbol: "$" },
+            percent: { decimals: 2 },
+            date: {},
+            rating: { max: 5 },
+            checkbox: {},
+            url: {},
+            text: {},
+        };
+        return defaults[type] || {};
+    }
 
     function setType(type) {
         if (!selection || !sheetStore) return;
 
-        const config = { type, ...options };
+        // When switching types, start with default options for the new type
+        const newOptions = getDefaultOptionsForType(type);
+        const config = { type, ...newOptions };
+
+        currentType = type;
+        options = newOptions;
+
         if (type === "text") {
             // Special case to clear config if it's default text
             applyToSelection(null);
@@ -44,6 +76,8 @@
                 }
             }
         });
+        // cellsVersion will be incremented by the Yjs observers,
+        // which will trigger Grid's render scheduler automatically
     }
 
     function updateOption(key, value) {
@@ -57,10 +91,10 @@
         { id: "number", label: "Number", icon: "123" },
         { id: "currency", label: "Currency", icon: "$" },
         { id: "percent", label: "Percent", icon: "%" },
-        { id: "date", label: "Date", icon: "📅" },
-        { id: "checkbox", label: "Checkbox", icon: "☑" },
-        { id: "rating", label: "Rating", icon: "⭐" },
-        { id: "url", label: "Link", icon: "🔗" },
+        { id: "date", label: "Date", icon: date, isSvg: true },
+        { id: "checkbox", label: "Checkbox", icon: checkbox, isSvg: true },
+        { id: "rating", label: "Rating", icon: star, isSvg: true },
+        { id: "url", label: "Link", icon: link, isSvg: true },
     ];
 </script>
 
@@ -73,7 +107,9 @@
                 onclick={() => setType(type.id)}
                 title={type.label}
             >
-                <span class="icon">{type.icon}</span>
+                <span class="icon"
+                    >{#if type.isSvg}{@html type.icon}{:else}{type.icon}{/if}</span
+                >
                 <span class="label">{type.label}</span>
             </button>
         {/each}
@@ -161,8 +197,11 @@
     .icon {
         font-weight: bold;
         width: 16px;
-        display: inline-block;
-        text-align: center;
+        height: 16px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
     }
 
     .options-panel {

@@ -2,23 +2,23 @@
     /**
      * GridOverlays - Cell Editor Overlay (Canvas Architecture)
      *
-     * Simplified for the canvas rendering architecture. Renders only:
-     *   - The active cell editor (text input or picker)
-     *   - Formula segment colorization overlay
-     *   - FormulaValuePopup
+     * Renders the active cell editor, formula segment colorization, and FormulaValuePopup.
      *
-     * Selection fill is painted on canvas.
-     * Selection / anchor borders are DOM <div>s managed by Grid.svelte.
-     * Formula cell-reference highlights are painted on canvas.
+     * Editor modes:
+     *   - Formula: plain <input> with a colored overlay (formula starts with "=")
+     *   - Picker:  date/time/datetime picker via PickerEditor.svelte
+     *   - Text:    contenteditable <div> for all other text cells (plain or rich)
      *
-     * ## Positioning
-     * editorBounds { top, left, width, height } are relative to the
-     * grid container's top-left corner (i.e. already include header offsets).
+     * Rich text is stored as an HTML string in the cell's v field. The contenteditable
+     * is always used for text editing so formatting can be applied to selections at any time.
+     * applyRichFormat() returns true if inline formatting was applied (selection existed),
+     * false if not (caller should apply cell-level formatting instead).
      */
 
+    import { untrack } from "svelte";
     import { segmentFormula } from "../../../formulas/reference-highlighter.js";
     import { editSessionState } from "../../../stores/spreadsheet/index.js";
-    import { runsToHtml, htmlToRuns } from "../../../stores/spreadsheet/richText.js";
+    import { isRichText } from "../../../stores/spreadsheet/richText.js";
     import FormulaValuePopup from "../FormulaValuePopup.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
 
@@ -36,35 +36,57 @@
         onEditSelect,
         onCommitEdit,
         onCancelEdit,
-        onCtrlEnter,
     } = $props();
 
     let cellEditInputEl = $state(null);
     let richEditEl = $state(null);
+    let lastCommittedRichHtml = $state(null); // Track latest rich HTML to avoid duplicate commits
 
     let pickerMode = $derived(editSessionState.pickerMode);
-    let isFormulaMode = $derived(isEditing && (typeof editValue === 'string') && editValue?.startsWith("="));
-    // Use rich text editor when the session has a rich text value
-    let isRichTextMode = $derived(isEditing && editSessionState.richTextValue != null);
+    let isFormulaMode = $derived(
+        isEditing &&
+            typeof editValue === "string" &&
+            editValue?.startsWith("="),
+    );
+    // Use contenteditable for all non-formula, non-picker text cells
+    let isContentEditable = $derived(
+        isEditing && !pickerMode && !isFormulaMode,
+    );
     let formulaSegments = $derived(
         isFormulaMode ? segmentFormula(editValue ?? "") : [],
     );
 
-    // When switching to rich text mode, initialize contenteditable HTML and register format applier
+    // Initialize contenteditable when it becomes active.
+    // Use untrack() for all inner reads so that changes to editValue or richTextValue
+    // during the session don't re-run this effect and destroy formatting the user applied.
     $effect(() => {
-        if (isRichTextMode && richEditEl) {
-            const html = runsToHtml(editSessionState.richTextValue);
-            richEditEl.innerHTML = html;
-            // Move cursor to end
-            const range = document.createRange();
-            range.selectNodeContents(richEditEl);
-            range.collapse(false);
-            const sel = window.getSelection();
-            sel?.removeAllRanges();
-            sel?.addRange(range);
-            // Register so toolbar can apply inline formatting
-            editSessionState.richFormatApplier = applyRichFormat;
-            return () => { editSessionState.richFormatApplier = null; };
+        if (isContentEditable && richEditEl) {
+            untrack(() => {
+                const html = editSessionState.richTextValue;
+                if (isRichText(html)) {
+                    richEditEl.innerHTML = html;
+                } else {
+                    // Plain text — set as textContent to avoid XSS
+                    richEditEl.textContent = editValue ?? "";
+                }
+                // Move cursor to end
+                const range = document.createRange();
+                range.selectNodeContents(richEditEl);
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel?.removeAllRanges();
+                sel?.addRange(range);
+                // Sync initial HTML so commit() works from the start
+                const initHtml = richEditEl.innerHTML;
+                editSessionState.liveRichHtml = isRichText(initHtml)
+                    ? initHtml
+                    : null;
+                // Register so toolbar can apply inline formatting
+                editSessionState.richFormatApplier = applyRichFormat;
+            });
+            return () => {
+                editSessionState.richFormatApplier = null;
+            };
         }
     });
 
@@ -75,14 +97,47 @@
 
     function handleRichBlur() {
         if (!richEditEl) return;
-        // Use a short delay so that clicks on the formatting toolbar (which temporarily
-        // steal focus) can refocus the editor via applyRichFormat before we commit.
+        // Capture HTML and text immediately while element is still mounted
+        // (Svelte might clear the binding during setTimeout)
+        const html = richEditEl.innerHTML;
+        const innerText = richEditEl.innerText;
+        const textContent = richEditEl.textContent;
+
+        // Short delay so toolbar clicks (which briefly steal focus) can refocus
+        // the editor via applyRichFormat before we commit.
         setTimeout(() => {
-            if (document.activeElement === richEditEl) return; // focus returned
-            if (!richEditEl) return;
-            const runs = htmlToRuns(richEditEl);
-            onCommitEdit?.(runs);
+            if (document.activeElement === richEditEl) return;
+            commitRichValueWithContent(html, innerText, textContent);
         }, 150);
+    }
+
+    function commitRichValue() {
+        if (!richEditEl) return;
+        const html = richEditEl.innerHTML;
+        // If no markup tags present, commit as plain string
+        const value = isRichText(html)
+            ? html
+            : (richEditEl.innerText ?? richEditEl.textContent ?? "");
+        onCommitEdit?.(value);
+    }
+
+    function commitRichValueWithContent(html, innerText, textContent) {
+        // Use captured content if available, fallback to element if still mounted
+        const htmlContent = html ?? richEditEl?.innerHTML ?? "";
+
+        // Determine value to commit
+        let valueToCommit;
+        if (isRichText(htmlContent)) {
+            // Rich text HTML should be committed (not the plain text version)
+            valueToCommit = htmlContent;
+        } else {
+            // No rich text markup, use plain text
+            valueToCommit = innerText ?? textContent ?? "";
+        }
+
+        // Store the HTML we're committing to avoid duplicate commits
+        lastCommittedRichHtml = htmlContent;
+        onCommitEdit?.(valueToCommit);
     }
 
     function handleEditKeydown(e) {
@@ -98,23 +153,6 @@
         }
     }
 
-    /**
-     * Keydown handler for the plain <input> editor.
-     * Ctrl+Enter converts the current text to a rich-text run array so the
-     * contenteditable editor takes over and the user can insert a line break.
-     */
-    function handleInputKeydown(e) {
-        if (e.key === "Enter" && e.ctrlKey) {
-            e.stopPropagation();
-            e.preventDefault();
-            // Convert current plain text to rich text and signal parent to save + reopen.
-            const currentText = /** @type {HTMLInputElement} */ (e.target).value;
-            onCtrlEnter?.(currentText);
-        } else {
-            handleEditKeydown(e);
-        }
-    }
-
     function handleRichKeydown(e) {
         if (e.key === "Escape") {
             e.stopPropagation();
@@ -126,7 +164,7 @@
             // Plain Enter = commit
             e.stopPropagation();
             e.preventDefault();
-            handleRichBlur();
+            commitRichValue();
         } else if (e.key === "Enter" && e.ctrlKey) {
             // Ctrl+Enter = insert line break
             e.stopPropagation();
@@ -137,6 +175,11 @@
 
     function handleRichInput() {
         if (!richEditEl) return;
+        // Keep live HTML in sync so commitCurrentEdit() can commit rich text
+        // even when triggered by a mousedown on another cell (before blur fires).
+        const html = richEditEl.innerHTML;
+        const isRich = isRichText(html);
+        editSessionState.liveRichHtml = isRich ? html : null;
         // Keep plain-text draft in sync for formula bar display
         const plain = richEditEl.innerText;
         onEditInput?.(plain, null, null);
@@ -147,10 +190,9 @@
         if (!sel || sel.rangeCount === 0) return;
         const range = sel.getRangeAt(0);
         range.deleteContents();
-        const br = document.createElement('br');
+        const br = document.createElement("br");
         range.insertNode(br);
-        // Insert a zero-width text node after <br> so cursor has somewhere to go
-        const textNode = document.createTextNode('\u200B');
+        const textNode = document.createTextNode("\u200B");
         br.after(textNode);
         range.setStartAfter(textNode);
         range.collapse(true);
@@ -159,30 +201,44 @@
     }
 
     /**
-     * Apply a format to the current selection in the rich text editor.
-     * Called by FormattingToolbar when editing is active.
-     * @param {string} prop  CSS property ('fontWeight', 'fontStyle', 'textDecoration', 'color', 'fontSize')
+     * Apply inline formatting to the current selection in the rich text editor.
+     * Returns true if formatting was applied to a selection, false if the cursor
+     * was collapsed (caller should apply cell-level formatting instead).
+     *
+     * @param {string} prop  CSS property name ('fontWeight', 'fontStyle', 'underline', 'strikethrough', 'color', 'fontSize')
      * @param {string} value
+     * @returns {boolean}
      */
     export function applyRichFormat(prop, value) {
-        if (!richEditEl) return;
+        if (!richEditEl) return false;
         richEditEl.focus();
-        document.execCommand('styleWithCSS', false, 'true');
-        if (prop === 'fontWeight') document.execCommand('bold', false, null);
-        else if (prop === 'fontStyle') document.execCommand('italic', false, null);
-        else if (prop === 'underline') document.execCommand('underline', false, null);
-        else if (prop === 'strikethrough') document.execCommand('strikeThrough', false, null);
-        else if (prop === 'color') document.execCommand('foreColor', false, value);
-        else if (prop === 'fontSize') {
-            // execCommand fontSize only accepts 1-7; use inline style instead
-            const sel = window.getSelection();
-            if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+        const sel = window.getSelection();
+        const hasSelection =
+            sel && !sel.isCollapsed && richEditEl.contains(sel.anchorNode);
+        if (!hasSelection) return false;
+
+        document.execCommand("styleWithCSS", false, "true");
+        if (prop === "fontWeight") document.execCommand("bold", false, null);
+        else if (prop === "fontStyle")
+            document.execCommand("italic", false, null);
+        else if (prop === "underline")
+            document.execCommand("underline", false, null);
+        else if (prop === "strikethrough")
+            document.execCommand("strikeThrough", false, null);
+        else if (prop === "color")
+            document.execCommand("foreColor", false, value);
+        else if (prop === "fontSize") {
+            if (sel.rangeCount > 0) {
                 const range = sel.getRangeAt(0);
-                const span = document.createElement('span');
-                span.style.fontSize = value + 'px';
+                const span = document.createElement("span");
+                span.style.fontSize = value + "px";
                 range.surroundContents(span);
             }
         }
+        // Sync live HTML after formatting so commit() has the latest value
+        const newHtml = richEditEl.innerHTML;
+        editSessionState.liveRichHtml = isRichText(newHtml) ? newHtml : null;
+        return true;
     }
 
     function handlePickerCommit(val) {
@@ -191,7 +247,7 @@
 
     export function focusEditor() {
         setTimeout(() => {
-            if (isRichTextMode) richEditEl?.focus();
+            if (isContentEditable) richEditEl?.focus();
             else cellEditInputEl?.focus();
         }, 0);
     }
@@ -211,7 +267,7 @@
 
 <!-- Fullscreen container: pointer-events none so mouse events reach the event layer -->
 <div class="overlays-root">
-    {#if editorBounds && isEditing}
+    {#if editorBounds && isEditing && editSessionState.surface === "grid"}
         <div class="cell-editor" style={editorStyle}>
             {#if pickerMode}
                 <PickerEditor
@@ -222,16 +278,7 @@
                     on:cancel={onCancelEdit}
                     on:blur={handleEditBlur}
                 />
-            {:else if isRichTextMode}
-                <div
-                    class="cell-rich-edit"
-                    contenteditable="true"
-                    bind:this={richEditEl}
-                    onblur={handleRichBlur}
-                    onkeydown={handleRichKeydown}
-                    oninput={handleRichInput}
-                ></div>
-            {:else}
+            {:else if isFormulaMode}
                 <input
                     type="text"
                     class="cell-edit-input"
@@ -250,10 +297,8 @@
                         onEditSelect?.(t.selectionStart, t.selectionEnd);
                     }}
                     onblur={handleEditBlur}
-                    onkeydown={handleInputKeydown}
+                    onkeydown={handleEditKeydown}
                 />
-            {/if}
-            {#if isFormulaMode}
                 <div class="formula-overlay" aria-hidden="true">
                     {#each formulaSegments as segment}
                         {#if segment.color}
@@ -269,6 +314,15 @@
                     {/each}
                 </div>
                 <FormulaValuePopup formula={editValue} visible={true} />
+            {:else}
+                <div
+                    class="cell-rich-edit"
+                    contenteditable="true"
+                    bind:this={richEditEl}
+                    onblur={handleRichBlur}
+                    onkeydown={handleRichKeydown}
+                    oninput={handleRichInput}
+                ></div>
             {/if}
         </div>
     {/if}
@@ -328,7 +382,7 @@
         font-family: monospace;
     }
 
-    .cell-editor:has(.cell-edit-input) .formula-overlay {
+    .formula-overlay {
         position: absolute;
         inset: 0;
         padding: 0 4px;

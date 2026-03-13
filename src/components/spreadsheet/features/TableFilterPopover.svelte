@@ -1,4 +1,6 @@
 <script>
+    import { close } from "../../../lib/icons/index.js";
+
     /**
      * TableFilterPopover - Enhanced filter dropdown for a table column
      *
@@ -172,7 +174,7 @@
             <span class="active-badge" title="Filter active">●</span>
         {/if}
         <button class="close-btn" onclick={() => onClose()} aria-label="Close"
-            >✕</button
+            >{@html close}</button
         >
     </div>
 
@@ -277,11 +279,16 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 11px;
-        padding: 1px 3px;
+        font-size: 14px;
+        padding: 2px;
         border-radius: 3px;
         flex-shrink: 0;
         line-height: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
     }
 
     .close-btn:hover {

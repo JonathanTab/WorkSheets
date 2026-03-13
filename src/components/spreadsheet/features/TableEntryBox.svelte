@@ -1,4 +1,6 @@
 <script>
+    import { close } from "../../../lib/icons/index.js";
+
     /**
      * TableEntryBox - Floating multi-row entry form
      *
@@ -103,7 +105,7 @@
             class="close-btn"
             onclick={() => onclose?.()}
             type="button"
-            aria-label="Close">✕</button
+            aria-label="Close">{@html close}</button
         >
     </div>
 
@@ -152,7 +154,7 @@
                             class="remove-row-btn"
                             onclick={() => removeRow(rowIdx)}
                             type="button"
-                            aria-label="Remove row">✕</button
+                            aria-label="Remove row">{@html close}</button
                         >
                     {/if}
                 </div>
@@ -212,7 +214,13 @@
         cursor: pointer;
         font-size: 14px;
         color: var(--muted, #64748b);
-        padding: 2px 4px;
+        padding: 2px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: 3px;
     }
 
     .close-btn:hover {

@@ -536,7 +536,7 @@
         display: flex;
         align-items: center;
         gap: 2px;
-        padding: 2px 4px;
+        padding: 3px 4px;
         background: transparent;
         border: none;
         border-radius: 4px;
@@ -547,29 +547,37 @@
         background: var(--color-fill);
     }
 
+    .border-button:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
+    }
+
     .border-icon {
         display: flex;
         align-items: center;
         justify-content: center;
+        color: var(--color-text-secondary);
     }
 
     .arrow {
         font-size: 0.5rem;
-        opacity: 0.6;
+        opacity: 0.4;
     }
 
     .border-panel {
         position: absolute;
         top: 100%;
         left: 0;
-        margin-top: 4px;
-        padding: 8px;
+        margin-top: 2px;
+        padding: 10px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow:
+            0 1px 3px rgba(0, 0, 0, 0.08),
+            0 4px 12px rgba(0, 0, 0, 0.12);
         z-index: 1000;
-        min-width: 180px;
+        min-width: 200px;
     }
 
     .border-controls {
@@ -581,18 +589,18 @@
     .control-group {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 6px;
     }
 
     .control-group label {
-        font-size: 0.75rem;
-        color: var(--color-text-secondary);
+        font-size: 0.6875rem;
+        color: var(--color-text-muted);
     }
 
     .width-select {
-        height: 24px;
+        height: 22px;
         padding: 0 4px;
-        font-size: 0.75rem;
+        font-size: 0.6875rem;
         border: 1px solid var(--color-border);
         border-radius: 4px;
         background: var(--color-surface);
@@ -625,17 +633,23 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 2px;
+        gap: 3px;
         padding: 6px 4px;
         background: transparent;
         border: none;
         border-radius: 4px;
         cursor: pointer;
         text-align: center;
+        transition: background 0.08s ease;
     }
 
     .border-type-button:hover {
         background: var(--color-fill);
+    }
+
+    .border-type-button:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
     }
 
     .border-type-icon {
@@ -644,10 +658,13 @@
         display: flex;
         align-items: center;
         justify-content: center;
+        color: var(--color-text-secondary);
     }
 
     .border-type-label {
-        font-size: 0.625rem;
-        color: var(--color-text-secondary);
+        font-size: 0.5625rem;
+        color: var(--color-text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
     }
 </style>

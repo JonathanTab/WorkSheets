@@ -3,7 +3,11 @@
         spreadsheetSession,
         selectionState,
     } from "../../../stores/spreadsheetStore.svelte.js";
-    import { clipboardManager, editSessionState } from "../../../stores/spreadsheet/index.js";
+    import {
+        clipboardManager,
+        editSessionState,
+    } from "../../../stores/spreadsheet/index.js";
+    import { cut, copy, paste, printer } from "../../../lib/icons/index.js";
     import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import ColorPicker from "./ColorPicker.svelte";
     import BorderPicker from "./BorderPicker.svelte";
@@ -135,20 +139,25 @@
      * For range mode, iterates cells (skipping table/viewport cells).
      */
     function applyFormatting(property, value) {
-        // When editing a rich-text cell with a text selection, apply inline formatting
-        if (editSessionState.richTextValue != null && editSessionState.richFormatApplier) {
+        // When editing, try to apply inline formatting to the current text selection.
+        // richFormatApplier returns true if a selection existed and formatting was applied,
+        // false if the cursor was collapsed (fall through to cell-level formatting).
+        if (editSessionState.isEditing && editSessionState.richFormatApplier) {
             const propMap = {
-                bold: ['fontWeight', 'bold'],
-                italic: ['fontStyle', 'italic'],
-                underline: ['underline', null],
-                strikethrough: ['strikethrough', null],
-                color: ['color', value],
-                fontSize: ['fontSize', value],
+                bold: ["fontWeight", "bold"],
+                italic: ["fontStyle", "italic"],
+                underline: ["underline", null],
+                strikethrough: ["strikethrough", null],
+                color: ["color", value],
+                fontSize: ["fontSize", value],
             };
             const mapped = propMap[property];
             if (mapped) {
-                editSessionState.richFormatApplier(mapped[0], mapped[1] ?? value);
-                return;
+                const applied = editSessionState.richFormatApplier(
+                    mapped[0],
+                    mapped[1] ?? value,
+                );
+                if (applied) return;
             }
         }
 
@@ -420,7 +429,7 @@
             disabled={!hasSelection}
             title="Cut (Ctrl+X)"
         >
-            ✂
+            {@html cut}
         </button>
         <button
             class="toolbar-btn"
@@ -429,14 +438,14 @@
             disabled={!hasSelection}
             title="Copy (Ctrl+C)"
         >
-            📋
+            {@html copy}
         </button>
         <button
             class="toolbar-btn"
             onclick={() => handlePaste("full")}
             title="Paste (Ctrl+V)"
         >
-            📄
+            {@html paste}
         </button>
     </div>
 
@@ -572,7 +581,7 @@
             onclick={handlePrint}
             title="Print (Ctrl+P)"
         >
-            🖨
+            {@html printer}
         </button>
     </div>
 </div>
@@ -581,33 +590,36 @@
     .formatting-toolbar {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 0 0.5rem;
+        gap: 2px;
+        padding: 4px 0;
+        height: 36px;
     }
 
     .toolbar-group {
         display: flex;
         align-items: center;
-        gap: 2px;
+        gap: 1px;
     }
 
     .toolbar-btn {
         display: flex;
         align-items: center;
         justify-content: center;
-        min-width: 28px;
-        height: 28px;
-        padding: 0 6px;
+        min-width: 26px;
+        height: 26px;
+        padding: 0 5px;
         background: transparent;
         border: none;
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.875rem;
-        color: var(--color-text);
+        color: var(--color-text-secondary);
+        transition: all 0.08s ease;
     }
 
     .toolbar-btn:hover:not(.disabled) {
         background: var(--color-fill);
+        color: var(--color-text);
     }
 
     .toolbar-btn.active {
@@ -616,15 +628,21 @@
     }
 
     .toolbar-btn.disabled {
-        opacity: 0.4;
+        opacity: 0.35;
         cursor: not-allowed;
+    }
+
+    .toolbar-btn:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
     }
 
     .divider {
         width: 1px;
-        height: 20px;
+        height: 18px;
         background: var(--color-border);
-        margin: 0 4px;
+        margin: 0 6px;
+        flex-shrink: 0;
     }
 
     .spacer {
@@ -632,48 +650,55 @@
     }
 
     .font-family-select {
-        height: 28px;
-        padding: 0 8px;
-        font-size: 0.8125rem;
-        border: 1px solid var(--color-border);
+        height: 26px;
+        padding: 0 6px;
+        font-size: 0.75rem;
+        border: 1px solid transparent;
         border-radius: 4px;
-        background: var(--color-surface);
+        background: transparent;
         color: var(--color-text);
         cursor: pointer;
+        transition: all 0.08s ease;
+        min-width: 90px;
     }
 
     .font-family-select:hover {
-        border-color: var(--color-border-strong);
+        background: var(--color-fill);
+        border-color: var(--color-border);
     }
 
     .font-family-select:focus {
         outline: none;
         border-color: var(--color-primary);
+        background: var(--color-surface);
     }
 
     .font-size-input {
-        width: 40px;
-        height: 28px;
-        padding: 0 4px;
-        font-size: 0.8125rem;
+        width: 36px;
+        height: 26px;
+        padding: 0 3px;
+        font-size: 0.75rem;
         text-align: center;
-        border: 1px solid var(--color-border);
+        border: 1px solid transparent;
         border-radius: 4px;
-        background: var(--color-surface);
+        background: transparent;
         color: var(--color-text);
+        transition: all 0.08s ease;
     }
 
     .font-size-input:hover {
-        border-color: var(--color-border-strong);
+        background: var(--color-fill);
+        border-color: var(--color-border);
     }
 
     .font-size-input:focus {
         outline: none;
         border-color: var(--color-primary);
+        background: var(--color-surface);
     }
 
     .font-size-input:disabled {
-        opacity: 0.5;
+        opacity: 0.35;
         cursor: not-allowed;
     }
 </style>

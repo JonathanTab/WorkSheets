@@ -58,10 +58,10 @@ export const COLUMN_TYPE_ICONS = {
     number: '#',
     currency: '$',
     percent: '%',
-    date: '📅',
+    date: 'D',
     checkbox: '✓',
     rating: '★',
-    url: '🔗',
+    url: '↗',
 };
 
 export class TableStore {

@@ -31,7 +31,7 @@
     .toolbar {
         display: flex;
         flex-direction: column;
-        background: var(--color-bg-secondary);
+        background: var(--color-surface);
         border-bottom: 1px solid var(--color-border);
         user-select: none;
     }
@@ -39,20 +39,21 @@
     .toolbar-row {
         display: flex;
         align-items: center;
-        padding: 0 0.5rem;
+        padding: 0 8px;
         min-height: 32px;
     }
 
     .row1 {
         justify-content: space-between;
         border-bottom: 1px solid var(--color-border);
-        gap: 1rem;
+        gap: 8px;
+        background: var(--color-bg-secondary);
     }
 
     .row1-left {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
+        gap: 4px;
     }
 
     .row1-right {
@@ -63,12 +64,14 @@
     .row2 {
         justify-content: flex-start;
         background: var(--color-surface);
+        padding: 0 6px;
     }
 
     .close-btn {
         display: flex;
         align-items: center;
-        padding: 0.25rem 0.5rem;
+        gap: 4px;
+        padding: 4px 8px;
         font-size: 0.8125rem;
         font-weight: 500;
         color: var(--color-text-secondary);
@@ -76,11 +79,16 @@
         border: none;
         border-radius: 4px;
         cursor: pointer;
-        transition: all 0.15s ease;
+        transition: all 0.1s ease;
     }
 
     .close-btn:hover {
         background: var(--color-fill);
         color: var(--color-text);
+    }
+
+    .close-btn:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
     }
 </style>

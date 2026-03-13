@@ -90,7 +90,9 @@
                 onmouseleave={handleSubmenuLeave}
             >
                 {#if item.icon}
-                    <span class="item-icon">{item.icon}</span>
+                    <span class="item-icon"
+                        >{#if item.isSvgIcon}{@html item.icon}{:else}{item.icon}{/if}</span
+                    >
                 {/if}
                 <span class="item-label">{item.label}</span>
                 <span class="submenu-arrow">▶</span>
@@ -130,7 +132,9 @@
                 disabled={item.disabled}
             >
                 {#if item.icon}
-                    <span class="item-icon">{item.icon}</span>
+                    <span class="item-icon"
+                        >{#if item.isSvgIcon}{@html item.icon}{:else}{item.icon}{/if}</span
+                    >
                 {/if}
                 <span class="item-label">{item.label}</span>
                 {#if item.shortcut}
@@ -187,8 +191,12 @@
 
     .item-icon {
         width: 20px;
-        text-align: center;
-        font-size: 0.875rem;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        font-size: 14px;
     }
 
     .item-label {

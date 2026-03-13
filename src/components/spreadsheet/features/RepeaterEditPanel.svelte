@@ -1,4 +1,6 @@
 <script>
+    import { close, trash, repeat } from "../../../lib/icons/index.js";
+
     /**
      * RepeaterEditPanel - Floating panel for configuring a repeater.
      *
@@ -96,7 +98,7 @@
 
     <!-- Header -->
     <div class="panel-header">
-        <span class="panel-icon">↻</span>
+        <span class="panel-icon">{@html repeat}</span>
         {#if editingName}
             <input
                 class="name-edit-input"
@@ -104,17 +106,28 @@
                 bind:value={editingNameValue}
                 onblur={commitNameEdit}
                 onkeydown={(e) => {
-                    if (e.key === "Enter") { e.stopPropagation(); commitNameEdit(); }
-                    else if (e.key === "Escape") { e.stopPropagation(); cancelNameEdit(); }
+                    if (e.key === "Enter") {
+                        e.stopPropagation();
+                        commitNameEdit();
+                    } else if (e.key === "Escape") {
+                        e.stopPropagation();
+                        cancelNameEdit();
+                    }
                 }}
                 autofocus
             />
         {:else}
-            <button class="name-btn" onclick={startNameEdit} title="Click to rename">
+            <button
+                class="name-btn"
+                onclick={startNameEdit}
+                title="Click to rename"
+            >
                 {name}
             </button>
         {/if}
-        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">✕</button>
+        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close"
+            >{@html close}</button
+        >
     </div>
 
     <div class="panel-body">
@@ -124,7 +137,10 @@
             <div class="field-controls">
                 <button
                     class="step-btn"
-                    onclick={() => { localCount = Math.max(1, localCount - 1); applyCount(); }}
+                    onclick={() => {
+                        localCount = Math.max(1, localCount - 1);
+                        applyCount();
+                    }}
                     disabled={localCount <= 1}
                     aria-label="Decrease">−</button
                 >
@@ -140,7 +156,10 @@
                 />
                 <button
                     class="step-btn"
-                    onclick={() => { localCount = Math.min(500, localCount + 1); applyCount(); }}
+                    onclick={() => {
+                        localCount = Math.min(500, localCount + 1);
+                        applyCount();
+                    }}
                     disabled={localCount >= 500}
                     aria-label="Increase">+</button
                 >
@@ -153,7 +172,10 @@
             <div class="field-controls">
                 <button
                     class="step-btn"
-                    onclick={() => { localGap = Math.max(0, localGap - 1); applyGap(); }}
+                    onclick={() => {
+                        localGap = Math.max(0, localGap - 1);
+                        applyGap();
+                    }}
                     disabled={localGap <= 0}
                     aria-label="Decrease">−</button
                 >
@@ -169,7 +191,10 @@
                 />
                 <button
                     class="step-btn"
-                    onclick={() => { localGap = Math.min(100, localGap + 1); applyGap(); }}
+                    onclick={() => {
+                        localGap = Math.min(100, localGap + 1);
+                        applyGap();
+                    }}
                     aria-label="Increase">+</button
                 >
             </div>
@@ -205,13 +230,14 @@
         </div>
 
         <div class="template-hint">
-            Only the template (first copy) is editable. Other copies are read-only projections.
+            Only the template (first copy) is editable. Other copies are
+            read-only projections.
         </div>
     </div>
 
     <div class="panel-footer">
         <button class="delete-btn" onclick={handleDelete}>
-            🗑 Delete Repeater
+            {@html trash} Delete Repeater
         </button>
     </div>
 </div>
@@ -292,12 +318,15 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 12px;
-        padding: 0 2px;
+        font-size: 14px;
+        padding: 2px;
         line-height: 1;
         border-radius: 3px;
         display: flex;
         align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
         flex-shrink: 0;
     }
     .close-btn:hover {

@@ -14,6 +14,18 @@
 
     import { COLUMN_TYPE_ICONS } from "../../../stores/spreadsheet/features/TableStore.svelte.js";
     import TableColumnPanel from "./TableColumnPanel.svelte";
+    import {
+        close,
+        check,
+        filter,
+        trash,
+        download,
+        grip,
+        grid,
+        functionIcon,
+        sortAsc,
+        sortDesc,
+    } from "../../../lib/icons/index.js";
 
     let {
         /** @type {import('../../../stores/spreadsheet/features/TableStore.svelte.js').TableStore} */
@@ -45,7 +57,10 @@
 
     function handleInsertSortDirToggle() {
         if (!insertSortColId) return;
-        table?.setInsertSort(insertSortColId, insertSortDir === "asc" ? "desc" : "asc");
+        table?.setInsertSort(
+            insertSortColId,
+            insertSortDir === "asc" ? "desc" : "asc",
+        );
     }
 
     // Position management
@@ -74,8 +89,14 @@
 
     // Accent color
     const ACCENT_COLORS = [
-        '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6',
-        '#ef4444', '#06b6d4', '#ec4899', '#84cc16',
+        "#3b82f6",
+        "#10b981",
+        "#f59e0b",
+        "#8b5cf6",
+        "#ef4444",
+        "#06b6d4",
+        "#ec4899",
+        "#84cc16",
     ];
 
     // Table name editing
@@ -226,7 +247,8 @@
 
     <!-- Header -->
     <div class="panel-header">
-        <span class="panel-icon" style="color:{accentColor};">⊞</span>
+        <span class="panel-icon" style="color:{accentColor};">{@html grid}</span
+        >
         {#if editingName}
             <input
                 class="name-edit-input"
@@ -255,7 +277,7 @@
         {/if}
         <span class="row-count">{rowCount} row{rowCount !== 1 ? "s" : ""}</span>
         <button class="close-btn" onclick={() => onClose?.()} aria-label="Close"
-            >✕</button
+            >{@html close}</button
         >
     </div>
 
@@ -264,12 +286,13 @@
         <div class="stats-bar">
             {#if filterCount > 0}
                 <span class="stat-pill filter">
-                    ☰ {filterCount} filter{filterCount > 1 ? "s" : ""}
+                    {@html filter}
+                    {filterCount} filter{filterCount > 1 ? "s" : ""}
                 </span>
             {/if}
             {#if isSorted}
                 <span class="stat-pill sort">
-                    {table?.sortDir === "asc" ? "▲" : "▼"}
+                    {@html table?.sortDir === "asc" ? sortAsc : sortDesc}
                     {table?.columns?.find((c) => c.id === table.sortColId)
                         ?.name ?? ""}
                 </span>
@@ -300,7 +323,9 @@
                     ondragend={handleDragEnd}
                 >
                     <!-- Drag handle -->
-                    <span class="drag-handle" title="Drag to reorder">⠿</span>
+                    <span class="drag-handle" title="Drag to reorder"
+                        >{@html grip}</span
+                    >
 
                     <!-- Type badge (click to configure) -->
                     <button
@@ -384,7 +409,7 @@
                 onchange={handleInsertSortColChange}
             >
                 <option value="">— none —</option>
-                {#each columns.filter(c => !c.isNonEntry) as col}
+                {#each columns.filter((c) => !c.isNonEntry) as col}
                     <option value={col.id}>{col.name}</option>
                 {/each}
             </select>
@@ -394,7 +419,7 @@
                     onclick={handleInsertSortDirToggle}
                     title="Toggle direction"
                 >
-                    {insertSortDir === "asc" ? "▲ Asc" : "▼ Desc"}
+                    {@html insertSortDir === "asc" ? sortAsc : sortDesc}
                 </button>
             {/if}
         </div>
@@ -405,16 +430,37 @@
         {#if editingPosition}
             <div class="position-edit-row">
                 <label class="pos-label">Row</label>
-                <input type="number" class="pos-input" bind:value={posRow} min="0" />
+                <input
+                    type="number"
+                    class="pos-input"
+                    bind:value={posRow}
+                    min="0"
+                />
                 <label class="pos-label">Col</label>
-                <input type="number" class="pos-input" bind:value={posCol} min="0" />
-                <button class="pos-ok-btn" onclick={commitPosition}>✓</button>
-                <button class="pos-cancel-btn" onclick={cancelPosition}>✕</button>
+                <input
+                    type="number"
+                    class="pos-input"
+                    bind:value={posCol}
+                    min="0"
+                />
+                <button class="pos-ok-btn" onclick={commitPosition}
+                    >{@html check}</button
+                >
+                <button class="pos-cancel-btn" onclick={cancelPosition}
+                    >{@html close}</button
+                >
             </div>
         {:else}
             <div class="position-display-row">
-                <span class="pos-value">Row {table?.startRow ?? 0}, Col {table?.startCol ?? 0}</span>
-                <button class="pos-edit-btn" onclick={startPositionEdit} title="Move table">Move…</button>
+                <span class="pos-value"
+                    >Row {table?.startRow ?? 0}, Col {table?.startCol ??
+                        0}</span
+                >
+                <button
+                    class="pos-edit-btn"
+                    onclick={startPositionEdit}
+                    title="Move table">Move…</button
+                >
             </div>
         {/if}
 
@@ -442,10 +488,10 @@
             onclick={handleExportCSV}
             title="Export as CSV"
         >
-            ↓ Export CSV
+            {@html download} Export CSV
         </button>
         <button class="delete-btn" onclick={handleDelete}>
-            🗑 Delete Table
+            {@html trash} Delete Table
         </button>
     </div>
 </div>
@@ -533,11 +579,16 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 12px;
-        padding: 0 2px;
+        font-size: 14px;
+        padding: 2px;
         line-height: 1;
         border-radius: 3px;
         flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
     }
 
     .close-btn:hover {
@@ -815,7 +866,8 @@
         color: var(--text-color, #1e293b);
     }
 
-    .pos-ok-btn, .pos-cancel-btn {
+    .pos-ok-btn,
+    .pos-cancel-btn {
         width: 22px;
         height: 22px;
         border-radius: 3px;
@@ -872,7 +924,9 @@
 
     .color-swatch.active {
         border-color: #1e293b;
-        box-shadow: 0 0 0 1px #fff, 0 0 0 3px currentColor;
+        box-shadow:
+            0 0 0 1px #fff,
+            0 0 0 3px currentColor;
     }
 
     /* Add column button */

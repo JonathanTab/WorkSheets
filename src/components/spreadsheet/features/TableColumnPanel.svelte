@@ -14,6 +14,18 @@
 
     import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
     import { COLUMN_TYPE_ICONS } from "../../../stores/spreadsheet/features/TableStore.svelte.js";
+    import {
+        date,
+        checkbox,
+        star,
+        link,
+        close,
+        trash,
+        alignLeft,
+        alignCenter,
+        alignRight,
+        menu,
+    } from "../../../lib/icons/index.js";
 
     let {
         /** @type {import('../../../stores/spreadsheet/features/TableStore.svelte.js').TableStore} */
@@ -52,17 +64,17 @@
         { id: "number", label: "Number", icon: "#" },
         { id: "currency", label: "Currency", icon: "$" },
         { id: "percent", label: "Percent", icon: "%" },
-        { id: "date", label: "Date", icon: "📅" },
-        { id: "checkbox", label: "Checkbox", icon: "✓" },
-        { id: "rating", label: "Rating", icon: "★" },
-        { id: "url", label: "URL", icon: "🔗" },
+        { id: "date", label: "Date", icon: date, isSvg: true },
+        { id: "checkbox", label: "Checkbox", icon: checkbox, isSvg: true },
+        { id: "rating", label: "Rating", icon: star, isSvg: true },
+        { id: "url", label: "URL", icon: link, isSvg: true },
     ];
 
     const ALIGN_OPTIONS = [
-        { value: null, label: "Auto", icon: "≡" },
-        { value: "left", label: "Left", icon: "⬅" },
-        { value: "center", label: "Center", icon: "⬛" },
-        { value: "right", label: "Right", icon: "➡" },
+        { value: null, label: "Auto", icon: menu, isSvg: true },
+        { value: "left", label: "Left", icon: alignLeft, isSvg: true },
+        { value: "center", label: "Center", icon: alignCenter, isSvg: true },
+        { value: "right", label: "Right", icon: alignRight, isSvg: true },
     ];
 
     const COND_OPS = [
@@ -196,7 +208,7 @@
             <button
                 class="close-btn"
                 onclick={() => onClose?.()}
-                aria-label="Close">✕</button
+                aria-label="Close">{@html close}</button
             >
         </div>
     </div>
@@ -213,7 +225,9 @@
                         onclick={() => applyType(t.id)}
                         title={t.label}
                     >
-                        <span class="type-icon">{t.icon}</span>
+                        <span class="type-icon"
+                            >{#if t.isSvg}{@html t.icon}{:else}{t.icon}{/if}</span
+                        >
                         <span class="type-label">{t.label}</span>
                     </button>
                 {/each}
@@ -229,7 +243,8 @@
                         class="align-btn"
                         class:active={localHAlign === opt.value}
                         onclick={() => applyAlign(opt.value)}
-                        title={opt.label}>{opt.icon}</button
+                        title={opt.label}
+                        >{#if opt.isSvg}{@html opt.icon}{:else}{opt.icon}{/if}</button
                     >
                 {/each}
             </div>
@@ -396,7 +411,7 @@
                         >Apply</button
                     >
                     <button class="remove-cond-btn" onclick={removeCondFmt}
-                        >✕</button
+                        >{@html close}</button
                     >
                 </div>
             {/if}
@@ -413,7 +428,7 @@
                 ? "Delete this column"
                 : "Cannot delete the only column"}
         >
-            🗑 Delete Column
+            {@html trash} Delete Column
         </button>
     </div>
 </div>
@@ -479,10 +494,15 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 12px;
-        padding: 2px 4px;
+        font-size: 14px;
+        padding: 2px;
         border-radius: 3px;
         flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
     }
 
     .close-btn:hover {
