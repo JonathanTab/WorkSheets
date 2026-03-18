@@ -3,15 +3,26 @@
         alignLeft,
         alignCenter,
         alignRight,
+        alignTop,
+        alignMiddle,
+        alignBottom,
     } from "../../../lib/icons/index.js";
 
-    let { value = "left", onchange = undefined } = $props();
+    let { value = "left", onchange = undefined, vertical = false } = $props();
 
-    const alignments = [
+    const hAlignments = [
         { id: "left", icon: alignLeft, label: "Align Left" },
         { id: "center", icon: alignCenter, label: "Align Center" },
         { id: "right", icon: alignRight, label: "Align Right" },
     ];
+
+    const vAlignments = [
+        { id: "top", icon: alignTop, label: "Align Top" },
+        { id: "middle", icon: alignMiddle, label: "Align Middle" },
+        { id: "bottom", icon: alignBottom, label: "Align Bottom" },
+    ];
+
+    let alignments = $derived(vertical ? vAlignments : hAlignments);
 
     function handleSelect(alignId) {
         onchange?.(alignId);

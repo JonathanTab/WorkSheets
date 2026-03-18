@@ -21,6 +21,7 @@
     import { isRichText } from "../../../stores/spreadsheet/richText.js";
     import FormulaValuePopup from "../FormulaValuePopup.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
+    import ImageEditor from "../cellTypes/ImageEditor.svelte";
 
     let {
         /**
@@ -36,6 +37,10 @@
         onEditSelect,
         onCommitEdit,
         onCancelEdit,
+        /** Called with direction (+1 right, -1 left) when Tab is pressed during editing. */
+        onTabCommit = null,
+        /** Document ID, passed to ImageEditor for blob parentId. */
+        docId = null,
     } = $props();
 
     let cellEditInputEl = $state(null);
@@ -43,12 +48,13 @@
     let lastCommittedRichHtml = $state(null); // Track latest rich HTML to avoid duplicate commits
 
     let pickerMode = $derived(editSessionState.pickerMode);
+    let isImagePickerMode = $derived(pickerMode === 'image-picker');
     let isFormulaMode = $derived(
         isEditing &&
             typeof editValue === "string" &&
             editValue?.startsWith("="),
     );
-    // Use contenteditable for all non-formula, non-picker text cells
+    // Use contenteditable for all non-formula, non-picker, non-image text cells
     let isContentEditable = $derived(
         isEditing && !pickerMode && !isFormulaMode,
     );
@@ -92,6 +98,9 @@
 
     function handleEditBlur() {
         if (pickerMode) return;
+        // Don't commit when the surface was switched to the formula bar — the blur
+        // is caused by focus moving to the formula bar input, not a real dismiss.
+        if (editSessionState.surface !== 'grid') return;
         onCommitEdit?.(editValue);
     }
 
@@ -107,6 +116,7 @@
         // the editor via applyRichFormat before we commit.
         setTimeout(() => {
             if (document.activeElement === richEditEl) return;
+            if (editSessionState.surface !== 'grid') return;
             commitRichValueWithContent(html, innerText, textContent);
         }, 150);
     }
@@ -143,13 +153,23 @@
     function handleEditKeydown(e) {
         if (e.key === "Enter") {
             e.stopPropagation();
-            onCommitEdit?.(editValue);
+            e.preventDefault();
+            if (onTabCommit) {
+                onTabCommit(1); // Enter = move down
+            } else {
+                onCommitEdit?.(editValue);
+            }
         } else if (e.key === "Escape") {
             e.stopPropagation();
             onCancelEdit?.();
         } else if (e.key === "Tab") {
             e.stopPropagation();
-            onCommitEdit?.(editValue);
+            e.preventDefault();
+            if (onTabCommit) {
+                onTabCommit(e.shiftKey ? -1 : 1, 'tab');
+            } else {
+                onCommitEdit?.(editValue);
+            }
         }
     }
 
@@ -159,12 +179,22 @@
             onCancelEdit?.();
         } else if (e.key === "Tab") {
             e.stopPropagation();
-            handleRichBlur();
+            e.preventDefault();
+            if (onTabCommit) {
+                onTabCommit(e.shiftKey ? -1 : 1, 'tab');
+            } else {
+                handleRichBlur();
+            }
         } else if (e.key === "Enter" && !e.ctrlKey) {
-            // Plain Enter = commit
+            // Plain Enter = commit and move down
             e.stopPropagation();
             e.preventDefault();
-            commitRichValue();
+            if (onTabCommit) {
+                commitRichValue(); // captures HTML first
+                onTabCommit(1);
+            } else {
+                commitRichValue();
+            }
         } else if (e.key === "Enter" && e.ctrlKey) {
             // Ctrl+Enter = insert line break
             e.stopPropagation();
@@ -269,7 +299,21 @@
 <div class="overlays-root">
     {#if editorBounds && isEditing && editSessionState.surface === "grid"}
         <div class="cell-editor" style={editorStyle}>
-            {#if pickerMode}
+            {#if isImagePickerMode}
+                <ImageEditor
+                    value={editValue}
+                    {docId}
+                    onCommit={(blobId, fit) => {
+                        // Commit blobId as the cell value; fit is stored separately via ct update
+                        onCommitEdit?.(blobId ?? '');
+                        // Signal fit change via a custom event so Grid can update ct
+                        if (typeof window !== 'undefined') {
+                            window.dispatchEvent(new CustomEvent('image-fit-change', { detail: { fit } }));
+                        }
+                    }}
+                    onCancel={onCancelEdit}
+                />
+            {:else if pickerMode}
                 <PickerEditor
                     type={pickerMode}
                     value={editValue}
@@ -299,20 +343,7 @@
                     onblur={handleEditBlur}
                     onkeydown={handleEditKeydown}
                 />
-                <div class="formula-overlay" aria-hidden="true">
-                    {#each formulaSegments as segment}
-                        {#if segment.color}
-                            <span
-                                style="color:{segment.color}; font-weight:600;"
-                                >{segment.text}</span
-                            >
-                        {:else if segment.type === "FUNCTION"}
-                            <span class="formula-function">{segment.text}</span>
-                        {:else}
-                            <span>{segment.text}</span>
-                        {/if}
-                    {/each}
-                </div>
+                <div class="formula-overlay" aria-hidden="true"><span class="formula-overlay-text">{#each formulaSegments as segment}{#if segment.color}<span style="color:{segment.color}; font-weight:600;">{segment.text}</span>{:else if segment.type === "FUNCTION"}<span class="formula-function">{segment.text}</span>{:else}<span>{segment.text}</span>{/if}{/each}</span></div>
                 <FormulaValuePopup formula={editValue} visible={true} />
             {:else}
                 <div
@@ -387,15 +418,22 @@
         inset: 0;
         padding: 0 4px;
         font-size: 0.8125rem;
-        line-height: normal;
         pointer-events: none;
-        white-space: pre;
         overflow: hidden;
         font-family: monospace;
         z-index: 1;
         color: var(--text-color, #1e293b);
         background: var(--input-bg, #ffffff);
         outline: 2px solid var(--editor-outline, #3b82f6);
+        /* Vertically center text to match <input type="text"> behavior */
+        display: flex;
+        align-items: center;
+    }
+
+    .formula-overlay-text {
+        white-space: pre;
+        overflow: hidden;
+        min-width: 0;
     }
 
     .formula-function {
@@ -406,5 +444,6 @@
     .cell-editor:has(.formula-overlay) .cell-edit-input {
         color: transparent;
         background: transparent;
+        caret-color: var(--text-color, #1e293b);
     }
 </style>

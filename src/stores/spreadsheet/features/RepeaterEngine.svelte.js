@@ -51,6 +51,19 @@ export class RepeaterStore {
     count = $state(1); // total reps (0-based, so count=3 → $rep 0,1,2)
     gap = $state(0); // empty rows (vertical) or cols (horizontal) between reps
 
+    // ── Plain-number geometry snapshot (non-reactive) ─────────────────────────
+    // The $state fields above trigger Svelte reactive tracking on every read.
+    // getCellContext() is called per-cell during rendering (200+ times/frame),
+    // so reading $state inside it causes thousands of signal subscriptions/frame.
+    // #geo holds the same values as plain numbers, updated in #syncFromYjs, so
+    // the hot render path can use getCellContextFast() with zero reactive overhead.
+    #geo = {
+        direction: /** @type {'vertical'|'horizontal'} */ ('vertical'),
+        templateStartRow: 0, templateEndRow: 0,
+        templateStartCol: 0, templateEndCol: 0,
+        count: 1, gap: 0,
+    };
+
     // ── Derived geometry ──────────────────────────────────────────────────────
     get templateRows() {
         return this.templateEndRow - this.templateStartRow + 1;
@@ -107,6 +120,14 @@ export class RepeaterStore {
         this.direction = m.get("direction") ?? "vertical";
         this.count = m.get("count") ?? 1;
         this.gap = m.get("gap") ?? 0;
+        // Keep plain-number snapshot in sync for zero-overhead hot path
+        this.#geo.direction = this.direction;
+        this.#geo.templateStartRow = this.templateStartRow;
+        this.#geo.templateEndRow = this.templateEndRow;
+        this.#geo.templateStartCol = this.templateStartCol;
+        this.#geo.templateEndCol = this.templateEndCol;
+        this.#geo.count = this.count;
+        this.#geo.gap = this.gap;
     }
 
     #observeYjs() {
@@ -160,6 +181,38 @@ export class RepeaterStore {
             templateRow: row,
             templateCol: this.templateStartCol + localCol,
         };
+    }
+
+    /**
+     * Hot-path version of getCellContext that reads only plain numbers (no $state).
+     * Use this during rendering to avoid Svelte reactive tracking overhead.
+     * Equivalent logic to getCellContext() but operates on #geo snapshot.
+     */
+    getCellContextFast(row, col) {
+        const g = this.#geo;
+        if (g.direction === "vertical") {
+            if (col < g.templateStartCol || col > g.templateEndCol) return null;
+            const templateRows = g.templateEndRow - g.templateStartRow + 1;
+            const offset = row - g.templateStartRow;
+            if (offset < 0) return null;
+            const span = templateRows + g.gap;
+            const repIndex = Math.floor(offset / span);
+            if (repIndex >= g.count) return null;
+            const localRow = offset % span;
+            if (localRow >= templateRows) return null;
+            return { repIndex, templateRow: g.templateStartRow + localRow, templateCol: col };
+        }
+        // Horizontal
+        if (row < g.templateStartRow || row > g.templateEndRow) return null;
+        const templateCols = g.templateEndCol - g.templateStartCol + 1;
+        const offset = col - g.templateStartCol;
+        if (offset < 0) return null;
+        const span = templateCols + g.gap;
+        const repIndex = Math.floor(offset / span);
+        if (repIndex >= g.count) return null;
+        const localCol = offset % span;
+        if (localCol >= templateCols) return null;
+        return { repIndex, templateRow: row, templateCol: g.templateStartCol + localCol };
     }
 
     /**
@@ -276,7 +329,9 @@ export class RepeaterEngine {
      */
     getCellRepeaterContext(row, col) {
         for (const store of this.stores.values()) {
-            const ctx = store.getCellContext(row, col);
+            // Use fast path (plain numbers, no $state reads) to avoid reactive tracking
+            // overhead — this is called once per visible cell per frame.
+            const ctx = store.getCellContextFast(row, col);
             if (ctx) return { repeater: store, ...ctx };
         }
         return null;

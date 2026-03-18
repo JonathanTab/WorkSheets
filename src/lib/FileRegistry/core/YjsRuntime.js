@@ -150,4 +150,53 @@ export class YjsRuntime {
     isConnected(docId) {
         return this.activeDocs.get(docId)?.provider.wsconnected || false;
     }
+
+    /**
+     * Explicitly initialize a Yjs document with the provided initializer function.
+     * This should be called when creating a new document to ensure the initial
+     * structure is set before other clients can load it.
+     *
+     * @param {string} docId - The logical document ID.
+     * @param {string} roomId - The physical room ID on the Yjs server.
+     * @param {function(Y.Doc): void} initializer - Function to initialize the document.
+     * @returns {Promise<import('yjs').Doc>}
+     */
+    async initialize(docId, roomId, initializer) {
+        console.log(`[YjsRuntime] Initializing document ${docId} (room: ${roomId})...`);
+
+        // Load the document first
+        const ydoc = await this.load(docId, roomId);
+
+        // Run the initializer within a transaction
+        ydoc.transact(() => {
+            initializer(ydoc);
+        });
+
+        // Wait for persistence to sync the initial data
+        const active = this.activeDocs.get(docId);
+        if (active?.persistence) {
+            await new Promise((resolve) => {
+                // If already synced, resolve immediately
+                if (active.persistence.synced) {
+                    resolve();
+                    return;
+                }
+
+                // Wait for sync with timeout
+                const timeout = setTimeout(() => {
+                    console.warn(`[YjsRuntime] Initialization sync timeout for ${roomId}`);
+                    resolve();
+                }, PERSISTENCE_TIMEOUT);
+
+                active.persistence.once('synced', () => {
+                    clearTimeout(timeout);
+                    console.log(`[YjsRuntime] Initialization synced for ${roomId}`);
+                    resolve();
+                });
+            });
+        }
+
+        console.log(`[YjsRuntime] Document ${docId} initialized`);
+        return ydoc;
+    }
 }

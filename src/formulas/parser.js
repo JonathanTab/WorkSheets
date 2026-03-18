@@ -138,8 +138,35 @@ class Tokenizer {
 
             if (/\d/.test(char) || (char === '.' && /\d/.test(this.peek()))) {
                 tokens.push(this.readNumber());
-            } else if (char === '"' || char === "'") {
+            } else if (char === '"') {
                 tokens.push(this.readString(char));
+            } else if (char === "'") {
+                // Single-quoted string OR quoted sheet name ('Sheet Name'!A1).
+                // Read the content, then decide by checking for a trailing '!'.
+                this.advance(); // consume opening '
+                let nameValue = '';
+                while (this.currentChar) {
+                    if (this.currentChar === "'") {
+                        if (this.peek() === "'") {
+                            // '' escape sequence inside quoted sheet name
+                            nameValue += "'";
+                            this.advance();
+                            this.advance();
+                        } else {
+                            this.advance(); // consume closing '
+                            break;
+                        }
+                    } else {
+                        nameValue += this.currentChar;
+                        this.advance();
+                    }
+                }
+                if (this.currentChar === '!') {
+                    this.advance(); // consume !
+                    tokens.push({ type: TokenType.SHEET_REF, value: nameValue });
+                } else {
+                    tokens.push({ type: TokenType.STRING, value: nameValue });
+                }
             } else if (/[a-zA-Z_]/.test(char)) {
                 tokens.push(this.readIdentifier());
             } else if (char === '$') {
@@ -580,7 +607,8 @@ export function extractCellRefs(ast) {
                 break;
 
             case NodeType.SHEET_REF:
-                visit(node.ref);
+                // Cross-sheet refs are tracked separately; don't add them to the
+                // same-sheet dependency graph (which uses row/col keys only).
                 break;
         }
     }

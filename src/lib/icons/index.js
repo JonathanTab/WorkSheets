@@ -53,6 +53,12 @@ export const icons = {
 
     alignRight: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="10" x2="7" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="7" y2="18"/></svg>`,
 
+    alignTop: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="3" x2="21" y2="3"/><line x1="9" y1="6" x2="9" y2="21"/><line x1="15" y1="6" x2="15" y2="21"/><line x1="6" y1="9" x2="9" y2="6" /><line x1="12" y1="9" x2="9" y2="6"/><line x1="12" y1="9" x2="15" y2="6"/><line x1="18" y1="9" x2="15" y2="6"/></svg>`,
+
+    alignMiddle: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="6" y1="9" x2="9" y2="12"/><line x1="12" y1="9" x2="9" y2="12"/><line x1="12" y1="9" x2="15" y2="12"/><line x1="18" y1="9" x2="15" y2="12"/></svg>`,
+
+    alignBottom: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="3" x2="15" y2="18"/><line x1="6" y1="15" x2="9" y2="18"/><line x1="12" y1="15" x2="9" y2="18"/><line x1="12" y1="15" x2="15" y2="18"/><line x1="18" y1="15" x2="15" y2="18"/></svg>`,
+
     // Additional utility icons
     plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
 
@@ -96,6 +102,9 @@ export const icons = {
 
     // Function/formula
     functionIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`,
+
+    // Image cell type
+    image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
 };
 
 // Helper function to get icon with custom size/class
@@ -133,6 +142,9 @@ export const {
     alignLeft,
     alignCenter,
     alignRight,
+    alignTop,
+    alignMiddle,
+    alignBottom,
     plus,
     moreVertical,
     insertColumn,
@@ -149,5 +161,6 @@ export const {
     download,
     grip,
     grid,
-    functionIcon
+    functionIcon,
+    image: imageIcon,
 } = icons;

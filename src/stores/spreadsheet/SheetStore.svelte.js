@@ -77,6 +77,15 @@ export class SheetStore {
     rowMetaVersion = $state(0);
     colMetaVersion = $state(0);
 
+    // --- Print Settings Version ---
+    // Incremented when print settings change (triggers page break re-computation)
+    printSettingsVersion = $state(0);
+
+    // --- Floating Images ---
+    // Key: imageId (string) -> Value: { id, blobId, anchorRow, anchorCol, offsetX, offsetY, width, height, fit }
+    floatingImages = $state(new Map());
+    floatingImagesVersion = $state(0);
+
     // --- Merge Engine ---
     /** @type {MergeEngine} */
     mergeEngine = null;
@@ -116,6 +125,34 @@ export class SheetStore {
         this.defaultColWidth = this.#sheet.get('defaultColWidth');
         this.hidden = this.#sheet.get('hidden') ?? false;
         this.tabColor = this.#sheet.get('tabColor');
+        this.#syncFloatingImages();
+    }
+
+    #syncFloatingImages() {
+        const ymap = this.#sheet.get('floatingImages');
+        if (!ymap) { this.floatingImages = new Map(); return; }
+        const result = new Map();
+        ymap.forEach((v, id) => {
+            result.set(id, this.#normalizeFloatingImage(id, v));
+        });
+        this.floatingImages = result;
+    }
+
+    #normalizeFloatingImage(id, v) {
+        if (v instanceof Y.Map) {
+            return {
+                id,
+                blobId:     v.get('blobId') ?? '',
+                anchorRow:  v.get('anchorRow') ?? 0,
+                anchorCol:  v.get('anchorCol') ?? 0,
+                offsetX:    v.get('offsetX') ?? 0,
+                offsetY:    v.get('offsetY') ?? 0,
+                width:      v.get('width') ?? 200,
+                height:     v.get('height') ?? 150,
+                fit:        v.get('fit') ?? 'contain',
+            };
+        }
+        return { id, blobId: '', anchorRow: 0, anchorCol: 0, offsetX: 0, offsetY: 0, width: 200, height: 150, fit: 'contain', ...v };
     }
 
     #syncAllCells() {
@@ -212,6 +249,17 @@ export class SheetStore {
             // transaction fires our own handlers).
             if (event.keysChanged.has('rowMeta')) tryAttachRowMeta();
             if (event.keysChanged.has('colMeta')) tryAttachColMeta();
+            if (event.keysChanged.has('printSettings')) {
+                // tryAttachPrintSettings is defined later in the same scope;
+                // closures evaluate at call time so this is safe.
+                tryAttachPrintSettings(); // eslint-disable-line no-use-before-define
+                this.printSettingsVersion++;
+            }
+            if (event.keysChanged.has('floatingImages')) {
+                tryAttachFloatingImages(); // eslint-disable-line no-use-before-define
+                this.#syncFloatingImages();
+                this.floatingImagesVersion++;
+            }
         };
         this.#sheet.observe(sheetObserver);
 
@@ -261,6 +309,35 @@ export class SheetStore {
         };
         this.#borders.observe(bordersObserver);
 
+        // 5. Observe printSettings Y.Map changes
+        let printSettingsMap = null;
+        const printSettingsHandler = () => { this.printSettingsVersion++; };
+        const tryAttachPrintSettings = () => {
+            const map = this.#sheet.get('printSettings');
+            if (map && map !== printSettingsMap) {
+                if (printSettingsMap) printSettingsMap.unobserve(printSettingsHandler);
+                printSettingsMap = map;
+                printSettingsMap.observe(printSettingsHandler);
+            }
+        };
+        tryAttachPrintSettings();
+
+        // 6. Observe floatingImages Y.Map changes
+        let floatingImagesMap = null;
+        const floatingImagesHandler = () => {
+            this.#syncFloatingImages();
+            this.floatingImagesVersion++;
+        };
+        const tryAttachFloatingImages = () => {
+            const map = this.#sheet.get('floatingImages');
+            if (map && map !== floatingImagesMap) {
+                if (floatingImagesMap) floatingImagesMap.unobserveDeep(floatingImagesHandler);
+                floatingImagesMap = map;
+                floatingImagesMap.observeDeep(floatingImagesHandler);
+            }
+        };
+        tryAttachFloatingImages();
+
         this.#cleanup = () => {
             this.#sheet.unobserve(sheetObserver);
             this.#cells.unobserve(cellObserver);
@@ -268,13 +345,76 @@ export class SheetStore {
             this.#borders.unobserve(bordersObserver);
             if (rowMetaMap) rowMetaMap.unobserveDeep(rowMetaHandler);
             if (colMetaMap) colMetaMap.unobserveDeep(colMetaHandler);
+            if (printSettingsMap) printSettingsMap.unobserve(printSettingsHandler);
+            if (floatingImagesMap) floatingImagesMap.unobserveDeep(floatingImagesHandler);
         };
     }
 
     // --- Public API ---
 
+    // ─── Floating Image Methods ────────────────────────────────────────────────
+
+    /**
+     * Add a new floating image to the sheet.
+     * @param {{ blobId: string, anchorRow: number, anchorCol: number, offsetX?: number, offsetY?: number, width?: number, height?: number, fit?: string }} opts
+     * @returns {string} The new image ID
+     */
+    addFloatingImage(opts) {
+        const id = crypto.randomUUID ? crypto.randomUUID() : `fi_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        this.#ydoc.transact(() => {
+            let ymap = this.#sheet.get('floatingImages');
+            if (!ymap) {
+                ymap = new Y.Map();
+                this.#sheet.set('floatingImages', ymap);
+            }
+            const img = new Y.Map();
+            img.set('blobId',    opts.blobId ?? '');
+            img.set('anchorRow', opts.anchorRow ?? 0);
+            img.set('anchorCol', opts.anchorCol ?? 0);
+            img.set('offsetX',   opts.offsetX ?? 0);
+            img.set('offsetY',   opts.offsetY ?? 0);
+            img.set('width',     opts.width ?? 200);
+            img.set('height',    opts.height ?? 150);
+            img.set('fit',       opts.fit ?? 'contain');
+            ymap.set(id, img);
+        });
+        return id;
+    }
+
+    /**
+     * Update properties of an existing floating image.
+     * @param {string} id
+     * @param {Partial<{blobId,anchorRow,anchorCol,offsetX,offsetY,width,height,fit}>} changes
+     */
+    updateFloatingImage(id, changes) {
+        const ymap = this.#sheet.get('floatingImages');
+        if (!ymap) return;
+        const img = ymap.get(id);
+        if (!img || !(img instanceof Y.Map)) return;
+        this.#ydoc.transact(() => {
+            for (const [k, v] of Object.entries(changes)) {
+                img.set(k, v);
+            }
+        });
+    }
+
+    /**
+     * Remove a floating image from the sheet.
+     * @param {string} id
+     */
+    removeFloatingImage(id) {
+        const ymap = this.#sheet.get('floatingImages');
+        if (!ymap) return;
+        this.#ydoc.transact(() => {
+            ymap.delete(id);
+        });
+    }
+
+    // ─── Cell Methods ──────────────────────────────────────────────────────────
+
     /**
      * Get a cell's reactive state.
+     * Returns reactive object if exists, or frozen empty cell constant.
      * Returns reactive object if exists, or frozen empty cell constant.
      * @param {number} row
      * @param {number} col
@@ -493,12 +633,12 @@ export class SheetStore {
      * @param {Object} props
      */
     setRowFormatting(rowIndex, props) {
-        let rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) {
-            rowMeta = new Y.Map();
-            this.#sheet.set('rowMeta', rowMeta);
-        }
         this.#ydoc.transact(() => {
+            let rowMeta = this.#sheet.get('rowMeta');
+            if (!rowMeta) {
+                rowMeta = new Y.Map();
+                this.#sheet.set('rowMeta', rowMeta);
+            }
             let meta = rowMeta.get(String(rowIndex));
             if (!meta) {
                 meta = new Y.Map();
@@ -539,12 +679,12 @@ export class SheetStore {
      * @param {Object} props
      */
     setColFormatting(colIndex, props) {
-        let colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) {
-            colMeta = new Y.Map();
-            this.#sheet.set('colMeta', colMeta);
-        }
         this.#ydoc.transact(() => {
+            let colMeta = this.#sheet.get('colMeta');
+            if (!colMeta) {
+                colMeta = new Y.Map();
+                this.#sheet.set('colMeta', colMeta);
+            }
             let meta = colMeta.get(String(colIndex));
             if (!meta) {
                 meta = new Y.Map();
@@ -563,13 +703,12 @@ export class SheetStore {
      * @param {Object} ct
      */
     setColTypeConfig(col, ct) {
-        let colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) {
-            colMeta = new Y.Map();
-            this.#sheet.set('colMeta', colMeta);
-        }
-
         this.#ydoc.transact(() => {
+            let colMeta = this.#sheet.get('colMeta');
+            if (!colMeta) {
+                colMeta = new Y.Map();
+                this.#sheet.set('colMeta', colMeta);
+            }
             let meta = colMeta.get(String(col));
             if (!meta) {
                 meta = new Y.Map();
@@ -578,9 +717,28 @@ export class SheetStore {
             if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
             else meta.set(CELL_TYPE_CONFIG_KEY, ct);
         });
-        // colMetaVersion is incremented by the colMetaHandler (observeDeep on
-        // colMeta) when the transaction above commits — covers both local and
-        // remote changes with no manual increment needed.
+    }
+
+    /**
+     * Set row-level type config
+     * @param {number} row
+     * @param {Object|null} ct
+     */
+    setRowTypeConfig(row, ct) {
+        this.#ydoc.transact(() => {
+            let rowMeta = this.#sheet.get('rowMeta');
+            if (!rowMeta) {
+                rowMeta = new Y.Map();
+                this.#sheet.set('rowMeta', rowMeta);
+            }
+            let meta = rowMeta.get(String(row));
+            if (!meta) {
+                meta = new Y.Map();
+                rowMeta.set(String(row), meta);
+            }
+            if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
+            else meta.set(CELL_TYPE_CONFIG_KEY, ct);
+        });
     }
 
     // --- Sheet Property Setters ---
@@ -1652,6 +1810,257 @@ export class SheetStore {
         this.#ydoc.transact(() => {
             for (const key of keysToDelete) {
                 this.#borders.delete(key);
+            }
+        });
+    }
+
+    // --- Conditional Formatting ---
+
+    /**
+     * Get all conditional format rules for this sheet.
+     * Returns a plain JS array of rule objects.
+     * @returns {Array<Object>}
+     */
+    getConditionalFormats() {
+        const arr = this.#sheet.get('conditionalFormats');
+        if (!arr) return [];
+        return arr.toArray();
+    }
+
+    /**
+     * Add a conditional format rule.
+     * Rule: { id, startRow, startCol, endRow, endCol, condition, threshold, style }
+     * @param {Object} rule
+     */
+    addConditionalFormat(rule) {
+        this.#ydoc.transact(() => {
+            let arr = this.#sheet.get('conditionalFormats');
+            if (!arr) {
+                arr = new Y.Array();
+                this.#sheet.set('conditionalFormats', arr);
+            }
+            arr.push([rule]);
+        });
+    }
+
+    /**
+     * Update a conditional format rule by id.
+     * @param {string} id
+     * @param {Object} updates
+     */
+    updateConditionalFormat(id, updates) {
+        this.#ydoc.transact(() => {
+            const arr = this.#sheet.get('conditionalFormats');
+            if (!arr) return;
+            const rules = arr.toArray();
+            const idx = rules.findIndex(r => r.id === id);
+            if (idx === -1) return;
+            arr.delete(idx, 1);
+            arr.insert(idx, [{ ...rules[idx], ...updates }]);
+        });
+    }
+
+    /**
+     * Delete a conditional format rule by id.
+     * @param {string} id
+     */
+    deleteConditionalFormat(id) {
+        this.#ydoc.transact(() => {
+            const arr = this.#sheet.get('conditionalFormats');
+            if (!arr) return;
+            const rules = arr.toArray();
+            const idx = rules.findIndex(r => r.id === id);
+            if (idx !== -1) arr.delete(idx, 1);
+        });
+    }
+
+    // --- Data Validation ---
+
+    /**
+     * Get all data validation rules for this sheet.
+     * @returns {Array<Object>}
+     */
+    getDataValidations() {
+        const arr = this.#sheet.get('dataValidations');
+        if (!arr) return [];
+        return arr.toArray();
+    }
+
+    /**
+     * Add a data validation rule.
+     * Rule: { id, startRow, startCol, endRow, endCol, type, options, message, strict }
+     * @param {Object} rule
+     */
+    addDataValidation(rule) {
+        this.#ydoc.transact(() => {
+            let arr = this.#sheet.get('dataValidations');
+            if (!arr) {
+                arr = new Y.Array();
+                this.#sheet.set('dataValidations', arr);
+            }
+            arr.push([rule]);
+        });
+    }
+
+    /**
+     * Update a data validation rule by id.
+     * @param {string} id
+     * @param {Object} updates
+     */
+    updateDataValidation(id, updates) {
+        this.#ydoc.transact(() => {
+            const arr = this.#sheet.get('dataValidations');
+            if (!arr) return;
+            const rules = arr.toArray();
+            const idx = rules.findIndex(r => r.id === id);
+            if (idx === -1) return;
+            arr.delete(idx, 1);
+            arr.insert(idx, [{ ...rules[idx], ...updates }]);
+        });
+    }
+
+    /**
+     * Delete a data validation rule by id.
+     * @param {string} id
+     */
+    deleteDataValidation(id) {
+        this.#ydoc.transact(() => {
+            const arr = this.#sheet.get('dataValidations');
+            if (!arr) return;
+            const rules = arr.toArray();
+            const idx = rules.findIndex(r => r.id === id);
+            if (idx !== -1) arr.delete(idx, 1);
+        });
+    }
+
+    /**
+     * Clear all formatting from a range of cells (keeps values).
+     * @param {number} startRow
+     * @param {number} startCol
+     * @param {number} endRow
+     * @param {number} endCol
+     */
+    clearRangeFormatting(startRow, startCol, endRow, endCol) {
+        const formattingKeys = [
+            'fontFamily', 'fontSize', 'bold', 'italic', 'underline',
+            'strikethrough', 'color', 'backgroundColor', 'horizontalAlign',
+            'verticalAlign', 'wrapText', 'numberFormat', 'ct'
+        ];
+        this.#ydoc.transact(() => {
+            this.#cells.forEach((cellYMap, key) => {
+                const [r, c] = key.split(',').map(Number);
+                if (r < startRow || r > endRow || c < startCol || c > endCol) return;
+                for (const k of formattingKeys) {
+                    if (cellYMap.has(k)) cellYMap.delete(k);
+                }
+            });
+        });
+    }
+
+    /**
+     * Adjust formula references by a row/col offset (relative refs only).
+     * @param {string} formula
+     * @param {number} rowOffset
+     * @param {number} colOffset
+     * @returns {string}
+     */
+    #adjustFormulaByOffset(formula, rowOffset, colOffset) {
+        if (rowOffset === 0 && colOffset === 0) return formula;
+        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
+            const colNum = this.#colToNum(col);
+            const rowNum = parseInt(row, 10);
+            const newCol = colAbs ? col : this.#numToCol(colNum + colOffset);
+            const newRow = rowAbs ? row : String(rowNum + rowOffset);
+            return `${colAbs}${newCol}${rowAbs}${newRow}`;
+        });
+    }
+
+    /**
+     * Fill down: copy source row values+formatting down through the range.
+     * @param {number} startRow  source row
+     * @param {number} startCol
+     * @param {number} endRow
+     * @param {number} endCol
+     */
+    fillDown(startRow, startCol, endRow, endCol) {
+        this.#ydoc.transact(() => {
+            for (let c = startCol; c <= endCol; c++) {
+                const srcKey = `${startRow},${c}`;
+                const srcYMap = this.#cells.get(srcKey);
+                for (let r = startRow + 1; r <= endRow; r++) {
+                    const dstKey = `${r},${c}`;
+                    if (srcYMap) {
+                        const data = this.#processCellYMapToData(srcYMap);
+                        if (data.v && typeof data.v === 'string' && data.v.startsWith('=')) {
+                            data.v = this.#adjustFormulaByOffset(data.v, r - startRow, 0);
+                        }
+                        const newMap = createCellYMap(data);
+                        this.#cells.set(dstKey, newMap);
+                    } else {
+                        this.#cells.delete(dstKey);
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Fill right: copy source col values+formatting right through the range.
+     * @param {number} startRow
+     * @param {number} startCol  source col
+     * @param {number} endRow
+     * @param {number} endCol
+     */
+    fillRight(startRow, startCol, endRow, endCol) {
+        this.#ydoc.transact(() => {
+            for (let r = startRow; r <= endRow; r++) {
+                const srcKey = `${r},${startCol}`;
+                const srcYMap = this.#cells.get(srcKey);
+                for (let c = startCol + 1; c <= endCol; c++) {
+                    const dstKey = `${r},${c}`;
+                    if (srcYMap) {
+                        const data = this.#processCellYMapToData(srcYMap);
+                        if (data.v && typeof data.v === 'string' && data.v.startsWith('=')) {
+                            data.v = this.#adjustFormulaByOffset(data.v, 0, c - startCol);
+                        }
+                        const newMap = createCellYMap(data);
+                        this.#cells.set(dstKey, newMap);
+                    } else {
+                        this.#cells.delete(dstKey);
+                    }
+                }
+            }
+        });
+    }
+
+    // --- Print Settings ---
+
+    /**
+     * Get all print settings as a plain object.
+     * @returns {Object}
+     */
+    getPrintSettings() {
+        const ps = this.#sheet.get('printSettings');
+        if (!ps) return {};
+        const result = {};
+        ps.forEach((v, k) => { result[k] = v; });
+        return result;
+    }
+
+    /**
+     * Merge updates into the print settings Y.Map.
+     * @param {Object} updates  Key/value pairs to set
+     */
+    setPrintSettings(updates) {
+        if (!updates || typeof updates !== 'object') return;
+        this.#ydoc.transact(() => {
+            let ps = this.#sheet.get('printSettings');
+            if (!ps) {
+                ps = new Y.Map();
+                this.#sheet.set('printSettings', ps);
+            }
+            for (const [k, v] of Object.entries(updates)) {
+                ps.set(k, v);
             }
         });
     }

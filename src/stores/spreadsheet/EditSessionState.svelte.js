@@ -63,6 +63,13 @@ export class EditSessionState {
      */
     richFormatApplier = null;
 
+    /**
+     * The sheet ID where this edit was initiated.
+     * Used to track cross-sheet formula editing so we can return to the origin sheet on commit/cancel.
+     * @type {string | null}
+     */
+    editingSheetId = $state(null);
+
     /** @type {Map<string, Function>} */
     #focusHandles = new Map();
 
@@ -166,6 +173,7 @@ export class EditSessionState {
         this.surface = surface;
         this.sessionId++;
         this.pickerMode = options.pickerMode || null;
+        this.editingSheetId = options.sheetId ?? null;
 
         formulaEditState.startEditing(row, col, text);
         formulaEditState.updateValue(text, this.cursorStart);
@@ -269,6 +277,32 @@ export class EditSessionState {
         this.#stopEditing();
     }
 
+    /**
+     * Append a formula reference after the current cursor position (for multi-select).
+     * Inserts a comma separator unless the preceding character is already an operator/open-paren.
+     * @param {string} ref
+     */
+    appendReference(ref) {
+        if (!this.isEditing || !this.isFormulaMode) return;
+
+        const value = this.draft;
+        const pos = Math.max(this.cursorStart, this.cursorEnd);
+
+        const before = value.substring(0, pos);
+        const after = value.substring(pos);
+
+        // Only add comma if the char before cursor isn't already a separator/operator
+        const lastChar = before.trimEnd().slice(-1);
+        const needsComma = lastChar && !',;(+-*/='.includes(lastChar);
+        const prefix = needsComma ? ',' : '';
+
+        const newValue = before + prefix + ref + after;
+        const newCursor = pos + prefix.length + ref.length;
+
+        this.updateDraft(newValue, newCursor, newCursor);
+        this.requestFocus(this.surface);
+    }
+
     #stopEditing() {
         this.phase = 'idle';
         this.cell = null;
@@ -281,6 +315,7 @@ export class EditSessionState {
         this.cursorEnd = 0;
         this.surface = 'grid';
         this.pickerMode = null;
+        this.editingSheetId = null;
         this.sessionId++;
         formulaEditState.stopEditing();
     }
@@ -288,6 +323,9 @@ export class EditSessionState {
 
 /**
  * Find all reference token ranges in a formula.
+ * Cross-sheet refs (Sheet1!A1, 'My Sheet'!A1:B5) are treated as single tokens
+ * so that clicking a cell while in formula mode replaces the whole cross-sheet
+ * ref rather than just the cell-address part (which would leave a dangling "Sheet1!").
  * @param {string} formula
  * @returns {Array<{start: number, end: number}>}
  */
@@ -298,33 +336,38 @@ function findReferencePositions(formula) {
     const content = formula.startsWith('=') ? formula.slice(1) : formula;
     const offset = formula.startsWith('=') ? 1 : 0;
 
-    // Match ranges first (A1:B5)
-    const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     let match;
 
-    const rangePositions = [];
-    while ((match = rangeRegex.exec(content)) !== null) {
-        rangePositions.push({
-            start: match.index,
-            end: match.index + match[0].length
-        });
-        positions.push({
-            start: match.index + offset,
-            end: match.index + match[0].length + offset
-        });
+    // 1. Cross-sheet refs first (highest priority, treated as whole tokens).
+    //    Matches: Sheet1!A1, Sheet1!A1:B5, 'Sheet Name'!A1, 'Sheet''s Name'!A1:B5
+    const crossSheetRegex = /(?:'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
+    const crossSheetPositions = [];
+    while ((match = crossSheetRegex.exec(content)) !== null) {
+        crossSheetPositions.push({ start: match.index, end: match.index + match[0].length });
+        positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
     }
 
-    // Match individual refs not inside ranges.
+    // Helper: is a content-relative position covered by a cross-sheet token?
+    function inCrossSheet(idx) {
+        return crossSheetPositions.some(r => idx >= r.start && idx < r.end);
+    }
+
+    // 2. Plain ranges (A1:B5) not inside a cross-sheet ref.
+    const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
+    const rangePositions = [];
+    while ((match = rangeRegex.exec(content)) !== null) {
+        if (!inCrossSheet(match.index)) {
+            rangePositions.push({ start: match.index, end: match.index + match[0].length });
+            positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
+        }
+    }
+
+    // 3. Individual cell refs not inside a cross-sheet token or range.
     const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
     while ((match = cellRegex.exec(content)) !== null) {
-        const inRange = rangePositions.some(
-            (r) => match.index >= r.start && match.index < r.end
-        );
-        if (!inRange) {
-            positions.push({
-                start: match.index + offset,
-                end: match.index + match[0].length + offset
-            });
+        if (!inCrossSheet(match.index) &&
+            !rangePositions.some(r => match.index >= r.start && match.index < r.end)) {
+            positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
         }
     }
 

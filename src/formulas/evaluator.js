@@ -14,9 +14,10 @@ import { getFunction, isError, FormulaError } from './functions.js';
  * @param {Function} getCellValue - Function to get cell value: (row, col) => value
  * @param {Object} context - Evaluation context (e.g. { rep: 2 } for repeaters)
  * @param {Map<string,Function>|null} customFunctions - Extra function registry (TABLE_* etc.)
+ * @param {Function|null} getCrossSheetValue - Function to get a value from another sheet: (sheetName, row, col) => value
  * @returns {any} - The computed value
  */
-export function evaluate(ast, getCellValue, context = {}, customFunctions = null) {
+export function evaluate(ast, getCellValue, context = {}, customFunctions = null, getCrossSheetValue = null) {
     if (!ast) return null;
 
     // Handle errors propagating
@@ -39,18 +40,16 @@ export function evaluate(ast, getCellValue, context = {}, customFunctions = null
             return evaluateRange(ast, getCellValue);
 
         case NodeType.BINARY_OP:
-            return evaluateBinaryOp(ast, getCellValue, context, customFunctions);
+            return evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossSheetValue);
 
         case NodeType.UNARY_OP:
-            return evaluateUnaryOp(ast, getCellValue, context, customFunctions);
+            return evaluateUnaryOp(ast, getCellValue, context, customFunctions, getCrossSheetValue);
 
         case NodeType.FUNCTION_CALL:
-            return evaluateFunctionCall(ast, getCellValue, context, customFunctions);
+            return evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCrossSheetValue);
 
         case NodeType.SHEET_REF:
-            // For now, treat sheet refs as errors
-            // TODO: Implement multi-sheet support
-            return FormulaError.REF;
+            return evaluateSheetRef(ast, getCrossSheetValue);
 
         case NodeType.REP_VAR:
             // $rep variable – returns the current repetition index (0-based)
@@ -121,15 +120,51 @@ function evaluateRange(ast, getCellValue) {
 }
 
 /**
+ * Evaluate a cross-sheet reference node (SheetName!CellOrRange)
+ */
+function evaluateSheetRef(ast, getCrossSheetValue) {
+    if (!getCrossSheetValue) return FormulaError.REF;
+
+    const sheetName = ast.sheet;
+    const ref = ast.ref;
+
+    if (ref.type === NodeType.CELL_REF) {
+        const value = getCrossSheetValue(sheetName, ref.row, ref.col);
+        if (value === null || value === undefined) return null;
+        if (typeof value === 'string' && value.trim() !== '' && !isNaN(Number(value))) {
+            return Number(value);
+        }
+        return value;
+    }
+
+    if (ref.type === NodeType.RANGE) {
+        const { start, end } = ref;
+        if (start.row > end.row || start.col > end.col) return FormulaError.REF;
+        const result = [];
+        for (let r = start.row; r <= end.row; r++) {
+            const row = [];
+            for (let c = start.col; c <= end.col; c++) {
+                const v = getCrossSheetValue(sheetName, r, c);
+                row.push(v);
+            }
+            result.push(row);
+        }
+        return result;
+    }
+
+    return FormulaError.REF;
+}
+
+/**
  * Evaluate a binary operation
  */
-function evaluateBinaryOp(ast, getCellValue, context, customFunctions) {
-    const left = evaluate(ast.left, getCellValue, context, customFunctions);
+function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossSheetValue) {
+    const left = evaluate(ast.left, getCellValue, context, customFunctions, getCrossSheetValue);
 
     // Short-circuit for errors
     if (isError(left)) return left;
 
-    const right = evaluate(ast.right, getCellValue, context, customFunctions);
+    const right = evaluate(ast.right, getCellValue, context, customFunctions, getCrossSheetValue);
 
     // Short-circuit for errors
     if (isError(right)) return right;
@@ -238,8 +273,8 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions) {
 /**
  * Evaluate a unary operation
  */
-function evaluateUnaryOp(ast, getCellValue, context, customFunctions) {
-    const operand = evaluate(ast.operand, getCellValue, context, customFunctions);
+function evaluateUnaryOp(ast, getCellValue, context, customFunctions, getCrossSheetValue) {
+    const operand = evaluate(ast.operand, getCellValue, context, customFunctions, getCrossSheetValue);
 
     if (isError(operand)) return operand;
 
@@ -264,7 +299,7 @@ function evaluateUnaryOp(ast, getCellValue, context, customFunctions) {
 /**
  * Evaluate a function call
  */
-function evaluateFunctionCall(ast, getCellValue, context, customFunctions) {
+function evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCrossSheetValue) {
     const funcDef = getFunction(ast.name);
 
     if (!funcDef) {
@@ -272,7 +307,7 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions) {
         const customFn = customFunctions?.get(ast.name.toUpperCase());
         if (customFn) {
             const evaluatedArgs = ast.args.map((arg) =>
-                evaluate(arg, getCellValue, context, customFunctions),
+                evaluate(arg, getCellValue, context, customFunctions, getCrossSheetValue),
             );
             try {
                 return customFn(...evaluatedArgs);
@@ -294,10 +329,8 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions) {
     }
 
     // Evaluate arguments
-    // For functions that need ranges, we don't evaluate the argument
-    // We check if the function wants raw AST nodes
     const evaluatedArgs = ast.args.map((arg) =>
-        evaluate(arg, getCellValue, context, customFunctions),
+        evaluate(arg, getCellValue, context, customFunctions, getCrossSheetValue),
     );
 
     // Call the function
@@ -315,13 +348,14 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions) {
  * @param {Function} getCellValue - Function to get cell value
  * @param {Object} [context] - Optional evaluation context
  * @param {Map<string,Function>|null} [customFunctions] - Optional custom function registry
+ * @param {Function|null} [getCrossSheetValue] - Optional cross-sheet getter: (sheetName, row, col) => value
  * @returns {any} - The computed value or error
  */
-export function evaluateFormula(formula, getCellValue, context = {}, customFunctions = null) {
+export function evaluateFormula(formula, getCellValue, context = {}, customFunctions = null, getCrossSheetValue = null) {
     try {
         const ast = parseFormula(formula);
         if (!ast) return null;
-        return evaluate(ast, getCellValue, context, customFunctions);
+        return evaluate(ast, getCellValue, context, customFunctions, getCrossSheetValue);
     } catch (err) {
         console.error('Error parsing/evaluating formula:', err);
         return FormulaError.ERROR;

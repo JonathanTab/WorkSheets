@@ -68,6 +68,7 @@
         { id: "checkbox", label: "Checkbox", icon: checkbox, isSvg: true },
         { id: "rating", label: "Rating", icon: star, isSvg: true },
         { id: "url", label: "URL", icon: link, isSvg: true },
+        { id: "dropdown", label: "Dropdown", icon: "▾" },
     ];
 
     const ALIGN_OPTIONS = [

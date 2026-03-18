@@ -1,5 +1,5 @@
 <script>
-    import { onMount, onDestroy, untrack } from "svelte";
+    import { onMount, onDestroy } from "svelte";
     import Grid from "./Grid.svelte";
     import FormulaBar from "./FormulaBar.svelte";
     import SheetTabs from "./SheetTabs.svelte";
@@ -10,11 +10,17 @@
         loadDocument,
         unloadDocument,
     } from "../../stores/spreadsheetStore.svelte.js";
+    import { editSessionState } from "../../stores/spreadsheet/index.js";
+    import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
 
     let { docId } = $props();
 
     let isLoading = $state(true);
     let error = $state(null);
+
+    // ── Page break overlay state ───────────────────────────────────────────────
+    let showPageBreaks = $state(false);
+    let pageBreakPrintSettings = $state(null);
     let currentLoadedDocId = $state.raw(null); // Track what we've actually loaded (raw to avoid reactivity)
     let isLoadInProgress = false; // Guard against concurrent loads
 
@@ -85,12 +91,19 @@
         }
     }
 
+    // ── Page break overlay event listener ─────────────────────────────────────
+    function handleTogglePageBreaks(e) {
+        showPageBreaks = e.detail.show;
+        pageBreakPrintSettings = e.detail.settings ?? null;
+    }
+
     // Use onMount for initial load
     onMount(() => {
         console.log("[SpreadsheetWorkspace] onMount, docId:", docId);
         if (docId) {
             loadDoc(docId);
         }
+        document.addEventListener('togglePageBreaks', handleTogglePageBreaks);
     });
 
     // Use $effect only for docId changes after mount
@@ -103,6 +116,7 @@
     });
 
     onDestroy(() => {
+        document.removeEventListener('togglePageBreaks', handleTogglePageBreaks);
         // Optionally unload document when leaving
         // unloadDocument();
     });
@@ -119,8 +133,39 @@
         spreadsheetSession.redo();
     }
 
+    // Cross-sheet formula editing: true when editing a formula and navigated to another sheet
+    let isCrossSheetFormulaEdit = $derived(
+        editSessionState.isFormulaMode &&
+        editSessionState.editingSheetId !== null &&
+        editSessionState.editingSheetId !== activeSheetId
+    );
+
+    let crossSheetOriginLabel = $derived.by(() => {
+        if (!isCrossSheetFormulaEdit) return '';
+        const cell = editSessionState.cell;
+        if (!cell) return '';
+        const sheetName = spreadsheetSession.getSheetName(editSessionState.editingSheetId);
+        const cellRef = toCellRef(cell.row, cell.col);
+        return `${sheetName}!${cellRef}`;
+    });
+
     function handleSheetChange(sheetId) {
+        if (editSessionState.isFormulaMode) {
+            // Stay in formula edit mode — just switch the sheet for reference picking.
+            // Switch surface to formula bar so the input remains accessible while browsing.
+            editSessionState.switchSurface('formulaBar', { focus: true });
+            spreadsheetSession.setActiveSheet(sheetId);
+            return;
+        }
         spreadsheetSession.setActiveSheet(sheetId);
+    }
+
+    function handleCancelCrossSheetEdit() {
+        const editingSheetId = editSessionState.editingSheetId;
+        editSessionState.cancel();
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        }
     }
 
     function handleAddSheet(name) {
@@ -164,20 +209,40 @@
             <!-- Formula Bar -->
             <FormulaBar
                 {selectedCell}
-                onEdit={(value, row, col) => {
+                onEdit={(value, row, col, sheetId) => {
                     // Use provided row/col if available (from editingCell tracking)
                     // otherwise fall back to current anchor
                     const targetRow = row ?? selectionState.anchor?.row;
                     const targetCol = col ?? selectionState.anchor?.col;
                     if (targetRow !== undefined && targetCol !== undefined) {
-                        handleCellEdit(targetRow, targetCol, value);
+                        const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
+                        if (typeof value === 'string' && value.startsWith('=')) {
+                            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
+                        } else {
+                            spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
+                        }
                     }
                 }}
             />
 
             <!-- Main Grid -->
             <div class="grid-container">
-                <Grid />
+                <Grid
+                    showPageBreaks={showPageBreaks}
+                    printSettings={pageBreakPrintSettings ?? spreadsheetSession.activeSheetStore?.getPrintSettings() ?? null}
+                />
+                {#if isCrossSheetFormulaEdit}
+                    <div class="cross-sheet-indicator">
+                        <span class="cross-sheet-icon">⊞</span>
+                        <span class="cross-sheet-label">Editing <strong>{crossSheetOriginLabel}</strong></span>
+                        <span class="cross-sheet-hint">Click cells to add references · Enter to confirm · Esc to cancel</span>
+                        <button
+                            class="cross-sheet-cancel"
+                            onclick={handleCancelCrossSheetEdit}
+                            title="Cancel edit"
+                        >✕</button>
+                    </div>
+                {/if}
             </div>
 
             <!-- Sheet Tabs -->
@@ -244,5 +309,61 @@
         min-height: 0;
         border-top: 1px solid var(--border-color, #e2e8f0);
         border-bottom: 1px solid var(--border-color, #e2e8f0);
+        position: relative;
+    }
+
+    .cross-sheet-indicator {
+        position: absolute;
+        bottom: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 200;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.375rem 0.75rem;
+        background: #1e40af;
+        color: #fff;
+        border-radius: 20px;
+        font-size: 0.8125rem;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+        white-space: nowrap;
+        pointer-events: auto;
+    }
+
+    .cross-sheet-icon {
+        font-size: 0.875rem;
+        opacity: 0.8;
+    }
+
+    .cross-sheet-label strong {
+        font-weight: 700;
+    }
+
+    .cross-sheet-hint {
+        opacity: 0.75;
+        font-size: 0.75rem;
+        border-left: 1px solid rgba(255,255,255,0.3);
+        padding-left: 0.5rem;
+    }
+
+    .cross-sheet-cancel {
+        background: rgba(255,255,255,0.15);
+        border: none;
+        color: #fff;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 0.75rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        margin-left: 0.25rem;
+    }
+
+    .cross-sheet-cancel:hover {
+        background: rgba(255,255,255,0.25);
     }
 </style>

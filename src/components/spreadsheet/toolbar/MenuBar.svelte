@@ -16,7 +16,7 @@
         clipboardManager,
         selectionState,
     } from "../../../stores/spreadsheet/index.js";
-    import { CanvasPrintEngine } from "../../../stores/spreadsheet/rendering/CanvasPrintEngine.js";
+    import { VectorPrintEngine } from "../../../stores/spreadsheet/rendering/VectorPrintEngine.js";
     import { AxisMetrics } from "../../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
     import {
         ROW_HEIGHT,
@@ -78,17 +78,21 @@
         isExportingPDF = true;
         try {
             const { rowMetrics, colMetrics } = buildMetricsForPrint(sheetStore);
-            const engine = new CanvasPrintEngine();
+            // Use saved print settings from the sheet (or defaults)
+            const printSettings = sheetStore.getPrintSettings?.() ?? {};
+            const engine = new VectorPrintEngine();
+            const docName = spreadsheetSession.docTitle || sheetStore.name || 'sheet';
             await engine.downloadPDF(
                 {
-                    printSettings: {},
+                    printSettings,
                     renderContext,
                     sheetStore,
                     session: spreadsheetSession,
                     rowMetrics,
                     colMetrics,
+                    docName,
                 },
-                `${sheetStore.name ?? "sheet"}.pdf`,
+                `${docName}.pdf`,
             );
         } catch (err) {
             console.error("PDF export failed:", err);

@@ -28,6 +28,13 @@ export class FormulaEngine {
     /** @type {Function} */
     #getCellValue;
 
+    /**
+     * Optional getter for cells on other sheets.
+     * Signature: (sheetName: string, row: number, col: number) => any
+     * @type {Function|null}
+     */
+    #getCrossSheetValue = null;
+
     /** @type {boolean} */
     #isRecalculating = false;
 
@@ -51,6 +58,15 @@ export class FormulaEngine {
      */
     setCellValueGetter(fn) {
         this.#getCellValue = fn;
+    }
+
+    /**
+     * Set the cross-sheet cell value getter.
+     * Called when a formula references cells on a different sheet (e.g. Sheet2!A1).
+     * @param {Function|null} fn - Function: (sheetName, row, col) => value
+     */
+    setCrossSheetGetter(fn) {
+        this.#getCrossSheetValue = fn;
     }
 
     /**
@@ -87,7 +103,7 @@ export class FormulaEngine {
             if (k in this.computedValues) return this.computedValues[k];
             return this.#getCellValue ? this.#getCellValue(r, c) : null;
         };
-        return evaluate(formulaInfo.ast, getCellValueWithComputed, context, this.#customFunctions);
+        return evaluate(formulaInfo.ast, getCellValueWithComputed, context, this.#customFunctions, this.#getCrossSheetValue);
     }
 
     /**
@@ -213,7 +229,7 @@ export class FormulaEngine {
             return this.#getCellValue ? this.#getCellValue(r, c) : null;
         };
 
-        return evaluate(ast, getCellValueWithComputed);
+        return evaluate(ast, getCellValueWithComputed, {}, this.#customFunctions, this.#getCrossSheetValue);
     }
 
     /**

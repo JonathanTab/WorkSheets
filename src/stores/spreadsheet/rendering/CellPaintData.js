@@ -30,9 +30,9 @@ import { isRichText, isRichTextArray, richTextToPlain, htmlStringToRuns } from '
  * @property {number} y          Canvas-relative CSS Y
  * @property {number} width      CSS width
  * @property {number} height     CSS height
- * @property {boolean} selected
- * @property {boolean} isAnchor
- * @property {'text'|'checkbox'|'rating'|'url'|'table_header'|'table_entry'|'table_data'} renderType
+ * @property {boolean} [selected]  @deprecated  Selection is now on the SelectionRenderer canvas
+ * @property {boolean} [isAnchor]  @deprecated  Selection is now on the SelectionRenderer canvas
+ * @property {'text'|'checkbox'|'rating'|'url'|'image'|'table_header'|'table_entry'|'table_data'} renderType
  * @property {string} [displayValue]
  * @property {string|null} [bgColor]
  * @property {string|null} [textColor]
@@ -45,8 +45,9 @@ import { isRichText, isRichTextArray, richTextToPlain, htmlStringToRuns } from '
  * @property {'left'|'center'|'right'} [hAlign]
  * @property {'top'|'middle'|'bottom'} [vAlign]
  * @property {boolean} [wrapText]
- * @property {any} [rawValue]          For checkbox (boolean), rating (number)
+ * @property {any} [rawValue]          For checkbox (boolean), rating (number), image (string blobId)
  * @property {number} [ratingMax]      For rating cells
+ * @property {any} [ctConfig]          Raw cell type config object (used by image type for fit mode)
  * @property {{colName:string,sortIcon:string,hasFilter:boolean,filterActive:boolean,typeIcon?:string,isFormula?:boolean,accentColor?:string,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
  * @property {string} [placeholderText] For table entry cells
  * @property {boolean} [isNonEntryCol]  For table entry cells — formula columns
@@ -59,19 +60,6 @@ import { isRichText, isRichTextArray, richTextToPlain, htmlStringToRuns } from '
  * @property {boolean} [isRepeaterCopy] True for non-template repeater cells (visual dimming)
  * @property {Array|null} [richTextRuns] Rich-text run array when cell value is rich text
  */
-
-/**
- * Whether a cell is within the selection (supports all selectionMode values).
- * @param {number} row
- * @param {number} col
- * @param {import('../SelectionState.svelte.js').SelectionState|null} selectionState
- * @param {number} rowCount
- * @param {number} colCount
- */
-function isInSelection(row, col, selectionState, rowCount, colCount) {
-    if (!selectionState) return false;
-    return selectionState.isSelected(row, col, rowCount, colCount);
-}
 
 /**
  * Match a conditional format condition.
@@ -93,6 +81,31 @@ function matchesCondition(v, cond, threshold) {
 }
 
 /**
+ * Check if a cell value passes a data validation rule.
+ * @param {*} value
+ * @param {Object} rule
+ * @returns {boolean} true = valid
+ */
+function checkDvRule(value, rule) {
+    if (rule.type === 'list') {
+        const opts = rule.options || [];
+        return opts.length === 0 || opts.includes(String(value));
+    }
+    const num = Number(value);
+    if (rule.type === 'number') {
+        if (isNaN(num)) return false;
+        return matchesCondition(num, rule.condition, rule.min) &&
+            (rule.condition !== 'between' || num <= Number(rule.max));
+    }
+    if (rule.type === 'text') {
+        const len = String(value).length;
+        return matchesCondition(len, rule.condition, rule.min) &&
+            (rule.condition !== 'between' || len <= Number(rule.max));
+    }
+    return true;
+}
+
+/**
  * Build a flat array of CellPaintItem objects for a single pane.
  *
  * @param {Object} params
@@ -103,8 +116,6 @@ function matchesCondition(v, cond, threshold) {
  * @param {import('../features/SheetRenderContext.svelte.js').SheetRenderContext|null} params.renderContext
  * @param {import('../SheetStore.svelte.js').SheetStore|null} params.sheetStore
  * @param {import('../SpreadsheetSession.svelte.js').SpreadsheetSession|null} params.session
- * @param {import('../SelectionState.svelte.js').SelectionState|null} params.selectionState
- * @param {import('../FormulaEditState.svelte.js').FormulaEditState|null} params.formulaEditState
  * @param {number} params.frozenRows
  * @param {number} params.frozenCols
  * @param {number} params.frozenHeight  Frozen pane height in CSS px
@@ -122,8 +133,6 @@ export function buildPaneData(params) {
         renderContext,
         sheetStore,
         session,
-        selectionState,
-        formulaEditState,
         frozenRows,
         frozenCols,
         frozenHeight,
@@ -141,12 +150,23 @@ export function buildPaneData(params) {
     }
 
     const effectiveSheetStore = renderContext?.sheetStore ?? sheetStore;
-    const anchor = selectionState?.anchor ?? null;
-    const rowCount = effectiveSheetStore?.rowCount ?? 0;
-    const colCount = effectiveSheetStore?.colCount ?? 0;
 
     /** @type {CellPaintItem[]} */
     const cells = [];
+
+    // Hoist sheet-level rule lookups outside the cell loops — same value for every cell
+    const cfRules = effectiveSheetStore?.getConditionalFormats?.() ?? null;
+    const dvRules = effectiveSheetStore?.getDataValidations?.() ?? null;
+
+    // Pre-fetch column formatting once per visible column (not once per cell).
+    // getColFormatting hits Yjs Y.Map on every call, so calling it per-cell in a
+    // rows×cols loop dominates buildPaneData cost.
+    const colFmtCache = new Array(colRange.end + 1);
+    if (effectiveSheetStore?.getColFormatting) {
+        for (let c = colRange.start; c <= colRange.end; c++) {
+            colFmtCache[c] = effectiveSheetStore.getColFormatting(c);
+        }
+    }
 
     // Track overflow extents for each row to skip shadow cells
     // Map of row -> { cellCol: overflowRightX }
@@ -161,6 +181,11 @@ export function buildPaneData(params) {
 
         // Reset overflow tracker for this row
         const rowOverflowMap = new Map();
+
+        // Cache row-level formatting once per row (shared by all columns in this row)
+        // mappedRow for repeaters is resolved per-cell, but for non-repeater rows it's always r
+        // We cache the non-repeater case here; repeater cells will re-fetch inside the loop
+        const rowFmtCache = effectiveSheetStore?.getRowFormatting?.(r);
 
         for (let c = colRange.start; c <= colRange.end; c++) {
             // ── Cell type dispatch ────────────────────────────────────────────
@@ -197,27 +222,15 @@ export function buildPaneData(params) {
                 continue;
             }
 
-            // Merge span adjustments
-            if (cellType === CELL_TYPE.MERGE_PRIMARY && renderContext) {
-                const span = renderContext.getMergeSpan(r, c);
-                if (span) {
-                    width = colMetrics.offsetOf(c + span.colSpan) - colMetrics.offsetOf(c);
-                    // height also needs to span rows
-                    // (height is overwritten below using span)
-                }
-            }
-
+            // Merge span adjustments — fetch span once and apply to both width and height
             let spanHeight = height;
             if (cellType === CELL_TYPE.MERGE_PRIMARY && renderContext) {
                 const span = renderContext.getMergeSpan(r, c);
                 if (span) {
-                    spanHeight = rowMetrics.offsetOf(r + span.rowSpan) - rowMetrics.offsetOf(r);
                     width = colMetrics.offsetOf(c + span.colSpan) - colMetrics.offsetOf(c);
+                    spanHeight = rowMetrics.offsetOf(r + span.rowSpan) - rowMetrics.offsetOf(r);
                 }
             }
-
-            const selected = isInSelection(r, c, selectionState, rowCount, colCount);
-            const isAnchor = anchor?.row === r && anchor?.col === c;
 
             // ── Table cell types ──────────────────────────────────────────────
             if (
@@ -243,7 +256,6 @@ export function buildPaneData(params) {
                 const item = {
                     row: r, col: c,
                     x, y, width, height: spanHeight,
-                    selected, isAnchor,
                     renderType: 'text',
                     bgColor: null,
                     borders: null,
@@ -270,8 +282,16 @@ export function buildPaneData(params) {
                 } else if (cellType === CELL_TYPE.TABLE_ENTRY) {
                     item.renderType = 'table_entry';
                     item.bgColor = '#f8fafc';
-                    item.placeholderText = colDef?.isNonEntry ? '=' : (colDef?.name ?? '');
                     item.isNonEntryCol = colDef?.isNonEntry ?? false;
+                    // Show already-typed entry buffer value if present; otherwise placeholder.
+                    const entryVal = colDef && !colDef.isNonEntry
+                        ? info.table.entryBuffer?.[colDef.id]
+                        : undefined;
+                    if (entryVal !== undefined && entryVal !== null && entryVal !== '') {
+                        item.displayValue = String(entryVal);
+                    } else {
+                        item.placeholderText = colDef?.isNonEntry ? '=' : (colDef?.name ?? '');
+                    }
                 } else {
                     // TABLE_DATA
                     const rawValue = (colDef && info.dataIndex >= 0)
@@ -360,7 +380,6 @@ export function buildPaneData(params) {
             const item = {
                 row: r, col: c,
                 x, y, width, height: spanHeight,
-                selected, isAnchor,
                 renderType: 'text',
                 displayValue: '',
                 bgColor: null,
@@ -376,6 +395,10 @@ export function buildPaneData(params) {
                 wrapText: false,
                 borders: null,
                 isRepeaterCopy,
+                // clipContent: set to true below only for cells that actually need clipping
+                // (rich text, wrap, overflow, table headers). Plain text cells skip
+                // ctx.save()/ctx.restore() entirely — that call is expensive in Chrome.
+                clipContent: false,
             };
 
             // For merged primary cells, default to top vertical alignment (supports paragraph-style text)
@@ -397,6 +420,17 @@ export function buildPaneData(params) {
             } else if (ct?.type === 'url') {
                 item.renderType = 'url';
                 item.displayValue = dispV != null ? String(dispV) : '';
+            } else if (ct?.type === 'dropdown') {
+                item.renderType = 'dropdown';
+                item.displayValue = dispV != null ? String(dispV) : '';
+                item.dropdownOptions = ct.options || [];
+            } else if (ct?.type === 'image') {
+                item.renderType = 'image';
+                item.rawValue = sheetCell?.v ?? null; // blob ID string
+                item.ctConfig = ct;
+                item.clipContent = true;
+                item.hAlign = 'center';
+                item.vAlign = 'middle';
             } else {
                 item.renderType = 'text';
 
@@ -410,10 +444,12 @@ export function buildPaneData(params) {
                     // New format: HTML string — convert to runs for canvas renderer
                     item.richTextRuns = htmlStringToRuns(formattedValue);
                     item.displayValue = richTextToPlain(formattedValue);
+                    item.clipContent = true; // rich text always clips
                 } else if (isRichTextArray(formattedValue)) {
                     // Legacy format: run array — use directly
                     item.richTextRuns = formattedValue;
                     item.displayValue = richTextToPlain(formattedValue);
+                    item.clipContent = true; // rich text always clips
                 } else {
                     item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
@@ -437,8 +473,8 @@ export function buildPaneData(params) {
             }
 
             // Apply formatting: col-level → row-level → cell-level (cell wins)
-            // Col-level formatting (lowest priority)
-            const colFmt = effectiveSheetStore?.getColFormatting?.(mappedCol);
+            // Col-level formatting (lowest priority) — use pre-built cache (populated above)
+            const colFmt = colFmtCache[mappedCol] ?? null;
             if (colFmt) {
                 if (colFmt.backgroundColor) item.bgColor = colFmt.backgroundColor;
                 if (colFmt.color) item.textColor = colFmt.color;
@@ -453,7 +489,8 @@ export function buildPaneData(params) {
                 if (colFmt.wrapText) item.wrapText = true;
             }
             // Row-level formatting (overrides col)
-            const rowFmt = effectiveSheetStore?.getRowFormatting?.(mappedRow);
+            // Use pre-cached value for non-repeater cells; re-fetch for repeater rows
+            const rowFmt = (mappedRow === r) ? rowFmtCache : effectiveSheetStore?.getRowFormatting?.(mappedRow);
             if (rowFmt) {
                 if (rowFmt.backgroundColor) item.bgColor = rowFmt.backgroundColor;
                 if (rowFmt.color) item.textColor = rowFmt.color;
@@ -500,11 +537,12 @@ export function buildPaneData(params) {
                     }
                 }
 
-                // Get borders from exterior edges
+                // Get borders from exterior edges — cache the top-left lookup to avoid double call
+                const tlBorders = effectiveSheetStore.getCellBorders(borderRow, borderCol);
                 const borders = {
-                    top: effectiveSheetStore.getCellBorders(borderRow, borderCol).top,
+                    top: tlBorders.top,
+                    left: tlBorders.left,
                     bottom: effectiveSheetStore.getCellBorders(endBorderRow, borderCol).bottom,
-                    left: effectiveSheetStore.getCellBorders(borderRow, borderCol).left,
                     right: effectiveSheetStore.getCellBorders(borderRow, endBorderCol).right,
                 };
 
@@ -513,9 +551,39 @@ export function buildPaneData(params) {
                 }
             }
 
-            // Formula highlight color (for formula edit mode reference visualization)
-            const hlColor = formulaEditState?.getCellHighlightColor(r, c);
-            if (hlColor) item.formulaHighlight = hlColor;
+            // Sheet-level conditional formatting — uses computed display value (dispV)
+            // so formula cells compare their result rather than the formula string
+            // (cfRules hoisted above the loops for performance)
+            if (cfRules?.length) {
+                const cfVal = dispV ?? sheetCell?.v;
+                for (const rule of cfRules) {
+                    if (r < rule.startRow || r > rule.endRow) continue;
+                    if (c < rule.startCol || c > rule.endCol) continue;
+                    if (matchesCondition(cfVal, rule.condition, rule.threshold)) {
+                        if (rule.style?.backgroundColor) item.bgColor = rule.style.backgroundColor;
+                        if (rule.style?.color) item.textColor = rule.style.color;
+                        if (rule.style?.bold) item.bold = true;
+                        if (rule.style?.italic) item.italic = true;
+                        break; // First matching rule wins
+                    }
+                }
+            }
+
+            // Data validation — mark cells with invalid values for red-outline rendering
+            // (dvRules hoisted above the loops for performance)
+            if (dvRules?.length) {
+                const cellVal = sheetCell?.v;
+                if (cellVal != null && cellVal !== '') {
+                    for (const rule of dvRules) {
+                        if (r < rule.startRow || r > rule.endRow) continue;
+                        if (c < rule.startCol || c > rule.endCol) continue;
+                        if (!checkDvRule(cellVal, rule)) {
+                            item.dvInvalid = true;
+                        }
+                        break;
+                    }
+                }
+            }
 
             // Cell spillover: extend width into adjacent empty cells for text cells without wrapping
             if (
@@ -532,6 +600,17 @@ export function buildPaneData(params) {
                     const overflowRightX = item.x + item.width;
                     rowOverflowMap.set(c, overflowRightX);
                 }
+            }
+
+            // Mark cells that need content clipping (ctx.save/clip/restore in renderer).
+            // wrapText and merged cells need clipping; so do table headers (complex layout).
+            // Plain single-line text cells that don't overflow are left as clipContent:false.
+            if (item.wrapText || cellType === CELL_TYPE.MERGE_PRIMARY) {
+                item.clipContent = true;
+            }
+            // Non-text render types have their own internal layout that can overflow
+            if (item.renderType !== 'text' && item.renderType !== 'url' && item.renderType !== 'dropdown') {
+                item.clipContent = true;
             }
 
             cells.push(item);

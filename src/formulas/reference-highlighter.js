@@ -60,39 +60,70 @@ export function segmentFormula(formula) {
 
     let pos = 0;
 
-    // Regex patterns
+    // Regex patterns — cross-sheet refs must be matched before plain refs
+    // Quoted:   'Sheet Name'!A1  or  'Sheet Name'!A1:B5
+    // Unquoted: Sheet1!A1        or  Sheet1!A1:B5
+    const crossSheetRangePattern = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
+    const crossSheetCellPattern  = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+/g;
     const rangePattern = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     const cellPattern = /\$?[A-Za-z]+\$?\d+/g;
     const functionPattern = /[A-Za-z_][A-Za-z0-9_]*(?=\()/g;
-    const numberPattern = /\d+\.?\d*/g;
-    const stringPattern = /"[^"]*"|'[^']*'/g;
-    const operatorPattern = /[+\-*/^%=<>(),:]/g;
 
-    // Find all ranges first (they contain cell refs that we don't want to double-match)
-    const ranges = [];
+    // Find cross-sheet ranges first
+    const crossSheetRanges = [];
     let match;
-    while ((match = rangePattern.exec(content)) !== null) {
-        ranges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+    while ((match = crossSheetRangePattern.exec(content)) !== null) {
+        crossSheetRanges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
     }
 
-    // Find all individual cell refs that are NOT part of ranges
+    // Find cross-sheet cells (not inside a cross-sheet range)
+    const crossSheetCells = [];
+    while ((match = crossSheetCellPattern.exec(content)) !== null) {
+        const inCrossRange = crossSheetRanges.some(r => match.index >= r.start && match.index < r.end);
+        if (!inCrossRange) {
+            crossSheetCells.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+        }
+    }
+
+    // Collect all cross-sheet positions to exclude from plain patterns
+    const crossSheetPositions = [...crossSheetRanges, ...crossSheetCells];
+
+    const isInCrossSheet = (idx) => crossSheetPositions.some(r => idx >= r.start && idx < r.end);
+
+    // Find all plain ranges not part of a cross-sheet ref
+    const ranges = [];
+    while ((match = rangePattern.exec(content)) !== null) {
+        if (!isInCrossSheet(match.index)) {
+            ranges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+        }
+    }
+
+    // Find all individual cell refs not inside a range or cross-sheet ref
     const cells = [];
     while ((match = cellPattern.exec(content)) !== null) {
-        const isInRange = ranges.some(r => match.index >= r.start && match.index < r.end);
-        if (!isInRange) {
+        const inRange = ranges.some(r => match.index >= r.start && match.index < r.end);
+        if (!inRange && !isInCrossSheet(match.index)) {
             cells.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
         }
     }
 
-    // Find functions
+    // Find functions (skip those that are actually cross-sheet identifiers)
     const functions = [];
     while ((match = functionPattern.exec(content)) !== null) {
-        functions.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+        if (!isInCrossSheet(match.index)) {
+            functions.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+        }
     }
 
     // Build a combined list of special tokens with their positions
     const tokens = [];
 
+    for (const r of crossSheetRanges) {
+        tokens.push({ ...r, type: TokenType.RANGE });
+    }
+    for (const c of crossSheetCells) {
+        tokens.push({ ...c, type: TokenType.CELL_REF });
+    }
     for (const r of ranges) {
         tokens.push({ ...r, type: TokenType.RANGE });
     }

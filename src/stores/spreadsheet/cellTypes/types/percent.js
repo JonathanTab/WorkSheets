@@ -1,5 +1,8 @@
 /**
  * Percent cell type descriptor
+ *
+ * Stores the percentage as a plain number (50 = 50%).
+ * Does NOT use the 0–1 fraction convention to avoid confusion.
  */
 export const percentType = {
     id: 'percent',
@@ -10,26 +13,21 @@ export const percentType = {
 
         const decimals = config?.decimals ?? 2;
 
-        // Percent typically stores 0.125 as 12.5%
         const formatted = new Intl.NumberFormat(undefined, {
             minimumFractionDigits: decimals,
             maximumFractionDigits: decimals,
-            style: 'percent'
         }).format(num);
 
-        return formatted;
+        return `${formatted}%`;
     },
     parseInput(inputString) {
         if (inputString === '') return null;
-        let clean = inputString.replace(/[^\d.%-]/g, '');
-        let isPercent = clean.includes('%');
-        clean = clean.replace('%', '');
-
+        // Strip % and whitespace, keep digits, dot, minus
+        const clean = inputString.replace(/[^\d.\-]/g, '');
         const num = Number(clean);
         if (isNaN(num)) return inputString;
-
-        // If user typed '12.5%', store as 0.125
-        return isPercent ? num / 100 : num;
+        // Store as-is — 50% is stored as 50
+        return num;
     },
     defaultStyle() {
         return { horizontalAlign: 'right' };

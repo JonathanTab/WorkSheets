@@ -207,14 +207,19 @@ export function extractReferences(formula) {
     // Remove the leading = if present
     const content = formula.startsWith('=') ? formula.slice(1) : formula;
 
+    // Strip cross-sheet references entirely so their cell parts don't register
+    // as same-sheet refs (e.g. Sheet2!A1 should not highlight A1 on this sheet).
+    const crossSheetPattern = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
+    const strippedContent = content.replace(crossSheetPattern, '');
+
     // Regex to match cell references (with optional $ for absolute refs)
     // Also matches ranges (A1:B5)
     const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
 
     // First, find and remove ranges
-    const ranges = content.match(rangeRegex) || [];
-    let contentWithoutRanges = content;
+    const ranges = strippedContent.match(rangeRegex) || [];
+    let contentWithoutRanges = strippedContent;
 
     for (const range of ranges) {
         contentWithoutRanges = contentWithoutRanges.replace(range, '');
@@ -244,7 +249,6 @@ export function extractReferences(formula) {
     const cells = contentWithoutRanges.match(cellRegex) || [];
 
     for (const cellRef of cells) {
-        // Make sure it's not part of a function name or already in a range
         const parsed = parseCellRef(cellRef);
         if (parsed) {
             refs.push({

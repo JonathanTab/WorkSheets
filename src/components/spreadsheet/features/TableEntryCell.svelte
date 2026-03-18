@@ -24,6 +24,8 @@
         onTabPrev = null,
         /** Callback: called when Enter is pressed to commit the entry row */
         onCommit = null,
+        /** Callback: called on any input change (e.g. to repaint canvas) */
+        onValueChange = null,
     } = $props();
 
     let col = $derived(table?.columns?.[colIndex] ?? null);
@@ -38,6 +40,7 @@
             val = e.currentTarget.checked;
         }
         table.setEntryValue(col.id, val);
+        onValueChange?.();
     }
 
     function handleKeydown(e) {

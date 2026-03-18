@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "c:\\Users\\Jon\\.claude\\projects\\c--Users-Jon-code-plainTab\\memory"
+    ],
+    "allow": [
+      "Bash(npm run:*)"
+    ]
+  }
+}

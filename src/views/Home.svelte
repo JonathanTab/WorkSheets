@@ -1,6 +1,6 @@
 <script>
     import { onMount, onDestroy } from "svelte";
-    import DocumentPicker from "../components/DocumentPicker.svelte";
+    import DriveBrowser from "../components/DriveBrowser.svelte";
     import SpreadsheetWorkspace from "../components/spreadsheet/SpreadsheetWorkspace.svelte";
     import { spreadsheetSession } from "../stores/spreadsheetStore.svelte.js";
 
@@ -72,7 +72,7 @@
     {#if currentDocId}
         <SpreadsheetWorkspace docId={currentDocId} />
     {:else}
-        <DocumentPicker />
+        <DriveBrowser />
     {/if}
 </div>
 

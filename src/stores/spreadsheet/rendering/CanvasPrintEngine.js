@@ -1,18 +1,95 @@
 /**
  * CanvasPrintEngine - Client-side PDF generation using jsPDF + CanvasRenderer.
  *
- * Generates a PDF from a spreadsheet by:
- * 1. Computing page breaks using the existing PrintEngine logic
- * 2. For each page, painting that cell range onto an offscreen canvas
- *    at print resolution
- * 3. Adding each page as a PNG image to a jsPDF document
- * 4. Returning the PDF as a Blob (for download or print preview)
+ * Features:
+ *  - printArea: 'usedArea' (auto-detect data bounds) or 'selection' (use areaStart/End props)
+ *  - pageOrder: 'downThenOver' (row pages first) or 'overThenDown' (col pages first)
+ *  - Header/footer: left/center/right text with variable substitution
+ *  - Consistent render scale across all pages (printDPI / 96 canvas px per CSS px)
+ *
+ * Scale model:
+ *   - "scale" in printSettings (0.1–4.0) maps 1 CSS px → scale × (25.4/96) mm on paper.
+ *   - At scale=1: 96 CSS px = 1 inch = 25.4mm (standard screen reference pixel).
+ *   - printDPI controls render quality (default 300). Higher = sharper, larger file.
  */
 
 import { jsPDF } from 'jspdf';
 import { CanvasRenderer } from './CanvasRenderer.js';
 import { buildPaneData } from './CellPaintData.js';
 import { PrintEngine } from '../features/PrintEngine.js';
+
+// Standard paper sizes in mm
+const PAPER_SIZES = {
+    A4:     { width: 210,   height: 297   },
+    letter: { width: 215.9, height: 279.4 },
+    legal:  { width: 215.9, height: 355.6 },
+    A3:     { width: 297,   height: 420   },
+    A5:     { width: 148,   height: 210   },
+};
+
+const CSS_PX_PER_INCH = 96;
+const MM_PER_INCH = 25.4;
+
+/**
+ * Determine the bounding box of cells that actually have data.
+ * Returns null if the sheet is empty.
+ * @param {import('../SheetStore.svelte.js').SheetStore} sheetStore
+ * @returns {{ startRow: number, startCol: number, endRow: number, endCol: number } | null}
+ */
+function computeUsedArea(sheetStore) {
+    let minRow = Infinity, maxRow = -Infinity;
+    let minCol = Infinity, maxCol = -Infinity;
+
+    sheetStore.cells.forEach((cell, key) => {
+        if (!cell || !cell.exists) return;
+        const comma = key.indexOf(',');
+        const row = parseInt(key.slice(0, comma), 10);
+        const col = parseInt(key.slice(comma + 1), 10);
+        if (row < minRow) minRow = row;
+        if (row > maxRow) maxRow = row;
+        if (col < minCol) minCol = col;
+        if (col > maxCol) maxCol = col;
+    });
+
+    if (maxRow < 0 || !isFinite(maxRow)) return null;
+    return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
+}
+
+/**
+ * Substitute template variables in a header/footer string.
+ * Variables: {page}, {pages}, {sheetName}, {docName}, {date}, {time}
+ */
+function substituteVars(text, vars) {
+    if (!text) return '';
+    return text
+        .replace(/\{page\}/g,      String(vars.page))
+        .replace(/\{pages\}/g,     String(vars.pages))
+        .replace(/\{sheetName\}/g, vars.sheetName ?? '')
+        .replace(/\{docName\}/g,   vars.docName ?? '')
+        .replace(/\{date\}/g,      vars.date)
+        .replace(/\{time\}/g,      vars.time);
+}
+
+/**
+ * Draw header or footer text (left/center/right) on the current jsPDF page.
+ * @param {jsPDF} pdf
+ * @param {'header'|'footer'} which
+ * @param {{ pageW: number, pageH: number, marginTop: number, marginBottom: number, marginLeft: number, marginRight: number }} geo
+ * @param {{ left: string, center: string, right: string }} texts  (already substituted)
+ */
+function drawHF(pdf, which, geo, texts) {
+    const { pageW, pageH, marginTop, marginBottom, marginLeft, marginRight } = geo;
+    const y = which === 'header'
+        ? marginTop / 2          // midpoint of top margin
+        : pageH - marginBottom / 2; // midpoint of bottom margin
+
+    pdf.setFontSize(8);
+    pdf.setTextColor(80, 80, 80);
+
+    if (texts.left)   pdf.text(texts.left,   marginLeft,         y, { align: 'left',   baseline: 'middle' });
+    if (texts.center) pdf.text(texts.center, pageW / 2,          y, { align: 'center', baseline: 'middle' });
+    if (texts.right)  pdf.text(texts.right,  pageW - marginRight, y, { align: 'right',  baseline: 'middle' });
+}
 
 export class CanvasPrintEngine {
     #printEngine;
@@ -31,6 +108,7 @@ export class CanvasPrintEngine {
      * @param {import('../SpreadsheetSession.svelte.js').SpreadsheetSession} params.session
      * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} params.rowMetrics
      * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} params.colMetrics
+     * @param {string} [params.docName]
      * @returns {Promise<Blob>}
      */
     async generatePDF(params) {
@@ -41,137 +119,206 @@ export class CanvasPrintEngine {
             session,
             rowMetrics,
             colMetrics,
+            docName = '',
         } = params;
 
         const totalRows = renderContext?.effectiveRowCount ?? sheetStore?.rowCount ?? 100;
         const totalCols = renderContext?.effectiveColCount ?? sheetStore?.colCount ?? 26;
 
-        // ── 1. Compute page breaks ─────────────────────────────────────────────
+        // ── 1. Page geometry ────────────────────────────────────────────────────
+        const orientation = printSettings.orientation ?? 'portrait';
+        const paperKey    = printSettings.paperSize ?? 'A4';
+        const paper       = PAPER_SIZES[paperKey] ?? PAPER_SIZES.A4;
+
+        const pageW = orientation === 'landscape' ? paper.height : paper.width; // mm
+        const pageH = orientation === 'landscape' ? paper.width  : paper.height; // mm
+
+        const marginTop    = printSettings.marginTop    ?? 19; // mm
+        const marginBottom = printSettings.marginBottom ?? 19;
+        const marginLeft   = printSettings.marginLeft   ?? 18;
+        const marginRight  = printSettings.marginRight  ?? 18;
+
+        const printableW_mm = pageW  - marginLeft - marginRight;
+        const printableH_mm = pageH  - marginTop  - marginBottom;
+
+        const userScale = printSettings.scale ?? 1.0;
+
+        // Printable area in CSS pixels at the user's scale
+        const printableW_css = (printableW_mm / MM_PER_INCH) * CSS_PX_PER_INCH / userScale;
+        const printableH_css = (printableH_mm / MM_PER_INCH) * CSS_PX_PER_INCH / userScale;
+
+        // ── 2. Determine print area bounds ──────────────────────────────────────
+        const printArea = printSettings.printArea ?? 'usedArea';
+        let settingsForBreaks = { ...printSettings };
+
+        if (printArea === 'usedArea') {
+            const used = computeUsedArea(sheetStore);
+            if (used) {
+                settingsForBreaks.areaStartRow = used.startRow;
+                settingsForBreaks.areaStartCol = used.startCol;
+                settingsForBreaks.areaEndRow   = used.endRow;
+                settingsForBreaks.areaEndCol   = used.endCol;
+            }
+            // else: empty sheet — falls through to whole sheet bounds
+        }
+        // 'selection': areaStart/End already embedded in printSettings by PageSetupPanel
+
+        // ── 3. Compute page breaks (whole rows & cols) ──────────────────────────
         const { rowBreaks, colBreaks } = this.#printEngine.computePageBreaks(
-            printSettings,
+            settingsForBreaks,
             rowMetrics,
             colMetrics,
             totalRows,
             totalCols,
         );
 
-        // ── 2. Page dimensions ─────────────────────────────────────────────────
-        const orientation = printSettings.orientation ?? 'portrait';
-        const paperSize = this.#getPaperSizeMM(printSettings.paperSize ?? 'A4');
-        const printDPI = 150; // Balance quality vs. file size
+        // ── 4. Render quality ───────────────────────────────────────────────────
+        const printDPI = printSettings.printDPI ?? 300;
+        const renderScale = printDPI / CSS_PX_PER_INCH;
 
-        const pageW = orientation === 'landscape' ? paperSize.height : paperSize.width;
-        const pageH = orientation === 'landscape' ? paperSize.width : paperSize.height;
+        // ── 5. Options ──────────────────────────────────────────────────────────
+        const showGridLines = printSettings.showGridLines ?? true;
+        const pageOrder     = printSettings.pageOrder ?? 'downThenOver';
 
-        const marginTop = printSettings.marginTop ?? 10;
-        const marginBottom = printSettings.marginBottom ?? 10;
-        const marginLeft = printSettings.marginLeft ?? 10;
-        const marginRight = printSettings.marginRight ?? 10;
+        // ── 6. Header/footer setup ──────────────────────────────────────────────
+        const now = new Date();
+        const dateStr = now.toLocaleDateString();
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const sheetName = sheetStore?.name ?? '';
 
-        const pxPerMM = printDPI / 25.4;
-        const printableW = (pageW - marginLeft - marginRight) * pxPerMM;
-        const printableH = (pageH - marginTop - marginBottom) * pxPerMM;
+        const hfVarsBase = { sheetName, docName, date: dateStr, time: timeStr };
+        const hasHeader = printSettings.headerLeft || printSettings.headerCenter || printSettings.headerRight;
+        const hasFooter = printSettings.footerLeft || printSettings.footerCenter || printSettings.footerRight;
 
-        // ── 3. Create jsPDF document ───────────────────────────────────────────
+        // Total page count
+        const totalPages = rowBreaks.length * colBreaks.length;
+
+        // ── 7. Create jsPDF document ────────────────────────────────────────────
         const pdf = new jsPDF({
             orientation,
             unit: 'mm',
             format: [pageW, pageH],
         });
 
-        // ── 4. Offscreen canvas + renderer ────────────────────────────────────
+        // ── 8. Offscreen canvas + renderer ─────────────────────────────────────
         const offscreenCanvas = document.createElement('canvas');
-        offscreenCanvas.width = Math.ceil(printableW);
-        offscreenCanvas.height = Math.ceil(printableH);
-
         const renderer = new CanvasRenderer(offscreenCanvas);
-        renderer.resize(printableW, printableH, 1); // DPR=1 for print (we handle size ourselves)
 
-        // ── 5. Render each page ────────────────────────────────────────────────
+        const geo = { pageW, pageH, marginTop, marginBottom, marginLeft, marginRight };
+
         let isFirstPage = true;
+        let pageNum = 0;
 
-        for (let ri = 0; ri < rowBreaks.length; ri++) {
-            const startRow = rowBreaks[ri];
-            const endRow = ri + 1 < rowBreaks.length
-                ? rowBreaks[ri + 1] - 1
-                : (printSettings.areaEndRow ?? totalRows - 1);
-
+        // ── 9. Build page list respecting page order ────────────────────────────
+        const pages = [];
+        if (pageOrder === 'overThenDown') {
             for (let ci = 0; ci < colBreaks.length; ci++) {
-                const startCol = colBreaks[ci];
-                const endCol = ci + 1 < colBreaks.length
-                    ? colBreaks[ci + 1] - 1
-                    : (printSettings.areaEndCol ?? totalCols - 1);
-
-                // Compute pixel extents of this page's content
-                const contentLeft = colMetrics.offsetOf(startCol);
-                const contentTop = rowMetrics.offsetOf(startRow);
-                const contentRight = colMetrics.offsetOf(endCol + 1);
-                const contentBottom = rowMetrics.offsetOf(endRow + 1);
-                const contentW = contentRight - contentLeft;
-                const contentH = contentBottom - contentTop;
-
-                if (contentW <= 0 || contentH <= 0) continue;
-
-                // Scale to fit printable area
-                const scaleX = printableW / contentW;
-                const scaleY = printableH / contentH;
-                const scale = Math.min(scaleX, scaleY);
-
-                // Resize canvas to scaled page size
-                const scaledW = Math.ceil(contentW * scale);
-                const scaledH = Math.ceil(contentH * scale);
-                offscreenCanvas.width = scaledW;
-                offscreenCanvas.height = scaledH;
-                renderer.resize(scaledW, scaledH, 1);
-
-                // Build paint data for this range
-                const rowRange = { start: startRow, end: endRow, count: endRow - startRow + 1 };
-                const colRange = { start: startCol, end: endCol, count: endCol - startCol + 1 };
-
-                // For print: all cells are treated as "frozen" (no scroll offset)
-                // We shift X/Y so the first cell starts at 0,0
-                const cells = buildPaneData({
-                    rowRange,
-                    colRange,
-                    rowMetrics,
-                    colMetrics,
-                    renderContext,
-                    sheetStore,
-                    session,
-                    selectionState: null,  // no selection in print
-                    formulaEditState: null,
-                    frozenRows: 0,
-                    frozenCols: 0,
-                    frozenHeight: 0,
-                    frozenWidth: 0,
-                    scrollLeft: contentLeft,
-                    scrollTop: contentTop,
-                });
-
-                // Scale cell positions to match print scale
-                for (const cell of cells) {
-                    cell.x *= scale;
-                    cell.y *= scale;
-                    cell.width *= scale;
-                    cell.height *= scale;
-                    if (cell.fontSize) cell.fontSize = Math.round(cell.fontSize * scale);
+                for (let ri = 0; ri < rowBreaks.length; ri++) {
+                    pages.push({ ri, ci });
                 }
+            }
+        } else {
+            // default: down then over
+            for (let ri = 0; ri < rowBreaks.length; ri++) {
+                for (let ci = 0; ci < colBreaks.length; ci++) {
+                    pages.push({ ri, ci });
+                }
+            }
+        }
 
-                // Paint
-                renderer.clear();
-                renderer.paintPane(cells, {
-                    clipX: 0, clipY: 0,
-                    clipW: scaledW, clipH: scaledH,
+        // ── 10. Render each page ────────────────────────────────────────────────
+        for (const { ri, ci } of pages) {
+            pageNum++;
+
+            const startRow = rowBreaks[ri];
+            const endRow   = ri + 1 < rowBreaks.length
+                ? rowBreaks[ri + 1] - 1
+                : (settingsForBreaks.areaEndRow ?? totalRows - 1);
+
+            const startCol = colBreaks[ci];
+            const endCol   = ci + 1 < colBreaks.length
+                ? colBreaks[ci + 1] - 1
+                : (settingsForBreaks.areaEndCol ?? totalCols - 1);
+
+            // Content bounds in CSS pixels (natural cell sizes, no scroll)
+            const contentLeft   = colMetrics.offsetOf(startCol);
+            const contentTop    = rowMetrics.offsetOf(startRow);
+            const contentRight  = colMetrics.offsetOf(endCol + 1);
+            const contentBottom = rowMetrics.offsetOf(endRow + 1);
+            const contentW_css  = contentRight  - contentLeft;
+            const contentH_css  = contentBottom - contentTop;
+
+            if (contentW_css <= 0 || contentH_css <= 0) continue;
+
+            // Tell the renderer the CSS size and use renderScale as DPR.
+            // paintPane() applies ctx.scale(renderScale, renderScale) internally,
+            // so all coordinates — including hardcoded pixel values inside custom
+            // cell painters (checkbox size, star radius, etc.) — are treated as
+            // CSS pixels and uniformly scaled to the high-resolution canvas.
+            renderer.resize(contentW_css, contentH_css, renderScale);
+
+            const rowRange = { start: startRow, end: endRow,   count: endRow   - startRow + 1 };
+            const colRange = { start: startCol, end: endCol,   count: endCol   - startCol + 1 };
+
+            const cells = buildPaneData({
+                rowRange,
+                colRange,
+                rowMetrics,
+                colMetrics,
+                renderContext,
+                sheetStore,
+                session,
+                selectionState:  null,
+                formulaEditState: null,
+                frozenRows:    0,
+                frozenCols:    0,
+                frozenHeight:  0,
+                frozenWidth:   0,
+                scrollLeft: contentLeft,
+                scrollTop:  contentTop,
+            });
+
+            // Paint — all coordinates are CSS pixels; renderer scales internally.
+            renderer.clear();
+            renderer.paintPane(cells, {
+                clipX: 0,
+                clipY: 0,
+                clipW: contentW_css,
+                clipH: contentH_css,
+                showGridLines,
+            });
+
+            // Size of this content in mm on the printed page
+            const imgW_mm = contentW_css * (MM_PER_INCH / CSS_PX_PER_INCH) * userScale;
+            const imgH_mm = contentH_css * (MM_PER_INCH / CSS_PX_PER_INCH) * userScale;
+
+            const clampedW = Math.min(imgW_mm, printableW_mm);
+            const clampedH = Math.min(imgH_mm, printableH_mm);
+
+            // Add page to PDF
+            if (!isFirstPage) pdf.addPage([pageW, pageH], orientation);
+            isFirstPage = false;
+
+            const imgData = offscreenCanvas.toDataURL('image/png');
+            pdf.addImage(imgData, 'PNG', marginLeft, marginTop, clampedW, clampedH, undefined, 'FAST');
+
+            // Header / Footer
+            const hfVars = { ...hfVarsBase, page: pageNum, pages: totalPages };
+
+            if (hasHeader) {
+                drawHF(pdf, 'header', geo, {
+                    left:   substituteVars(printSettings.headerLeft,   hfVars),
+                    center: substituteVars(printSettings.headerCenter, hfVars),
+                    right:  substituteVars(printSettings.headerRight,  hfVars),
                 });
+            }
 
-                // Add page to PDF
-                if (!isFirstPage) pdf.addPage([pageW, pageH], orientation);
-                isFirstPage = false;
-
-                const imgData = offscreenCanvas.toDataURL('image/png');
-                const imgW = pageW - marginLeft - marginRight;
-                const imgH = imgW * (scaledH / scaledW);
-                pdf.addImage(imgData, 'PNG', marginLeft, marginTop, imgW, imgH);
+            if (hasFooter) {
+                drawHF(pdf, 'footer', geo, {
+                    left:   substituteVars(printSettings.footerLeft,   hfVars),
+                    center: substituteVars(printSettings.footerCenter, hfVars),
+                    right:  substituteVars(printSettings.footerRight,  hfVars),
+                });
             }
         }
 
@@ -187,27 +334,14 @@ export class CanvasPrintEngine {
      */
     async downloadPDF(params, filename = 'spreadsheet.pdf') {
         const blob = await this.generatePDF(params);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
         a.download = filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-    }
-
-    // ─── Private helpers ──────────────────────────────────────────────────────
-
-    #getPaperSizeMM(key) {
-        const sizes = {
-            A4: { width: 210, height: 297 },
-            letter: { width: 215.9, height: 279.4 },
-            legal: { width: 215.9, height: 355.6 },
-            A3: { width: 297, height: 420 },
-            A5: { width: 148, height: 210 },
-        };
-        return sizes[key] ?? sizes.A4;
     }
 }
 

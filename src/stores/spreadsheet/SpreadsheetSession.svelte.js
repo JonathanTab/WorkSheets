@@ -17,9 +17,12 @@ import { storage } from '../storage.js';
 import { authStore } from '../authStore.js';
 import { get } from 'svelte/store';
 import { SheetStore } from './SheetStore.svelte.js';
-import { spreadsheetSchema, createSheetYMap } from './schema.js';
+import { spreadsheetSchema, createSheetYMap, initializeDocument } from './schema.js';
 import { SCHEMA_VERSION, META_KEYS, CELL_KEYS } from './constants.js';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
+import { parseFormula } from '../../formulas/parser.js';
+import { evaluate } from '../../formulas/evaluator.js';
+import { FormulaError } from '../../formulas/functions.js';
 import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
 import { TableManager } from './features/TableManager.svelte.js';
 import { RepeaterEngine } from './features/RepeaterEngine.svelte.js';
@@ -148,12 +151,16 @@ export class SpreadsheetSession {
             console.log('[SpreadsheetSession] Previous session unloaded');
 
             // Load the document using the new Storage facade
-            console.log('[SpreadsheetSession] Calling storage.drive.loadFile()...');
-            const ydoc = await storage.drive.loadFile(docId);
-            console.log('[SpreadsheetSession] storage.drive.loadFile() returned');
+            console.log('[SpreadsheetSession] Calling storage.drive.loadDoc()...');
+            const ydoc = await storage.drive.loadDoc(docId);
+            console.log('[SpreadsheetSession] storage.drive.loadDoc() returned');
 
             const root = ydoc.getMap('spreadsheet');
             console.log('[SpreadsheetSession] Got root map');
+
+            // Note: Document initialization now happens explicitly during creation
+            // via createDocument() - not implicitly on load. This prevents
+            // race conditions with offline clients re-initializing documents.
 
             this.docId = docId;
             this.ydoc = ydoc;
@@ -177,12 +184,21 @@ export class SpreadsheetSession {
             if (activeSheet) {
                 this.activeSheetStore = new SheetStore(activeSheet, ydoc);
 
-                // Initialize undo manager for cells and borders Y.Maps
+                // Initialize undo manager — track all mutable Y types for this sheet.
+                // Ensure rowMeta/colMeta/tables/repeaters exist (older docs may lack them).
                 const cells = activeSheet.get('cells');
                 const borders = activeSheet.get('borders');
+                let rowMeta0 = activeSheet.get('rowMeta');
+                if (!rowMeta0) { rowMeta0 = new Y.Map(); activeSheet.set('rowMeta', rowMeta0); }
+                let colMeta0 = activeSheet.get('colMeta');
+                if (!colMeta0) { colMeta0 = new Y.Map(); activeSheet.set('colMeta', colMeta0); }
+                let tables0 = activeSheet.get('tables');
+                if (!tables0) { tables0 = new Y.Map(); activeSheet.set('tables', tables0); }
+                let repeaters0 = activeSheet.get('repeaters');
+                if (!repeaters0) { repeaters0 = new Y.Map(); activeSheet.set('repeaters', repeaters0); }
                 if (cells) {
                     // UndoManager tracks all local changes by default (origin=null)
-                    this.undoManager = new Y.UndoManager([cells, borders]);
+                    this.undoManager = new Y.UndoManager([cells, borders, rowMeta0, colMeta0, tables0, repeaters0]);
 
                     // Set up observer to update reactive undo/redo state
                     this.#setupUndoObserver();
@@ -207,7 +223,7 @@ export class SpreadsheetSession {
 
             // Set up awareness (for collaboration)
             console.log('[SpreadsheetSession] Setting up awareness...');
-            const provider = storage.core.runtime.activeDocs.get(docId)?.provider;
+            const provider = storage._runtime?.activeDocs?.get(docId)?.provider;
             if (provider) {
                 this.awareness = provider.awareness;
             }
@@ -217,14 +233,12 @@ export class SpreadsheetSession {
             this.#updateDocTitle();
 
             // Listen for file updates from Storage (via core for full event access)
-            const fileUpdatedHandler = (file) => {
-                if (file.id === this.docId) {
-                    this.#updateDocTitle();
-                }
+            const fileUpdatedHandler = () => {
+                this.#updateDocTitle();
             };
-            storage.core.on('file-updated', fileUpdatedHandler);
+            storage.on('change', fileUpdatedHandler);
             this.#cleanupStorageListener = () => {
-                storage.core.off('file-updated', fileUpdatedHandler);
+                storage.off('change', fileUpdatedHandler);
             };
 
         } catch (err) {
@@ -408,6 +422,48 @@ export class SpreadsheetSession {
             return v;
         });
 
+        // Set up cross-sheet getter — resolves SheetName!CellRef references at eval time.
+        // Reads raw Yjs data from the target sheet and recursively evaluates formula chains.
+        this.formulaEngine.setCrossSheetGetter((sheetName, row, col) => {
+            const targetSheet = this.sheets.find(s => s.name === sheetName);
+            if (!targetSheet) return FormulaError.REF;
+
+            const sheetsMap = this.root?.get('sheets');
+            const sheetYMap = sheetsMap?.get(targetSheet.id);
+            if (!sheetYMap) return FormulaError.REF;
+
+            const cells = sheetYMap.get('cells');
+            if (!cells) return null;
+
+            // Recursive evaluator with cycle detection via visited set.
+            // Handles arbitrary-depth formula chains within the target sheet.
+            const evalCell = (r, c, visited) => {
+                const k = `${r},${c}`;
+                if (visited.has(k)) return FormulaError.REF; // Circular ref
+                const cm = cells.get(k);
+                if (!cm) return null;
+                const v = cm.get?.(CELL_KEYS.VALUE);
+                if (v === undefined || v === null) return null;
+                if (typeof v === 'string' && v.startsWith('=')) {
+                    const nextVisited = new Set(visited);
+                    nextVisited.add(k);
+                    try {
+                        const ast = parseFormula(v);
+                        if (!ast) return null;
+                        return evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, null, null);
+                    } catch {
+                        return FormulaError.ERROR;
+                    }
+                }
+                if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) {
+                    return Number(v);
+                }
+                return v;
+            };
+
+            return evalCell(row, col, new Set());
+        });
+
         // Load existing formulas from the sheet and compute initial values
         const cells = sheet.get('cells');
         if (cells) {
@@ -421,10 +477,17 @@ export class SpreadsheetSession {
                 }
             });
 
-            // Second pass: set formulas (this computes values in reactive state)
+            // Second pass: register all formulas and build the dependency graph.
+            // setFormula evaluates each formula immediately, but in arbitrary order —
+            // dependent cells may not be in computedValues yet, producing stale values.
             for (const { row, col, formula } of formulaCells) {
                 this.formulaEngine.setFormula(row, col, formula);
             }
+
+            // Third pass: recalculate all formula cells in topological (dependency) order
+            // so that chains like A1=10, B1=A1+5, C1=B1*2 all resolve correctly.
+            // graph.setFormula marks every cell dirty, so recalculateDirty covers them all.
+            this.formulaEngine.recalculateDirty();
         }
 
         // Observe cell changes for formula recalculation
@@ -534,9 +597,19 @@ export class SpreadsheetSession {
 
             const cells = sheet.get('cells');
             const borders = sheet.get('borders');
+            // Ensure all mutable Y types exist (older docs may lack some of them).
+            let rowMeta = sheet.get('rowMeta');
+            if (!rowMeta) { rowMeta = new Y.Map(); sheet.set('rowMeta', rowMeta); }
+            let colMeta = sheet.get('colMeta');
+            if (!colMeta) { colMeta = new Y.Map(); sheet.set('colMeta', colMeta); }
+            let tables = sheet.get('tables');
+            if (!tables) { tables = new Y.Map(); sheet.set('tables', tables); }
+            let repeaters = sheet.get('repeaters');
+            if (!repeaters) { repeaters = new Y.Map(); sheet.set('repeaters', repeaters); }
+
             if (cells) {
                 // UndoManager tracks all local changes by default (origin=null)
-                this.undoManager = new Y.UndoManager([cells, borders]);
+                this.undoManager = new Y.UndoManager([cells, borders, rowMeta, colMeta, tables, repeaters]);
 
                 // Set up observer to update reactive undo/redo state
                 this.#setupUndoObserver();
@@ -630,6 +703,82 @@ export class SpreadsheetSession {
      */
     setCellFormula(row, col, formula) {
         this.activeSheetStore?.setCellFormula(row, col, formula);
+    }
+
+    /**
+     * Get the display name of a sheet by ID.
+     * @param {string} sheetId
+     * @returns {string}
+     */
+    getSheetName(sheetId) {
+        return this.sheets.find(s => s.id === sheetId)?.name ?? sheetId;
+    }
+
+    /**
+     * Set a cell's formula on any sheet (not just the active one).
+     * Used when committing a formula that was edited while viewing a different sheet.
+     * @param {string} sheetId
+     * @param {number} row
+     * @param {number} col
+     * @param {string} formula
+     */
+    setCellFormulaOnSheet(sheetId, row, col, formula) {
+        if (sheetId === this.activeSheetId || !sheetId) {
+            this.activeSheetStore?.setCellFormula(row, col, formula);
+            return;
+        }
+        const sheetsMap = this.root?.get('sheets');
+        const sheet = sheetsMap?.get(sheetId);
+        if (!sheet || !this.ydoc) return;
+        const cells = sheet.get('cells');
+        if (!cells) return;
+        const key = `${row},${col}`;
+        const normalized = formula.startsWith('=') ? formula : '=' + formula;
+        this.ydoc.transact(() => {
+            let cellMap = cells.get(key);
+            if (!cellMap) {
+                const newCell = new Y.Map();
+                newCell.set('v', normalized);
+                cells.set(key, newCell);
+            } else {
+                cellMap.set('v', normalized);
+            }
+        });
+    }
+
+    /**
+     * Set a cell's plain value on any sheet (not just the active one).
+     * @param {string} sheetId
+     * @param {number} row
+     * @param {number} col
+     * @param {any} value
+     */
+    setCellValueOnSheet(sheetId, row, col, value) {
+        if (sheetId === this.activeSheetId || !sheetId) {
+            this.activeSheetStore?.setCellValue(row, col, value);
+            return;
+        }
+        const sheetsMap = this.root?.get('sheets');
+        const sheet = sheetsMap?.get(sheetId);
+        if (!sheet || !this.ydoc) return;
+        const cells = sheet.get('cells');
+        if (!cells) return;
+        const key = `${row},${col}`;
+        this.ydoc.transact(() => {
+            if (value === '' || value === null || value === undefined) {
+                const cellMap = cells.get(key);
+                if (cellMap) cells.delete(key);
+            } else {
+                let cellMap = cells.get(key);
+                if (!cellMap) {
+                    const newCell = new Y.Map();
+                    newCell.set('v', value);
+                    cells.set(key, newCell);
+                } else {
+                    cellMap.set('v', value);
+                }
+            }
+        });
     }
 
     /**
@@ -956,10 +1105,17 @@ export function getAllDocuments() {
 
 /**
  * Create a new spreadsheet document
+ * Explicitly initializes the Yjs document structure at creation time,
+ * preventing race conditions with offline clients.
  * @param {string} title
  */
 export async function createDocument(title) {
-    return storage.drive.createFile({ title, type: 'yjs' });
+    return storage.drive.createAndInitializeFile({
+        title,
+        initializer: (ydoc) => {
+            initializeDocument(ydoc);
+        }
+    });
 }
 
 /**

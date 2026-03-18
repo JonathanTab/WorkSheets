@@ -81,7 +81,6 @@
 
                     if (
                         state.user?.username &&
-                        state.apiKey &&
                         !initialized &&
                         !isInitializing
                     ) {
@@ -92,7 +91,7 @@
                         isInitializing = true;
                         initialized = await initializeSpreadsheet();
                         isInitializing = false;
-                    } else if (!state.user?.username || !state.apiKey) {
+                    } else if (!state.user?.username) {
                         // User logged out, reset initialization state
                         console.log(
                             "[App] User logged out - resetting document state",
@@ -136,7 +135,7 @@
     {/if}
 
     <!-- Login modal when not authenticated -->
-    {#if !$authStore.apiKey && !loading}
+    {#if !$authStore.user && !loading}
         <LoginModal />
     {/if}
 </main>

@@ -24,39 +24,14 @@
     function getProvider(docId) {
         if (!docId) return null;
 
-        // Access runtime via storage.core.runtime (not storage.runtime)
         const storage = getDocManager();
-        if (!storage) {
-            console.log(
-                "[ConnectionStatus] getProvider: storage not available",
-            );
-            return null;
-        }
+        if (!storage) return null;
 
-        const core = storage.core;
-        if (!core) {
-            console.log("[ConnectionStatus] getProvider: core not available");
-            return null;
-        }
+        const runtime = storage._runtime;
+        if (!runtime) return null;
 
-        const runtime = core.runtime;
-        if (!runtime) {
-            console.log(
-                "[ConnectionStatus] getProvider: runtime not available",
-            );
-            return null;
-        }
-
-        const activeDoc = runtime.activeDocs.get(docId);
-        if (!activeDoc) {
-            console.log(
-                "[ConnectionStatus] getProvider: docId not in activeDocs",
-                docId,
-                "activeDocs:",
-                [...runtime.activeDocs.keys()],
-            );
-            return null;
-        }
+        const activeDoc = runtime.activeDocs?.get(docId);
+        if (!activeDoc) return null;
 
         return activeDoc.provider;
     }

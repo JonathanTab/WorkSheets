@@ -62,6 +62,7 @@ export const COLUMN_TYPE_ICONS = {
     checkbox: '✓',
     rating: '★',
     url: '↗',
+    dropdown: '▾',
 };
 
 export class TableStore {

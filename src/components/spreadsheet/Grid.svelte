@@ -48,6 +48,7 @@
     } from "../../stores/spreadsheet/index.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { CanvasRenderer } from "../../stores/spreadsheet/rendering/CanvasRenderer.js";
+    import { SelectionRenderer } from "../../stores/spreadsheet/rendering/SelectionRenderer.js";
     import { RenderScheduler } from "../../stores/spreadsheet/rendering/RenderScheduler.js";
     import { HitTestEngine } from "../../stores/spreadsheet/rendering/HitTestEngine.js";
     import { buildPaneData } from "../../stores/spreadsheet/rendering/CellPaintData.js";
@@ -62,17 +63,32 @@
     import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
     import TableEditPanel from "./features/TableEditPanel.svelte";
     import TableColumnPanel from "./features/TableColumnPanel.svelte";
+    import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
+    import FloatingImages from "./FloatingImages.svelte";
+    import ImageEditor from "./cellTypes/ImageEditor.svelte";
+    import { setOnLoadCallback } from "../../stores/spreadsheet/rendering/ImageCache.js";
+
+    // ─── Props ─────────────────────────────────────────────────────────────────
+    let {
+        showPageBreaks = false,
+        printSettings = null,
+    } = $props();
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
     let containerEl = $state(null);
     let scrollEl = $state(null);
     let canvasEl = $state(null);
+    let selectCanvasEl = $state(null);
 
     // ─── Canvas rendering instances ───────────────────────────────────────────
     /** @type {CanvasRenderer|null} */
     let canvasRenderer = null;
     /** @type {RenderScheduler|null} */
     let renderScheduler = null;
+    /** @type {SelectionRenderer|null} */
+    let selectionRenderer = null;
+    /** @type {RenderScheduler|null} */
+    let selectionScheduler = null;
     const hitTestEngine = new HitTestEngine();
 
     // ─── Grid virtualizer ─────────────────────────────────────────────────────
@@ -81,10 +97,63 @@
     let virtualizerSheetId = $state.raw(null);
     let resizeObserver = null;
 
+    // ─── Page break overlay ───────────────────────────────────────────────────
+    const _printEngine = new PrintEngine();
+
+    /**
+     * Compute page break lines for the overlay.
+     * Returns arrays of pixel positions (in grid-root container space).
+     * Only computed when showPageBreaks=true to avoid overhead.
+     */
+    let pageBreakLines = $derived.by(() => {
+        if (!showPageBreaks || !virtualizer || !printSettings) return null;
+
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        // Track printSettingsVersion so overlay updates when settings are saved
+        const _psv = sheetStore?.printSettingsVersion;
+        const totalRows = sheetStore?.rowCount ?? 100;
+        const totalCols = sheetStore?.colCount ?? 26;
+
+        const { rowBreaks, colBreaks } = _printEngine.computePageBreaks(
+            printSettings,
+            virtualizer.rowMetrics,
+            virtualizer.colMetrics,
+            totalRows,
+            totalCols,
+        );
+
+        const scrollLeft = virtualizer.scrollLeft;
+        const scrollTop  = virtualizer.scrollTop;
+
+        // Convert row breaks to Y positions in grid-root container coords.
+        // Row break at rowIndex R means a new page starts at R.
+        // The horizontal line goes just before row R.
+        const rowLines = rowBreaks.slice(1).map(r => {
+            const rowY = HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(r) - scrollTop;
+            return rowY;
+        });
+
+        // Convert col breaks to X positions
+        const colLines = colBreaks.slice(1).map(c => {
+            const colX = HEADER_WIDTH + virtualizer.colMetrics.offsetOf(c) - scrollLeft;
+            return colX;
+        });
+
+        // Compute printable area end in container coords (for shading)
+        const ps = printSettings;
+        const areaEndRow = ps.areaEndRow ?? totalRows - 1;
+        const areaEndCol = ps.areaEndCol ?? totalCols - 1;
+        const printEndY = HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(areaEndRow + 1) - scrollTop;
+        const printEndX = HEADER_WIDTH  + virtualizer.colMetrics.offsetOf(areaEndCol + 1) - scrollLeft;
+
+        return { rowLines, colLines, printEndX, printEndY };
+    });
+
     // ─── Interaction state ────────────────────────────────────────────────────
     let isSelectingRange = $state(false);
     let rangeStartCell = $state(null);
     let rangeEndCell = $state(null);
+    let isMultiRefSelect = $state(false); // true when Ctrl/Cmd held during formula cell click
     let resizing = $state(null);
     let currentCursor = $state("cell");
 
@@ -251,10 +320,15 @@
     let focusedEntryCell = $state(null);
     /** @type {{ table:any, dataIndex:number, colDef:any, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
     let focusedTableDataCell = $state(null);
+    /** @type {{ row:number, col:number, options:string[], left:number, top:number, width:number, height:number }|null} */
+    let focusedDropdownCell = $state(null);
+    let dropdownFilter = $state('');
     /** @type {{ type: 'table'|'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
     /** @type {{ table:any, colId:string, left:number, top:number }|null} */
     let activeColumnConfig = $state(null);
+    /** @type {{ table:any, colDef:any, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
+    let activeHeaderRename = $state(null);
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -263,6 +337,7 @@
     // ─── Dialog state ─────────────────────────────────────────────────────────
     let showCreateTableDialog = $state(false);
     let showCreateRepeaterDialog = $state(false);
+    let showFloatingImageInsert = $state(false);
 
     // ─── Derived store state ──────────────────────────────────────────────────
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
@@ -362,17 +437,45 @@
         untrack(() => renderScheduler?.invalidateAll());
     });
 
-    // ─── Main repaint trigger ─────────────────────────────────────────────────
     $effect(() => {
-        // Touch reactive dependencies to track them.
-        // NOTE: we track cellsVersion (not sheetStore.cells) because Svelte 5 does
-        // not detect Map.set/delete mutations via a plain reference read.
+        if (!selectCanvasEl || !virtualizer) return;
+
+        const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
+        const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
+        if (w <= 0 || h <= 0) return;
+
+        if (!selectionRenderer) {
+            selectionRenderer = new SelectionRenderer(selectCanvasEl);
+            selectionScheduler = new RenderScheduler(performSelectionPaint);
+        }
+
+        selectionRenderer.resize(w, h);
+        untrack(() => selectionScheduler?.invalidateAll());
+    });
+
+    // ─── Data canvas repaint trigger ──────────────────────────────────────────
+    // Tracks only data/structure changes — NOT selection state or formula typing.
+    // Selection fills and formula highlights are on the separate selection canvas,
+    // so arrow-key navigation no longer causes an expensive full buildPaneData call.
+    $effect(() => {
         const _cellsVer = sheetStore?.cellsVersion;
         const _borders = sheetStore?.bordersVersion;
+        const _rowMetaVer = sheetStore?.rowMetaVersion;
+        const _colMetaVer = sheetStore?.colMetaVersion;
         const _mergeVer = renderContext?.mergeEngine?.version;
-        // Table and repeater version counters trigger repaints on structure changes
         const _tableVer = renderContext?.tableManager?.tableVersion;
         const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
+        const _plan = renderPlan;
+
+        if (!renderPlan || !virtualizer) return;
+
+        untrack(() => renderScheduler?.invalidateAll());
+    });
+
+    // ─── Selection canvas repaint trigger ─────────────────────────────────────
+    // Tracks selection state and formula edit deps only. Repaints are cheap
+    // (~0.3ms) since SelectionRenderer just draws fill rects — no data lookups.
+    $effect(() => {
         const _plan = renderPlan;
         const _sel = selectionState.range;
         const _selMode = selectionState.selectionMode;
@@ -384,7 +487,7 @@
 
         if (!renderPlan || !virtualizer) return;
 
-        untrack(() => renderScheduler?.invalidateAll());
+        untrack(() => selectionScheduler?.invalidateAll());
     });
 
     // ─── Warn on zero viewport ────────────────────────────────────────────────
@@ -416,8 +519,6 @@
             renderContext,
             sheetStore,
             session: spreadsheetSession,
-            selectionState,
-            formulaEditState,
             frozenRows,
             frozenCols,
             frozenHeight,
@@ -525,6 +626,93 @@
         }
     }
 
+    // ─── Selection canvas paint (called by selectionScheduler on RAF) ─────────
+    function performSelectionPaint() {
+        if (!selectCanvasEl || !selectionRenderer || !renderPlan || !virtualizer) return;
+
+        const frozenRows = virtualizer.frozenRows;
+        const frozenCols = virtualizer.frozenCols;
+        const frozenHeight = renderPlan.frozenHeight;
+        const frozenWidth = renderPlan.frozenWidth;
+        const scrollLeft = virtualizer.scrollLeft;
+        const scrollTop = virtualizer.scrollTop;
+
+        const commonSelParams = {
+            rowMetrics: virtualizer.rowMetrics,
+            colMetrics: virtualizer.colMetrics,
+            selectionState,
+            formulaEditState,
+            frozenRows,
+            frozenCols,
+            frozenHeight,
+            frozenWidth,
+            rowCount,
+            colCount,
+        };
+
+        selectionRenderer.clear();
+
+        const bp = renderPlan.plans.body;
+        if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
+            selectionRenderer.paintSelectionPane({
+                ...commonSelParams,
+                rowRange: bp.rowRange,
+                colRange: bp.colRange,
+                scrollLeft,
+                scrollTop,
+                clipX: frozenWidth,
+                clipY: frozenHeight,
+                clipW: renderPlan.bodyViewportWidth,
+                clipH: renderPlan.bodyViewportHeight,
+            });
+        }
+
+        const tp = renderPlan.plans.top;
+        if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
+            selectionRenderer.paintSelectionPane({
+                ...commonSelParams,
+                rowRange: tp.rowRange,
+                colRange: tp.colRange,
+                scrollLeft,
+                scrollTop: 0,
+                clipX: frozenWidth,
+                clipY: 0,
+                clipW: renderPlan.bodyViewportWidth,
+                clipH: frozenHeight,
+            });
+        }
+
+        const lp = renderPlan.plans.left;
+        if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
+            selectionRenderer.paintSelectionPane({
+                ...commonSelParams,
+                rowRange: lp.rowRange,
+                colRange: lp.colRange,
+                scrollLeft: 0,
+                scrollTop,
+                clipX: 0,
+                clipY: frozenHeight,
+                clipW: frozenWidth,
+                clipH: renderPlan.bodyViewportHeight,
+            });
+        }
+
+        const cp = renderPlan.plans.corner;
+        if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
+            selectionRenderer.paintSelectionPane({
+                ...commonSelParams,
+                rowRange: cp.rowRange,
+                colRange: cp.colRange,
+                scrollLeft: 0,
+                scrollTop: 0,
+                clipX: 0,
+                clipY: 0,
+                clipW: frozenWidth,
+                clipH: frozenHeight,
+            });
+        }
+    }
+
     // ─── Pixel-to-container coordinate helpers ────────────────────────────────
     function getLocalCoords(e) {
         const rect = containerEl?.getBoundingClientRect();
@@ -607,6 +795,10 @@
     let editorBoundsForOverlay = $derived.by(() => {
         if (!editSessionState.isEditing || !virtualizer || !renderPlan)
             return null;
+        // Hide inline editor when the editing cell is on a different sheet
+        const editingSheetId = editSessionState.editingSheetId;
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
+            return null;
         const row = editSessionState.cell?.row;
         const col = editSessionState.cell?.col;
         if (row == null || col == null || row < 0 || col < 0) return null;
@@ -657,20 +849,21 @@
 
     /**
      * Insert button info for the active entry row.
-     * Shown below the entry row when the user is focused on an entry cell.
+     * Shown to the right of the entry row when the user is focused on an entry cell.
      */
     let entryInsertButtonInfo = $derived.by(() => {
         if (!focusedEntryCell || !virtualizer || !renderPlan) return null;
         const tbl = focusedEntryCell.table;
         const entryRow = tbl.startRow + 1;
-        const top =
-            cellContainerTop(entryRow) + virtualizer.getRowHeight(entryRow);
-        const left = cellContainerLeft(tbl.startCol);
-        let width = 0;
+        const top = cellContainerTop(entryRow);
+        const height = virtualizer.getRowHeight(entryRow);
+        // Position to the right of the last table column
+        let tableWidth = 0;
         for (let c = tbl.startCol; c <= tbl.endCol; c++) {
-            width += virtualizer.getColWidth(c);
+            tableWidth += virtualizer.getColWidth(c);
         }
-        return { table: tbl, top, left, width };
+        const left = cellContainerLeft(tbl.startCol) + tableWidth;
+        return { table: tbl, top, height, left };
     });
 
     /**
@@ -878,6 +1071,7 @@
             isSelectingRange = true;
             rangeStartCell = { row, col };
             rangeEndCell = { row, col };
+            isMultiRefSelect = e.ctrlKey || e.metaKey;
             e.preventDefault();
             return;
         }
@@ -892,6 +1086,12 @@
 
         // Close open filter popover
         activeFilterPopover = null;
+
+        // Close header rename overlay if clicking elsewhere
+        if (activeHeaderRename &&
+            (activeHeaderRename.row !== row || activeHeaderRename.col !== col)) {
+            activeHeaderRename = null;
+        }
 
         // Close entry cell if clicking elsewhere
         if (
@@ -908,6 +1108,14 @@
                 focusedTableDataCell.col !== col)
         ) {
             focusedTableDataCell = null;
+        }
+
+        // Close dropdown overlay if clicking elsewhere
+        if (
+            focusedDropdownCell &&
+            (focusedDropdownCell.row !== row || focusedDropdownCell.col !== col)
+        ) {
+            focusedDropdownCell = null;
         }
 
         const cellType = renderContext?.getCellType(row, col);
@@ -1100,16 +1308,33 @@
     function handleMouseUp() {
         if (isFormulaEditMode && isSelectingRange && rangeStartCell) {
             const endCell = rangeEndCell || rangeStartCell;
-            const ref = toRangeRef(
+            let ref = toRangeRef(
                 Math.min(rangeStartCell.row, endCell.row),
                 Math.min(rangeStartCell.col, endCell.col),
                 Math.max(rangeStartCell.row, endCell.row),
                 Math.max(rangeStartCell.col, endCell.col),
             );
-            editSessionState.insertReference(ref);
+
+            // Prefix with sheet name when picking from a different sheet
+            const currentSheetId = spreadsheetSession.activeSheetId;
+            const editingSheetId = editSessionState.editingSheetId;
+            if (currentSheetId && editingSheetId && currentSheetId !== editingSheetId) {
+                const sheetName = spreadsheetSession.getSheetName(currentSheetId);
+                // Quote the name if it contains spaces or special chars
+                const needsQuotes = /[\s!']/.test(sheetName);
+                const escapedName = needsQuotes ? `'${sheetName.replace(/'/g, "''")}'` : sheetName;
+                ref = `${escapedName}!${ref}`;
+            }
+
+            if (isMultiRefSelect) {
+                editSessionState.appendReference(ref);
+            } else {
+                editSessionState.insertReference(ref);
+            }
             isSelectingRange = false;
             rangeStartCell = null;
             rangeEndCell = null;
+            isMultiRefSelect = false;
             return;
         }
         selectionState.endSelection();
@@ -1164,11 +1389,26 @@
             return;
         }
 
-        // ── TABLE_HEADER / TABLE_ENTRY: no plain-text editing ────────────────
-        if (
-            cellType === CELL_TYPE.TABLE_HEADER ||
-            cellType === CELL_TYPE.TABLE_ENTRY
-        ) {
+        // ── TABLE_HEADER: inline rename on double-click ──────────────────────
+        if (cellType === CELL_TYPE.TABLE_HEADER) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                activeHeaderRename = {
+                    table: info.table,
+                    colDef: info.colDef,
+                    row,
+                    col,
+                    left: cellContainerLeft(col),
+                    top: cellContainerTop(row),
+                    width: virtualizer.getColWidth(col),
+                    height: virtualizer.getRowHeight(row),
+                };
+            }
+            return;
+        }
+
+        // ── TABLE_ENTRY: no plain-text editing ───────────────────────────────
+        if (cellType === CELL_TYPE.TABLE_ENTRY) {
             return;
         }
 
@@ -1215,6 +1455,38 @@
         const { seedText = null, surface = "grid" } = options;
         const rawValue = spreadsheetSession.getCellEditValue(row, col);
         const ct = renderContext?.getCellTypeConfig(row, col);
+
+        // Dropdown cell: show overlay list instead of text editor
+        if (ct?.type === 'dropdown') {
+            let ddOptions = [];
+            if (ct.source === 'range' && ct.range) {
+                ddOptions = resolveRangeOptions(ct.range);
+            } else if (Array.isArray(ct.options)) {
+                ddOptions = ct.options;
+            }
+            if (ddOptions.length > 0) {
+                dropdownFilter = '';
+                focusedDropdownCell = {
+                    row, col,
+                    options: ddOptions,
+                    left: cellContainerLeft(col),
+                    top: cellContainerTop(row),
+                    width: virtualizer.getColWidth(col),
+                    height: virtualizer.getRowHeight(row),
+                };
+                return;
+            }
+        }
+        // Image cells: set image picker mode and pass current blob ID as initial value
+        if (ct?.type === 'image') {
+            const currentBlobId = spreadsheetSession.getCellEditValue(row, col) ?? '';
+            editSessionState.beginEdit(
+                row, col, currentBlobId, surface,
+                { pickerMode: 'image-picker', sheetId: spreadsheetSession.activeSheetId },
+            );
+            return;
+        }
+
         const pickerMode =
             ct?.type === "date"
                 ? "date"
@@ -1229,13 +1501,77 @@
             col,
             seedText !== null ? seedText : (rawValue ?? ""),
             surface,
-            { pickerMode },
+            { pickerMode, sheetId: spreadsheetSession.activeSheetId },
         );
+    }
+
+    /**
+     * Persist an edit to a specific sheet (may differ from active sheet during cross-sheet formula editing).
+     * Falls back to the active sheet when sheetId is null/undefined.
+     */
+    function persistEditOnSheet(sheetId, payload) {
+        if (!payload) return;
+        const { row, col, value } = payload;
+        const targetSheetId = sheetId || spreadsheetSession.activeSheetId;
+
+        if (typeof value === 'string' && value.startsWith('=')) {
+            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, row, col, value);
+        } else {
+            // Get the cell type config from the target sheet's store for value parsing
+            const targetStore = targetSheetId === spreadsheetSession.activeSheetId
+                ? sheetStore
+                : null; // For non-active sheets skip type-config parsing; value is used as-is
+            const ct = targetStore?.getCellTypeConfig(row, col);
+            const parsedValue = CellTypeRegistry.parseInput(ct, value);
+            spreadsheetSession.setCellValueOnSheet(targetSheetId, row, col, parsedValue);
+        }
     }
 
     function persistEdit(payload) {
         if (!payload || !sheetStore) return;
         const { row, col, value } = payload;
+
+        // Data validation check (skip for formulas)
+        if (typeof value !== "string" || !value.startsWith("=")) {
+            // Check explicit DV rules
+            const dvRules = sheetStore.getDataValidations?.() ?? [];
+            for (const rule of dvRules) {
+                if (row < rule.startRow || row > rule.endRow) continue;
+                if (col < rule.startCol || col > rule.endCol) continue;
+                const valid = checkDataValidation(value, rule);
+                if (!valid) {
+                    const msg = rule.message || `Invalid value for this cell.`;
+                    if (rule.strict !== false) {
+                        window.alert(msg);
+                        return; // Reject the edit
+                    } else {
+                        console.warn('Data validation warning:', msg);
+                    }
+                }
+                break;
+            }
+
+            // Check dropdown cell type validation setting
+            const cellCt = sheetStore.getCellTypeConfig(row, col);
+            if (cellCt?.type === 'dropdown' && cellCt.validation && cellCt.validation !== 'none') {
+                let ddOpts = [];
+                if (cellCt.source === 'range' && cellCt.range) {
+                    ddOpts = resolveRangeOptions(cellCt.range);
+                } else if (Array.isArray(cellCt.options)) {
+                    ddOpts = cellCt.options;
+                }
+                if (ddOpts.length > 0 && !ddOpts.includes(String(value))) {
+                    const msg = `"${value}" is not a valid option.`;
+                    if (cellCt.validation === 'hard') {
+                        window.alert(msg);
+                        return;
+                    } else {
+                        console.warn('Dropdown validation warning:', msg);
+                    }
+                }
+            }
+        }
+
         if (typeof value === "string" && value.startsWith("=")) {
             sheetStore.setCellFormula(row, col, value);
         } else {
@@ -1246,32 +1582,87 @@
         }
     }
 
+    function checkDataValidation(value, rule) {
+        if (rule.type === 'list') {
+            const options = rule.options || [];
+            return options.length === 0 || options.includes(String(value));
+        }
+        if (rule.type === 'number') {
+            const num = Number(value);
+            if (isNaN(num)) return false;
+            return checkNumericCondition(num, rule);
+        }
+        if (rule.type === 'date') {
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return false;
+            return true; // Could extend with min/max date checks
+        }
+        if (rule.type === 'text') {
+            const len = String(value).length;
+            return checkNumericCondition(len, rule);
+        }
+        return true;
+    }
+
+    function checkNumericCondition(num, rule) {
+        const min = Number(rule.min);
+        const max = Number(rule.max);
+        switch (rule.condition) {
+            case 'between':  return num >= min && num <= max;
+            case 'gt':       return num > min;
+            case 'gte':      return num >= min;
+            case 'lt':       return num < min;
+            case 'lte':      return num <= min;
+            case 'eq':       return num === min;
+            case 'neq':      return num !== min;
+            default:         return true;
+        }
+    }
+
     function commitCurrentEdit() {
+        const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        persistEdit(payload);
+        persistEditOnSheet(editingSheetId, payload);
+        // Return to origin sheet if we navigated away for cross-sheet ref picking
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        }
     }
 
     function commitEditAndMove(dRow, dCol) {
+        const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        persistEdit(payload);
-        selectionState.moveSelection(dRow, dCol);
-        scrollToAnchor();
+        persistEditOnSheet(editingSheetId, payload);
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        } else {
+            selectionState.moveSelection(dRow, dCol);
+            scrollToAnchor();
+        }
     }
 
     function commitEdit(value = undefined) {
         if (value !== undefined && editSessionState.isEditing) {
             // Rich text / contenteditable passes value (HTML string or plain string) directly
+            const editingSheetId = editSessionState.editingSheetId;
             const { row, col } = editSessionState.cell;
             editSessionState.cancel();
-            persistEdit({ row, col, value });
+            persistEditOnSheet(editingSheetId, { row, col, value });
+            if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+                spreadsheetSession.setActiveSheet(editingSheetId);
+            }
         } else {
             commitCurrentEdit();
         }
     }
     function cancelEdit() {
+        const editingSheetId = editSessionState.editingSheetId;
         editSessionState.cancel();
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        }
     }
 
     function handleEditInput(value, start, end) {
@@ -1428,6 +1819,12 @@
                 if (virtualizer)
                     virtualizer.setScroll(pendingScrollTop, pendingScrollLeft);
                 scrollPending = false;
+                // Paint canvas in the same RAF as the scroll state update.
+                // Without this, the canvas would lag 1 frame behind the DOM
+                // overlay positions (table/repeater outlines), causing visible jitter.
+                if (canvasRenderer && renderPlan) {
+                    performPaint(new Set(['body', 'top', 'left', 'corner']));
+                }
             });
         }
     }
@@ -1496,6 +1893,13 @@
                 anchorCellType === CELL_TYPE.TABLE_HEADER ||
                 anchorCellType === CELL_TYPE.TABLE_ENTRY
             ) {
+                e.preventDefault();
+                return;
+            }
+
+            // Block typing into image cells — they use the image picker editor
+            const anchorCt = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
+            if (anchorCt?.type === 'image') {
                 e.preventDefault();
                 return;
             }
@@ -1585,21 +1989,51 @@
                 scrollToAnchor();
                 e.preventDefault();
                 break;
+            case "Tab":
+                selectionState.moveSelection(
+                    0,
+                    e.shiftKey ? -1 : 1,
+                    false,
+                    rowCount,
+                    colCount,
+                );
+                scrollToAnchor();
+                e.preventDefault();
+                break;
             case "Enter":
+                // Enter moves selection down, but opens the image picker for image cells.
                 if (anchor) {
-                    const anchorCellType = renderContext?.getCellType(
+                    const anchorCellType = renderContext?.getCellType(anchor.row, anchor.col);
+                    const anchorCt2 = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
+                    if (anchorCt2?.type === 'image') {
+                        beginCellEdit(anchor.row, anchor.col, { surface: 'grid' });
+                        e.preventDefault();
+                        break;
+                    }
+                    if (
+                        anchorCellType !== CELL_TYPE.TABLE_HEADER &&
+                        anchorCellType !== CELL_TYPE.TABLE_ENTRY
+                    ) {
+                        selectionState.moveSelection(1, 0, false, rowCount, colCount);
+                        scrollToAnchor();
+                    }
+                }
+                e.preventDefault();
+                break;
+            case "F2":
+                // F2 opens the cell editor (standard spreadsheet shortcut).
+                if (anchor) {
+                    const f2CellType = renderContext?.getCellType(
                         anchor.row,
                         anchor.col,
                     );
-                    // TABLE_DATA: open the inline editor overlay
-                    if (anchorCellType === CELL_TYPE.TABLE_DATA) {
+                    if (f2CellType === CELL_TYPE.TABLE_DATA) {
                         const info = renderContext?.tableManager?.getCellInfo(
                             anchor.row,
                             anchor.col,
                         );
                         if (info?.table && info.colDef) {
                             const colType = info.colDef.type;
-                            // Checkbox/rating handled by single click; formula columns not editable
                             if (
                                 colType !== "checkbox" &&
                                 colType !== "rating" &&
@@ -1614,25 +2048,15 @@
                                     left: cellContainerLeft(anchor.col),
                                     top: cellContainerTop(anchor.row),
                                     width: virtualizer.getColWidth(anchor.col),
-                                    height: virtualizer.getRowHeight(
-                                        anchor.row,
-                                    ),
+                                    height: virtualizer.getRowHeight(anchor.row),
                                 };
                             }
                         }
-                    }
-                    // TABLE_HEADER / TABLE_ENTRY: block the regular editor
-                    else if (
-                        anchorCellType === CELL_TYPE.TABLE_HEADER ||
-                        anchorCellType === CELL_TYPE.TABLE_ENTRY
+                    } else if (
+                        f2CellType !== CELL_TYPE.TABLE_HEADER &&
+                        f2CellType !== CELL_TYPE.TABLE_ENTRY
                     ) {
-                        // No action - don't open any editor
-                    }
-                    // Regular cells: open the standard cell editor
-                    else {
-                        beginCellEdit(anchor.row, anchor.col, {
-                            surface: "grid",
-                        });
+                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
                     }
                 }
                 e.preventDefault();
@@ -1669,7 +2093,11 @@
                 }
                 break;
             case "v":
-                if ((e.ctrlKey || e.metaKey) && selection) {
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey && selection) {
+                    // Ctrl+Shift+V → paste values only
+                    pasteSelection("values");
+                    e.preventDefault();
+                } else if ((e.ctrlKey || e.metaKey) && selection) {
                     pasteSelection("full");
                     e.preventDefault();
                 }
@@ -1677,6 +2105,66 @@
             case "a":
                 if (e.ctrlKey || e.metaKey) {
                     selectionState.selectAll();
+                    e.preventDefault();
+                }
+                break;
+            case "d":
+                if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                    // Ctrl+D → fill down
+                    fillDown();
+                    e.preventDefault();
+                }
+                break;
+            case "r":
+                if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                    // Ctrl+R → fill right
+                    fillRight();
+                    e.preventDefault();
+                }
+                break;
+            case "4":
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+                    // Ctrl+Shift+4 → format as currency
+                    applyTypeToSelection('currency', { decimals: 2, symbol: '$' });
+                    e.preventDefault();
+                }
+                break;
+            case "5":
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+                    // Ctrl+Shift+5 → format as percent
+                    applyTypeToSelection('percent', { decimals: 2 });
+                    e.preventDefault();
+                }
+                break;
+            case ";":
+                if (e.ctrlKey || e.metaKey) {
+                    // Ctrl+; → insert today's date
+                    insertDate();
+                    e.preventDefault();
+                }
+                break;
+            case "\\":
+                if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
+                    // Ctrl+\ → clear formatting
+                    clearFormatting();
+                    e.preventDefault();
+                }
+                break;
+            case "=":
+                if ((e.ctrlKey || e.metaKey) && e.altKey) {
+                    // Ctrl+Alt+= → insert row/column (when row/col selected)
+                    const mode = selectionState.selectionMode;
+                    if (mode === 'rows') insertRowAbove();
+                    else if (mode === 'cols') insertColumnLeft();
+                    e.preventDefault();
+                }
+                break;
+            case "-":
+                if ((e.ctrlKey || e.metaKey) && e.altKey) {
+                    // Ctrl+Alt+- → delete row/column (when row/col selected)
+                    const delMode = selectionState.selectionMode;
+                    if (delMode === 'rows') deleteSelectedRows();
+                    else if (delMode === 'cols') deleteSelectedColumns();
                     e.preventDefault();
                 }
                 break;
@@ -1730,8 +2218,83 @@
                 ct === CELL_TYPE.VIEWPORT_OCCUPIED
             )
                 return;
-            sheetStore.clearCell(r, c);
+            sheetStore.clearCellValue(r, c);
         });
+    }
+
+    // ─── Dropdown range resolver ──────────────────────────────────────────────
+    function resolveRangeOptions(rangeStr) {
+        if (!sheetStore) return [];
+        const parts = rangeStr.trim().toUpperCase().split(':');
+        function parseRef(ref) {
+            const m = ref.match(/^([A-Z]+)(\d+)$/);
+            if (!m) return null;
+            let col = 0;
+            for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
+            col--;
+            return { row: parseInt(m[2]) - 1, col };
+        }
+        const start = parseRef(parts[0]);
+        const end = parts[1] ? parseRef(parts[1]) : start;
+        if (!start || !end) return [];
+        const opts = [];
+        for (let r = start.row; r <= end.row; r++) {
+            for (let c = start.col; c <= end.col; c++) {
+                const cell = sheetStore.getCell(r, c);
+                if (cell?.v != null && cell.v !== '') opts.push(String(cell.v));
+            }
+        }
+        return opts;
+    }
+
+    // ─── Fill Down / Right ────────────────────────────────────────────────────
+    function fillDown() {
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff || eff.startRow === eff.endRow) return;
+        sheetStore.fillDown(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+    }
+
+    function fillRight() {
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff || eff.startCol === eff.endCol) return;
+        sheetStore.fillRight(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+    }
+
+    // ─── Apply cell type to selection ─────────────────────────────────────────
+    function applyTypeToSelection(type, extraOptions = {}) {
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+        const config = { type, ...extraOptions };
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = eff.startRow; r <= eff.endRow; r++) {
+                for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    sheetStore.setCellTypeConfig(r, c, config);
+                }
+            }
+        });
+    }
+
+    // ─── Insert today's date ──────────────────────────────────────────────────
+    function insertDate() {
+        if (!sheetStore || !anchor) return;
+        const today = new Date();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        const yyyy = today.getFullYear();
+        sheetStore.setCellValue(anchor.row, anchor.col, `${mm}/${dd}/${yyyy}`);
+    }
+
+    // ─── Clear formatting ─────────────────────────────────────────────────────
+    function clearFormatting() {
+        if (!sheetStore) return;
+        const eff = selectionState.effectiveRange(rowCount, colCount);
+        if (!eff) return;
+        sheetStore.clearRangeFormatting(
+            eff.startRow, eff.startCol, eff.endRow, eff.endCol
+        );
     }
 
     // ─── Row / Column insert / delete ─────────────────────────────────────────
@@ -2020,6 +2583,29 @@
         },
         { divider: true },
         {
+            label: "Insert Image in Cell",
+            icon: "🖼",
+            action: () => {
+                if (anchor) {
+                    // Apply image type then open the picker
+                    sheetStore?.setCellTypeConfig(anchor.row, anchor.col, { type: 'image', fit: 'contain' });
+                    beginCellEdit(anchor.row, anchor.col, { surface: 'grid' });
+                }
+            },
+            disabled: !anchor,
+        },
+        {
+            label: "Insert Floating Image…",
+            icon: "🖼",
+            action: () => {
+                if (anchor && sheetStore) {
+                    showFloatingImageInsert = true;
+                }
+            },
+            disabled: !anchor,
+        },
+        { divider: true },
+        {
             label: "Merge Cells",
             icon: mergeIcon,
             isSvgIcon: true,
@@ -2277,7 +2863,26 @@
     // ─── Lifecycle ────────────────────────────────────────────────────────────
     let resizeTicking = false;
 
+    /** Handler stored for cleanup — image fit change from ImageEditor */
+    function handleImageFitChange(e) {
+        const { fit } = e.detail ?? {};
+        if (!fit || !sheetStore) return;
+        const cell = editSessionState.cell;
+        if (!cell) return;
+        const ct = sheetStore.getCellTypeConfig(cell.row, cell.col);
+        if (ct?.type === 'image') {
+            sheetStore.setCellTypeConfig(cell.row, cell.col, { ...ct, fit });
+        }
+    }
+
     onMount(() => {
+        // Trigger a canvas repaint when any image finishes loading
+        setOnLoadCallback(() => {
+            renderScheduler?.invalidateAll();
+        });
+
+        window.addEventListener('image-fit-change', handleImageFitChange);
+
         document.addEventListener("mouseup", handleMouseUp);
 
         if (containerEl) {
@@ -2314,6 +2919,10 @@
         virtualizer?.destroy();
         renderScheduler?.destroy();
         canvasRenderer?.destroy();
+        selectionScheduler?.destroy();
+        selectionRenderer?.destroy();
+        setOnLoadCallback(null);
+        window.removeEventListener('image-fit-change', handleImageFitChange);
     });
 </script>
 
@@ -2321,11 +2930,20 @@
 
 <div class="grid-root" bind:this={containerEl}>
     {#if renderPlan && virtualizer}
-        <!-- ── 1. Canvas layer (all cell rendering) ── -->
+        <!-- ── 1a. Data canvas (cell backgrounds, text, borders, gridlines) ── -->
         <canvas
             bind:this={canvasEl}
             class="grid-canvas"
             style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none;"
+        ></canvas>
+
+        <!-- ── 1b. Selection canvas (selection fills + formula highlights) ── -->
+        <!-- Separate from data canvas so selection changes (arrow keys, mouse) -->
+        <!-- only repaint this lightweight layer, not the full cell data. -->
+        <canvas
+            bind:this={selectCanvasEl}
+            class="select-canvas"
+            style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none; z-index:3;"
         ></canvas>
 
         <!-- ── 2. DOM overlay layer ── -->
@@ -2503,6 +3121,49 @@
                 </div>
             {/if}
 
+            <!-- Dropdown cell overlay -->
+            {#if focusedDropdownCell}
+                {@const filteredOpts = dropdownFilter
+                    ? focusedDropdownCell.options.filter(o => String(o).toLowerCase().includes(dropdownFilter.toLowerCase()))
+                    : focusedDropdownCell.options}
+                <div
+                    class="dropdown-cell-overlay"
+                    style="position:absolute; left:{focusedDropdownCell.left}px; top:{focusedDropdownCell.top + focusedDropdownCell.height}px; width:{Math.max(focusedDropdownCell.width, 140)}px; z-index:30;"
+                >
+                    <input
+                        class="dropdown-filter-input"
+                        type="text"
+                        placeholder="Search..."
+                        bind:value={dropdownFilter}
+                        autofocus
+                        onkeydown={(e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                if (filteredOpts.length > 0) {
+                                    sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                    focusedDropdownCell = null;
+                                }
+                            } else if (e.key === 'Escape') {
+                                focusedDropdownCell = null;
+                            }
+                        }}
+                    />
+                    {#each filteredOpts as opt}
+                        <button
+                            class="dropdown-option"
+                            onmousedown={(e) => {
+                                e.preventDefault();
+                                sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, opt);
+                                focusedDropdownCell = null;
+                            }}
+                        >{opt}</button>
+                    {/each}
+                    {#if filteredOpts.length === 0}
+                        <div class="dropdown-no-match">No matches</div>
+                    {/if}
+                </div>
+            {/if}
+
             <!-- Cell editor (GridOverlays: input + formula overlay + FormulaValuePopup) -->
             <GridOverlays
                 bind:this={overlaysRef}
@@ -2513,7 +3174,35 @@
                 onEditSelect={handleEditSelect}
                 onCommitEdit={commitEdit}
                 onCancelEdit={cancelEdit}
+                docId={spreadsheetSession.docId}
+                onTabCommit={(dir, kind) => {
+                    // dir: +1 = right/down, -1 = left/up; kind: 'tab' = horizontal
+                    const dRow = kind === 'tab' ? 0 : 1;
+                    const dCol = kind === 'tab' ? dir : 0;
+                    if (editSessionState.isEditing) {
+                        // Session still active (formula/plain text) — commit+move together
+                        commitEditAndMove(dRow, dCol);
+                    } else {
+                        // Rich text: session was committed inside commitRichValue(),
+                        // just move selection now.
+                        selectionState.moveSelection(dRow, dCol);
+                        scrollToAnchor();
+                    }
+                }}
             />
+
+            <!-- Floating images layer (over-grid, draggable/resizable) -->
+            {#if sheetStore && virtualizer && renderPlan}
+                <FloatingImages
+                    {sheetStore}
+                    {virtualizer}
+                    frozenWidth={renderPlan.frozenWidth}
+                    frozenHeight={renderPlan.frozenHeight}
+                    headerWidth={HEADER_WIDTH}
+                    headerHeight={HEADER_HEIGHT}
+                    docId={spreadsheetSession.docId}
+                />
+            {/if}
 
             <!-- Table filter popovers -->
             {#if activeFilterPopover && filterPopoverPosition}
@@ -2543,21 +3232,23 @@
                         onTabNext={entryTabNext}
                         onTabPrev={entryTabPrev}
                         onCommit={commitEntryAndRefocus}
+                        onValueChange={() => untrack(() => renderScheduler?.invalidateAll())}
                     />
                 </div>
-                <!-- Floating Insert button below the entry row -->
+                <!-- Entry action buttons — inline to the right of the table, same row height -->
                 {#if entryInsertButtonInfo}
                     <div
-                        class="entry-insert-bar"
-                        style="position:absolute; left:{entryInsertButtonInfo.left}px; top:{entryInsertButtonInfo.top}px; width:{entryInsertButtonInfo.width}px; z-index:23;"
+                        class="entry-action-bar"
+                        style="position:absolute; left:{entryInsertButtonInfo.left + 4}px; top:{entryInsertButtonInfo.top}px; height:{entryInsertButtonInfo.height}px; z-index:23;"
                     >
                         <button
-                            class="entry-insert-btn"
+                            class="entry-add-btn"
                             onclick={commitEntryAndRefocus}
-                            title="Insert row (Enter)"
-                            aria-label="Insert row"
+                            onmousedown={(e) => e.preventDefault()}
+                            title="Add row (Enter)"
+                            aria-label="Add row"
                         >
-                            ↵ Insert
+                            {@html plusIcon} Add
                         </button>
                         <button
                             class="entry-clear-btn"
@@ -2565,6 +3256,7 @@
                                 focusedEntryCell.table.clearEntry();
                                 focusedEntryCell = null;
                             }}
+                            onmousedown={(e) => e.preventDefault()}
                             title="Clear entry (Escape)"
                             aria-label="Clear entry"
                         >
@@ -2572,6 +3264,38 @@
                         </button>
                     </div>
                 {/if}
+            {/if}
+
+            <!-- Table header inline rename overlay (shown on double-click) -->
+            {#if activeHeaderRename}
+                <div
+                    class="header-rename-overlay"
+                    style="position:absolute; left:{activeHeaderRename.left}px; top:{activeHeaderRename.top}px; width:{activeHeaderRename.width}px; height:{activeHeaderRename.height}px; z-index:25;"
+                >
+                    <input
+                        type="text"
+                        class="header-rename-input"
+                        value={activeHeaderRename.colDef.name ?? ''}
+                        autofocus
+                        onkeydown={(e) => {
+                            if (e.key === 'Enter' || e.key === 'Tab') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const newName = /** @type {HTMLInputElement} */ (e.target).value.trim();
+                                if (newName) activeHeaderRename.table.renameColumn(activeHeaderRename.colDef.id, newName);
+                                activeHeaderRename = null;
+                            } else if (e.key === 'Escape') {
+                                e.stopPropagation();
+                                activeHeaderRename = null;
+                            }
+                        }}
+                        onblur={(e) => {
+                            const newName = /** @type {HTMLInputElement} */ (e.target).value.trim();
+                            if (newName) activeHeaderRename?.table.renameColumn(activeHeaderRename.colDef.id, newName);
+                            activeHeaderRename = null;
+                        }}
+                    />
+                </div>
             {/if}
 
             <!-- Column config panel (floating, from context menu or header badge click) -->
@@ -2616,6 +3340,69 @@
         >
             <div class="scroll-spacer" style={spacerStyle()}></div>
         </div>
+
+        <!-- ── Page break overlay ── -->
+        {#if showPageBreaks && pageBreakLines}
+            {@const { rowLines, colLines, printEndX, printEndY } = pageBreakLines}
+            <svg
+                class="page-break-overlay"
+                style="position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:9; overflow:visible;"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+                <!-- Row page break lines -->
+                {#each rowLines as y}
+                    {#if y > HEADER_HEIGHT && y < 9999}
+                        <line
+                            x1={HEADER_WIDTH}
+                            y1={y}
+                            x2="100%"
+                            y2={y}
+                            stroke="#1a73e8"
+                            stroke-width="1.5"
+                            stroke-dasharray="6 3"
+                            opacity="0.75"
+                        />
+                        <text x={HEADER_WIDTH + 4} y={y - 3} font-size="9" fill="#1a73e8" opacity="0.75" font-family="system-ui,sans-serif">page</text>
+                    {/if}
+                {/each}
+
+                <!-- Column page break lines -->
+                {#each colLines as x}
+                    {#if x > HEADER_WIDTH && x < 9999}
+                        <line
+                            x1={x}
+                            y1={HEADER_HEIGHT}
+                            x2={x}
+                            y2="100%"
+                            stroke="#1a73e8"
+                            stroke-width="1.5"
+                            stroke-dasharray="6 3"
+                            opacity="0.75"
+                        />
+                    {/if}
+                {/each}
+
+                <!-- Print area end (right / bottom) shading -->
+                {#if printEndX > HEADER_WIDTH && printEndX < 9999}
+                    <rect
+                        x={printEndX}
+                        y={0}
+                        width="9999"
+                        height="100%"
+                        fill="rgba(0,0,0,0.06)"
+                    />
+                {/if}
+                {#if printEndY > HEADER_HEIGHT && printEndY < 9999}
+                    <rect
+                        x={0}
+                        y={printEndY}
+                        width="100%"
+                        height="9999"
+                        fill="rgba(0,0,0,0.06)"
+                    />
+                {/if}
+            </svg>
+        {/if}
     {/if}
 </div>
 
@@ -2637,6 +3424,40 @@
     <RepeaterCreateDialog onClose={() => (showCreateRepeaterDialog = false)} />
 {/if}
 
+{#if showFloatingImageInsert && anchor && sheetStore}
+    <!-- Floating image upload dialog -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+        class="floating-insert-backdrop"
+        onmousedown={() => (showFloatingImageInsert = false)}
+    >
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="floating-insert-dialog" onmousedown={(e) => e.stopPropagation()}>
+            <h3 class="floating-insert-title">Insert Floating Image</h3>
+            <ImageEditor
+                value=""
+                docId={spreadsheetSession.docId}
+                onCommit={(blobId, fit) => {
+                    if (blobId && anchor) {
+                        sheetStore.addFloatingImage({
+                            blobId,
+                            anchorRow: anchor.row,
+                            anchorCol: anchor.col,
+                            offsetX: 0,
+                            offsetY: 0,
+                            width: 240,
+                            height: 160,
+                            fit: fit ?? 'contain',
+                        });
+                    }
+                    showFloatingImageInsert = false;
+                }}
+                onCancel={() => (showFloatingImageInsert = false)}
+            />
+        </div>
+    </div>
+{/if}
+
 <style>
     .grid-root {
         width: 100%;
@@ -2647,10 +3468,15 @@
         background: var(--grid-bg, #fff);
     }
 
-    /* ── Canvas (z:1 inside grid-root, but below overlays) ── */
+    /* ── Data canvas (z:2 — below selection and DOM overlays) ── */
     .grid-canvas {
         z-index: 2;
         display: block; /* prevent inline baseline gap */
+    }
+
+    /* ── Selection canvas (z:3 — above data canvas, below DOM overlays) ── */
+    .select-canvas {
+        display: block;
     }
 
     /* ── DOM overlay layer (z:5) ── */
@@ -2766,6 +3592,7 @@
         border-radius: 2px;
         z-index: 8; /* below selection border */
         transition: opacity 0.15s;
+        will-change: transform;
     }
 
     .range-outline--repeater {
@@ -2857,18 +3684,62 @@
         box-sizing: border-box;
     }
 
-    /* ── Entry insert bar (below entry row, shown when entry cell is focused) ── */
-    .entry-insert-bar {
+    /* ── Dropdown cell overlay ── */
+    .dropdown-cell-overlay {
         pointer-events: auto;
+        background: white;
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
         display: flex;
-        align-items: stretch;
-        gap: 0;
-        height: 24px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        flex-direction: column;
+        overflow: hidden;
+        max-height: 200px;
+        overflow-y: auto;
     }
 
-    .entry-insert-btn {
-        flex: 1;
+    .dropdown-option {
+        padding: 5px 10px;
+        text-align: left;
+        background: none;
+        border: none;
+        border-bottom: 1px solid #f1f5f9;
+        cursor: pointer;
+        font-size: 0.8125rem;
+        color: #1e293b;
+        white-space: nowrap;
+    }
+
+    .dropdown-option:last-child { border-bottom: none; }
+    .dropdown-option:hover { background: #eff6ff; color: #1d4ed8; }
+
+    .dropdown-filter-input {
+        width: 100%;
+        padding: 5px 8px;
+        border: none;
+        border-bottom: 1px solid #e2e8f0;
+        font-size: 0.8125rem;
+        outline: none;
+        box-sizing: border-box;
+        background: #f8fafc;
+    }
+
+    .dropdown-no-match {
+        padding: 6px 10px;
+        font-size: 0.8125rem;
+        color: #94a3b8;
+        font-style: italic;
+    }
+
+    /* ── Entry action bar (right of entry row, inline with the row height) ── */
+    .entry-action-bar {
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+    }
+
+    .entry-add-btn {
         border: 1px solid #3b82f6;
         background: #eff6ff;
         color: #1d4ed8;
@@ -2877,22 +3748,23 @@
         font-weight: 500;
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 4px;
-        border-radius: 0 0 0 4px;
+        gap: 3px;
+        border-radius: 4px;
         transition: background 0.1s;
         box-sizing: border-box;
-        padding: 0 8px;
+        padding: 0 6px;
+        height: 22px;
+        white-space: nowrap;
     }
 
-    .entry-insert-btn:hover {
+    .entry-add-btn:hover {
         background: #dbeafe;
     }
 
     .entry-clear-btn {
-        width: 26px;
+        width: 22px;
+        height: 22px;
         border: 1px solid #e2e8f0;
-        border-left: none;
         background: var(--cell-bg, #fff);
         color: #94a3b8;
         cursor: pointer;
@@ -2900,7 +3772,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        border-radius: 0 0 4px 0;
+        border-radius: 4px;
         transition: all 0.1s;
         box-sizing: border-box;
     }
@@ -2909,6 +3781,54 @@
         background: #fef2f2;
         border-color: #fca5a5;
         color: #dc2626;
+    }
+
+    /* ── Table header inline rename overlay ── */
+    .header-rename-overlay {
+        pointer-events: auto;
+        z-index: 25;
+    }
+
+    .header-rename-input {
+        width: 100%;
+        height: 100%;
+        border: 2px solid var(--editor-outline, #3b82f6);
+        background: #fff;
+        padding: 0 6px;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text-color, #1e293b);
+        box-sizing: border-box;
+        outline: none;
+    }
+
+    /* ── Floating image insert dialog ── */
+    .floating-insert-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.25);
+    }
+
+    .floating-insert-dialog {
+        background: #fff;
+        border-radius: 10px;
+        box-shadow: 0 16px 48px rgba(0,0,0,0.18);
+        padding: 20px;
+        min-width: 320px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .floating-insert-title {
+        font-size: 0.9375rem;
+        font-weight: 600;
+        color: #1e293b;
+        margin: 0;
     }
 
     /* ── Column config panel anchor ── */

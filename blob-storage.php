@@ -14,7 +14,7 @@
 
 define('DATA_ROOT', dirname(__DIR__) . '/data/congruum-docs/');
 require_once "iauth.php";
-define('DB_FILE', DATA_ROOT . 'congruum-docs.sqlite');
+define('DB_FILE', DATA_ROOT . 'storage.sqlite');
 define('BLOBS_DIR', DATA_ROOT . 'blobs/');
 
 // Rate limiting configuration (for unauthenticated requests)
@@ -127,7 +127,7 @@ function hasWriteAccess($db, $docId, $user = null) {
     // Get document with all relevant fields
     $stmt = $db->prepare("
         SELECT d.owner, d.folder_id, d.type, d.public_write, d.parent_id
-        FROM documents d
+        FROM files d
         WHERE d.id = ? AND d.deleted = 0
     ");
     $stmt->execute([$docId]);
@@ -150,8 +150,8 @@ function hasWriteAccess($db, $docId, $user = null) {
 
     // Check direct document share
     $stmt = $db->prepare("
-        SELECT 1 FROM document_shares
-        WHERE document_id = ? AND username = ? AND can_write = 1
+        SELECT 1 FROM file_shares
+        WHERE file_id = ? AND username = ? AND can_write = 1
     ");
     $stmt->execute([$docId, $user]);
     if ($stmt->fetch()) return true;
@@ -187,7 +187,7 @@ function hasReadAccess($db, $docId, $user = null) {
     // Get document with all relevant fields
     $stmt = $db->prepare("
         SELECT d.owner, d.folder_id, d.type, d.public_read, d.parent_id
-        FROM documents d
+        FROM files d
         WHERE d.id = ? AND d.deleted = 0
     ");
     $stmt->execute([$docId]);
@@ -210,8 +210,8 @@ function hasReadAccess($db, $docId, $user = null) {
 
     // Check direct document share
     $stmt = $db->prepare("
-        SELECT 1 FROM document_shares
-        WHERE document_id = ? AND username = ? AND can_read = 1
+        SELECT 1 FROM file_shares
+        WHERE file_id = ? AND username = ? AND can_read = 1
     ");
     $stmt->execute([$docId, $user]);
     if ($stmt->fetch()) return true;
@@ -349,10 +349,6 @@ $requestUri = $_SERVER['REQUEST_URI'] ?? '';
 
 // Handle CORS preflight requests
 if ($method === 'OPTIONS') {
-    header('Access-Control-Allow-Origin: *');
-    header('Access-Control-Allow-Methods: GET, HEAD, POST, PUT, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, Content-Disposition, Range, Authorization');
-    header('Access-Control-Max-Age: 86400');
     http_response_code(200);
     exit;
 }
@@ -419,7 +415,7 @@ try {
             }
 
             // Get document info
-            $stmt = $db->prepare("SELECT blob_key FROM documents WHERE id = ? AND type = 'blob' AND deleted = 0");
+            $stmt = $db->prepare("SELECT blob_key FROM files WHERE id = ? AND type = 'blob' AND deleted = 0");
             $stmt->execute([$docId]);
             $doc = $stmt->fetch();
 
@@ -478,11 +474,11 @@ try {
 
             // Update document metadata
             $stmt = $db->prepare("
-                UPDATE documents
-                SET size = ?, mime_type = ?, filename = ?, updated_at = ?
+                UPDATE files
+                SET size = ?, mime_type = ?, filename = ?, updated_at = datetime('now')
                 WHERE id = ?
             ");
-            $stmt->execute([$size, $mimeType, $filename, time(), $docId]);
+            $stmt->execute([$size, $mimeType, $filename, $docId]);
 
             header('Content-Type: application/json');
             echo json_encode([
@@ -506,7 +502,7 @@ try {
             // Get document info
             $stmt = $db->prepare("
                 SELECT blob_key, filename, mime_type, size
-                FROM documents
+                FROM files
                 WHERE id = ? AND type = 'blob' AND deleted = 0
             ");
             $stmt->execute([$docId]);
@@ -552,14 +548,11 @@ try {
             header('Content-Length: ' . $length);
             // Use both filename and filename* for maximum compatibility
             $encodedFilename = rawurlencode($filename);
-            header("Content-Disposition: attachment; filename=\"$encodedFilename\"; filename*=UTF-8''$encodedFilename");
+            // Use 'inline' for stream action (allows browser to display), 'attachment' for download
+            $disposition = ($action === 'stream') ? 'inline' : 'attachment';
+            header("Content-Disposition: $disposition; filename=\"$encodedFilename\"; filename*=UTF-8''$encodedFilename");
             header('Accept-Ranges: bytes');
             header('Cache-Control: private, max-age=3600');
-
-            // Add CORS headers for cross-origin requests
-            header('Access-Control-Allow-Origin: *');
-            header('Access-Control-Allow-Methods: GET, HEAD, OPTIONS');
-            header('Access-Control-Allow-Headers: Range, Authorization');
 
             // For HEAD requests, just send headers
             if ($method === 'HEAD') {
@@ -596,7 +589,7 @@ try {
             // Get document info
             $stmt = $db->prepare("
                 SELECT blob_key, filename, mime_type, size, created_at, updated_at
-                FROM documents
+                FROM files
                 WHERE id = ? AND type = 'blob' AND deleted = 0
             ");
             $stmt->execute([$docId]);

@@ -10,18 +10,31 @@
     import { untrack } from "svelte";
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
     import { close, check } from "../../lib/icons/index.js";
+    import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
 
     let { selectedCell = null, onEdit } = $props();
 
     let previousCellKey = $state(null); // Track previous cell to detect actual cell changes
     let editInputEl = $state(null);
 
-    // Cell reference (e.g., "A1", "B23")
-    let cellRef = $derived(
-        selectedCell
-            ? `${String.fromCharCode(65 + selectedCell.col)}${selectedCell.row + 1}`
-            : "",
-    );
+    // Cell reference — shows origin cell during editing, active anchor otherwise.
+    // When editing cross-sheet (formula started on a different sheet), shows "SheetName!A1".
+    let cellRef = $derived.by(() => {
+        if (editSessionState.isEditing && editSessionState.cell) {
+            const cell = editSessionState.cell;
+            const ref = toCellRef(cell.row, cell.col);
+            const editingSheetId = editSessionState.editingSheetId;
+            const activeSheetId = spreadsheetSession.activeSheetId;
+            if (editingSheetId && editingSheetId !== activeSheetId) {
+                // Cross-sheet: show full qualified ref
+                const sheetName = spreadsheetSession.getSheetName(editingSheetId);
+                return `${sheetName}!${ref}`;
+            }
+            return ref;
+        }
+        if (!selectedCell) return '';
+        return toCellRef(selectedCell.row, selectedCell.col);
+    });
 
     // Current cell key for tracking
     let currentCellKey = $derived(
@@ -95,6 +108,7 @@
                 selectedCell.col,
                 rawVal,
                 "formulaBar",
+                { sheetId: spreadsheetSession.activeSheetId },
             );
         }
     }
@@ -107,13 +121,22 @@
             return;
         }
 
+        const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        onEdit?.(payload.value, payload.row, payload.col);
+        onEdit?.(payload.value, payload.row, payload.col, editingSheetId);
+        // Return to origin sheet if we navigated away for cross-sheet ref picking
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        }
     }
 
     function cancelEdit() {
+        const editingSheetId = editSessionState.editingSheetId;
         editSessionState.cancel();
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            spreadsheetSession.setActiveSheet(editingSheetId);
+        }
     }
 
     function handleKeydown(e) {
@@ -122,6 +145,10 @@
             e.preventDefault();
         } else if (e.key === "Escape") {
             cancelEdit();
+            e.preventDefault();
+        } else if (e.key === "Tab") {
+            // Commit and let the grid move selection (Tab = right, Shift+Tab = left)
+            commitEdit();
             e.preventDefault();
         }
     }
@@ -230,22 +257,7 @@
                 />
                 {#if isFormulaMode}
                     <!-- Color overlay for references -->
-                    <div class="formula-overlay" aria-hidden="true">
-                        {#each formulaSegments as segment}
-                            {#if segment.color}
-                                <span
-                                    style="color: {segment.color}; font-weight: 600;"
-                                    >{segment.text}</span
-                                >
-                            {:else if segment.type === "FUNCTION"}
-                                <span class="formula-function"
-                                    >{segment.text}</span
-                                >
-                            {:else}
-                                <span>{segment.text}</span>
-                            {/if}
-                        {/each}
-                    </div>
+                    <div class="formula-overlay" aria-hidden="true"><span class="formula-overlay-text">{#each formulaSegments as segment}{#if segment.color}<span style="color: {segment.color}; font-weight: 600;">{segment.text}</span>{:else if segment.type === "FUNCTION"}<span class="formula-function">{segment.text}</span>{:else}<span>{segment.text}</span>{/if}{/each}</span></div>
                     <!-- Real-time computed value popup -->
                     <FormulaValuePopup formula={editValue} visible={true} />
                 {/if}
@@ -284,6 +296,10 @@
 
     .cell-reference {
         min-width: 60px;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         padding: 0.25rem 0.5rem;
         font-family: monospace;
         font-size: 0.875rem;
@@ -428,7 +444,6 @@
         padding: 0.25rem 0.5rem;
         font-size: 0.875rem;
         pointer-events: none;
-        white-space: pre;
         overflow: hidden;
         font-family: monospace;
         z-index: 1;
@@ -437,6 +452,15 @@
         border: 2px solid var(--focus-color, #3b82f6);
         border-radius: 4px;
         background: var(--input-bg, #ffffff);
+        /* Vertically center to match <input> behavior */
+        display: flex;
+        align-items: center;
+    }
+
+    .formula-overlay-text {
+        white-space: pre;
+        overflow: hidden;
+        min-width: 0;
     }
 
     .formula-function {

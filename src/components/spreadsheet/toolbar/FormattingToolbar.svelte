@@ -14,6 +14,9 @@
     import AlignmentPicker from "./AlignmentPicker.svelte";
     import MenuDropdown from "./MenuDropdown.svelte";
     import CellTypeConfigurator from "./CellTypeConfigurator.svelte";
+    import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
+    import DataValidationPanel from "../DataValidationPanel.svelte";
+    import PageSetupPanel from "../PageSetupPanel.svelte";
 
     // Font size options
     const fontSizes = [
@@ -38,6 +41,11 @@
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return null;
 
+        // Touch version counters so this derived re-runs on any meta change
+        const _rowMetaVer = sheetStore.rowMetaVersion;
+        const _colMetaVer = sheetStore.colMetaVersion;
+        const _cellsVer = sheetStore.cellsVersion;
+
         const mode = selectionState.selectionMode;
         const rowCount = sheetStore.rowCount;
         const colCount = sheetStore.colCount;
@@ -56,6 +64,7 @@
                 color: rowFmt.color ?? null,
                 backgroundColor: rowFmt.backgroundColor ?? null,
                 horizontalAlign: rowFmt.horizontalAlign ?? null,
+                verticalAlign: rowFmt.verticalAlign ?? null,
             };
         }
 
@@ -71,6 +80,7 @@
                 color: colFmt.color ?? null,
                 backgroundColor: colFmt.backgroundColor ?? null,
                 horizontalAlign: colFmt.horizontalAlign ?? null,
+                verticalAlign: colFmt.verticalAlign ?? null,
             };
         }
 
@@ -89,6 +99,7 @@
             "color",
             "backgroundColor",
             "horizontalAlign",
+            "verticalAlign",
         ];
 
         for (const key of keys) {
@@ -170,17 +181,21 @@
 
         if (mode === "rows" && selectionState.selectedRows) {
             const { start, end } = selectionState.selectedRows;
-            for (let r = start; r <= end; r++) {
-                sheetStore.setRowFormatting?.(r, { [property]: value });
-            }
+            spreadsheetSession.ydoc?.transact(() => {
+                for (let r = start; r <= end; r++) {
+                    sheetStore.setRowFormatting?.(r, { [property]: value });
+                }
+            });
             return;
         }
 
         if (mode === "cols" && selectionState.selectedCols) {
             const { start, end } = selectionState.selectedCols;
-            for (let c = start; c <= end; c++) {
-                sheetStore.setColFormatting?.(c, { [property]: value });
-            }
+            spreadsheetSession.ydoc?.transact(() => {
+                for (let c = start; c <= end; c++) {
+                    sheetStore.setColFormatting?.(c, { [property]: value });
+                }
+            });
             return;
         }
 
@@ -281,16 +296,29 @@
         const rowCount = sheetStore.rowCount;
         const colCount = sheetStore.colCount;
 
-        // For whole-column mode, use setColTypeConfig
-        if (mode === "cols" && selectionState.selectedCols) {
-            const { start, end } = selectionState.selectedCols;
-            for (let c = start; c <= end; c++) {
-                sheetStore.setColTypeConfig(c, config);
-            }
+        // For whole-row mode, use setRowTypeConfig
+        if (mode === "rows" && selectionState.selectedRows) {
+            const { start, end } = selectionState.selectedRows;
+            spreadsheetSession.ydoc?.transact(() => {
+                for (let r = start; r <= end; r++) {
+                    sheetStore.setRowTypeConfig(r, config);
+                }
+            });
             return;
         }
 
-        // For range/row/all: set on individual cells
+        // For whole-column mode, use setColTypeConfig
+        if (mode === "cols" && selectionState.selectedCols) {
+            const { start, end } = selectionState.selectedCols;
+            spreadsheetSession.ydoc?.transact(() => {
+                for (let c = start; c <= end; c++) {
+                    sheetStore.setColTypeConfig(c, config);
+                }
+            });
+            return;
+        }
+
+        // For range/all: set on individual cells
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
 
@@ -312,10 +340,30 @@
         });
     }
 
-    // Print handler
-    function handlePrint() {
-        window.print();
+    // Vertical alignment handler
+    function handleVerticalAlignmentChange(align) {
+        applyFormatting("verticalAlign", align);
     }
+
+    // Page setup / Print handler
+    let showPageSetupPanel = $state(false);
+    let showPageBreaksOnGrid = $state(false);
+
+    function handlePrint() {
+        showPageSetupPanel = true;
+    }
+
+    function togglePageBreaksFromToolbar() {
+        showPageBreaksOnGrid = !showPageBreaksOnGrid;
+        const settings = spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {};
+        document.dispatchEvent(new CustomEvent('togglePageBreaks', {
+            detail: { show: showPageBreaksOnGrid, settings }
+        }));
+    }
+
+    // Conditional formatting / Data validation panels
+    let showCFPanel = $state(false);
+    let showDVPanel = $state(false);
 
     // Clipboard handlers
     function handleCopy() {
@@ -539,11 +587,20 @@
 
     <div class="divider"></div>
 
-    <!-- Alignment -->
+    <!-- Horizontal Alignment -->
     <div class="toolbar-group">
         <AlignmentPicker
             value={selectedFormatting?.horizontalAlign || "left"}
             onchange={handleAlignmentChange}
+        />
+    </div>
+
+    <!-- Vertical Alignment -->
+    <div class="toolbar-group">
+        <AlignmentPicker
+            value={selectedFormatting?.verticalAlign || "middle"}
+            onchange={handleVerticalAlignmentChange}
+            vertical={true}
         />
     </div>
 
@@ -552,7 +609,7 @@
     <!-- Cell Type -->
     <div class="toolbar-group">
         <MenuDropdown icon="123" title="Cell Type">
-            <CellTypeConfigurator {selectionState} />
+            <CellTypeConfigurator />
         </MenuDropdown>
     </div>
 
@@ -571,20 +628,70 @@
         </button>
     </div>
 
+    <div class="divider"></div>
+
+    <!-- Conditional Formatting -->
+    <div class="toolbar-group cf-group">
+        <button
+            class="toolbar-btn"
+            class:active={showCFPanel}
+            onclick={() => { showCFPanel = !showCFPanel; showDVPanel = false; }}
+            title="Conditional Formatting"
+        >
+            <span style="font-size:11px;line-height:1">CF</span>
+        </button>
+        {#if showCFPanel}
+            <div class="panel-anchor">
+                <ConditionalFormatPanel onclose={() => (showCFPanel = false)} />
+            </div>
+        {/if}
+    </div>
+
+    <!-- Data Validation -->
+    <div class="toolbar-group cf-group">
+        <button
+            class="toolbar-btn"
+            class:active={showDVPanel}
+            onclick={() => { showDVPanel = !showDVPanel; showCFPanel = false; }}
+            title="Data Validation"
+        >
+            <span style="font-size:11px;line-height:1">DV</span>
+        </button>
+        {#if showDVPanel}
+            <div class="panel-anchor">
+                <DataValidationPanel onclose={() => (showDVPanel = false)} />
+            </div>
+        {/if}
+    </div>
+
     <!-- Spacer -->
     <div class="spacer"></div>
 
-    <!-- Print -->
+    <!-- Page Breaks Toggle + Print / Page Setup -->
     <div class="toolbar-group">
         <button
             class="toolbar-btn"
+            class:active={showPageBreaksOnGrid}
+            onclick={togglePageBreaksFromToolbar}
+            title={showPageBreaksOnGrid ? "Hide Page Breaks" : "Show Page Breaks"}
+            style="font-size:11px; letter-spacing:-0.5px;"
+        >PB</button>
+        <button
+            class="toolbar-btn"
+            class:active={showPageSetupPanel}
             onclick={handlePrint}
-            title="Print (Ctrl+P)"
+            title="Page Setup & Export PDF (Ctrl+P)"
         >
             {@html printer}
         </button>
     </div>
 </div>
+
+{#if showPageSetupPanel}
+    <PageSetupPanel
+        onclose={() => (showPageSetupPanel = false)}
+    />
+{/if}
 
 <style>
     .formatting-toolbar {
@@ -647,6 +754,17 @@
 
     .spacer {
         flex: 1;
+    }
+
+    .cf-group {
+        position: relative;
+    }
+
+    .panel-anchor {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        z-index: 200;
     }
 
     .font-family-select {
