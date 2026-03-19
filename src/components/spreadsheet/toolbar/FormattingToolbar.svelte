@@ -185,6 +185,7 @@
                 strikethrough: ["strikethrough", null],
                 color: ["color", value],
                 fontSize: ["fontSize", value],
+                fontFamily: ["fontFamily", value],
             };
             const mapped = propMap[property];
             if (mapped) {
@@ -270,6 +271,18 @@
         if (!isNaN(size) && size > 0) {
             applyFormatting("fontSize", size);
         }
+    }
+
+    function decrementFontSize() {
+        const current = selectedFormatting?.fontSize || 12;
+        const idx = fontSizes.findLastIndex(s => s < current);
+        if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
+    }
+
+    function incrementFontSize() {
+        const current = selectedFormatting?.fontSize || 12;
+        const idx = fontSizes.findIndex(s => s > current);
+        if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
     }
 
     // Font family handler
@@ -538,7 +551,13 @@
     </div>
 
     <!-- Font Size -->
-    <div class="toolbar-group">
+    <div class="toolbar-group font-size-group">
+        <button
+            class="toolbar-btn font-size-step"
+            onmousedown={(e) => { e.preventDefault(); decrementFontSize(); }}
+            disabled={!hasSelection}
+            title="Decrease font size"
+        >−</button>
         <input
             type="text"
             class="font-size-input"
@@ -547,6 +566,12 @@
             disabled={!hasSelection}
             size="3"
         />
+        <button
+            class="toolbar-btn font-size-step"
+            onmousedown={(e) => { e.preventDefault(); incrementFontSize(); }}
+            disabled={!hasSelection}
+            title="Increase font size"
+        >+</button>
     </div>
 
     <div class="divider"></div>
@@ -842,6 +867,17 @@
     .font-size-input:disabled {
         opacity: 0.35;
         cursor: not-allowed;
+    }
+
+    .font-size-group {
+        gap: 0;
+    }
+
+    .font-size-step {
+        min-width: 20px;
+        padding: 0 3px;
+        font-size: 1rem;
+        line-height: 1;
     }
 
     /* ── Mobile: scrollable toolbar with bigger tap targets ── */

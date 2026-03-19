@@ -476,6 +476,12 @@ export class CanvasRenderer {
         const text = cell.displayValue;
         if (text === '' || text == null) return;
 
+        // Delegate multi-line plain text to the rich text renderer
+        if (text.includes('\n')) {
+            this.#paintRichTextContent(ctx, { ...cell, richTextRuns: [{ t: text }] });
+            return;
+        }
+
         const font = this.#buildFont(cell);
         if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
         ctx.fillStyle = cell.textColor || this.#theme.defaultText;
@@ -542,7 +548,7 @@ export class CanvasRenderer {
     }
 
     /**
-     * Paint rich-text run array with per-run font/color/decorations.
+     * Paint rich-text run array with per-run font/color/decorations and word-wrap.
      * @param {CanvasRenderingContext2D} ctx
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      */
@@ -562,18 +568,27 @@ export class CanvasRenderer {
         const defaultUnderline = cell.underline || false;
         const defaultStrikethrough = cell.strikethrough || false;
 
-        // Split runs into visual lines (by \n within run text)
-        const lines = [[]];
+        const maxWidth = width - 2 * pad;
+
+        // Split runs into logical lines (by explicit \n)
+        const logicalLines = [[]];
         for (const run of runs) {
             const parts = run.t.split('\n');
             for (let i = 0; i < parts.length; i++) {
-                if (i > 0) lines.push([]);
-                if (parts[i]) lines[lines.length - 1].push({ ...run, t: parts[i] });
+                if (i > 0) logicalLines.push([]);
+                if (parts[i]) logicalLines[logicalLines.length - 1].push({ ...run, t: parts[i] });
             }
         }
 
+        // Word-wrap each logical line into visual sub-lines
+        const allLines = [];
+        for (const logLine of logicalLines) {
+            const wrapped = this.#wrapLogicalLine(ctx, logLine, maxWidth, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
+            for (const vl of wrapped) allLines.push(vl);
+        }
+
         const lineHeight = defaultFontSize * 1.5;
-        const totalTextH = lines.length * lineHeight;
+        const totalTextH = allLines.length * lineHeight;
 
         let startY;
         if (vAlign === 'top') startY = y + pad + defaultFontSize / 2;
@@ -587,8 +602,8 @@ export class CanvasRenderer {
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'left';
 
-        for (let li = 0; li < lines.length; li++) {
-            const lineRuns = lines[li];
+        for (let li = 0; li < allLines.length; li++) {
+            const lineRuns = allLines[li];
             const lineY = Math.round(startY + li * lineHeight);
 
             // Measure line width for alignment
@@ -640,13 +655,78 @@ export class CanvasRenderer {
     }
 
     /**
+     * Word-wrap a single logical line (array of runs) to fit within maxWidth.
+     * Returns an array of visual lines (each an array of run objects with text).
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {Array} lineRuns
+     * @param {number} maxWidth
+     * @param {number} defaultSize
+     * @param {string} defaultFamily
+     * @param {boolean} defaultBold
+     * @param {boolean} defaultItalic
+     * @returns {Array<Array>}
+     */
+    #wrapLogicalLine(ctx, lineRuns, maxWidth, defaultSize, defaultFamily, defaultBold, defaultItalic) {
+        if (lineRuns.length === 0) return [[]];
+
+        const visualLines = [[]];
+        let lineWidth = 0;
+
+        for (const run of lineRuns) {
+            const font = this.#buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic);
+            if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
+
+            // Split text into tokens (words and whitespace), keeping delimiters
+            const tokens = run.t.split(/(\s+)/);
+
+            for (const token of tokens) {
+                if (!token) continue;
+                const isWS = !token.trim();
+                const tokenW = ctx.measureText(token).width;
+
+                // Skip leading whitespace on a new line
+                if (lineWidth === 0 && isWS) continue;
+
+                if (!isWS && lineWidth > 0 && lineWidth + tokenW > maxWidth) {
+                    // Word doesn't fit — start a new visual line
+                    visualLines.push([]);
+                    lineWidth = 0;
+                }
+
+                const lastLine = visualLines[visualLines.length - 1];
+                const lastFrag = lastLine[lastLine.length - 1];
+                // Merge with last fragment if same run (same style key)
+                if (lastFrag && lastFrag._runRef === run) {
+                    lastFrag.t += token;
+                } else {
+                    lastLine.push({ ...run, t: token, _runRef: run });
+                }
+                lineWidth += tokenW;
+            }
+        }
+
+        // Remove the _runRef helper before returning
+        for (const line of visualLines) {
+            for (const frag of line) delete frag._runRef;
+        }
+
+        // Drop any empty trailing lines (shouldn't happen, but guard)
+        while (visualLines.length > 1 && visualLines[visualLines.length - 1].length === 0) {
+            visualLines.pop();
+        }
+
+        return visualLines;
+    }
+
+    /**
      * Build a CSS font string for a single rich-text run, falling back to cell defaults.
      */
     #buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic) {
         const bold = run.b !== undefined ? run.b : defaultBold;
         const italic = run.i !== undefined ? run.i : defaultItalic;
         const size = run.f || defaultSize;
-        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${size}px ${defaultFamily}`;
+        const family = run.ff || defaultFamily;
+        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${size}px ${family}`;
     }
 
     /**

@@ -18,6 +18,7 @@
     import { untrack } from "svelte";
     import { segmentFormula } from "../../../formulas/reference-highlighter.js";
     import { editSessionState } from "../../../stores/spreadsheet/index.js";
+    import { spreadsheetSession } from "../../../stores/spreadsheetStore.svelte.js";
     import { isRichText } from "../../../stores/spreadsheet/richText.js";
     import FormulaValuePopup from "../FormulaValuePopup.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
@@ -61,6 +62,26 @@
     let formulaSegments = $derived(
         isFormulaMode ? segmentFormula(editValue ?? "") : [],
     );
+
+    // Cell-level formatting for the current edit cell — applied to the editor as base styles
+    let cellFormatting = $derived.by(() => {
+        if (!editSessionState.isEditing || !editSessionState.cell) return null;
+        const { row, col } = editSessionState.cell;
+        const sheetStore = spreadsheetSession?.activeSheetStore;
+        if (!sheetStore) return null;
+        return sheetStore.getCell(row, col);
+    });
+
+    let richEditStyle = $derived.by(() => {
+        const f = cellFormatting;
+        const parts = [];
+        if (f?.fontFamily) parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
+        if (f?.fontSize) parts.push(`font-size: ${f.fontSize}px`);
+        if (f?.bold) parts.push('font-weight: bold');
+        if (f?.italic) parts.push('font-style: italic');
+        if (f?.color) parts.push(`color: ${f.color}`);
+        return parts.length ? parts.join('; ') : null;
+    });
 
     // Initialize contenteditable when it becomes active.
     // Use untrack() for all inner reads so that changes to editValue or richTextValue
@@ -117,6 +138,9 @@
         setTimeout(() => {
             if (document.activeElement === richEditEl) return;
             if (editSessionState.surface !== 'grid') return;
+            // Don't commit if focus moved to the formatting toolbar (user is changing font/size/color)
+            const toolbar = document.querySelector('.formatting-toolbar');
+            if (toolbar?.contains(document.activeElement)) return;
             commitRichValueWithContent(html, innerText, textContent);
         }, 150);
     }
@@ -265,6 +289,21 @@
                 range.surroundContents(span);
             }
         }
+        else if (prop === "fontFamily") {
+            if (sel.rangeCount > 0) {
+                const range = sel.getRangeAt(0);
+                const span = document.createElement("span");
+                span.style.fontFamily = value;
+                try {
+                    range.surroundContents(span);
+                } catch {
+                    // For complex selections spanning multiple elements
+                    const fragment = range.extractContents();
+                    span.appendChild(fragment);
+                    range.insertNode(span);
+                }
+            }
+        }
         // Sync live HTML after formatting so commit() has the latest value
         const newHtml = richEditEl.innerHTML;
         editSessionState.liveRichHtml = isRichText(newHtml) ? newHtml : null;
@@ -348,6 +387,7 @@
             {:else}
                 <div
                     class="cell-rich-edit"
+                    style={richEditStyle}
                     contenteditable="true"
                     bind:this={richEditEl}
                     onblur={handleRichBlur}
@@ -391,7 +431,7 @@
 
     .cell-rich-edit {
         width: 100%;
-        height: 100%;
+        height: auto;
         min-height: 100%;
         border: none;
         padding: 2px 4px;
@@ -403,9 +443,10 @@
         position: relative;
         z-index: 2;
         box-sizing: border-box;
-        /* Allow text to spill right like a real spreadsheet cell — no scrolling */
         overflow: visible;
-        white-space: pre;
+        white-space: pre-wrap;
+        overflow-wrap: break-word;
+        word-break: break-word;
         line-height: 1.5;
     }
 

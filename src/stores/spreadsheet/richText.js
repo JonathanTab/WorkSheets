@@ -190,6 +190,7 @@ export function htmlToRuns(el) {
         if (inlineStyle.textDecoration.includes('line-through')) childStyle.s = true;
         if (inlineStyle.color) childStyle.c = inlineStyle.color;
         if (inlineStyle.fontSize) childStyle.f = parseFloat(inlineStyle.fontSize);
+        if (inlineStyle.fontFamily) childStyle.ff = inlineStyle.fontFamily;
 
         if (tag === 'b' || tag === 'strong') childStyle.b = true;
         if (tag === 'i' || tag === 'em') childStyle.i = true;
@@ -262,6 +263,7 @@ function pushRun(runs, text, style) {
     if (style.s) run.s = true;
     if (style.c) run.c = style.c;
     if (style.f) run.f = style.f;
+    if (style.ff) run.ff = style.ff;
 
     const last = runs[runs.length - 1];
     if (last && styleKey(last) === styleKey(run)) {
@@ -285,7 +287,7 @@ function mergeRuns(runs) {
 }
 
 function styleKey(run) {
-    return `${run.b ?? ''}|${run.i ?? ''}|${run.u ? 1 : 0}|${run.s ? 1 : 0}|${run.c ?? ''}|${run.f ?? ''}`;
+    return `${run.b ?? ''}|${run.i ?? ''}|${run.u ? 1 : 0}|${run.s ? 1 : 0}|${run.c ?? ''}|${run.f ?? ''}|${run.ff ?? ''}`;
 }
 
 function escapeHtml(str) {
