@@ -7,7 +7,7 @@
 
 // Color palette for cell references (must match FormulaEditState)
 const REFERENCE_COLORS = [
-    '#3b82f6', // blue
+    //'#3b82f6', // blue
     '#ef4444', // red
     '#22c55e', // green
     '#f59e0b', // amber
