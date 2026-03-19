@@ -219,8 +219,8 @@
     .dialog {
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
         min-width: 280px;
         max-width: 320px;
     }
@@ -232,7 +232,7 @@
 
     .dialog-title {
         font-weight: 600;
-        font-size: 0.875rem;
+        font-size: 13px;
         color: var(--color-text);
     }
 
@@ -250,17 +250,17 @@
     }
 
     .form-row label {
-        font-size: 0.75rem;
+        font-size: 11px;
         color: var(--color-text-secondary);
         font-weight: 500;
     }
 
     .form-row input[type="text"] {
-        height: 32px;
+        height: 28px;
         padding: 0 8px;
         border: 1px solid var(--color-border);
         border-radius: 4px;
-        font-size: 0.8125rem;
+        font-size: 13px;
         background: var(--color-surface);
         color: var(--color-text);
     }
@@ -273,51 +273,16 @@
     .checkbox-label {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         cursor: pointer;
-        font-size: 0.8125rem;
+        font-size: 13px;
         color: var(--color-text);
     }
 
     .checkbox-label input[type="checkbox"] {
-        width: 16px;
-        height: 16px;
+        width: 14px;
+        height: 14px;
         cursor: pointer;
-    }
-
-    .toggle-group {
-        display: flex;
-        gap: 2px;
-    }
-
-    .toggle-btn {
-        flex: 1;
-        height: 28px;
-        padding: 0 12px;
-        border: 1px solid var(--color-border);
-        background: var(--color-surface);
-        color: var(--color-text);
-        font-size: 0.75rem;
-        cursor: pointer;
-        transition: all 0.15s;
-    }
-
-    .toggle-btn:first-child {
-        border-radius: 4px 0 0 4px;
-    }
-
-    .toggle-btn:last-child {
-        border-radius: 0 4px 4px 0;
-    }
-
-    .toggle-btn.active {
-        background: var(--color-primary);
-        border-color: var(--color-primary);
-        color: white;
-    }
-
-    .toggle-btn:hover:not(.active) {
-        background: var(--color-fill);
     }
 
     .columns-preview {
@@ -331,10 +296,10 @@
     }
 
     .column-chip {
-        padding: 2px 8px;
+        padding: 2px 6px;
         background: var(--color-fill);
-        border-radius: 10px;
-        font-size: 0.6875rem;
+        border-radius: 3px;
+        font-size: 11px;
         color: var(--color-text-secondary);
     }
 
@@ -347,14 +312,14 @@
     }
 
     .btn {
-        height: 32px;
-        padding: 0 16px;
+        height: 28px;
+        padding: 0 12px;
         border: none;
         border-radius: 4px;
-        font-size: 0.8125rem;
+        font-size: 13px;
         font-weight: 500;
         cursor: pointer;
-        transition: all 0.15s;
+        transition: all 0.1s;
     }
 
     .btn-primary {
@@ -363,7 +328,7 @@
     }
 
     .btn-primary:hover:not(:disabled) {
-        background: var(--color-primary-hover);
+        background: #0066dd;
     }
 
     .btn-primary:disabled {
@@ -372,11 +337,12 @@
     }
 
     .btn-secondary {
-        background: var(--color-fill);
+        background: var(--color-surface);
         color: var(--color-text);
+        border: 1px solid var(--color-border);
     }
 
     .btn-secondary:hover {
-        background: var(--color-fill-hover);
+        background: var(--color-fill);
     }
 </style>

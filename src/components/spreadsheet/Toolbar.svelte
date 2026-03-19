@@ -91,4 +91,19 @@
         outline: 2px solid var(--color-primary);
         outline-offset: 1px;
     }
+
+    /* ── Mobile: tighter rows ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .toolbar-row {
+            min-height: 38px;
+            padding: 0 6px;
+        }
+        .row1 {
+            gap: 4px;
+        }
+        .close-btn {
+            padding: 6px 10px;
+            font-size: 0.875rem;
+        }
+    }
 </style>

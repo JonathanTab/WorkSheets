@@ -48,20 +48,20 @@
     // Determine if we should render as an anchor or button
     $: tag = href ? "a" : "button";
 
-    // Base button styles - iOS style
+    // Base button styles - desktop/dialog style
     $: baseClasses = `
         inline-flex items-center justify-center gap-2
-        font-semibold transition-all duration-200 ease-out
+        font-medium transition-all duration-100 ease-out
         select-none
-        border-2 box-border relative overflow-hidden
+        border box-border relative overflow-hidden
         [-webkit-tap-highlight-color:transparent]
     `;
 
-    // Size classes - matching iOS button dimensions
+    // Size classes - compact desktop button dimensions
     $: sizeClasses = {
-        sm: "h-8 px-4 text-[0.875em] min-w-[36px] rounded-lg",
-        md: "h-10 px-4 text-[0.95em] min-w-[40px] rounded-[10px]",
-        lg: "h-12 px-5 text-[1em] min-w-[44px] rounded-xl",
+        sm: "h-7 px-3 text-[0.8125em] min-w-[32px] rounded-[4px]",
+        md: "h-8 px-3 text-[0.875em] min-w-[36px] rounded-[5px]",
+        lg: "h-9 px-4 text-[0.9375em] min-w-[40px] rounded-[5px]",
     }[size];
 
     // Shape classes
@@ -71,21 +71,19 @@
         pill: "rounded-full",
     }[shape];
 
-    // Variant classes using Tailwind 4 theme variables - iOS style
+    // Variant classes - flat desktop style
     $: variantClasses = {
         primary: `
-            bg-primary text-text-inverse
+            bg-primary text-white
             border-primary
-            shadow-[0_2px_8px_rgba(0,122,255,0.3)]
-            hover:bg-[#0077ed] hover:border-[#0077ed]
-            hover:shadow-[0_4px_12px_rgba(0,122,255,0.4)]
-            active:bg-[#0066cc] active:border-[#0066cc]
+            hover:bg-[#0066dd]
+            active:bg-[#0055cc]
         `,
         secondary: `
-            bg-fill text-text
+            bg-surface text-text
             border-border
-            hover:bg-fill-secondary hover:border-border-strong
-            active:bg-fill-tertiary
+            hover:bg-fill
+            active:bg-fill-secondary
         `,
         ghost: `
             bg-transparent text-text-secondary
@@ -94,28 +92,22 @@
             active:bg-fill-secondary
         `,
         danger: `
-            bg-red-500 text-white
-            border-red-500
-            shadow-[0_2px_8px_rgba(239,68,68,0.3)]
-            hover:bg-red-600 hover:border-red-600
-            hover:shadow-[0_4px_12px_rgba(239,68,68,0.4)]
-            active:bg-red-700 active:border-red-700
+            bg-[#dc2626] text-white
+            border-[#dc2626]
+            hover:bg-[#b91c1c]
+            active:bg-[#991b1b]
         `,
         success: `
-            bg-green-500 text-white
-            border-green-500
-            shadow-[0_2px_8px_rgba(34,197,94,0.3)]
-            hover:bg-green-600 hover:border-green-600
-            hover:shadow-[0_4px_12px_rgba(34,197,94,0.4)]
-            active:bg-green-700 active:border-green-700
+            bg-[#16a34a] text-white
+            border-[#16a34a]
+            hover:bg-[#15803d]
+            active:bg-[#166534]
         `,
         warning: `
-            bg-orange-500 text-white
-            border-orange-500
-            shadow-[0_2px_8px_rgba(249,115,22,0.3)]
-            hover:bg-orange-600 hover:border-orange-600
-            hover:shadow-[0_4px_12px_rgba(249,115,22,0.4)]
-            active:bg-orange-700 active:border-orange-700
+            bg-[#ea580c] text-white
+            border-[#ea580c]
+            hover:bg-[#c2410c]
+            active:bg-[#9a3412]
         `,
     }[variant];
 
@@ -123,27 +115,27 @@
     $: darkClasses = {
         primary: `
             dark:bg-primary dark:border-primary
-            dark:hover:bg-[#0077ed] dark:hover:border-[#0077ed]
+            dark:hover:bg-[#0066dd]
         `,
         secondary: `
-            dark:bg-fill dark:border-border
-            dark:hover:bg-fill-secondary dark:hover:border-border-strong
+            dark:bg-surface dark:border-border
+            dark:hover:bg-fill
         `,
         ghost: `
             dark:bg-transparent dark:border-transparent
             dark:hover:bg-fill
         `,
         danger: `
-            dark:bg-red-600 dark:border-red-600
-            dark:hover:bg-red-700 dark:hover:border-red-700
+            dark:bg-[#dc2626] dark:border-[#dc2626]
+            dark:hover:bg-[#b91c1c]
         `,
         success: `
-            dark:bg-green-600 dark:border-green-600
-            dark:hover:bg-green-700 dark:hover:border-green-700
+            dark:bg-[#16a34a] dark:border-[#16a34a]
+            dark:hover:bg-[#15803d]
         `,
         warning: `
-            dark:bg-orange-500 dark:border-orange-500
-            dark:hover:bg-orange-600 dark:hover:border-orange-600
+            dark:bg-[#ea580c] dark:border-[#ea580c]
+            dark:hover:bg-[#c2410c]
         `,
     }[variant];
 

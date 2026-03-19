@@ -67,12 +67,11 @@
     import FloatingImages from "./FloatingImages.svelte";
     import ImageEditor from "./cellTypes/ImageEditor.svelte";
     import { setOnLoadCallback } from "../../stores/spreadsheet/rendering/ImageCache.js";
+    import { openModal } from "../../lib/ui/modalStore.svelte.js";
+    import AlertModal from "../modals/AlertModal.svelte";
 
     // ─── Props ─────────────────────────────────────────────────────────────────
-    let {
-        showPageBreaks = false,
-        printSettings = null,
-    } = $props();
+    let { showPageBreaks = false, printSettings = null } = $props();
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
     let containerEl = $state(null);
@@ -90,12 +89,17 @@
     /** @type {RenderScheduler|null} */
     let selectionScheduler = null;
     const hitTestEngine = new HitTestEngine();
+    // Track which canvas element each renderer was created for, so we can
+    // detect when the {#if} block remounts and recreates canvas elements.
+    let rendererCanvasEl = null;
+    let selRendererCanvasEl = null;
 
     // ─── Grid virtualizer ─────────────────────────────────────────────────────
     let virtualizer = $state(null);
     let overlaysRef = $state(null);
     let virtualizerSheetId = $state.raw(null);
     let resizeObserver = null;
+    let vvCleanup = null; // visual viewport cleanup for iOS keyboard handling
 
     // ─── Page break overlay ───────────────────────────────────────────────────
     const _printEngine = new PrintEngine();
@@ -123,19 +127,21 @@
         );
 
         const scrollLeft = virtualizer.scrollLeft;
-        const scrollTop  = virtualizer.scrollTop;
+        const scrollTop = virtualizer.scrollTop;
 
         // Convert row breaks to Y positions in grid-root container coords.
         // Row break at rowIndex R means a new page starts at R.
         // The horizontal line goes just before row R.
-        const rowLines = rowBreaks.slice(1).map(r => {
-            const rowY = HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(r) - scrollTop;
+        const rowLines = rowBreaks.slice(1).map((r) => {
+            const rowY =
+                HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(r) - scrollTop;
             return rowY;
         });
 
         // Convert col breaks to X positions
-        const colLines = colBreaks.slice(1).map(c => {
-            const colX = HEADER_WIDTH + virtualizer.colMetrics.offsetOf(c) - scrollLeft;
+        const colLines = colBreaks.slice(1).map((c) => {
+            const colX =
+                HEADER_WIDTH + virtualizer.colMetrics.offsetOf(c) - scrollLeft;
             return colX;
         });
 
@@ -143,8 +149,14 @@
         const ps = printSettings;
         const areaEndRow = ps.areaEndRow ?? totalRows - 1;
         const areaEndCol = ps.areaEndCol ?? totalCols - 1;
-        const printEndY = HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(areaEndRow + 1) - scrollTop;
-        const printEndX = HEADER_WIDTH  + virtualizer.colMetrics.offsetOf(areaEndCol + 1) - scrollLeft;
+        const printEndY =
+            HEADER_HEIGHT +
+            virtualizer.rowMetrics.offsetOf(areaEndRow + 1) -
+            scrollTop;
+        const printEndX =
+            HEADER_WIDTH +
+            virtualizer.colMetrics.offsetOf(areaEndCol + 1) -
+            scrollLeft;
 
         return { rowLines, colLines, printEndX, printEndY };
     });
@@ -322,7 +334,7 @@
     let focusedTableDataCell = $state(null);
     /** @type {{ row:number, col:number, options:string[], left:number, top:number, width:number, height:number }|null} */
     let focusedDropdownCell = $state(null);
-    let dropdownFilter = $state('');
+    let dropdownFilter = $state("");
     /** @type {{ type: 'table'|'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
     /** @type {{ table:any, colId:string, left:number, top:number }|null} */
@@ -333,6 +345,17 @@
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
     let contextMenuPosition = $state({ x: 0, y: 0 });
+
+    // ─── Touch interaction state ───────────────────────────────────────────────
+    let touchStartPos = null; // { x, y } of first touch
+    let touchHandled = false; // suppress synthetic mouse events after touch
+    let touchScrolled = false; // true once movement threshold exceeded
+    let lastTapTime = 0; // for double-tap detection
+    let lastTapPos = null; // position of last tap
+    let longPressTimer = null; // for long-press context menu
+    const TOUCH_MOVE_THRESHOLD = 8; // px — max movement still considered a tap
+    const DOUBLE_TAP_DELAY = 300; // ms — max interval between taps
+    const LONG_PRESS_DELAY = 600; // ms — hold time for context menu
 
     // ─── Dialog state ─────────────────────────────────────────────────────────
     let showCreateTableDialog = $state(false);
@@ -385,7 +408,8 @@
                 virtualizerSheetId = sheetId;
                 if (containerEl) {
                     const rect = containerEl.getBoundingClientRect();
-                    virtualizer.setContainerSize(rect.width, rect.height);
+                    if (rect.width > 0 && rect.height > 0)
+                        virtualizer.setContainerSize(rect.width, rect.height);
                 }
             }
 
@@ -428,13 +452,22 @@
         const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
         if (w <= 0 || h <= 0) return;
 
-        if (!canvasRenderer) {
+        // Recreate renderer if canvas element changed (e.g. {#if} remount)
+        if (!canvasRenderer || rendererCanvasEl !== canvasEl) {
+            canvasRenderer?.destroy();
+            renderScheduler?.destroy();
             canvasRenderer = new CanvasRenderer(canvasEl);
             renderScheduler = new RenderScheduler(performPaint);
+            rendererCanvasEl = canvasEl;
         }
 
         canvasRenderer.resize(w, h);
-        untrack(() => renderScheduler?.invalidateAll());
+        // Flush immediately to avoid a blank-canvas frame while waiting for RAF.
+        // invalidateAll marks all panes dirty, then flush() paints synchronously.
+        untrack(() => {
+            renderScheduler?.invalidateAll();
+            renderScheduler?.flush();
+        });
     });
 
     $effect(() => {
@@ -444,19 +477,33 @@
         const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
         if (w <= 0 || h <= 0) return;
 
-        if (!selectionRenderer) {
+        // Recreate renderer if canvas element changed (e.g. {#if} remount)
+        if (!selectionRenderer || selRendererCanvasEl !== selectCanvasEl) {
+            selectionRenderer?.destroy();
+            selectionScheduler?.destroy();
             selectionRenderer = new SelectionRenderer(selectCanvasEl);
             selectionScheduler = new RenderScheduler(performSelectionPaint);
+            selRendererCanvasEl = selectCanvasEl;
         }
 
         selectionRenderer.resize(w, h);
-        untrack(() => selectionScheduler?.invalidateAll());
+        untrack(() => {
+            selectionScheduler?.invalidateAll();
+            selectionScheduler?.flush();
+        });
     });
 
     // ─── Data canvas repaint trigger ──────────────────────────────────────────
     // Tracks only data/structure changes — NOT selection state or formula typing.
     // Selection fills and formula highlights are on the separate selection canvas,
     // so arrow-key navigation no longer causes an expensive full buildPaneData call.
+    //
+    // NOTE: We intentionally do NOT track renderPlan here. renderPlan changes on
+    // every scroll frame (visible row/col ranges shift), and handleScroll already
+    // does a synchronous performPaint in its RAF. Tracking renderPlan would cause
+    // a redundant second paint per scroll frame (~6ms wasted at DPR=3).
+    // Viewport resize is handled by the canvas resize effect (flush).
+    // Frozen dimension changes are tracked explicitly below.
     $effect(() => {
         const _cellsVer = sheetStore?.cellsVersion;
         const _borders = sheetStore?.bordersVersion;
@@ -465,18 +512,20 @@
         const _mergeVer = renderContext?.mergeEngine?.version;
         const _tableVer = renderContext?.tableManager?.tableVersion;
         const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
-        const _plan = renderPlan;
+        const _fr = virtualizer?.frozenRows;
+        const _fc = virtualizer?.frozenCols;
 
-        if (!renderPlan || !virtualizer) return;
-
-        untrack(() => renderScheduler?.invalidateAll());
+        untrack(() => {
+            if (!renderScheduler || !renderPlan || !virtualizer) return;
+            renderScheduler.invalidateAll();
+        });
     });
 
     // ─── Selection canvas repaint trigger ─────────────────────────────────────
     // Tracks selection state and formula edit deps only. Repaints are cheap
     // (~0.3ms) since SelectionRenderer just draws fill rects — no data lookups.
+    // Like the data trigger, scroll-driven repaints are handled by handleScroll.
     $effect(() => {
-        const _plan = renderPlan;
         const _sel = selectionState.range;
         const _selMode = selectionState.selectionMode;
         const _selRows = selectionState.selectedRows;
@@ -484,10 +533,13 @@
         const _anch = selectionState.anchor;
         const _editing = editSessionState.isEditing;
         const _formula = formulaEditState?.currentValue;
+        const _fr = virtualizer?.frozenRows;
+        const _fc = virtualizer?.frozenCols;
 
-        if (!renderPlan || !virtualizer) return;
-
-        untrack(() => selectionScheduler?.invalidateAll());
+        untrack(() => {
+            if (!selectionScheduler || !renderPlan || !virtualizer) return;
+            selectionScheduler.invalidateAll();
+        });
     });
 
     // ─── Warn on zero viewport ────────────────────────────────────────────────
@@ -628,7 +680,13 @@
 
     // ─── Selection canvas paint (called by selectionScheduler on RAF) ─────────
     function performSelectionPaint() {
-        if (!selectCanvasEl || !selectionRenderer || !renderPlan || !virtualizer) return;
+        if (
+            !selectCanvasEl ||
+            !selectionRenderer ||
+            !renderPlan ||
+            !virtualizer
+        )
+            return;
 
         const frozenRows = virtualizer.frozenRows;
         const frozenCols = virtualizer.frozenCols;
@@ -797,7 +855,10 @@
             return null;
         // Hide inline editor when the editing cell is on a different sheet
         const editingSheetId = editSessionState.editingSheetId;
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        )
             return null;
         const row = editSessionState.cell?.row;
         const col = editSessionState.cell?.col;
@@ -991,6 +1052,7 @@
 
     // ─── Event layer handlers ─────────────────────────────────────────────────
     function handleEventLayerMouseDown(e) {
+        if (touchHandled) return; // suppress synthetic mouse events after touch
         if (e.button !== 0) return;
         const { localX, localY } = getLocalCoords(e);
         const hit = hitTestEngine.hitTest(localX, localY);
@@ -1020,6 +1082,7 @@
     }
 
     function handleEventLayerMouseMove(e) {
+        if (touchHandled) return;
         const { localX, localY } = getLocalCoords(e);
         const hit = hitTestEngine.hitTest(localX, localY);
         currentCursor = hitTestEngine.getCursor(hit);
@@ -1047,6 +1110,146 @@
         if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
             handleCellContextMenu(hit.row, hit.col, e);
         }
+    }
+
+    // ─── Touch handlers ───────────────────────────────────────────────────────
+    function getTouchLocalCoords(touch) {
+        const rect = containerEl?.getBoundingClientRect();
+        if (!rect) return { localX: 0, localY: 0 };
+        return {
+            localX: touch.clientX - rect.left,
+            localY: touch.clientY - rect.top,
+        };
+    }
+
+    function handleEventLayerTouchStart(e) {
+        if (e.touches.length !== 1) {
+            clearTimeout(longPressTimer);
+            touchStartPos = null;
+            return;
+        }
+        const touch = e.touches[0];
+        touchStartPos = { x: touch.clientX, y: touch.clientY };
+        touchScrolled = false;
+
+        // Long-press: show context menu
+        const savedClientX = touch.clientX;
+        const savedClientY = touch.clientY;
+        longPressTimer = setTimeout(() => {
+            if (!touchStartPos) return;
+            const { localX, localY } = getTouchLocalCoords({
+                clientX: savedClientX,
+                clientY: savedClientY,
+            });
+            const hit = hitTestEngine.hitTest(localX, localY);
+            if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
+                if (!isSelected(hit.row, hit.col)) {
+                    selectionState.startSelection(hit.row, hit.col);
+                    selectionState.endSelection();
+                }
+                contextMenuPosition = { x: savedClientX, y: savedClientY };
+                contextMenuVisible = true;
+            }
+            touchStartPos = null; // cancel tap after long-press
+        }, LONG_PRESS_DELAY);
+    }
+
+    function handleEventLayerTouchMove(e) {
+        if (!touchStartPos || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - touchStartPos.x;
+        const dy = touch.clientY - touchStartPos.y;
+        if (Math.sqrt(dx * dx + dy * dy) > TOUCH_MOVE_THRESHOLD) {
+            touchScrolled = true;
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        }
+    }
+
+    function handleEventLayerTouchEnd(e) {
+        clearTimeout(longPressTimer);
+        if (!touchStartPos) return;
+        if (e.changedTouches.length !== 1) {
+            touchStartPos = null;
+            return;
+        }
+
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - touchStartPos.x;
+        const dy = touch.clientY - touchStartPos.y;
+        touchStartPos = null;
+
+        // If moved too much it was a scroll, not a tap
+        if (
+            touchScrolled ||
+            Math.sqrt(dx * dx + dy * dy) > TOUCH_MOVE_THRESHOLD
+        )
+            return;
+
+        const { localX, localY } = getTouchLocalCoords(touch);
+        const hit = hitTestEngine.hitTest(localX, localY);
+
+        // Double-tap detection
+        const now = Date.now();
+        const isDoubleTap =
+            now - lastTapTime < DOUBLE_TAP_DELAY &&
+            lastTapPos !== null &&
+            Math.abs(touch.clientX - lastTapPos.x) < 30 &&
+            Math.abs(touch.clientY - lastTapPos.y) < 30;
+
+        lastTapTime = isDoubleTap ? 0 : now;
+        lastTapPos = { x: touch.clientX, y: touch.clientY };
+
+        // Prevent synthetic mousedown/mouseup from re-firing
+        touchHandled = true;
+        setTimeout(() => {
+            touchHandled = false;
+        }, 600);
+
+        if (isDoubleTap) {
+            if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
+                handleCellDoubleClick(hit.row, hit.col);
+            }
+            return;
+        }
+
+        // Single tap — synthetic event for handlers that need clientX/Y
+        const syntheticE = {
+            button: 0,
+            shiftKey: false,
+            ctrlKey: false,
+            metaKey: false,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            preventDefault: () => {},
+            stopPropagation: () => {},
+        };
+
+        switch (hit.region) {
+            case "corner":
+                handleCornerCellMouseDown();
+                break;
+            case "colHeader":
+                handleColHeaderMouseDown(hit.col);
+                break;
+            case "rowHeader":
+                handleRowHeaderMouseDown(hit.row);
+                break;
+            case "cell":
+                if (hit.row >= 0 && hit.col >= 0) {
+                    handleCellMouseDown(hit.row, hit.col, syntheticE);
+                    selectionState.endSelection(); // no drag on touch
+                }
+                break;
+        }
+    }
+
+    function handleEventLayerTouchCancel() {
+        clearTimeout(longPressTimer);
+        touchStartPos = null;
+        touchScrolled = false;
     }
 
     // ─── Header event handlers ────────────────────────────────────────────────
@@ -1088,8 +1291,10 @@
         activeFilterPopover = null;
 
         // Close header rename overlay if clicking elsewhere
-        if (activeHeaderRename &&
-            (activeHeaderRename.row !== row || activeHeaderRename.col !== col)) {
+        if (
+            activeHeaderRename &&
+            (activeHeaderRename.row !== row || activeHeaderRename.col !== col)
+        ) {
             activeHeaderRename = null;
         }
 
@@ -1318,11 +1523,18 @@
             // Prefix with sheet name when picking from a different sheet
             const currentSheetId = spreadsheetSession.activeSheetId;
             const editingSheetId = editSessionState.editingSheetId;
-            if (currentSheetId && editingSheetId && currentSheetId !== editingSheetId) {
-                const sheetName = spreadsheetSession.getSheetName(currentSheetId);
+            if (
+                currentSheetId &&
+                editingSheetId &&
+                currentSheetId !== editingSheetId
+            ) {
+                const sheetName =
+                    spreadsheetSession.getSheetName(currentSheetId);
                 // Quote the name if it contains spaces or special chars
                 const needsQuotes = /[\s!']/.test(sheetName);
-                const escapedName = needsQuotes ? `'${sheetName.replace(/'/g, "''")}'` : sheetName;
+                const escapedName = needsQuotes
+                    ? `'${sheetName.replace(/'/g, "''")}'`
+                    : sheetName;
                 ref = `${escapedName}!${ref}`;
             }
 
@@ -1457,17 +1669,18 @@
         const ct = renderContext?.getCellTypeConfig(row, col);
 
         // Dropdown cell: show overlay list instead of text editor
-        if (ct?.type === 'dropdown') {
+        if (ct?.type === "dropdown") {
             let ddOptions = [];
-            if (ct.source === 'range' && ct.range) {
+            if (ct.source === "range" && ct.range) {
                 ddOptions = resolveRangeOptions(ct.range);
             } else if (Array.isArray(ct.options)) {
                 ddOptions = ct.options;
             }
             if (ddOptions.length > 0) {
-                dropdownFilter = '';
+                dropdownFilter = "";
                 focusedDropdownCell = {
-                    row, col,
+                    row,
+                    col,
                     options: ddOptions,
                     left: cellContainerLeft(col),
                     top: cellContainerTop(row),
@@ -1478,12 +1691,13 @@
             }
         }
         // Image cells: set image picker mode and pass current blob ID as initial value
-        if (ct?.type === 'image') {
-            const currentBlobId = spreadsheetSession.getCellEditValue(row, col) ?? '';
-            editSessionState.beginEdit(
-                row, col, currentBlobId, surface,
-                { pickerMode: 'image-picker', sheetId: spreadsheetSession.activeSheetId },
-            );
+        if (ct?.type === "image") {
+            const currentBlobId =
+                spreadsheetSession.getCellEditValue(row, col) ?? "";
+            editSessionState.beginEdit(row, col, currentBlobId, surface, {
+                pickerMode: "image-picker",
+                sheetId: spreadsheetSession.activeSheetId,
+            });
             return;
         }
 
@@ -1514,16 +1728,27 @@
         const { row, col, value } = payload;
         const targetSheetId = sheetId || spreadsheetSession.activeSheetId;
 
-        if (typeof value === 'string' && value.startsWith('=')) {
-            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, row, col, value);
+        if (typeof value === "string" && value.startsWith("=")) {
+            spreadsheetSession.setCellFormulaOnSheet(
+                targetSheetId,
+                row,
+                col,
+                value,
+            );
         } else {
             // Get the cell type config from the target sheet's store for value parsing
-            const targetStore = targetSheetId === spreadsheetSession.activeSheetId
-                ? sheetStore
-                : null; // For non-active sheets skip type-config parsing; value is used as-is
+            const targetStore =
+                targetSheetId === spreadsheetSession.activeSheetId
+                    ? sheetStore
+                    : null; // For non-active sheets skip type-config parsing; value is used as-is
             const ct = targetStore?.getCellTypeConfig(row, col);
             const parsedValue = CellTypeRegistry.parseInput(ct, value);
-            spreadsheetSession.setCellValueOnSheet(targetSheetId, row, col, parsedValue);
+            spreadsheetSession.setCellValueOnSheet(
+                targetSheetId,
+                row,
+                col,
+                parsedValue,
+            );
         }
     }
 
@@ -1545,7 +1770,7 @@
                         window.alert(msg);
                         return; // Reject the edit
                     } else {
-                        console.warn('Data validation warning:', msg);
+                        console.warn("Data validation warning:", msg);
                     }
                 }
                 break;
@@ -1553,20 +1778,24 @@
 
             // Check dropdown cell type validation setting
             const cellCt = sheetStore.getCellTypeConfig(row, col);
-            if (cellCt?.type === 'dropdown' && cellCt.validation && cellCt.validation !== 'none') {
+            if (
+                cellCt?.type === "dropdown" &&
+                cellCt.validation &&
+                cellCt.validation !== "none"
+            ) {
                 let ddOpts = [];
-                if (cellCt.source === 'range' && cellCt.range) {
+                if (cellCt.source === "range" && cellCt.range) {
                     ddOpts = resolveRangeOptions(cellCt.range);
                 } else if (Array.isArray(cellCt.options)) {
                     ddOpts = cellCt.options;
                 }
                 if (ddOpts.length > 0 && !ddOpts.includes(String(value))) {
                     const msg = `"${value}" is not a valid option.`;
-                    if (cellCt.validation === 'hard') {
+                    if (cellCt.validation === "hard") {
                         window.alert(msg);
                         return;
                     } else {
-                        console.warn('Dropdown validation warning:', msg);
+                        console.warn("Dropdown validation warning:", msg);
                     }
                 }
             }
@@ -1583,21 +1812,21 @@
     }
 
     function checkDataValidation(value, rule) {
-        if (rule.type === 'list') {
+        if (rule.type === "list") {
             const options = rule.options || [];
             return options.length === 0 || options.includes(String(value));
         }
-        if (rule.type === 'number') {
+        if (rule.type === "number") {
             const num = Number(value);
             if (isNaN(num)) return false;
             return checkNumericCondition(num, rule);
         }
-        if (rule.type === 'date') {
+        if (rule.type === "date") {
             const d = new Date(value);
             if (isNaN(d.getTime())) return false;
             return true; // Could extend with min/max date checks
         }
-        if (rule.type === 'text') {
+        if (rule.type === "text") {
             const len = String(value).length;
             return checkNumericCondition(len, rule);
         }
@@ -1608,14 +1837,22 @@
         const min = Number(rule.min);
         const max = Number(rule.max);
         switch (rule.condition) {
-            case 'between':  return num >= min && num <= max;
-            case 'gt':       return num > min;
-            case 'gte':      return num >= min;
-            case 'lt':       return num < min;
-            case 'lte':      return num <= min;
-            case 'eq':       return num === min;
-            case 'neq':      return num !== min;
-            default:         return true;
+            case "between":
+                return num >= min && num <= max;
+            case "gt":
+                return num > min;
+            case "gte":
+                return num >= min;
+            case "lt":
+                return num < min;
+            case "lte":
+                return num <= min;
+            case "eq":
+                return num === min;
+            case "neq":
+                return num !== min;
+            default:
+                return true;
         }
     }
 
@@ -1625,7 +1862,10 @@
         if (!payload) return;
         persistEditOnSheet(editingSheetId, payload);
         // Return to origin sheet if we navigated away for cross-sheet ref picking
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
     }
@@ -1635,7 +1875,10 @@
         const payload = editSessionState.commit();
         if (!payload) return;
         persistEditOnSheet(editingSheetId, payload);
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         } else {
             selectionState.moveSelection(dRow, dCol);
@@ -1650,7 +1893,10 @@
             const { row, col } = editSessionState.cell;
             editSessionState.cancel();
             persistEditOnSheet(editingSheetId, { row, col, value });
-            if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+            if (
+                editingSheetId &&
+                editingSheetId !== spreadsheetSession.activeSheetId
+            ) {
                 spreadsheetSession.setActiveSheet(editingSheetId);
             }
         } else {
@@ -1660,7 +1906,10 @@
     function cancelEdit() {
         const editingSheetId = editSessionState.editingSheetId;
         editSessionState.cancel();
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
     }
@@ -1819,11 +2068,16 @@
                 if (virtualizer)
                     virtualizer.setScroll(pendingScrollTop, pendingScrollLeft);
                 scrollPending = false;
-                // Paint canvas in the same RAF as the scroll state update.
-                // Without this, the canvas would lag 1 frame behind the DOM
-                // overlay positions (table/repeater outlines), causing visible jitter.
+                // Paint both canvases in the same RAF as the scroll state update.
+                // Without this, the canvases lag 1 frame behind the DOM overlay
+                // positions (table/repeater outlines), causing visible jitter.
+                // The repaint-trigger $effects intentionally do NOT track renderPlan
+                // to avoid a redundant second paint per scroll frame.
                 if (canvasRenderer && renderPlan) {
-                    performPaint(new Set(['body', 'top', 'left', 'corner']));
+                    performPaint(new Set(["body", "top", "left", "corner"]));
+                }
+                if (selectionRenderer && renderPlan) {
+                    performSelectionPaint();
                 }
             });
         }
@@ -1898,8 +2152,11 @@
             }
 
             // Block typing into image cells — they use the image picker editor
-            const anchorCt = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
-            if (anchorCt?.type === 'image') {
+            const anchorCt = renderContext?.getCellTypeConfig(
+                anchor.row,
+                anchor.col,
+            );
+            if (anchorCt?.type === "image") {
                 e.preventDefault();
                 return;
             }
@@ -2003,10 +2260,18 @@
             case "Enter":
                 // Enter moves selection down, but opens the image picker for image cells.
                 if (anchor) {
-                    const anchorCellType = renderContext?.getCellType(anchor.row, anchor.col);
-                    const anchorCt2 = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
-                    if (anchorCt2?.type === 'image') {
-                        beginCellEdit(anchor.row, anchor.col, { surface: 'grid' });
+                    const anchorCellType = renderContext?.getCellType(
+                        anchor.row,
+                        anchor.col,
+                    );
+                    const anchorCt2 = renderContext?.getCellTypeConfig(
+                        anchor.row,
+                        anchor.col,
+                    );
+                    if (anchorCt2?.type === "image") {
+                        beginCellEdit(anchor.row, anchor.col, {
+                            surface: "grid",
+                        });
                         e.preventDefault();
                         break;
                     }
@@ -2014,7 +2279,13 @@
                         anchorCellType !== CELL_TYPE.TABLE_HEADER &&
                         anchorCellType !== CELL_TYPE.TABLE_ENTRY
                     ) {
-                        selectionState.moveSelection(1, 0, false, rowCount, colCount);
+                        selectionState.moveSelection(
+                            1,
+                            0,
+                            false,
+                            rowCount,
+                            colCount,
+                        );
                         scrollToAnchor();
                     }
                 }
@@ -2048,7 +2319,9 @@
                                     left: cellContainerLeft(anchor.col),
                                     top: cellContainerTop(anchor.row),
                                     width: virtualizer.getColWidth(anchor.col),
-                                    height: virtualizer.getRowHeight(anchor.row),
+                                    height: virtualizer.getRowHeight(
+                                        anchor.row,
+                                    ),
                                 };
                             }
                         }
@@ -2056,7 +2329,9 @@
                         f2CellType !== CELL_TYPE.TABLE_HEADER &&
                         f2CellType !== CELL_TYPE.TABLE_ENTRY
                     ) {
-                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
+                        beginCellEdit(anchor.row, anchor.col, {
+                            surface: "grid",
+                        });
                     }
                 }
                 e.preventDefault();
@@ -2125,14 +2400,17 @@
             case "4":
                 if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
                     // Ctrl+Shift+4 → format as currency
-                    applyTypeToSelection('currency', { decimals: 2, symbol: '$' });
+                    applyTypeToSelection("currency", {
+                        decimals: 2,
+                        symbol: "$",
+                    });
                     e.preventDefault();
                 }
                 break;
             case "5":
                 if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
                     // Ctrl+Shift+5 → format as percent
-                    applyTypeToSelection('percent', { decimals: 2 });
+                    applyTypeToSelection("percent", { decimals: 2 });
                     e.preventDefault();
                 }
                 break;
@@ -2154,8 +2432,8 @@
                 if ((e.ctrlKey || e.metaKey) && e.altKey) {
                     // Ctrl+Alt+= → insert row/column (when row/col selected)
                     const mode = selectionState.selectionMode;
-                    if (mode === 'rows') insertRowAbove();
-                    else if (mode === 'cols') insertColumnLeft();
+                    if (mode === "rows") insertRowAbove();
+                    else if (mode === "cols") insertColumnLeft();
                     e.preventDefault();
                 }
                 break;
@@ -2163,8 +2441,8 @@
                 if ((e.ctrlKey || e.metaKey) && e.altKey) {
                     // Ctrl+Alt+- → delete row/column (when row/col selected)
                     const delMode = selectionState.selectionMode;
-                    if (delMode === 'rows') deleteSelectedRows();
-                    else if (delMode === 'cols') deleteSelectedColumns();
+                    if (delMode === "rows") deleteSelectedRows();
+                    else if (delMode === "cols") deleteSelectedColumns();
                     e.preventDefault();
                 }
                 break;
@@ -2225,7 +2503,7 @@
     // ─── Dropdown range resolver ──────────────────────────────────────────────
     function resolveRangeOptions(rangeStr) {
         if (!sheetStore) return [];
-        const parts = rangeStr.trim().toUpperCase().split(':');
+        const parts = rangeStr.trim().toUpperCase().split(":");
         function parseRef(ref) {
             const m = ref.match(/^([A-Z]+)(\d+)$/);
             if (!m) return null;
@@ -2241,7 +2519,7 @@
         for (let r = start.row; r <= end.row; r++) {
             for (let c = start.col; c <= end.col; c++) {
                 const cell = sheetStore.getCell(r, c);
-                if (cell?.v != null && cell.v !== '') opts.push(String(cell.v));
+                if (cell?.v != null && cell.v !== "") opts.push(String(cell.v));
             }
         }
         return opts;
@@ -2259,7 +2537,12 @@
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff || eff.startCol === eff.endCol) return;
-        sheetStore.fillRight(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+        sheetStore.fillRight(
+            eff.startRow,
+            eff.startCol,
+            eff.endRow,
+            eff.endCol,
+        );
     }
 
     // ─── Apply cell type to selection ─────────────────────────────────────────
@@ -2281,8 +2564,8 @@
     function insertDate() {
         if (!sheetStore || !anchor) return;
         const today = new Date();
-        const mm = String(today.getMonth() + 1).padStart(2, '0');
-        const dd = String(today.getDate()).padStart(2, '0');
+        const mm = String(today.getMonth() + 1).padStart(2, "0");
+        const dd = String(today.getDate()).padStart(2, "0");
         const yyyy = today.getFullYear();
         sheetStore.setCellValue(anchor.row, anchor.col, `${mm}/${dd}/${yyyy}`);
     }
@@ -2293,7 +2576,10 @@
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
         sheetStore.clearRangeFormatting(
-            eff.startRow, eff.startCol, eff.endRow, eff.endCol
+            eff.startRow,
+            eff.startCol,
+            eff.endRow,
+            eff.endCol,
         );
     }
 
@@ -2588,8 +2874,11 @@
             action: () => {
                 if (anchor) {
                     // Apply image type then open the picker
-                    sheetStore?.setCellTypeConfig(anchor.row, anchor.col, { type: 'image', fit: 'contain' });
-                    beginCellEdit(anchor.row, anchor.col, { surface: 'grid' });
+                    sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
+                        type: "image",
+                        fit: "contain",
+                    });
+                    beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
                 }
             },
             disabled: !anchor,
@@ -2862,6 +3151,8 @@
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
     let resizeTicking = false;
+    let latestResizeW = 0;
+    let latestResizeH = 0;
 
     /** Handler stored for cleanup — image fit change from ImageEditor */
     function handleImageFitChange(e) {
@@ -2870,7 +3161,7 @@
         const cell = editSessionState.cell;
         if (!cell) return;
         const ct = sheetStore.getCellTypeConfig(cell.row, cell.col);
-        if (ct?.type === 'image') {
+        if (ct?.type === "image") {
             sheetStore.setCellTypeConfig(cell.row, cell.col, { ...ct, fit });
         }
     }
@@ -2881,28 +3172,68 @@
             renderScheduler?.invalidateAll();
         });
 
-        window.addEventListener('image-fit-change', handleImageFitChange);
+        window.addEventListener("image-fit-change", handleImageFitChange);
 
         document.addEventListener("mouseup", handleMouseUp);
 
         if (containerEl) {
+            // ResizeObserver stores the latest dimensions and always uses them
+            // in the RAF callback. The resizeTicking flag ensures at most one
+            // RAF is queued, but intermediate entries update latestResize* so
+            // the RAF never uses stale values.
             resizeObserver = new ResizeObserver((entries) => {
-                if (resizeTicking) return;
-                resizeTicking = true;
-                requestAnimationFrame(() => {
-                    for (const entry of entries) {
-                        const { width, height } = entry.contentRect;
-                        if (virtualizer)
-                            virtualizer.setContainerSize(width, height);
-                    }
-                    resizeTicking = false;
-                });
+                const last = entries[entries.length - 1];
+                const { width, height } = last.contentRect;
+                if (width <= 0 || height <= 0) return;
+                latestResizeW = width;
+                latestResizeH = height;
+                if (!resizeTicking) {
+                    resizeTicking = true;
+                    requestAnimationFrame(() => {
+                        if (
+                            virtualizer &&
+                            latestResizeW > 0 &&
+                            latestResizeH > 0
+                        )
+                            virtualizer.setContainerSize(
+                                latestResizeW,
+                                latestResizeH,
+                            );
+                        resizeTicking = false;
+                    });
+                }
             });
             resizeObserver.observe(containerEl);
 
+            // Use getBoundingClientRect as an initial size hint.
+            // The ResizeObserver will correct it once layout settles.
             const rect = containerEl.getBoundingClientRect();
-            if (virtualizer)
+            if (rect.width > 0 && rect.height > 0 && virtualizer)
                 virtualizer.setContainerSize(rect.width, rect.height);
+        }
+
+        // On iOS Safari, the visual viewport shrinks when the keyboard appears.
+        // This doesn't always trigger a ResizeObserver on the grid container,
+        // so we listen directly and force a re-measure.
+        // NOTE: Only listen for 'resize', NOT 'scroll'. The scroll event fires
+        // during address bar hide/show animations with transitional heights,
+        // which causes the canvas to be cleared and resized dozens of times
+        // during a single scroll gesture, leading to blank canvas on mobile.
+        if (window.visualViewport) {
+            const onVVResize = () => {
+                if (containerEl && virtualizer) {
+                    const rect = containerEl.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0)
+                        virtualizer.setContainerSize(rect.width, rect.height);
+                }
+            };
+            window.visualViewport.addEventListener("resize", onVVResize);
+            vvCleanup = () => {
+                window.visualViewport?.removeEventListener(
+                    "resize",
+                    onVVResize,
+                );
+            };
         }
 
         if (!anchor) {
@@ -2911,18 +3242,55 @@
         }
     });
 
+    // ─── Passive touch event listeners (registered via effect, not template) ────
+    // Using passive: true tells the browser it can start scrolling immediately
+    // without waiting for these handlers. touch-action: pan-x pan-y already
+    // handles this on Chrome/Edge, but passive listeners add explicit Safari support.
+    $effect(() => {
+        if (!scrollEl) return;
+        const opts = { passive: true };
+        scrollEl.addEventListener(
+            "touchstart",
+            handleEventLayerTouchStart,
+            opts,
+        );
+        scrollEl.addEventListener("touchmove", handleEventLayerTouchMove, opts);
+        scrollEl.addEventListener("touchend", handleEventLayerTouchEnd, opts);
+        scrollEl.addEventListener(
+            "touchcancel",
+            handleEventLayerTouchCancel,
+            opts,
+        );
+        return () => {
+            scrollEl.removeEventListener(
+                "touchstart",
+                handleEventLayerTouchStart,
+            );
+            scrollEl.removeEventListener(
+                "touchmove",
+                handleEventLayerTouchMove,
+            );
+            scrollEl.removeEventListener("touchend", handleEventLayerTouchEnd);
+            scrollEl.removeEventListener(
+                "touchcancel",
+                handleEventLayerTouchCancel,
+            );
+        };
+    });
+
     onDestroy(() => {
         document.removeEventListener("mouseup", handleMouseUp);
         document.removeEventListener("mousemove", handleResizeMove);
         document.removeEventListener("mouseup", handleResizeEnd);
         if (resizeObserver) resizeObserver.disconnect();
+        vvCleanup?.();
         virtualizer?.destroy();
         renderScheduler?.destroy();
         canvasRenderer?.destroy();
         selectionScheduler?.destroy();
         selectionRenderer?.destroy();
         setOnLoadCallback(null);
-        window.removeEventListener('image-fit-change', handleImageFitChange);
+        window.removeEventListener("image-fit-change", handleImageFitChange);
     });
 </script>
 
@@ -2931,9 +3299,13 @@
 <div class="grid-root" bind:this={containerEl}>
     {#if renderPlan && virtualizer}
         <!-- ── 1a. Data canvas (cell backgrounds, text, borders, gridlines) ── -->
+        <!-- width/height="0" prevents the browser default 300×150 from showing -->
+        <!-- before canvasRenderer.resize() sets the correct CSS dimensions.    -->
         <canvas
             bind:this={canvasEl}
             class="grid-canvas"
+            width="0"
+            height="0"
             style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none;"
         ></canvas>
 
@@ -2943,6 +3315,8 @@
         <canvas
             bind:this={selectCanvasEl}
             class="select-canvas"
+            width="0"
+            height="0"
             style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none; z-index:3;"
         ></canvas>
 
@@ -3124,11 +3498,19 @@
             <!-- Dropdown cell overlay -->
             {#if focusedDropdownCell}
                 {@const filteredOpts = dropdownFilter
-                    ? focusedDropdownCell.options.filter(o => String(o).toLowerCase().includes(dropdownFilter.toLowerCase()))
+                    ? focusedDropdownCell.options.filter((o) =>
+                          String(o)
+                              .toLowerCase()
+                              .includes(dropdownFilter.toLowerCase()),
+                      )
                     : focusedDropdownCell.options}
                 <div
                     class="dropdown-cell-overlay"
-                    style="position:absolute; left:{focusedDropdownCell.left}px; top:{focusedDropdownCell.top + focusedDropdownCell.height}px; width:{Math.max(focusedDropdownCell.width, 140)}px; z-index:30;"
+                    style="position:absolute; left:{focusedDropdownCell.left}px; top:{focusedDropdownCell.top +
+                        focusedDropdownCell.height}px; width:{Math.max(
+                        focusedDropdownCell.width,
+                        140,
+                    )}px; z-index:30;"
                 >
                     <input
                         class="dropdown-filter-input"
@@ -3137,13 +3519,17 @@
                         bind:value={dropdownFilter}
                         autofocus
                         onkeydown={(e) => {
-                            if (e.key === 'Enter') {
+                            if (e.key === "Enter") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
-                                    sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                    sheetStore?.setCellValue(
+                                        focusedDropdownCell.row,
+                                        focusedDropdownCell.col,
+                                        filteredOpts[0],
+                                    );
                                     focusedDropdownCell = null;
                                 }
-                            } else if (e.key === 'Escape') {
+                            } else if (e.key === "Escape") {
                                 focusedDropdownCell = null;
                             }
                         }}
@@ -3153,10 +3539,14 @@
                             class="dropdown-option"
                             onmousedown={(e) => {
                                 e.preventDefault();
-                                sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, opt);
+                                sheetStore?.setCellValue(
+                                    focusedDropdownCell.row,
+                                    focusedDropdownCell.col,
+                                    opt,
+                                );
                                 focusedDropdownCell = null;
-                            }}
-                        >{opt}</button>
+                            }}>{opt}</button
+                        >
                     {/each}
                     {#if filteredOpts.length === 0}
                         <div class="dropdown-no-match">No matches</div>
@@ -3177,8 +3567,8 @@
                 docId={spreadsheetSession.docId}
                 onTabCommit={(dir, kind) => {
                     // dir: +1 = right/down, -1 = left/up; kind: 'tab' = horizontal
-                    const dRow = kind === 'tab' ? 0 : 1;
-                    const dCol = kind === 'tab' ? dir : 0;
+                    const dRow = kind === "tab" ? 0 : 1;
+                    const dCol = kind === "tab" ? dir : 0;
                     if (editSessionState.isEditing) {
                         // Session still active (formula/plain text) — commit+move together
                         commitEditAndMove(dRow, dCol);
@@ -3232,14 +3622,16 @@
                         onTabNext={entryTabNext}
                         onTabPrev={entryTabPrev}
                         onCommit={commitEntryAndRefocus}
-                        onValueChange={() => untrack(() => renderScheduler?.invalidateAll())}
+                        onValueChange={() =>
+                            untrack(() => renderScheduler?.invalidateAll())}
                     />
                 </div>
                 <!-- Entry action buttons — inline to the right of the table, same row height -->
                 {#if entryInsertButtonInfo}
                     <div
                         class="entry-action-bar"
-                        style="position:absolute; left:{entryInsertButtonInfo.left + 4}px; top:{entryInsertButtonInfo.top}px; height:{entryInsertButtonInfo.height}px; z-index:23;"
+                        style="position:absolute; left:{entryInsertButtonInfo.left +
+                            4}px; top:{entryInsertButtonInfo.top}px; height:{entryInsertButtonInfo.height}px; z-index:23;"
                     >
                         <button
                             class="entry-add-btn"
@@ -3275,23 +3667,36 @@
                     <input
                         type="text"
                         class="header-rename-input"
-                        value={activeHeaderRename.colDef.name ?? ''}
+                        value={activeHeaderRename.colDef.name ?? ""}
                         autofocus
                         onkeydown={(e) => {
-                            if (e.key === 'Enter' || e.key === 'Tab') {
+                            if (e.key === "Enter" || e.key === "Tab") {
                                 e.preventDefault();
                                 e.stopPropagation();
-                                const newName = /** @type {HTMLInputElement} */ (e.target).value.trim();
-                                if (newName) activeHeaderRename.table.renameColumn(activeHeaderRename.colDef.id, newName);
+                                const newName =
+                                    /** @type {HTMLInputElement} */ (
+                                        e.target
+                                    ).value.trim();
+                                if (newName)
+                                    activeHeaderRename.table.renameColumn(
+                                        activeHeaderRename.colDef.id,
+                                        newName,
+                                    );
                                 activeHeaderRename = null;
-                            } else if (e.key === 'Escape') {
+                            } else if (e.key === "Escape") {
                                 e.stopPropagation();
                                 activeHeaderRename = null;
                             }
                         }}
                         onblur={(e) => {
-                            const newName = /** @type {HTMLInputElement} */ (e.target).value.trim();
-                            if (newName) activeHeaderRename?.table.renameColumn(activeHeaderRename.colDef.id, newName);
+                            const newName = /** @type {HTMLInputElement} */ (
+                                e.target
+                            ).value.trim();
+                            if (newName)
+                                activeHeaderRename?.table.renameColumn(
+                                    activeHeaderRename.colDef.id,
+                                    newName,
+                                );
                             activeHeaderRename = null;
                         }}
                     />
@@ -3343,7 +3748,8 @@
 
         <!-- ── Page break overlay ── -->
         {#if showPageBreaks && pageBreakLines}
-            {@const { rowLines, colLines, printEndX, printEndY } = pageBreakLines}
+            {@const { rowLines, colLines, printEndX, printEndY } =
+                pageBreakLines}
             <svg
                 class="page-break-overlay"
                 style="position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:9; overflow:visible;"
@@ -3362,7 +3768,14 @@
                             stroke-dasharray="6 3"
                             opacity="0.75"
                         />
-                        <text x={HEADER_WIDTH + 4} y={y - 3} font-size="9" fill="#1a73e8" opacity="0.75" font-family="system-ui,sans-serif">page</text>
+                        <text
+                            x={HEADER_WIDTH + 4}
+                            y={y - 3}
+                            font-size="9"
+                            fill="#1a73e8"
+                            opacity="0.75"
+                            font-family="system-ui,sans-serif">page</text
+                        >
                     {/if}
                 {/each}
 
@@ -3432,7 +3845,10 @@
         onmousedown={() => (showFloatingImageInsert = false)}
     >
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="floating-insert-dialog" onmousedown={(e) => e.stopPropagation()}>
+        <div
+            class="floating-insert-dialog"
+            onmousedown={(e) => e.stopPropagation()}
+        >
             <h3 class="floating-insert-title">Insert Floating Image</h3>
             <ImageEditor
                 value=""
@@ -3447,7 +3863,7 @@
                             offsetY: 0,
                             width: 240,
                             height: 160,
-                            fit: fit ?? 'contain',
+                            fit: fit ?? "contain",
                         });
                     }
                     showFloatingImageInsert = false;
@@ -3690,7 +4106,7 @@
         background: white;
         border: 1px solid #cbd5e1;
         border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -3710,8 +4126,13 @@
         white-space: nowrap;
     }
 
-    .dropdown-option:last-child { border-bottom: none; }
-    .dropdown-option:hover { background: #eff6ff; color: #1d4ed8; }
+    .dropdown-option:last-child {
+        border-bottom: none;
+    }
+    .dropdown-option:hover {
+        background: #eff6ff;
+        color: #1d4ed8;
+    }
 
     .dropdown-filter-input {
         width: 100%;
@@ -3810,13 +4231,13 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(0,0,0,0.25);
+        background: rgba(0, 0, 0, 0.25);
     }
 
     .floating-insert-dialog {
         background: #fff;
         border-radius: 10px;
-        box-shadow: 0 16px 48px rgba(0,0,0,0.18);
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
         padding: 20px;
         min-width: 320px;
         display: flex;

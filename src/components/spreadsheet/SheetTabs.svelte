@@ -175,4 +175,25 @@
         background: var(--hover-bg, #e2e8f0);
         color: var(--text-color, #1e293b);
     }
+
+    /* ── Mobile: bigger touch targets ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .sheet-tabs {
+            min-height: 44px;
+        }
+        .tab {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+        }
+        .add-sheet-btn {
+            width: 36px;
+            height: 36px;
+        }
+        /* Show delete button always on touch (no hover) */
+        .tab .tab-delete {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+    }
 </style>

@@ -158,9 +158,10 @@ export class SpreadsheetSession {
             const root = ydoc.getMap('spreadsheet');
             console.log('[SpreadsheetSession] Got root map');
 
-            // Note: Document initialization now happens explicitly during creation
-            // via createDocument() - not implicitly on load. This prevents
-            // race conditions with offline clients re-initializing documents.
+            // Ensure document structure exists (idempotent — skips if already initialized).
+            // This handles documents loaded on a fresh client before sync, or documents
+            // created with an older API that didn't explicitly initialize the schema.
+            spreadsheetSchema.initialize(ydoc);
 
             this.docId = docId;
             this.ydoc = ydoc;

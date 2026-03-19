@@ -1,10 +1,11 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(find src/lib/yjs-manager -name *.js)"
+    ],
     "additionalDirectories": [
       "c:\\Users\\Jon\\.claude\\projects\\c--Users-Jon-code-plainTab\\memory"
-    ],
-    "allow": [
-      "Bash(npm run:*)"
     ]
   }
 }

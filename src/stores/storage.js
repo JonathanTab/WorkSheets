@@ -19,17 +19,17 @@ import { authStore } from './authStore.js';
 
 const APP_NAME = 'worksheets';
 const BASE_URL = 'https://instrumenta.cf/api/storage.php';
-const WS_URL   = 'wss://instrumenta.cf/congruum/';
+const WS_URL = 'wss://instrumenta.cf/congruum/';
 const BLOB_URL = 'https://instrumenta.cf/api/blob-storage.php';
 
 export const storage = createSvelteRegistry({
-    appName:     APP_NAME,
-    baseUrl:     BASE_URL,
-    blobUrl:     BLOB_URL,
-    wsUrl:       WS_URL,
-    // Session-cookie auth: getApiKey always returns null.
-    // StorageAPI sends no Bearer header; the browser cookie handles auth.
-    getApiKey:   () => null,
+    appName: APP_NAME,
+    baseUrl: BASE_URL,
+    blobUrl: BLOB_URL,
+    wsUrl: WS_URL,
+    // Auth: uses dev API key if set (localStorage), otherwise falls back to session cookie.
+    // StorageAPI sends Bearer header when key is present; browser cookie when null.
+    getApiKey: () => authStore.getApiKey(),
     getUsername: () => get(authStore).user?.username ?? 'anonymous',
 });
 
@@ -47,10 +47,18 @@ storage.init = async function () {
 // Expose lightweight debug helpers in dev.
 if (typeof window !== 'undefined') {
     /** @type {any} */ (window).storageDebug = {
-        sync:   () => storage.sync(),
-        state:  () => console.log(storage.getSyncState()),
-        files:  () => console.table(storage.drive.listFiles()),
-        folders:() => console.table(storage.drive.listFolders()),
+        sync: () => storage.sync(),
+        state: () => console.log(storage.getSyncState()),
+        files: () => console.table(storage.drive.listFiles()),
+        folders: () => console.table(storage.drive.listFolders()),
+        // Dev API key management (paste your API key to authenticate without cookies)
+        setApiKey: (key) => authStore.setDevApiKey(key),
+        clearApiKey: () => authStore.clearDevApiKey(),
+        getApiKey: () => {
+            const key = authStore.getApiKey();
+            console.log(key ? `API key set: ${key.substring(0, 8)}...` : 'No API key set (using session cookie)');
+            return key;
+        },
     };
 }
 

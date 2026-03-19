@@ -122,44 +122,47 @@ export class SelectionRenderer {
 
         ctx.save();
         ctx.scale(dpr, dpr);
-        ctx.beginPath();
-        ctx.rect(clipX, clipY, clipW, clipH);
-        ctx.clip();
 
-        for (let r = rowRange.start; r <= rowRange.end; r++) {
-            const isFrozenRow = r < frozenRows;
-            const y = isFrozenRow
-                ? rowMetrics.offsetOf(r)
-                : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
-            const h = rowMetrics.sizeOf(r);
+        try {
+            ctx.beginPath();
+            ctx.rect(clipX, clipY, clipW, clipH);
+            ctx.clip();
 
-            for (let c = colRange.start; c <= colRange.end; c++) {
-                // Check selection and formula highlight before computing x (early-exit
-                // skips coordinate math for the common case of unselected empty cells).
-                const selected = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
-                const hlColor = formulaEditState?.getCellHighlightColor(r, c) ?? null;
-                if (!selected && !hlColor) continue;
+            for (let r = rowRange.start; r <= rowRange.end; r++) {
+                const isFrozenRow = r < frozenRows;
+                const y = isFrozenRow
+                    ? rowMetrics.offsetOf(r)
+                    : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
+                const h = rowMetrics.sizeOf(r);
 
-                const isFrozenCol = c < frozenCols;
-                const x = isFrozenCol
-                    ? colMetrics.offsetOf(c)
-                    : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
-                const w = colMetrics.sizeOf(c);
+                for (let c = colRange.start; c <= colRange.end; c++) {
+                    // Check selection and formula highlight before computing x (early-exit
+                    // skips coordinate math for the common case of unselected empty cells).
+                    const selected = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
+                    const hlColor = formulaEditState?.getCellHighlightColor(r, c) ?? null;
+                    if (!selected && !hlColor) continue;
 
-                if (selected) {
-                    ctx.fillStyle = SELECTION_FILL;
-                    ctx.fillRect(x, y, w, h);
-                }
+                    const isFrozenCol = c < frozenCols;
+                    const x = isFrozenCol
+                        ? colMetrics.offsetOf(c)
+                        : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
+                    const w = colMetrics.sizeOf(c);
 
-                if (hlColor) {
-                    ctx.strokeStyle = hlColor;
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+                    if (selected) {
+                        ctx.fillStyle = SELECTION_FILL;
+                        ctx.fillRect(x, y, w, h);
+                    }
+
+                    if (hlColor) {
+                        ctx.strokeStyle = hlColor;
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+                    }
                 }
             }
+        } finally {
+            ctx.restore();
         }
-
-        ctx.restore();
     }
 }
 

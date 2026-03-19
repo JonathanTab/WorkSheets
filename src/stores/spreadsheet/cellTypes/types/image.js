@@ -105,7 +105,11 @@ function _drawEmptyImagePlaceholder(ctx, x, y, w, h, theme) {
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.roundRect(ix, iy, iw, ih, 2);
+    if (ctx.roundRect) {
+        ctx.roundRect(ix, iy, iw, ih, 2);
+    } else {
+        ctx.rect(ix, iy, iw, ih);
+    }
     ctx.stroke();
     ctx.setLineDash([]);
 
@@ -119,7 +123,11 @@ function _drawEmptyImagePlaceholder(ctx, x, y, w, h, theme) {
     ctx.lineWidth = 1;
     const fr = iconSize * 0.5;
     ctx.beginPath();
-    ctx.roundRect(cx - fr, cy - fr, fr * 2, fr * 2, 1);
+    if (ctx.roundRect) {
+        ctx.roundRect(cx - fr, cy - fr, fr * 2, fr * 2, 1);
+    } else {
+        ctx.rect(cx - fr, cy - fr, fr * 2, fr * 2);
+    }
     ctx.stroke();
 
     // Sun dot

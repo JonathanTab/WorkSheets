@@ -241,8 +241,8 @@
     .dialog {
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
         min-width: 280px;
         max-width: 320px;
     }
@@ -254,7 +254,7 @@
 
     .dialog-title {
         font-weight: 600;
-        font-size: 0.875rem;
+        font-size: 13px;
         color: var(--color-text);
     }
 
@@ -272,17 +272,17 @@
     }
 
     .form-row label {
-        font-size: 0.75rem;
+        font-size: 11px;
         color: var(--color-text-secondary);
         font-weight: 500;
     }
 
     .form-row input[type="text"] {
-        height: 32px;
+        height: 28px;
         padding: 0 8px;
         border: 1px solid var(--color-border);
         border-radius: 4px;
-        font-size: 0.8125rem;
+        font-size: 13px;
         background: var(--color-surface);
         color: var(--color-text);
     }
@@ -304,9 +304,9 @@
         border: 1px solid var(--color-border);
         background: var(--color-surface);
         color: var(--color-text);
-        font-size: 0.75rem;
+        font-size: 12px;
         cursor: pointer;
-        transition: all 0.15s;
+        transition: all 0.1s;
     }
 
     .toggle-btn:first-child {
@@ -335,11 +335,11 @@
 
     .number-input input[type="number"] {
         flex: 1;
-        height: 32px;
+        height: 28px;
         padding: 0 8px;
         border: 1px solid var(--color-border);
         border-radius: 0;
-        font-size: 0.8125rem;
+        font-size: 13px;
         text-align: center;
         background: var(--color-surface);
         color: var(--color-text);
@@ -353,12 +353,12 @@
     }
 
     .num-btn {
-        width: 32px;
-        height: 32px;
+        width: 28px;
+        height: 28px;
         border: 1px solid var(--color-border);
         background: var(--color-surface);
         color: var(--color-text);
-        font-size: 1rem;
+        font-size: 14px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -381,10 +381,10 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 8px;
+        padding: 6px 8px;
         background: var(--color-fill);
         border-radius: 4px;
-        font-size: 0.75rem;
+        font-size: 11px;
     }
 
     .info-label {
@@ -405,14 +405,14 @@
     }
 
     .btn {
-        height: 32px;
-        padding: 0 16px;
+        height: 28px;
+        padding: 0 12px;
         border: none;
         border-radius: 4px;
-        font-size: 0.8125rem;
+        font-size: 13px;
         font-weight: 500;
         cursor: pointer;
-        transition: all 0.15s;
+        transition: all 0.1s;
     }
 
     .btn-primary {
@@ -421,7 +421,7 @@
     }
 
     .btn-primary:hover:not(:disabled) {
-        background: var(--color-primary-hover);
+        background: #0066dd;
     }
 
     .btn-primary:disabled {
@@ -430,11 +430,12 @@
     }
 
     .btn-secondary {
-        background: var(--color-fill);
+        background: var(--color-surface);
         color: var(--color-text);
+        border: 1px solid var(--color-border);
     }
 
     .btn-secondary:hover {
-        background: var(--color-fill-hover);
+        background: var(--color-fill);
     }
 </style>

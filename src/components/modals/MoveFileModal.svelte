@@ -3,55 +3,89 @@
     import { closeTopModal } from "../../lib/ui/modalStore.svelte.js";
     import Button from "../../lib/ui/Button.svelte";
     import ModalHeader from "../../lib/ui/ModalHeader.svelte";
+    import {
+        folder,
+        home,
+        chevronRight,
+        chevronDown,
+        check,
+    } from "../../lib/icons/index.js";
 
     /** @type {{ file: import('../../lib/FileRegistry/FileRegistry.js').FileDescriptor, onConfirm: (folderId: string|null) => void }} */
     let { file, onConfirm } = $props();
-
-    const folderSvg  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
-    const arrowRightSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`;
-    const homeSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
 
     let allFolders = $state([]);
     let browseFolderId = $state(null);
     let selectedFolderId = $state(file.folderId ?? null);
     let saving = $state(false);
+    let expandedFolders = $state(new Set());
 
     $effect(() => {
-        const unsub = storage.drive.folders.subscribe(f => { allFolders = f; });
+        const unsub = storage.drive.folders.subscribe((f) => {
+            allFolders = f;
+        });
         return unsub;
     });
 
+    // Flatten folder tree for rendering
+    let flattenedFolders = $derived.by(() => {
+        const result = [];
+        const flatten = (parentId = null, depth = 0) => {
+            const children = allFolders.filter((f) => f.parentId === parentId);
+            for (const f of children) {
+                result.push({ ...f, depth });
+                if (expandedFolders.has(f.id)) {
+                    flatten(f.id, depth + 1);
+                }
+            }
+        };
+        flatten(null, 0);
+        return result;
+    });
+
+    // Recent folders
     let recentFolders = $derived.by(() => {
-        // Last 5 distinct folders from recently opened files
         const seen = new Set();
         const result = [];
         for (const f of storage.drive.recentlyOpened(50)) {
             const fid = f.folderId;
             if (fid && !seen.has(fid) && fid !== (file.folderId ?? null)) {
                 seen.add(fid);
-                const folder = allFolders.find(x => x.id === fid);
-                if (folder) result.push(folder);
+                const fld = allFolders.find((x) => x.id === fid);
+                if (fld) result.push(fld);
                 if (result.length >= 5) break;
             }
         }
         return result;
     });
 
-    let currentFolderChildren = $derived(
-        allFolders.filter(f => f.parentId === browseFolderId)
-    );
-
+    // Breadcrumb for current browse location
     let breadcrumb = $derived.by(() => {
         const crumbs = [];
         let id = browseFolderId;
         while (id) {
-            const folder = allFolders.find(f => f.id === id);
-            if (!folder) break;
-            crumbs.unshift(folder);
-            id = folder.parentId;
+            const fld = allFolders.find((f) => f.id === id);
+            if (!fld) break;
+            crumbs.unshift(fld);
+            id = fld.parentId;
         }
         return crumbs;
     });
+
+    // Folders in current browse location
+    let currentFolderChildren = $derived(
+        allFolders.filter((f) => f.parentId === browseFolderId),
+    );
+
+    function toggleFolderExpand(folderId) {
+        const newExpanded = new Set(expandedFolders);
+        if (newExpanded.has(folderId)) {
+            newExpanded.delete(folderId);
+        } else {
+            newExpanded.add(folderId);
+        }
+        expandedFolders = newExpanded;
+    }
 
     function selectFolder(id) {
         selectedFolderId = id;
@@ -60,6 +94,10 @@
     function navigateInto(id) {
         browseFolderId = id;
         selectedFolderId = id;
+    }
+
+    function navigateTo(id) {
+        browseFolderId = id;
     }
 
     async function confirm() {
@@ -73,103 +111,206 @@
 
     function folderName(id) {
         if (id === null) return "My Drive";
-        return allFolders.find(f => f.id === id)?.name ?? "Unknown folder";
+        return allFolders.find((f) => f.id === id)?.name ?? "Unknown folder";
+    }
+
+    // Check if folder has children
+    function hasChildren(folderId) {
+        return allFolders.some((f) => f.parentId === folderId);
     }
 </script>
 
 <ModalHeader title="Move to folder" />
 
 <div class="move-modal">
+    <!-- File being moved -->
+    <div class="file-info">
+        <span class="file-label">Moving:</span>
+        <span class="file-name">{file.title || "Untitled"}</span>
+    </div>
+
     <!-- Recent folders -->
     {#if recentFolders.length > 0}
         <div class="section">
-            <p class="section-label">Recent folders</p>
+            <p class="section-label">Recent locations</p>
             <div class="recent-list">
-                {#each recentFolders as folder (folder.id)}
+                {#each recentFolders as fld (fld.id)}
                     <button
                         class="recent-item"
-                        class:selected={selectedFolderId === folder.id}
-                        onclick={() => selectFolder(folder.id)}
-                        ondblclick={() => { selectFolder(folder.id); confirm(); }}
+                        class:selected={selectedFolderId === fld.id}
+                        onclick={() => selectFolder(fld.id)}
+                        ondblclick={() => {
+                            selectFolder(fld.id);
+                            confirm();
+                        }}
                     >
-                        <span class="folder-icon">{@html folderSvg}</span>
-                        {folder.name}
+                        <span class="folder-icon">{@html folder}</span>
+                        <span class="recent-name">{fld.name}</span>
+                        {#if selectedFolderId === fld.id}
+                            <span class="check-icon">{@html check}</span>
+                        {/if}
                     </button>
                 {/each}
             </div>
         </div>
-        <hr class="divider" />
+        <div class="divider"></div>
     {/if}
 
-    <!-- Browser -->
-    <div class="section">
-        <p class="section-label">Browse</p>
-
-        <!-- Breadcrumb -->
-        <div class="breadcrumb">
-            <button class="crumb root" onclick={() => { browseFolderId = null; selectedFolderId = null; }}>
-                {@html homeSvg} My Drive
-            </button>
-            {#each breadcrumb as crumb}
-                <span class="crumb-sep">{@html arrowRightSvg}</span>
-                <button class="crumb" onclick={() => { browseFolderId = crumb.id; selectedFolderId = crumb.id; }}>
-                    {crumb.name}
+    <!-- Split panel: Tree | Browser -->
+    <div class="split-panel">
+        <!-- Tree View (Left) -->
+        <div class="tree-panel">
+            <p class="section-label">Folder tree</p>
+            <div class="tree-view">
+                <!-- Root -->
+                <button
+                    class="tree-item root"
+                    class:selected={selectedFolderId === null}
+                    onclick={() => selectFolder(null)}
+                >
+                    <span class="tree-icon">{@html home}</span>
+                    <span class="tree-name">My Drive</span>
+                    {#if selectedFolderId === null}
+                        <span class="check-icon">{@html check}</span>
+                    {/if}
                 </button>
-            {/each}
+
+                <!-- Tree items -->
+                {#each flattenedFolders as fld (fld.id)}
+                    <button
+                        class="tree-item"
+                        style="padding-left: {8 + fld.depth * 14}px"
+                        class:selected={selectedFolderId === fld.id}
+                        onclick={() => selectFolder(fld.id)}
+                    >
+                        {#if hasChildren(fld.id)}
+                            <button
+                                class="expand-btn"
+                                onclick={(e) => {
+                                    e.stopPropagation();
+                                    toggleFolderExpand(fld.id);
+                                }}
+                            >
+                                {#if expandedFolders.has(fld.id)}
+                                    {@html chevronDown}
+                                {:else}
+                                    {@html chevronRight}
+                                {/if}
+                            </button>
+                        {:else}
+                            <span class="expand-placeholder"></span>
+                        {/if}
+                        <span class="tree-icon">{@html folder}</span>
+                        <span class="tree-name">{fld.name}</span>
+                        {#if selectedFolderId === fld.id}
+                            <span class="check-icon">{@html check}</span>
+                        {/if}
+                    </button>
+                {/each}
+            </div>
         </div>
 
-        <!-- Root option -->
-        {#if browseFolderId !== null}
-            <button
-                class="folder-row"
-                class:selected={selectedFolderId === null}
-                onclick={() => selectFolder(null)}
-            >
-                <span class="folder-icon">{@html homeSvg}</span>
-                <span>My Drive (root)</span>
-            </button>
-        {:else}
-            <button
-                class="folder-row root-row"
-                class:selected={selectedFolderId === null}
-                onclick={() => selectFolder(null)}
-            >
-                <span class="folder-icon">{@html homeSvg}</span>
-                <span>My Drive (root)</span>
-            </button>
-        {/if}
+        <!-- Divider -->
+        <div class="panel-divider"></div>
 
-        <!-- Sub-folders -->
-        {#each currentFolderChildren as folder (folder.id)}
-            <button
-                class="folder-row"
-                class:selected={selectedFolderId === folder.id}
-                onclick={() => selectFolder(folder.id)}
-            >
-                <span class="folder-icon">{@html folderSvg}</span>
-                <span class="folder-name">{folder.name}</span>
-                {#if allFolders.some(f => f.parentId === folder.id)}
-                    <button class="into-btn" title="Open" onclick={(e) => { e.stopPropagation(); navigateInto(folder.id); }}>
-                        {@html arrowRightSvg}
+        <!-- Browser View (Right) -->
+        <div class="browser-panel">
+            <p class="section-label">Browse</p>
+
+            <!-- Breadcrumb -->
+            <div class="breadcrumb">
+                <button class="crumb root" onclick={() => navigateTo(null)}>
+                    <span class="crumb-icon">{@html home}</span>
+                    <span>My Drive</span>
+                </button>
+                {#each breadcrumb as crumb}
+                    <span class="crumb-sep">{@html chevronRight}</span>
+                    <button class="crumb" onclick={() => navigateTo(crumb.id)}>
+                        {crumb.name}
+                    </button>
+                {/each}
+            </div>
+
+            <!-- Folder list -->
+            <div class="folder-list">
+                {#if browseFolderId !== null}
+                    <button
+                        class="folder-item parent-folder"
+                        onclick={() =>
+                            navigateTo(
+                                breadcrumb.length > 0
+                                    ? (breadcrumb[breadcrumb.length - 1]
+                                          .parentId ?? null)
+                                    : null,
+                            )}
+                    >
+                        <span class="folder-icon up">{@html chevronRight}</span>
+                        <span>..</span>
                     </button>
                 {/if}
-            </button>
-        {/each}
 
-        {#if currentFolderChildren.length === 0 && browseFolderId !== null}
-            <p class="empty-hint">No sub-folders here</p>
-        {/if}
+                <!-- Root option when at root level -->
+                <button
+                    class="folder-item"
+                    class:selected={selectedFolderId === null &&
+                        browseFolderId === null}
+                    onclick={() => selectFolder(null)}
+                    ondblclick={() => confirm()}
+                >
+                    <span class="folder-icon">{@html home}</span>
+                    <span>My Drive (root)</span>
+                    {#if selectedFolderId === null}
+                        <span class="check-icon">{@html check}</span>
+                    {/if}
+                </button>
+
+                {#each currentFolderChildren as fld (fld.id)}
+                    <button
+                        class="folder-item"
+                        class:selected={selectedFolderId === fld.id}
+                        onclick={() => selectFolder(fld.id)}
+                        ondblclick={() => navigateInto(fld.id)}
+                    >
+                        <span class="folder-icon">{@html folder}</span>
+                        <span class="folder-name">{fld.name}</span>
+                        {#if selectedFolderId === fld.id}
+                            <span class="check-icon">{@html check}</span>
+                        {/if}
+                        {#if hasChildren(fld.id)}
+                            <button
+                                class="into-btn"
+                                onclick={(e) => {
+                                    e.stopPropagation();
+                                    navigateInto(fld.id);
+                                }}
+                            >
+                                {@html chevronRight}
+                            </button>
+                        {/if}
+                    </button>
+                {/each}
+
+                {#if currentFolderChildren.length === 0 && browseFolderId !== null}
+                    <p class="empty-hint">No sub-folders</p>
+                {/if}
+            </div>
+        </div>
     </div>
 
     <!-- Selection summary -->
-    <p class="selection-summary">
-        Move to: <strong>{folderName(selectedFolderId)}</strong>
-    </p>
+    <div class="selection-summary">
+        <span class="summary-label">Destination:</span>
+        <span class="summary-value">{folderName(selectedFolderId)}</span>
+    </div>
 
     <!-- Actions -->
-    <div class="actions">
+    <div class="dialog-footer">
         <Button variant="secondary" onclick={closeTopModal}>Cancel</Button>
-        <Button loading={saving} onclick={confirm} disabled={selectedFolderId === file.folderId}>
+        <Button
+            loading={saving}
+            onclick={confirm}
+            disabled={selectedFolderId === file.folderId}
+        >
             Move here
         </Button>
     </div>
@@ -177,97 +318,318 @@
 
 <style>
     .move-modal {
-        padding: 0.75rem 1rem 1rem;
+        padding: 12px 16px 16px;
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
-        max-height: 60vh;
-        overflow-y: auto;
+        gap: 12px;
+        width: 560px;
+        max-width: 90vw;
+    }
+
+    .file-info {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--color-fill);
+        border-radius: 6px;
+        font-size: 0.8125rem;
+    }
+
+    .file-label {
+        color: var(--color-text-muted);
+    }
+
+    .file-name {
+        font-weight: 500;
+        color: var(--color-text);
     }
 
     .section-label {
-        font-size: 0.75rem;
+        font-size: 11px;
         font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.04em;
         color: var(--color-text-muted);
-        margin-bottom: 0.375rem;
+        margin: 0 0 6px 0;
     }
 
     .recent-list {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.375rem;
+        gap: 6px;
     }
 
     .recent-item {
         display: flex;
         align-items: center;
-        gap: 0.375rem;
-        padding: 0.375rem 0.625rem;
+        gap: 6px;
+        padding: 6px 10px;
         border: 1px solid var(--color-border);
-        border-radius: 8px;
+        border-radius: 6px;
         background: var(--color-surface);
         color: var(--color-text);
-        font-size: 0.8125rem;
+        font-size: 12px;
         cursor: pointer;
-        transition: border-color 0.1s, background 0.1s;
+        transition: all 0.15s;
     }
 
-    .recent-item:hover { background: var(--color-fill); }
-    .recent-item.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 10%, transparent); }
+    .recent-item:hover {
+        background: var(--color-fill);
+        border-color: var(--color-primary);
+    }
 
-    .divider { border: none; border-top: 1px solid var(--color-border); }
+    .recent-item.selected {
+        border-color: var(--color-primary);
+        background: var(--color-primary-soft);
+    }
 
+    .recent-name {
+        max-width: 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: 4px 0;
+    }
+
+    .split-panel {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 0;
+        min-height: 240px;
+        max-height: 320px;
+        border: 1px solid var(--color-border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    .tree-panel,
+    .browser-panel {
+        padding: 8px;
+        overflow-y: auto;
+    }
+
+    .tree-panel {
+        background: var(--color-bg);
+    }
+
+    .browser-panel {
+        background: var(--color-surface);
+    }
+
+    .panel-divider {
+        width: 1px;
+        background: var(--color-border);
+    }
+
+    /* Tree View */
+    .tree-view {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .tree-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        width: 100%;
+        padding: 5px 6px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--color-text);
+        font-size: 12px;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.1s;
+    }
+
+    .tree-item:hover {
+        background: var(--color-fill);
+    }
+
+    .tree-item.selected {
+        background: var(--color-primary-soft);
+        border-color: var(--color-primary);
+    }
+
+    .tree-item.root {
+        font-weight: 500;
+    }
+
+    .expand-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+
+    .expand-btn :global(svg) {
+        width: 12px;
+        height: 12px;
+    }
+
+    .expand-placeholder {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+    }
+
+    .tree-icon {
+        display: flex;
+        align-items: center;
+        width: 14px;
+        height: 14px;
+        color: #f59e0b;
+        flex-shrink: 0;
+    }
+
+    .tree-icon :global(svg) {
+        width: 14px;
+        height: 14px;
+    }
+
+    .tree-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* Breadcrumb */
     .breadcrumb {
         display: flex;
         align-items: center;
-        gap: 0.25rem;
-        font-size: 0.8125rem;
-        margin-bottom: 0.375rem;
+        gap: 2px;
+        font-size: 11px;
+        margin-bottom: 8px;
         flex-wrap: wrap;
+        padding: 4px 6px;
+        background: var(--color-fill);
+        border-radius: 4px;
     }
 
     .crumb {
         display: flex;
         align-items: center;
-        gap: 0.25rem;
+        gap: 3px;
         background: none;
         border: none;
         color: var(--color-text-secondary);
         cursor: pointer;
-        padding: 0.125rem 0.25rem;
-        border-radius: 4px;
-        font-size: 0.8125rem;
+        padding: 2px 4px;
+        border-radius: 3px;
+        font-size: 11px;
     }
 
-    .crumb:hover { background: var(--color-fill); color: var(--color-text); }
+    .crumb:hover {
+        background: var(--color-surface);
+        color: var(--color-text);
+    }
 
-    .crumb-sep { display: flex; align-items: center; width: 10px; height: 10px; color: var(--color-text-muted); }
-    .crumb-sep :global(svg) { width: 10px; height: 10px; }
-    .crumb :global(svg), .folder-icon :global(svg) { width: 14px; height: 14px; flex-shrink: 0; }
+    .crumb.root {
+        font-weight: 500;
+    }
 
-    .folder-row {
+    .crumb-icon {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        width: 100%;
-        padding: 0.5rem 0.5rem;
-        border: 1px solid transparent;
-        border-radius: 6px;
-        background: transparent;
-        color: var(--color-text);
-        font-size: 0.875rem;
-        cursor: pointer;
-        text-align: left;
-        transition: background 0.1s, border-color 0.1s;
+        width: 12px;
+        height: 12px;
     }
 
-    .folder-row:hover { background: var(--color-fill); }
-    .folder-row.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 10%, transparent); }
+    .crumb-icon :global(svg) {
+        width: 12px;
+        height: 12px;
+    }
 
-    .folder-icon { display: flex; align-items: center; color: #f59e0b; flex-shrink: 0; }
-    .folder-name { flex: 1; }
+    .crumb-sep {
+        display: flex;
+        align-items: center;
+        width: 10px;
+        height: 10px;
+        color: var(--color-text-muted);
+    }
+
+    .crumb-sep :global(svg) {
+        width: 10px;
+        height: 10px;
+    }
+
+    /* Folder list */
+    .folder-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .folder-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--color-text);
+        font-size: 12px;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.1s;
+    }
+
+    .folder-item:hover {
+        background: var(--color-fill);
+    }
+
+    .folder-item.selected {
+        background: var(--color-primary-soft);
+        border-color: var(--color-primary);
+    }
+
+    .folder-item.parent-folder {
+        color: var(--color-text-muted);
+    }
+
+    .folder-icon {
+        display: flex;
+        align-items: center;
+        width: 16px;
+        height: 16px;
+        color: #f59e0b;
+        flex-shrink: 0;
+    }
+
+    .folder-icon :global(svg) {
+        width: 16px;
+        height: 16px;
+    }
+
+    .folder-icon.up {
+        color: var(--color-text-muted);
+        transform: rotate(-90deg);
+    }
+
+    .folder-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
 
     .into-btn {
         display: flex;
@@ -281,25 +643,67 @@
         cursor: pointer;
         color: var(--color-text-secondary);
         flex-shrink: 0;
-        margin-left: auto;
         padding: 0;
     }
 
-    .into-btn :global(svg) { width: 12px; height: 12px; }
-    .into-btn:hover { background: var(--color-border); color: var(--color-text); }
-
-    .empty-hint { font-size: 0.8125rem; color: var(--color-text-muted); padding: 0.25rem 0.5rem; }
-
-    .selection-summary {
-        font-size: 0.875rem;
-        color: var(--color-text-secondary);
-        padding: 0.25rem 0;
+    .into-btn :global(svg) {
+        width: 12px;
+        height: 12px;
     }
 
-    .actions {
+    .into-btn:hover {
+        background: var(--color-border);
+        color: var(--color-text);
+    }
+
+    .check-icon {
+        display: flex;
+        align-items: center;
+        width: 14px;
+        height: 14px;
+        color: var(--color-primary);
+        flex-shrink: 0;
+        margin-left: auto;
+    }
+
+    .check-icon :global(svg) {
+        width: 14px;
+        height: 14px;
+    }
+
+    .empty-hint {
+        font-size: 12px;
+        color: var(--color-text-muted);
+        margin: 0;
+        padding: 8px;
+        text-align: center;
+    }
+
+    .selection-summary {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--color-fill);
+        border-radius: 6px;
+        font-size: 0.8125rem;
+    }
+
+    .summary-label {
+        color: var(--color-text-muted);
+    }
+
+    .summary-value {
+        font-weight: 500;
+        color: var(--color-primary);
+    }
+
+    .dialog-footer {
         display: flex;
         justify-content: flex-end;
-        gap: 0.5rem;
-        padding-top: 0.25rem;
+        gap: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--color-border);
+        margin-top: 4px;
     }
 </style>

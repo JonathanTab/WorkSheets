@@ -1,7 +1,10 @@
 <script>
     import Button from "../../lib/ui/Button.svelte";
     import Textbox from "../../lib/ui/Textbox.svelte";
-    import { closeModal } from "../../lib/ui/modalStore.svelte.js";
+    import {
+        closeModal,
+        closeTopModal,
+    } from "../../lib/ui/modalStore.svelte.js";
 
     let { onConfirm } = $props();
 
@@ -12,14 +15,41 @@
     }
 </script>
 
-<div class="p-6">
-    <h2 class="text-lg font-semibold mb-4">Create New Spreadsheet</h2>
-    <div class="mb-4">
-        <label class="block text-sm font-medium mb-2">Title</label>
+<div class="dialog-content">
+    <div class="field">
+        <label class="field-label">Title</label>
         <Textbox bind:value={title} placeholder="Enter document title" />
     </div>
-    <div class="flex justify-end gap-2">
-        <Button variant="secondary" onclick={closeModal}>Cancel</Button>
+    <div class="dialog-footer">
+        <Button variant="secondary" onclick={closeTopModal}>Cancel</Button>
         <Button onclick={handleSubmit}>Create</Button>
     </div>
 </div>
+
+<style>
+    .dialog-content {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+    }
+
+    .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .field-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--color-text-secondary);
+    }
+
+    .dialog-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding-top: 8px;
+    }
+</style>

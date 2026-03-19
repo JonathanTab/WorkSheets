@@ -819,4 +819,44 @@
         opacity: 0.35;
         cursor: not-allowed;
     }
+
+    /* ── Mobile: scrollable toolbar with bigger tap targets ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .formatting-toolbar {
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+            height: 44px;
+            padding: 0 4px;
+            gap: 0px;
+        }
+        .formatting-toolbar::-webkit-scrollbar {
+            display: none;
+        }
+        .toolbar-btn {
+            min-width: 36px;
+            height: 36px;
+            padding: 0 7px;
+            font-size: 1rem;
+        }
+        .toolbar-group {
+            gap: 2px;
+            flex-shrink: 0;
+        }
+        .divider {
+            margin: 0 4px;
+            flex-shrink: 0;
+        }
+        .font-family-select {
+            min-width: 80px;
+            height: 34px;
+            font-size: 0.8rem;
+        }
+        .font-size-input {
+            width: 38px;
+            height: 34px;
+            font-size: 0.8rem;
+        }
+    }
 </style>

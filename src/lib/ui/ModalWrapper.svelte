@@ -1,19 +1,19 @@
 <script>
     import { closeModal } from "./modalStore.svelte";
-    import { fly } from "svelte/transition";
+    import { scale } from "svelte/transition";
     import { onMount } from "svelte";
 
     let { modal, isTop, depth, zIndex, onOutroend } = $props();
 
     let container;
-    let panel;
+    let panel = $state(null);
 
-    // Depth effects: scale down, translate down, darken, and blur
+    // Depth effects for stacked modals - subtle scale and dim
     let panelStyle = $derived(
         isTop
             ? ""
-            : `transform: scale(${1 - depth * 0.03}) translateY(${depth * 12}px);
-               filter: brightness(${1 - depth * 0.15}) blur(${depth * 1}px);`,
+            : `transform: scale(${1 - depth * 0.02}) translateY(${depth * 8}px);
+               opacity: ${1 - depth * 0.15};`,
     );
 
     function getFocusable() {
@@ -59,58 +59,75 @@
     }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
     bind:this={container}
-    class="fixed inset-0 flex items-end justify-center md:items-center pointer-events-none"
+    class="modal-backdrop"
     style={`z-index: ${zIndex}`}
-    on:click={handleBackdropClick}
-    on:keydown={trapTab}
+    onclick={handleBackdropClick}
+    onkeydown={trapTab}
 >
     {#if !modal.closing}
         <div
             bind:this={panel}
             role="dialog"
             aria-modal="true"
-            class="
-                w-full max-h-[85vh]
-                flex flex-col overflow-hidden
-                bg-bg-secondary border border-border
-                rounded-t-2xl md:rounded-2xl
-                md:min-w-[420px] md:max-w-[90vw]
-                shadow-xl p-2
-                {isTop ? 'pointer-events-auto' : ''}
-            "
+            class="modal-panel {isTop ? 'modal-panel-top' : ''}"
             style={panelStyle}
-            in:fly|global={{
-                y: window.innerWidth <= 768 ? 100 : 20,
-                duration: 300,
-                easing: (t) =>
-                    t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2,
-            }}
-            out:fly|global={{
-                y: window.innerWidth <= 768 ? 100 : 20,
-                duration: 250,
-                easing: (t) =>
-                    t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2,
-            }}
-            on:outroend={() => onOutroend?.()}
+            in:scale|global={{ start: 0.95, duration: 150 }}
+            out:scale|global={{ start: 0.95, duration: 100 }}
+            onoutroend={() => onOutroend?.()}
         >
-            <svelte:component this={modal.component} {...modal.props} />
+            <modal.component {...modal.props} />
         </div>
     {/if}
 </div>
 
 <style>
-    .fixed.inset-0 {
+    .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         pointer-events: none;
     }
-    .fixed.inset-0 > div {
-        pointer-events: none; /* all modals non‑interactive by default */
+
+    .modal-panel {
+        /* Desktop dialog styling - sharp corners, window-like appearance */
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: 6px;
+        box-shadow:
+            0 8px 32px rgba(0, 0, 0, 0.15),
+            0 2px 8px rgba(0, 0, 0, 0.1);
+
+        /* Sizing */
+        min-width: 360px;
+        max-width: 520px;
+        max-height: 85vh;
+
+        /* Layout */
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+
+        pointer-events: none;
         transition:
-            transform 0.2s ease,
-            filter 0.2s ease; /* smooth visual changes */
+            transform 0.15s ease,
+            opacity 0.15s ease;
     }
-    .fixed.inset-0 > div.pointer-events-auto {
-        pointer-events: auto; /* only the top modal receives clicks */
+
+    .modal-panel-top {
+        pointer-events: auto;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 480px) {
+        .modal-panel {
+            min-width: calc(100vw - 32px);
+            max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 48px);
+        }
     }
 </style>

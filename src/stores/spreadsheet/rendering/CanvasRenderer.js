@@ -153,39 +153,41 @@ export class CanvasRenderer {
         ctx.save();
         ctx.scale(dpr, dpr); // from here on, all coords are in CSS pixels
 
-        // Set up clip region for this pane
-        ctx.beginPath();
-        ctx.rect(clipX, clipY, clipW, clipH);
-        ctx.clip();
-
-        // Fill pane background
-        ctx.fillStyle = this.#theme.cellBg;
-        ctx.fillRect(clipX, clipY, clipW, clipH);
-
-        // Paint each cell (backgrounds, content, custom borders, overlays)
-        for (const cell of cells) {
-            this.#paintCell(ctx, cell);
-        }
-
-        // Batch-draw default gridlines in one path to minimise stroke() calls.
-        // This replaces per-cell beginPath/stroke with a single batched stroke.
-        if (showGridLines) {
+        try {
+            // Set up clip region for this pane
             ctx.beginPath();
-            ctx.strokeStyle = this.#theme.gridline;
-            ctx.lineWidth = 1;
-            for (const cell of cells) {
-                const { x, y, width, height } = cell;
-                // right edge
-                ctx.moveTo(x + width - 0.5, y);
-                ctx.lineTo(x + width - 0.5, y + height);
-                // bottom edge
-                ctx.moveTo(x, y + height - 0.5);
-                ctx.lineTo(x + width, y + height - 0.5);
-            }
-            ctx.stroke();
-        }
+            ctx.rect(clipX, clipY, clipW, clipH);
+            ctx.clip();
 
-        ctx.restore(); // removes the DPR scale — back to physical pixel space
+            // Fill pane background
+            ctx.fillStyle = this.#theme.cellBg;
+            ctx.fillRect(clipX, clipY, clipW, clipH);
+
+            // Paint each cell (backgrounds, content, custom borders, overlays)
+            for (const cell of cells) {
+                this.#paintCell(ctx, cell);
+            }
+
+            // Batch-draw default gridlines in one path to minimise stroke() calls.
+            // This replaces per-cell beginPath/stroke with a single batched stroke.
+            if (showGridLines) {
+                ctx.beginPath();
+                ctx.strokeStyle = this.#theme.gridline;
+                ctx.lineWidth = 1;
+                for (const cell of cells) {
+                    const { x, y, width, height } = cell;
+                    // right edge
+                    ctx.moveTo(x + width - 0.5, y);
+                    ctx.lineTo(x + width - 0.5, y + height);
+                    // bottom edge
+                    ctx.moveTo(x, y + height - 0.5);
+                    ctx.lineTo(x + width, y + height - 0.5);
+                }
+                ctx.stroke();
+            }
+        } finally {
+            ctx.restore(); // removes the DPR scale — back to physical pixel space
+        }
     }
 
     /**
@@ -207,38 +209,40 @@ export class CanvasRenderer {
         ctx.save();
         ctx.scale(dpr, dpr);
 
-        for (const header of headers) {
-            const canvasX = frozenWidth + header.leftPx - scrollLeft;
-            const canvasY = frozenHeight; // just below frozen rows / at top of body area
+        try {
+            for (const header of headers) {
+                const canvasX = frozenWidth + header.leftPx - scrollLeft;
+                const canvasY = frozenHeight; // just below frozen rows / at top of body area
 
-            // Clip to entire header strip width
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(canvasX, canvasY, header.widthPx, header.heightPx);
-            ctx.clip();
+                // Clip to entire header strip width
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(canvasX, canvasY, header.widthPx, header.heightPx);
+                ctx.clip();
 
-            let xCursor = canvasX;
-            for (let i = 0; i < header.table.columns.length; i++) {
-                const col = header.table.columns[i];
-                const colW = header.colWidths?.[i] ?? 100;
-                this.#paintTableHeaderCell(ctx, {
-                    colName: col?.name ?? '',
-                    sortIcon: header.table.sortColId === col?.id
-                        ? (header.table.sortDir === 'asc' ? '▲' : '▼')
-                        : '',
-                    filterActive: !!(col?.id && header.table.filters?.get?.(col.id)),
-                    x: xCursor,
-                    y: canvasY,
-                    width: colW,
-                    height: header.heightPx,
-                });
-                xCursor += colW;
+                let xCursor = canvasX;
+                for (let i = 0; i < header.table.columns.length; i++) {
+                    const col = header.table.columns[i];
+                    const colW = header.colWidths?.[i] ?? 100;
+                    this.#paintTableHeaderCell(ctx, {
+                        colName: col?.name ?? '',
+                        sortIcon: header.table.sortColId === col?.id
+                            ? (header.table.sortDir === 'asc' ? '▲' : '▼')
+                            : '',
+                        filterActive: !!(col?.id && header.table.filters?.get?.(col.id)),
+                        x: xCursor,
+                        y: canvasY,
+                        width: colW,
+                        height: header.heightPx,
+                    });
+                    xCursor += colW;
+                }
+
+                ctx.restore();
             }
-
+        } finally {
             ctx.restore();
         }
-
-        ctx.restore();
     }
 
     // ─── Private: cell dispatch ───────────────────────────────────────────────
@@ -650,7 +654,11 @@ export class CanvasRenderer {
             // Badge background
             ctx.fillStyle = isFormula ? 'rgba(139,92,246,0.12)' : 'rgba(59,130,246,0.1)';
             ctx.beginPath();
-            ctx.roundRect(bx, by, bw2, bh, 2);
+            if (ctx.roundRect) {
+                ctx.roundRect(bx, by, bw2, bh, 2);
+            } else {
+                ctx.rect(bx, by, bw2, bh);
+            }
             ctx.fill();
 
             // Badge text
@@ -805,6 +813,7 @@ export class CanvasRenderer {
 
         // Clip text to leave room for the arrow
         ctx.save();
+        ctx.beginPath();
         ctx.rect(x + pad, y, width - arrowW - pad * 2, height);
         ctx.clip();
         if (text) ctx.fillText(text, x + pad, y + height / 2);

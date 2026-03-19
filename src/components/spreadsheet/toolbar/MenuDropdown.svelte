@@ -356,4 +356,22 @@
     .menu-item.submenu-open {
         background: var(--color-fill);
     }
+
+    /* ── Mobile: bigger touch targets ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .menu-button {
+            padding: 8px 10px;
+            font-size: 0.875rem;
+        }
+        .menu-item {
+            padding: 11px 14px;
+            font-size: 0.875rem;
+        }
+        .shortcut {
+            display: none; /* hide keyboard shortcuts on touch devices */
+        }
+        .dropdown-panel {
+            min-width: 220px;
+        }
+    }
 </style>

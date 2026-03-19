@@ -35,9 +35,9 @@
 <div class="modal">
     <div class="content">
         {#if $authStore.isLoading}
-            <p>Authenticating...</p>
+            <p class="status">Authenticating...</p>
         {:else}
-            <h2>You are signed out</h2>
+            <h2>Sign In</h2>
             {#if $authStore.error}
                 <p class="error">{$authStore.error}</p>
             {/if}
@@ -45,76 +45,68 @@
                 Login with Instrumenta
             </button>
         {/if}
-        <!-- <details style="margin-top: 1rem; text-align: left;">
-            <summary>Debug: Cookies ({cookies.length})</summary>
-
-            {#if cookies.length === 0}
-                <p><em>No accessible cookies found</em></p>
-            {:else}
-                <ul class="cookie-list">
-                    {#each cookies as cookie}
-                        <li>
-                            <strong>{cookie.name}</strong> = {cookie.value}
-                        </li>
-                    {/each}
-                </ul>
-            {/if}
-        </details> -->
     </div>
 </div>
 
 <style>
     .modal {
         position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.8);
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
         display: flex;
         justify-content: center;
         align-items: center;
         z-index: 1000;
     }
-    .cookie-list {
-        margin-top: 0.5rem;
-        padding-left: 1rem;
-        font-family: monospace;
-        font-size: 0.85rem;
-        max-height: 150px;
-        overflow-y: auto;
-    }
+
     .content {
-        background: white;
-        padding: 2rem;
-        border-radius: 0.5rem;
+        background: var(--color-surface, white);
+        border: 1px solid var(--color-border, #e5e5e5);
+        border-radius: 6px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        padding: 24px;
+        min-width: 320px;
         max-width: 400px;
-        width: 100%;
         text-align: center;
     }
 
+    h2 {
+        margin: 0 0 16px 0;
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--color-text, #18181b);
+    }
+
+    .status {
+        margin: 0;
+        font-size: 13px;
+        color: var(--color-text-secondary, #52525b);
+    }
+
     .error {
-        color: red;
-        margin: 1rem 0;
+        margin: 0 0 16px 0;
+        font-size: 13px;
+        color: #dc2626;
     }
 
     button {
-        background: #007bff;
+        background: var(--color-primary, #007bff);
         color: white;
         border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: 0.25rem;
+        padding: 8px 16px;
+        border-radius: 4px;
         cursor: pointer;
-        font-size: 1rem;
-        transition: opacity 0.2s;
+        font-size: 13px;
+        font-weight: 500;
+        transition: background 0.1s;
     }
 
     button:hover {
-        opacity: 0.9;
+        background: #0066dd;
     }
 
     button:disabled {
-        opacity: 0.7;
+        opacity: 0.5;
         cursor: not-allowed;
     }
 </style>

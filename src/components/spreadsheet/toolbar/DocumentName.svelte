@@ -259,4 +259,24 @@
     .doc-menu-item:hover {
         background: var(--color-fill);
     }
+
+    /* ── Mobile: always show action button, truncate name ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .name-display {
+            max-width: 120px;
+            font-size: 0.8125rem;
+        }
+        .doc-action-btn {
+            opacity: 1;
+            width: 30px;
+            height: 30px;
+        }
+        .folder-hint {
+            display: none;
+        }
+        .doc-menu-item {
+            padding: 0.625rem 0.75rem;
+            font-size: 0.875rem;
+        }
+    }
 </style>

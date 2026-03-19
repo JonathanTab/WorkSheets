@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 
 const AUTH_URL = 'https://instrumenta.cf/api/auth.php';
 const USER_CACHE = 'worksheets:user'; // only stores {username} — not a secret
+const DEV_API_KEY = 'worksheets:dev_api_key'; // dev-only API key for testing
 
 /**
  * Session-only auth store for same-origin PWAs.
@@ -97,10 +98,46 @@ function createAuthStore() {
      * If no cache exists and the device is online, waits for a session check
      * so we can detect an already-active website session (silent sign-in).
      *
+     * Also checks for dev API key mode - if set, validates against API and gets username.
+     *
      * @returns {Promise<boolean>} true if a user was found (cached or live)
      */
     async function initOffline() {
         if (!browser) return false;
+
+        // Check for dev API key first - this bypasses normal session auth
+        const devApiKey = getApiKey();
+        if (devApiKey) {
+            // In dev mode, validate the API key and get actual username
+            set({ user: null, isLoading: true, error: null, apiKey: null });
+            console.log('[dev] Using API key authentication mode');
+
+            if (navigator.onLine) {
+                try {
+                    const res = await fetch(`${AUTH_URL}?action=get_current_user`, {
+                        headers: { 'Authorization': `Bearer ${devApiKey}` },
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data?.username) {
+                            set({ user: { username: data.username }, isLoading: false, error: null, apiKey: null });
+                            console.log(`[dev] Authenticated as ${data.username}`);
+                            return true;
+                        }
+                    } else if (res.status === 401) {
+                        console.error('[dev] API key is invalid or expired');
+                        set({ user: null, isLoading: false, error: 'Invalid API key', apiKey: null });
+                        return false;
+                    }
+                } catch (err) {
+                    console.error('[dev] Failed to validate API key:', err);
+                }
+            }
+
+            // Fallback if offline or validation failed
+            set({ user: { username: 'dev_user' }, isLoading: false, error: null, apiKey: null });
+            return true;
+        }
 
         let cached = null;
         try {
@@ -186,11 +223,43 @@ function createAuthStore() {
     // Accessors
     // ------------------------------------------------------------------
 
-    /** Always null — FileRegistry uses session cookies, not Bearer tokens. */
-    function getApiKey() { return null; }
+    /**
+     * Returns dev API key if set, otherwise null for session cookie auth.
+     * Dev API key is a development-only option for testing without cookies.
+     */
+    function getApiKey() {
+        if (!browser) return null;
+        try {
+            return localStorage.getItem(DEV_API_KEY) || null;
+        } catch {
+            return null;
+        }
+    }
 
-    /** @deprecated No-op. Session auth has no explicit key to set. */
-    async function setApiKey() { /* no-op */ }
+    /**
+     * Set a dev API key for authentication (development only).
+     * This bypasses session cookie auth and uses Bearer token instead.
+     * @param {string|null} key - API key to use, or null to clear
+     */
+    function setDevApiKey(key) {
+        if (!browser) return;
+        try {
+            if (key) {
+                localStorage.setItem(DEV_API_KEY, key);
+                console.log('[dev] API key set. Reload to use Bearer token auth.');
+            } else {
+                localStorage.removeItem(DEV_API_KEY);
+                console.log('[dev] API key cleared. Reload to use session cookie auth.');
+            }
+        } catch {
+            console.error('[dev] Failed to access localStorage');
+        }
+    }
+
+    /** Clear the dev API key. */
+    function clearDevApiKey() {
+        setDevApiKey(null);
+    }
 
     /** @deprecated Use trySessionAuth() directly. */
     async function checkIfLoggedIn() { return trySessionAuth(); }
@@ -214,7 +283,8 @@ function createAuthStore() {
         checkIfLoggedIn,
         login,
         logout,
-        setApiKey,
+        setDevApiKey,
+        clearDevApiKey,
         getApiKey,
         destroy,
     };

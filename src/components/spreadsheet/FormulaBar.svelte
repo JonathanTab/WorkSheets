@@ -467,4 +467,31 @@
         font-weight: 600;
         color: var(--function-color, #7c3aed);
     }
+
+    /* ── Mobile: taller touch targets ── */
+    @media (pointer: coarse), (max-width: 768px) {
+        .formula-bar {
+            min-height: 44px;
+            padding: 0.25rem 0.5rem;
+        }
+        .edit-buttons button {
+            width: 34px;
+            height: 34px;
+            font-size: 1rem;
+        }
+        .cell-reference {
+            min-width: 50px;
+            font-size: 0.8rem;
+            padding: 0.2rem 0.4rem;
+        }
+        .display-value {
+            height: 36px;
+            line-height: 28px;
+            font-size: 0.875rem;
+        }
+        .edit-input {
+            height: 36px;
+            font-size: 0.875rem;
+        }
+    }
 </style>

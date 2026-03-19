@@ -24,8 +24,18 @@
     } from "../../../stores/spreadsheetStore.svelte.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
+    import {
+        openModal,
+        closeTopModal,
+    } from "../../../lib/ui/modalStore.svelte.js";
+    import AlertModal from "../../modals/AlertModal.svelte";
 
     let isExportingPDF = $state(false);
+
+    // Helper to show alert modal
+    function showAlert(title, message, type = "info") {
+        openModal(AlertModal, { title, message, type });
+    }
 
     // Shared state for cursor-following menu behavior
     let openMenuId = $state(null);
@@ -72,7 +82,7 @@
         const renderContext = spreadsheetSession.renderContext;
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!renderContext || !sheetStore) {
-            alert("No active sheet to export.");
+            showAlert("Export PDF", "No active sheet to export.", "warning");
             return;
         }
         isExportingPDF = true;
@@ -81,7 +91,8 @@
             // Use saved print settings from the sheet (or defaults)
             const printSettings = sheetStore.getPrintSettings?.() ?? {};
             const engine = new VectorPrintEngine();
-            const docName = spreadsheetSession.docTitle || sheetStore.name || 'sheet';
+            const docName =
+                spreadsheetSession.docTitle || sheetStore.name || "sheet";
             await engine.downloadPDF(
                 {
                     printSettings,
@@ -96,7 +107,11 @@
             );
         } catch (err) {
             console.error("PDF export failed:", err);
-            alert("PDF export failed. See console for details.");
+            showAlert(
+                "Export PDF",
+                "PDF export failed. See console for details.",
+                "warning",
+            );
         } finally {
             isExportingPDF = false;
         }
@@ -106,23 +121,26 @@
     const fileItems = [
         {
             label: "New",
-            action: () => alert("New document - not implemented"),
+            action: () =>
+                showAlert("New Document", "New document - not implemented"),
             shortcut: "Ctrl+N",
         },
         {
             label: "Open...",
-            action: () => alert("Open document - not implemented"),
+            action: () =>
+                showAlert("Open Document", "Open document - not implemented"),
             shortcut: "Ctrl+O",
         },
         { divider: true },
         {
             label: "Save",
-            action: () => alert("Auto-saved via Yjs"),
+            action: () =>
+                showAlert("Save", "Document is auto-saved via Yjs", "success"),
             shortcut: "Ctrl+S",
         },
         {
             label: "Save As...",
-            action: () => alert("Save as - not implemented"),
+            action: () => showAlert("Save As", "Save as - not implemented"),
         },
         { divider: true },
         {
@@ -225,17 +243,31 @@
 
     // View menu items
     const viewItems = [
-        { label: "Zoom 100%", action: () => alert("Zoom - not implemented") },
-        { label: "Zoom 125%", action: () => alert("Zoom - not implemented") },
-        { label: "Zoom 150%", action: () => alert("Zoom - not implemented") },
+        {
+            label: "Zoom 100%",
+            action: () => showAlert("Zoom", "Zoom - not implemented"),
+        },
+        {
+            label: "Zoom 125%",
+            action: () => showAlert("Zoom", "Zoom - not implemented"),
+        },
+        {
+            label: "Zoom 150%",
+            action: () => showAlert("Zoom", "Zoom - not implemented"),
+        },
         { divider: true },
         {
             label: "Show Gridlines",
-            action: () => alert("Toggle gridlines - not implemented"),
+            action: () =>
+                showAlert("Gridlines", "Toggle gridlines - not implemented"),
         },
         {
             label: "Show Formula Bar",
-            action: () => alert("Toggle formula bar - not implemented"),
+            action: () =>
+                showAlert(
+                    "Formula Bar",
+                    "Toggle formula bar - not implemented",
+                ),
         },
     ];
 
@@ -302,7 +334,8 @@
         { divider: true },
         {
             label: "Chart...",
-            action: () => alert("Insert chart - not implemented"),
+            action: () =>
+                showAlert("Insert Chart", "Insert chart - not implemented"),
         },
     ];
 
@@ -337,7 +370,8 @@
         { divider: true },
         {
             label: "Number Format...",
-            action: () => alert("Number format - not implemented"),
+            action: () =>
+                showAlert("Number Format", "Number format - not implemented"),
         },
         { divider: true },
         { label: "Clear Formatting", action: () => clearFormatting() },
@@ -345,11 +379,14 @@
 
     function applyFormat(property, value) {
         // This will be handled by FormattingToolbar
-        alert(`Apply ${property}: ${value} - use formatting toolbar`);
+        showAlert(
+            "Format",
+            `Apply ${property}: ${value} - use formatting toolbar`,
+        );
     }
 
     function clearFormatting() {
-        alert("Clear formatting - not implemented");
+        showAlert("Clear Formatting", "Clear formatting - not implemented");
     }
 
     // Clipboard handlers
