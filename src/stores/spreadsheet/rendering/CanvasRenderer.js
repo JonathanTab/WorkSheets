@@ -112,6 +112,83 @@ export class CanvasRenderer {
     }
 
     /**
+     * Clear a single pane region. Used for partial (non-full-canvas) repaints.
+     * Coordinates are CSS pixels; internally scaled to physical pixels.
+     *
+     * @param {number} clipX CSS px from canvas left
+     * @param {number} clipY CSS px from canvas top
+     * @param {number} clipW CSS px width
+     * @param {number} clipH CSS px height
+     */
+    clearPane(clipX, clipY, clipW, clipH) {
+        if (!this.#ctx || !this.#canvas) return;
+        const dpr = this.#dpr;
+        this.#ctx.clearRect(
+            Math.round(clipX * dpr),
+            Math.round(clipY * dpr),
+            Math.round(clipW * dpr),
+            Math.round(clipH * dpr),
+        );
+    }
+
+    /**
+     * Shift a pane's pixels by (dx, dy) for incremental scroll rendering.
+     * After calling this, only the newly exposed strip needs repainting via paintPane.
+     *
+     * Uses self-blit: ctx.drawImage(canvas → same canvas). Per the HTML spec the source
+     * region is snapshotted before the destination is modified, so this is safe and
+     * supported in all major browsers.
+     *
+     * The exposed strip is filled with the background colour so paintPane can overlay it.
+     *
+     * @param {number} dx  Scroll delta in CSS px (positive = scrolled right → content shifts left)
+     * @param {number} dy  Scroll delta in CSS px (positive = scrolled down → content shifts up)
+     * @param {number} clipX  Pane left in CSS px
+     * @param {number} clipY  Pane top in CSS px
+     * @param {number} clipW  Pane width in CSS px
+     * @param {number} clipH  Pane height in CSS px
+     */
+    blitScroll(dx, dy, clipX, clipY, clipW, clipH) {
+        const ctx = this.#ctx;
+        const canvas = this.#canvas;
+        if (!ctx || !canvas || (dx === 0 && dy === 0)) return;
+
+        const dpr = this.#dpr;
+        const pxX = Math.round(clipX * dpr);
+        const pxY = Math.round(clipY * dpr);
+        const pxW = Math.round(clipW * dpr);
+        const pxH = Math.round(clipH * dpr);
+        const pxDx = Math.round(dx * dpr);
+        const pxDy = Math.round(dy * dpr);
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // physical pixel coords, no DPR scale
+
+        // Clip to the pane so the blit doesn't bleed into adjacent frozen panes
+        ctx.beginPath();
+        ctx.rect(pxX, pxY, pxW, pxH);
+        ctx.clip();
+
+        // Self-blit: shift existing pixels by the scroll delta
+        ctx.drawImage(canvas, pxX, pxY, pxW, pxH, pxX - pxDx, pxY - pxDy, pxW, pxH);
+
+        // Fill the newly exposed strip(s) with background so paintPane can repaint them
+        ctx.fillStyle = this.#theme.cellBg;
+        if (pxDy > 0) {
+            ctx.fillRect(pxX, pxY + pxH - pxDy, pxW, pxDy); // bottom strip
+        } else if (pxDy < 0) {
+            ctx.fillRect(pxX, pxY, pxW, -pxDy); // top strip
+        }
+        if (pxDx > 0) {
+            ctx.fillRect(pxX + pxW - pxDx, pxY, pxDx, pxH); // right strip
+        } else if (pxDx < 0) {
+            ctx.fillRect(pxX, pxY, -pxDx, pxH); // left strip
+        }
+
+        ctx.restore();
+    }
+
+    /**
      * Merge partial theme overrides.
      * @param {Partial<typeof DEFAULT_THEME>} overrides
      */
@@ -169,19 +246,24 @@ export class CanvasRenderer {
             }
 
             // Batch-draw default gridlines in one path to minimise stroke() calls.
-            // This replaces per-cell beginPath/stroke with a single batched stroke.
+            // gridlineOnly cells (overflow shadows) are included here so column
+            // boundaries stay visible under spilled text. Overflow cells use
+            // naturalWidth so their right/bottom lines stay at the column edge.
             if (showGridLines) {
                 ctx.beginPath();
                 ctx.strokeStyle = this.#theme.gridline;
                 ctx.lineWidth = 1;
                 for (const cell of cells) {
-                    const { x, y, width, height } = cell;
+                    const { x, y, height } = cell;
+                    // Use naturalWidth for overflow cells so the gridline stays
+                    // at the original column boundary, not the extended edge.
+                    const rightW = cell.naturalWidth ?? cell.width;
                     // right edge
-                    ctx.moveTo(x + width - 0.5, y);
-                    ctx.lineTo(x + width - 0.5, y + height);
+                    ctx.moveTo(x + rightW - 0.5, y);
+                    ctx.lineTo(x + rightW - 0.5, y + height);
                     // bottom edge
                     ctx.moveTo(x, y + height - 0.5);
-                    ctx.lineTo(x + width, y + height - 0.5);
+                    ctx.lineTo(x + rightW, y + height - 0.5);
                 }
                 ctx.stroke();
             }
@@ -252,6 +334,9 @@ export class CanvasRenderer {
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      */
     #paintCell(ctx, cell) {
+        // gridlineOnly = overflow-shadow cell; gridlines drawn separately, no content
+        if (cell.gridlineOnly) return;
+
         const { x, y, width, height } = cell;
         if (width <= 0 || height <= 0) return;
 

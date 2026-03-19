@@ -61,10 +61,11 @@ export function segmentFormula(formula) {
     let pos = 0;
 
     // Regex patterns — cross-sheet refs must be matched before plain refs
-    // Quoted:   'Sheet Name'!A1  or  'Sheet Name'!A1:B5
+    // Quoted:   'Sheet Name'!A1  or  'Sheet Name'!A1:B5  (also handles '' escape for single quotes in names)
     // Unquoted: Sheet1!A1        or  Sheet1!A1:B5
-    const crossSheetRangePattern = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
-    const crossSheetCellPattern  = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+/g;
+    // The pattern (?:'[^']*(?:''[^']*)*') matches quoted names with possible '' escapes
+    const crossSheetRangePattern = /(?:'[^']*(?:''[^']*)*'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
+    const crossSheetCellPattern = /(?:'[^']*(?:''[^']*)*'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+/g;
     const rangePattern = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     const cellPattern = /\$?[A-Za-z]+\$?\d+/g;
     const functionPattern = /[A-Za-z_][A-Za-z0-9_]*(?=\()/g;

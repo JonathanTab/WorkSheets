@@ -171,7 +171,8 @@ export function htmlToRuns(el) {
 
     function parseNode(node, style) {
         if (node.nodeType === Node.TEXT_NODE) {
-            const text = node.textContent;
+            // Strip zero-width spaces inserted by insertRichLineBreak
+            const text = node.textContent.replace(/\u200B/g, '');
             if (text) pushRun(runs, text, style);
             return;
         }
@@ -196,13 +197,27 @@ export function htmlToRuns(el) {
         if (tag === 's' || tag === 'strike') childStyle.s = true;
 
         if (tag === 'br') {
-            pushRun(runs, '\n', {});
+            // Only add newline if previous run didn't already end with one
+            const last = runs[runs.length - 1];
+            if (!last || !last.t.endsWith('\n')) {
+                pushRun(runs, '\n', {});
+            }
         } else if (tag === 'div' || tag === 'p') {
+            // Block elements represent a new line. Only add the separator newline
+            // if there's prior content and the last run doesn't already end with \n.
             if (runs.length > 0) {
                 const last = runs[runs.length - 1];
                 if (!last.t.endsWith('\n')) pushRun(runs, '\n', {});
             }
-            for (const child of node.childNodes) parseNode(child, childStyle);
+            // If the div contains only a single <br> (empty line), emit a newline
+            // for the line itself rather than double-counting from both the div and the br.
+            const onlyBr =
+                node.childNodes.length === 1 &&
+                node.childNodes[0].nodeType === Node.ELEMENT_NODE &&
+                node.childNodes[0].tagName.toLowerCase() === 'br';
+            if (!onlyBr) {
+                for (const child of node.childNodes) parseNode(child, childStyle);
+            }
         } else {
             for (const child of node.childNodes) parseNode(child, childStyle);
         }

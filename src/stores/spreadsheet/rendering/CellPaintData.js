@@ -179,8 +179,9 @@ export function buildPaneData(params) {
             : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
         const height = rowMetrics.sizeOf(r);
 
-        // Reset overflow tracker for this row
-        const rowOverflowMap = new Map();
+        // Track the rightmost overflow edge seen so far in this row.
+        // Cells whose left edge falls within this boundary are overflow shadows.
+        let rowOverflowRightX = -Infinity;
 
         // Cache row-level formatting once per row (shared by all columns in this row)
         // mappedRow for repeaters is resolved per-cell, but for non-repeater rows it's always r
@@ -205,20 +206,17 @@ export function buildPaneData(params) {
                 : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
             let width = colMetrics.sizeOf(c);
 
-            // Check for overflow-shadowed cells (same row, previous cols had overflow)
-            let isOverflowShadow = false;
-            for (const prevCol of rowOverflowMap.keys()) {
-                if (prevCol < c) {
-                    const overflowRightX = rowOverflowMap.get(prevCol);
-                    if (x < overflowRightX) {
-                        isOverflowShadow = true;
-                        break;
-                    }
-                }
-            }
+            // Check for overflow-shadowed cells: left edge is within a prior cell's overflow
+            const isOverflowShadow = x < rowOverflowRightX;
 
-            // Skip rendering cells that are shadowed by overflow (they'll be covered by the overflow cell)
+            // Overflow-shadow cells: skip content but include for gridlines only
             if (isOverflowShadow && cellType === CELL_TYPE.REGULAR) {
+                cells.push({
+                    row: r, col: c,
+                    x, y, width, height,
+                    renderType: 'text',
+                    gridlineOnly: true,
+                });
                 continue;
             }
 
@@ -585,20 +583,24 @@ export function buildPaneData(params) {
                 }
             }
 
-            // Cell spillover: extend width into adjacent empty cells for text cells without wrapping
+            // Cell spillover: extend width into adjacent empty cells for plain text only.
+            // Rich text cells always clip, and their HTML string would give wrong measurements.
             if (
                 cellType === CELL_TYPE.REGULAR &&
                 item.renderType === 'text' &&
                 !item.wrapText &&
+                !item.richTextRuns &&
                 item.displayValue &&
                 renderContext
             ) {
                 const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics);
                 if (overflowExtent > 0) {
+                    // Preserve natural column width so gridlines stay at column boundaries
+                    item.naturalWidth = width;
                     item.width += overflowExtent;
-                    // Track this overflow so we can skip shadow cells
+                    // Track the furthest overflow edge so subsequent cells can detect shadows
                     const overflowRightX = item.x + item.width;
-                    rowOverflowMap.set(c, overflowRightX);
+                    if (overflowRightX > rowOverflowRightX) rowOverflowRightX = overflowRightX;
                 }
             }
 

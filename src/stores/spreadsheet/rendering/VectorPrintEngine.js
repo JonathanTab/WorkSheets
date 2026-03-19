@@ -380,7 +380,9 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     const vAlign   = cell.vAlign || 'middle';
     const maxW     = cw - 2 * padMm;
 
-    let textX, jsPDFAlign;
+    let textX;
+    /** @type {'left'|'center'|'right'} */
+    let jsPDFAlign;
     if (hAlign === 'center') {
         textX = cx + cw / 2; jsPDFAlign = 'center';
     } else if (hAlign === 'right') {
@@ -390,31 +392,34 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     }
 
     if (cell.wrapText) {
-        // Wrap lines and clip to cell so they can't bleed below/outside
+        // Wrap lines and clip to cell so they can't bleed below/outside.
+        // Use baseline:'middle' throughout for consistent jsPDF rendering —
+        // baseline:'top' support is unreliable across jsPDF versions.
         const lines  = pdf.splitTextToSize(text, maxW);
         const lineH  = px2mm(sizePx * 1.4, s);
         const totalH = lines.length * lineH;
-        let lineY    = vAlign === 'top'    ? cy + padMm
-                     : vAlign === 'bottom' ? cy + ch - totalH
-                     : cy + (ch - totalH) / 2;
+        // lineY is the vertical center of the first line
+        let lineY    = vAlign === 'top'    ? cy + padMm + lineH / 2
+                     : vAlign === 'bottom' ? cy + ch - totalH + lineH / 2
+                     : cy + (ch - totalH) / 2 + lineH / 2;
 
         beginClip(pdf, cx, cy, cw, ch);
         for (const line of lines) {
-            pdf.text(line, textX, lineY, { align: jsPDFAlign, baseline: 'top' });
+            pdf.text(line, textX, lineY, { align: jsPDFAlign, baseline: 'middle' });
             lineY += lineH;
         }
         endClip(pdf);
     } else {
-        // Single line: splitTextToSize truncates naturally at cell width.
-        // No per-cell clip so that text can overspill into adjacent empty cells
-        // (buildPaneData already extends cell.width for those cases).
+        // Single line: no per-cell clip so that text can overspill into adjacent
+        // empty cells (buildPaneData already extends cell.width for those cases).
         const lines = pdf.splitTextToSize(text, maxW);
         const line  = lines[0] ?? text;
-        let textY, baseline;
-        if (vAlign === 'top')         { textY = cy + padMm;      baseline = 'top'; }
-        else if (vAlign === 'bottom') { textY = cy + ch - padMm; baseline = 'bottom'; }
-        else                          { textY = cy + ch / 2;     baseline = 'middle'; }
-        pdf.text(line, textX, textY, { align: jsPDFAlign, baseline });
+        const lineH = px2mm(sizePx * 1.4, s);
+        let textY;
+        if (vAlign === 'top')         textY = cy + padMm + lineH / 2;
+        else if (vAlign === 'bottom') textY = cy + ch - padMm - lineH / 2;
+        else                          textY = cy + ch / 2;
+        pdf.text(line, textX, textY, { align: jsPDFAlign, baseline: 'middle' });
     }
 
     // Underline / strikethrough decorations (plain text only; rich text handles per-run)
@@ -457,6 +462,18 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     const cw = px2mm(cell.width,  s);
     const ch = px2mm(cell.height, s);
     if (cw <= 0 || ch <= 0) return;
+
+    // Overflow-shadow cell: skip content, only draw gridlines at natural boundary
+    if (cell.gridlineOnly) {
+        if (showGridLines) {
+            const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
+            pdf.setDrawColor(r, g, b);
+            pdf.setLineWidth(0.13);
+            pdf.line(cx + cw, cy,      cx + cw, cy + ch);
+            pdf.line(cx,      cy + ch, cx + cw, cy + ch);
+        }
+        return;
+    }
 
     // ── 1. Background ─────────────────────────────────────────────────────────
     const bg = cell.bgColor;
@@ -566,8 +583,11 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
         const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
         pdf.setDrawColor(r, g, b);
         pdf.setLineWidth(0.13);
-        pdf.line(cx + cw, cy,      cx + cw, cy + ch); // right
-        pdf.line(cx,      cy + ch, cx + cw, cy + ch); // bottom
+        // Use naturalWidth for overflow cells so the right/bottom lines stay at
+        // the original column boundary, not the extended spill edge.
+        const gridCw = cell.naturalWidth ? px2mm(cell.naturalWidth, s) : cw;
+        pdf.line(cx + gridCw, cy,      cx + gridCw, cy + ch); // right
+        pdf.line(cx,          cy + ch, cx + gridCw, cy + ch); // bottom
     }
 }
 

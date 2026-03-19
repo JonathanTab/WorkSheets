@@ -32,10 +32,14 @@
                 return spreadsheetSession.getCellDisplayValue(row, col);
             };
 
+            // Get the cross-sheet value getter from the session
+            const getCrossSheetValue =
+                spreadsheetSession.getCrossSheetValue?.bind(spreadsheetSession);
+
             const ast = parseFormula(formula);
             if (!ast) return null;
 
-            return evaluate(ast, getCellValue);
+            return evaluate(ast, getCellValue, {}, null, getCrossSheetValue);
         } catch (err) {
             return FormulaError.ERROR;
         }

@@ -37,6 +37,30 @@
     const MAX_SAMPLE_CELLS = 200;
 
     // Derived: Get formatting state for selected cells
+    // Selection range expanded to cover any merged cells it touches — used by
+    // the border picker so that "outside border" sets edges on the full merge
+    // extent rather than just the primary cell's 1×1 footprint.
+    let borderSelectionRange = $derived.by(() => {
+        const range = selectionState.range;
+        if (!range) return null;
+        const mergeEngine = spreadsheetSession.activeSheetStore?.mergeEngine;
+        if (!mergeEngine || mergeEngine.merges.length === 0) return range;
+        let { startRow, endRow, startCol, endCol } = range;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const m of mergeEngine.merges) {
+                if (m.startRow <= endRow && m.endRow >= startRow && m.startCol <= endCol && m.endCol >= startCol) {
+                    if (m.startRow < startRow) { startRow = m.startRow; changed = true; }
+                    if (m.endRow > endRow) { endRow = m.endRow; changed = true; }
+                    if (m.startCol < startCol) { startCol = m.startCol; changed = true; }
+                    if (m.endCol > endCol) { endCol = m.endCol; changed = true; }
+                }
+            }
+        }
+        return { startRow, endRow, startCol, endCol };
+    });
+
     let selectedFormatting = $derived.by(() => {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return null;
@@ -581,7 +605,7 @@
         <BorderPicker
             value={selectedFormatting?.border}
             onchange={handleBorderChange}
-            selectionRange={selectionState.range}
+            selectionRange={borderSelectionRange}
         />
     </div>
 

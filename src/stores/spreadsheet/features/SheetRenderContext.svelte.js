@@ -227,6 +227,8 @@ export class SheetRenderContext {
         const cell = this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
         if (cell.wrapText) return 0;
+        // Rich text cells always clip; HTML string width can't be measured as plain text
+        if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
         // Only REGULAR cells can overflow (not table/repeater/merge)
         const type = this.getCellType(row, col);

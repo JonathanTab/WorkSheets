@@ -403,9 +403,9 @@
         position: relative;
         z-index: 2;
         box-sizing: border-box;
-        overflow: auto;
-        white-space: pre-wrap;
-        word-break: break-word;
+        /* Allow text to spill right like a real spreadsheet cell — no scrolling */
+        overflow: visible;
+        white-space: pre;
         line-height: 1.5;
     }
 

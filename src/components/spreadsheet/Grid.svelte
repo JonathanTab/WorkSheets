@@ -555,13 +555,18 @@
     });
 
     // ─── Paint function (called by RenderScheduler on RAF) ────────────────────
-    function performPaint(_dirtyPanes) {
+    // dirtyPanes: Set of 'body'|'top'|'left'|'corner' to repaint.
+    // When all four are present (default), the whole canvas is cleared first.
+    // Partial sets are used by performScrollPaint to skip unchanged frozen panes.
+    function performPaint(dirtyPanes = new Set(['body', 'top', 'left', 'corner'])) {
         if (!canvasEl || !canvasRenderer || !renderPlan || !virtualizer) return;
 
         const frozenRows = virtualizer.frozenRows;
         const frozenCols = virtualizer.frozenCols;
         const frozenHeight = renderPlan.frozenHeight;
         const frozenWidth = renderPlan.frozenWidth;
+        const bodyW = renderPlan.bodyViewportWidth;
+        const bodyH = renderPlan.bodyViewportHeight;
         const scrollLeft = virtualizer.scrollLeft;
         const scrollTop = virtualizer.scrollTop;
 
@@ -577,105 +582,263 @@
             frozenWidth,
         };
 
-        canvasRenderer.clear();
+        const isFullRepaint = dirtyPanes.size === 4;
+        if (isFullRepaint) {
+            canvasRenderer.clear();
+        }
 
         // Body pane
-        const bp = renderPlan.plans.body;
-        if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
-            canvasRenderer.paintPane(
-                buildPaneData({
-                    ...commonParams,
-                    rowRange: bp.rowRange,
-                    colRange: bp.colRange,
-                    scrollLeft,
-                    scrollTop,
-                }),
-                {
-                    clipX: frozenWidth,
-                    clipY: frozenHeight,
-                    clipW: renderPlan.bodyViewportWidth,
-                    clipH: renderPlan.bodyViewportHeight,
-                },
-            );
+        if (dirtyPanes.has('body')) {
+            const bp = renderPlan.plans.body;
+            if (!isFullRepaint) canvasRenderer.clearPane(frozenWidth, frozenHeight, bodyW, bodyH);
+            if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
+                canvasRenderer.paintPane(
+                    buildPaneData({
+                        ...commonParams,
+                        rowRange: bp.rowRange,
+                        colRange: bp.colRange,
+                        scrollLeft,
+                        scrollTop,
+                    }),
+                    { clipX: frozenWidth, clipY: frozenHeight, clipW: bodyW, clipH: bodyH },
+                );
+            }
         }
 
         // Top pane (frozen rows × scrollable cols)
-        const tp = renderPlan.plans.top;
-        if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
-            canvasRenderer.paintPane(
-                buildPaneData({
-                    ...commonParams,
-                    rowRange: tp.rowRange,
-                    colRange: tp.colRange,
-                    scrollLeft,
-                    scrollTop: 0,
-                }),
-                {
-                    clipX: frozenWidth,
-                    clipY: 0,
-                    clipW: renderPlan.bodyViewportWidth,
-                    clipH: frozenHeight,
-                },
-            );
+        if (dirtyPanes.has('top')) {
+            const tp = renderPlan.plans.top;
+            if (!isFullRepaint) canvasRenderer.clearPane(frozenWidth, 0, bodyW, frozenHeight);
+            if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
+                canvasRenderer.paintPane(
+                    buildPaneData({
+                        ...commonParams,
+                        rowRange: tp.rowRange,
+                        colRange: tp.colRange,
+                        scrollLeft,
+                        scrollTop: 0,
+                    }),
+                    { clipX: frozenWidth, clipY: 0, clipW: bodyW, clipH: frozenHeight },
+                );
+            }
         }
 
         // Left pane (scrollable rows × frozen cols)
-        const lp = renderPlan.plans.left;
-        if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
-            canvasRenderer.paintPane(
-                buildPaneData({
-                    ...commonParams,
-                    rowRange: lp.rowRange,
-                    colRange: lp.colRange,
-                    scrollLeft: 0,
-                    scrollTop,
-                }),
-                {
-                    clipX: 0,
-                    clipY: frozenHeight,
-                    clipW: frozenWidth,
-                    clipH: renderPlan.bodyViewportHeight,
-                },
-            );
+        if (dirtyPanes.has('left')) {
+            const lp = renderPlan.plans.left;
+            if (!isFullRepaint) canvasRenderer.clearPane(0, frozenHeight, frozenWidth, bodyH);
+            if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
+                canvasRenderer.paintPane(
+                    buildPaneData({
+                        ...commonParams,
+                        rowRange: lp.rowRange,
+                        colRange: lp.colRange,
+                        scrollLeft: 0,
+                        scrollTop,
+                    }),
+                    { clipX: 0, clipY: frozenHeight, clipW: frozenWidth, clipH: bodyH },
+                );
+            }
         }
 
         // Corner pane (frozen rows × frozen cols)
-        const cp = renderPlan.plans.corner;
-        if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
-            canvasRenderer.paintPane(
-                buildPaneData({
-                    ...commonParams,
-                    rowRange: cp.rowRange,
-                    colRange: cp.colRange,
-                    scrollLeft: 0,
-                    scrollTop: 0,
-                }),
-                { clipX: 0, clipY: 0, clipW: frozenWidth, clipH: frozenHeight },
-            );
+        if (dirtyPanes.has('corner')) {
+            const cp = renderPlan.plans.corner;
+            if (!isFullRepaint) canvasRenderer.clearPane(0, 0, frozenWidth, frozenHeight);
+            if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
+                canvasRenderer.paintPane(
+                    buildPaneData({
+                        ...commonParams,
+                        rowRange: cp.rowRange,
+                        colRange: cp.colRange,
+                        scrollLeft: 0,
+                        scrollTop: 0,
+                    }),
+                    { clipX: 0, clipY: 0, clipW: frozenWidth, clipH: frozenHeight },
+                );
+            }
         }
 
-        // Sticky table headers (painted on canvas after all panes)
-        const stickyHeaders = renderContext?.getStickyTableHeaders?.(
-            virtualizer.scrollTop,
-            renderPlan.frozenHeight,
-            virtualizer.rowMetrics,
-            virtualizer.colMetrics,
-        );
-        if (stickyHeaders?.length > 0) {
-            // Attach computed column widths as a separate property
-            const headersWithWidths = stickyHeaders.map((h) => ({
-                ...h,
-                colWidths: h.table.columns.map((_, i) =>
-                    virtualizer.getColWidth(h.table.startCol + i),
-                ),
-            }));
-            canvasRenderer.paintStickyHeaders(headersWithWidths, {
-                frozenWidth,
-                frozenHeight,
-                scrollLeft,
-                headerHeight: HEADER_HEIGHT,
-            });
+        // Sticky table headers — repaint whenever top or body changes (they live in the top strip)
+        if (dirtyPanes.has('top') || dirtyPanes.has('body') || isFullRepaint) {
+            const stickyHeaders = renderContext?.getStickyTableHeaders?.(
+                virtualizer.scrollTop,
+                renderPlan.frozenHeight,
+                virtualizer.rowMetrics,
+                virtualizer.colMetrics,
+            );
+            if (stickyHeaders?.length > 0) {
+                const headersWithWidths = stickyHeaders.map((h) => ({
+                    ...h,
+                    colWidths: h.table.columns.map((_, i) =>
+                        virtualizer.getColWidth(h.table.startCol + i),
+                    ),
+                }));
+                canvasRenderer.paintStickyHeaders(headersWithWidths, {
+                    frozenWidth,
+                    frozenHeight,
+                    scrollLeft,
+                    headerHeight: HEADER_HEIGHT,
+                });
+            }
         }
+    }
+
+    // ─── Incremental scroll paint ──────────────────────────────────────────────
+    // Blits each scrolling pane's existing pixels by the scroll delta, then
+    // repaints only the thin strip of rows/cols that have newly entered the
+    // visible viewport.
+    //
+    // IMPORTANT: Only content inside the pane clip rect exists on the canvas.
+    // Overscan rows/cols are computed by buildPaneData but fall outside the clip
+    // region, so they are never rendered.  Strip computation must therefore use
+    // the *visible viewport* bounds (via indexAtOffset), not the overscan-inflated
+    // body-range.  The corner pane (frozen × frozen) never changes during scroll.
+    function performScrollPaint(dx, dy, prevST, prevSL) {
+        if (!canvasEl || !canvasRenderer || !renderPlan || !virtualizer) return;
+
+        const frozenRows = virtualizer.frozenRows;
+        const frozenCols = virtualizer.frozenCols;
+        const frozenHeight = renderPlan.frozenHeight;
+        const frozenWidth = renderPlan.frozenWidth;
+        const bodyW = renderPlan.bodyViewportWidth;
+        const bodyH = renderPlan.bodyViewportHeight;
+        const scrollLeft = virtualizer.scrollLeft;
+        const scrollTop = virtualizer.scrollTop;
+        const rowMetrics = virtualizer.rowMetrics;
+        const colMetrics = virtualizer.colMetrics;
+
+        const commonParams = {
+            rowMetrics, colMetrics, renderContext, sheetStore,
+            session: spreadsheetSession,
+            frozenRows, frozenCols, frozenHeight, frozenWidth,
+        };
+
+        // Helper: build a strip row range from pixel offsets (visible-viewport based)
+        function rowStripRange(fromOffset, toOffset) {
+            const s = Math.max(frozenRows, rowMetrics.indexAtOffset(fromOffset));
+            const e = Math.min(virtualizer.rowCount - 1, rowMetrics.indexAtOffset(toOffset) + 1);
+            return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
+        }
+        function colStripRange(fromOffset, toOffset) {
+            const s = Math.max(frozenCols, colMetrics.indexAtOffset(fromOffset));
+            const e = Math.min(virtualizer.colCount - 1, colMetrics.indexAtOffset(toOffset) + 1);
+            return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
+        }
+
+        const bp = renderPlan.plans.body;
+
+        // ── Body pane: blit + repaint exposed strips ──────────────────────────
+        canvasRenderer.blitScroll(dx, dy, frozenWidth, frozenHeight, bodyW, bodyH);
+
+        if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
+            // Vertical strip (rows entering top or bottom)
+            if (dy !== 0) {
+                let stripRows, clipY, clipH;
+                if (dy > 0) {
+                    // Scrolling down → bottom strip
+                    stripRows = rowStripRange(prevST + bodyH, scrollTop + bodyH);
+                    clipY = frozenHeight + bodyH - dy;
+                    clipH = dy;
+                } else {
+                    // Scrolling up → top strip
+                    stripRows = rowStripRange(scrollTop, prevST);
+                    clipY = frozenHeight;
+                    clipH = -dy;
+                }
+                if (stripRows) {
+                    canvasRenderer.paintPane(
+                        buildPaneData({ ...commonParams, rowRange: stripRows, colRange: bp.colRange, scrollLeft, scrollTop }),
+                        { clipX: frozenWidth, clipY, clipW: bodyW, clipH },
+                    );
+                }
+            }
+
+            // Horizontal strip (cols entering left or right)
+            if (dx !== 0) {
+                let stripCols, clipX, clipW;
+                if (dx > 0) {
+                    stripCols = colStripRange(prevSL + bodyW, scrollLeft + bodyW);
+                    clipX = frozenWidth + bodyW - dx;
+                    clipW = dx;
+                } else {
+                    stripCols = colStripRange(scrollLeft, prevSL);
+                    clipX = frozenWidth;
+                    clipW = -dx;
+                }
+                if (stripCols) {
+                    canvasRenderer.paintPane(
+                        buildPaneData({ ...commonParams, rowRange: bp.rowRange, colRange: stripCols, scrollLeft, scrollTop }),
+                        { clipX, clipY: frozenHeight, clipW, clipH: bodyH },
+                    );
+                }
+            }
+        }
+
+        // ── Top pane (frozen rows × scrollable cols): blit + col strip ────────
+        if (dx !== 0) {
+            const tp = renderPlan.plans.top;
+            if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
+                canvasRenderer.blitScroll(dx, 0, frozenWidth, 0, bodyW, frozenHeight);
+                let stripCols, clipX, clipW;
+                if (dx > 0) {
+                    stripCols = colStripRange(prevSL + bodyW, scrollLeft + bodyW);
+                    clipX = frozenWidth + bodyW - dx;
+                    clipW = dx;
+                } else {
+                    stripCols = colStripRange(scrollLeft, prevSL);
+                    clipX = frozenWidth;
+                    clipW = -dx;
+                }
+                if (stripCols) {
+                    canvasRenderer.paintPane(
+                        buildPaneData({ ...commonParams, rowRange: tp.rowRange, colRange: stripCols, scrollLeft, scrollTop: 0 }),
+                        { clipX, clipY: 0, clipW, clipH: frozenHeight },
+                    );
+                }
+            }
+            // Sticky table headers scroll horizontally
+            const stickyHeaders = renderContext?.getStickyTableHeaders?.(
+                scrollTop, frozenHeight, rowMetrics, colMetrics,
+            );
+            if (stickyHeaders?.length > 0) {
+                const headersWithWidths = stickyHeaders.map((h) => ({
+                    ...h,
+                    colWidths: h.table.columns.map((_, i) =>
+                        virtualizer.getColWidth(h.table.startCol + i),
+                    ),
+                }));
+                canvasRenderer.paintStickyHeaders(headersWithWidths, {
+                    frozenWidth, frozenHeight, scrollLeft, headerHeight: HEADER_HEIGHT,
+                });
+            }
+        }
+
+        // ── Left pane (frozen cols × scrollable rows): blit + row strip ───────
+        if (dy !== 0) {
+            const lp = renderPlan.plans.left;
+            if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
+                canvasRenderer.blitScroll(0, dy, 0, frozenHeight, frozenWidth, bodyH);
+                let stripRows, clipY, clipH;
+                if (dy > 0) {
+                    stripRows = rowStripRange(prevST + bodyH, scrollTop + bodyH);
+                    clipY = frozenHeight + bodyH - dy;
+                    clipH = dy;
+                } else {
+                    stripRows = rowStripRange(scrollTop, prevST);
+                    clipY = frozenHeight;
+                    clipH = -dy;
+                }
+                if (stripRows) {
+                    canvasRenderer.paintPane(
+                        buildPaneData({ ...commonParams, rowRange: stripRows, colRange: lp.colRange, scrollLeft: 0, scrollTop }),
+                        { clipX: 0, clipY, clipW: frozenWidth, clipH },
+                    );
+                }
+            }
+        }
+
+        // Corner pane: never changes during scroll — skip entirely
     }
 
     // ─── Selection canvas paint (called by selectionScheduler on RAF) ─────────
@@ -1032,6 +1195,63 @@
         return { row, col };
     }
 
+    /**
+     * Move selection with merge awareness.
+     * - When the anchor is inside a merge, the move jumps from the merge's edge
+     *   rather than from the anchor's individual cell.
+     * - After moving, snaps the anchor to the merge primary if it landed inside
+     *   a merge (so shadow cells are never directly anchored).
+     * - Shift-extend moves are passed through unchanged (expandRangeForMerges
+     *   handles the visual expansion, which is sufficient for extend mode).
+     */
+    function moveSelectionMergeAware(dRow, dCol, extend = false) {
+        const mergeEngine = renderContext?.mergeEngine;
+
+        if (!extend && mergeEngine && (dRow !== 0 || dCol !== 0)) {
+            const cur = selectionState.anchor;
+            if (cur) {
+                const merge = mergeEngine.getMergeAt(cur.row, cur.col);
+                if (merge) {
+                    // Jump from the trailing edge of the merge in the direction of movement
+                    let newRow, newCol;
+                    if (dCol > 0) {
+                        newRow = cur.row;
+                        newCol = merge.endCol + dCol;
+                    } else if (dCol < 0) {
+                        newRow = cur.row;
+                        newCol = merge.startCol + dCol;
+                    } else if (dRow > 0) {
+                        newRow = merge.endRow + dRow;
+                        newCol = cur.col;
+                    } else {
+                        newRow = merge.startRow + dRow;
+                        newCol = cur.col;
+                    }
+                    newRow = Math.max(0, Math.min(rowCount - 1, newRow));
+                    newCol = Math.max(0, Math.min(colCount - 1, newCol));
+                    const snapped = snapToMergePrimary(newRow, newCol);
+                    selectionState.anchor = { row: snapped.row, col: snapped.col };
+                    selectionState.focus  = { row: snapped.row, col: snapped.col };
+                    return;
+                }
+            }
+        }
+
+        selectionState.moveSelection(dRow, dCol, extend, rowCount, colCount);
+
+        // After a non-extend move, ensure anchor/focus didn't land on a shadow cell
+        if (!extend && mergeEngine) {
+            const anchor = selectionState.anchor;
+            if (anchor) {
+                const snapped = snapToMergePrimary(anchor.row, anchor.col);
+                if (snapped.row !== anchor.row || snapped.col !== anchor.col) {
+                    selectionState.anchor = { row: snapped.row, col: snapped.col };
+                    selectionState.focus  = { row: snapped.row, col: snapped.col };
+                }
+            }
+        }
+    }
+
     // Expanded range for selection border (covers all touched merges)
     let expandedRange = $derived.by(() => {
         if (selectionState.selectionMode !== "range") return null;
@@ -1143,8 +1363,9 @@
             });
             const hit = hitTestEngine.hitTest(localX, localY);
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
-                if (!isSelected(hit.row, hit.col)) {
-                    selectionState.startSelection(hit.row, hit.col);
+                const snappedHit = snapToMergePrimary(hit.row, hit.col);
+                if (!isSelected(snappedHit.row, snappedHit.col)) {
+                    selectionState.startSelection(snappedHit.row, snappedHit.col);
                     selectionState.endSelection();
                 }
                 contextMenuPosition = { x: savedClientX, y: savedClientY };
@@ -1650,9 +1871,22 @@
 
     function handleCellContextMenu(row, col, e) {
         e.preventDefault();
+        // Always work with the merge primary so shadow cells are never the anchor
+        const snapped = snapToMergePrimary(row, col);
+        row = snapped.row;
+        col = snapped.col;
         if (!isSelected(row, col)) {
             selectionState.startSelection(row, col);
             selectionState.endSelection();
+        } else {
+            // Anchor may have drifted onto a shadow cell via keyboard nav — re-snap it
+            const anchor = selectionState.anchor;
+            if (anchor) {
+                const anchorSnapped = snapToMergePrimary(anchor.row, anchor.col);
+                if (anchorSnapped.row !== anchor.row || anchorSnapped.col !== anchor.col) {
+                    selectionState.anchor = { row: anchorSnapped.row, col: anchorSnapped.col };
+                }
+            }
         }
         contextMenuPosition = { x: e.clientX, y: e.clientY };
         contextMenuVisible = true;
@@ -1934,6 +2168,20 @@
         }
     });
 
+    // When editing a formula in-cell and navigating to another sheet, the cell
+    // editor hides (editorBounds = null). Switch to formula bar so the formula
+    // stays visible and ref picking routes focus back to the formula bar.
+    $effect(() => {
+        if (
+            editSessionState.isFormulaMode &&
+            editSessionState.surface === "grid" &&
+            editSessionState.editingSheetId &&
+            editSessionState.editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
+            editSessionState.switchSurface("formulaBar", { focus: false });
+        }
+    });
+
     // ─── Resize (columns & rows) ──────────────────────────────────────────────
     function startColResize(col, e) {
         e.preventDefault();
@@ -2065,17 +2313,34 @@
         if (!scrollPending) {
             scrollPending = true;
             requestAnimationFrame(() => {
-                if (virtualizer)
-                    virtualizer.setScroll(pendingScrollTop, pendingScrollLeft);
+                if (!virtualizer) { scrollPending = false; return; }
+
+                // Capture pre-scroll positions (the visible viewport bounds, not
+                // the overscan-inflated body range).
+                const prevST = virtualizer.scrollTop;
+                const prevSL = virtualizer.scrollLeft;
+
+                virtualizer.setScroll(pendingScrollTop, pendingScrollLeft);
                 scrollPending = false;
-                // Paint both canvases in the same RAF as the scroll state update.
-                // Without this, the canvases lag 1 frame behind the DOM overlay
-                // positions (table/repeater outlines), causing visible jitter.
-                // The repaint-trigger $effects intentionally do NOT track renderPlan
-                // to avoid a redundant second paint per scroll frame.
-                if (canvasRenderer && renderPlan) {
-                    performPaint(new Set(["body", "top", "left", "corner"]));
+
+                if (!canvasRenderer || !renderPlan) return;
+
+                const dy = virtualizer.scrollTop - prevST;
+                const dx = virtualizer.scrollLeft - prevSL;
+                const bodyH = renderPlan.bodyViewportHeight;
+                const bodyW = renderPlan.bodyViewportWidth;
+
+                // Incremental blit when delta fits within viewport; full repaint
+                // for large jumps (page-down, programmatic scroll, first frame).
+                const canIncremental = (dy !== 0 || dx !== 0) &&
+                    Math.abs(dy) < bodyH && Math.abs(dx) < bodyW;
+
+                if (canIncremental) {
+                    performScrollPaint(dx, dy, prevST, prevSL);
+                } else {
+                    performPaint(new Set(['body', 'top', 'left', 'corner']));
                 }
+
                 if (selectionRenderer && renderPlan) {
                     performSelectionPaint();
                 }
@@ -2203,57 +2468,27 @@
 
         switch (e.key) {
             case "ArrowUp":
-                selectionState.moveSelection(
-                    -1,
-                    0,
-                    e.shiftKey,
-                    rowCount,
-                    colCount,
-                );
+                moveSelectionMergeAware(-1, 0, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowDown":
-                selectionState.moveSelection(
-                    1,
-                    0,
-                    e.shiftKey,
-                    rowCount,
-                    colCount,
-                );
+                moveSelectionMergeAware(1, 0, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowLeft":
-                selectionState.moveSelection(
-                    0,
-                    -1,
-                    e.shiftKey,
-                    rowCount,
-                    colCount,
-                );
+                moveSelectionMergeAware(0, -1, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowRight":
-                selectionState.moveSelection(
-                    0,
-                    1,
-                    e.shiftKey,
-                    rowCount,
-                    colCount,
-                );
+                moveSelectionMergeAware(0, 1, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "Tab":
-                selectionState.moveSelection(
-                    0,
-                    e.shiftKey ? -1 : 1,
-                    false,
-                    rowCount,
-                    colCount,
-                );
+                moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
@@ -2279,12 +2514,10 @@
                         anchorCellType !== CELL_TYPE.TABLE_HEADER &&
                         anchorCellType !== CELL_TYPE.TABLE_ENTRY
                     ) {
-                        selectionState.moveSelection(
+                        moveSelectionMergeAware(
                             1,
                             0,
                             false,
-                            rowCount,
-                            colCount,
                         );
                         scrollToAnchor();
                     }

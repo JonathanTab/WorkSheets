@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(npm run:*)",
-      "Bash(find src/lib/yjs-manager -name *.js)"
+      "Bash(find src/lib/yjs-manager -name *.js)",
+      "Bash(find c:/Users/Jon/code/plainTab -type f \\\\\\(-name *.php -o -name server.* -o -name api.* \\\\\\))",
+      "Bash(find /c/Users/Jon/code/plainTab -type f \\\\\\(-name *pdf* -o -name *print* \\\\\\))",
+      "Bash(grep -E \"\\\\.\\(js|ts\\)$\")",
+      "Bash(npx vite:*)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jon\\.claude\\projects\\c--Users-Jon-code-plainTab\\memory"

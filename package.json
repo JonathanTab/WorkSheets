@@ -9,7 +9,8 @@
     "build:pwa": "npm run generate-assets && npm run build",
     "generate-assets": "node scripts/generate-pwa-assets.js",
     "preview": "vite preview",
-    "deploy:dev": "deploy.sh"
+    "deploy:dev": "deploy.sh",
+    "cli": "node src/cli/index.js"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",

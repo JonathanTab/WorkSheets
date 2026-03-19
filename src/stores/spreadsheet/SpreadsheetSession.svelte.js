@@ -675,6 +675,54 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Get a cell value from another sheet by name.
+     * Used for cross-sheet references in formulas (e.g., Sheet2!A1).
+     * @param {string} sheetName
+     * @param {number} row
+     * @param {number} col
+     * @returns {any}
+     */
+    getCrossSheetValue(sheetName, row, col) {
+        const targetSheet = this.sheets.find(s => s.name === sheetName);
+        if (!targetSheet) return FormulaError.REF;
+
+        const sheetsMap = this.root?.get('sheets');
+        const sheetYMap = sheetsMap?.get(targetSheet.id);
+        if (!sheetYMap) return FormulaError.REF;
+
+        const cells = sheetYMap.get('cells');
+        if (!cells) return null;
+
+        // Recursive evaluator with cycle detection via visited set.
+        // Handles arbitrary-depth formula chains within the target sheet.
+        const evalCell = (r, c, visited) => {
+            const k = `${r},${c}`;
+            if (visited.has(k)) return FormulaError.REF; // Circular ref
+            const cm = cells.get(k);
+            if (!cm) return null;
+            const v = cm.get?.(CELL_KEYS.VALUE);
+            if (v === undefined || v === null) return null;
+            if (typeof v === 'string' && v.startsWith('=')) {
+                const nextVisited = new Set(visited);
+                nextVisited.add(k);
+                try {
+                    const ast = parseFormula(v);
+                    if (!ast) return null;
+                    return evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, null, null);
+                } catch {
+                    return FormulaError.ERROR;
+                }
+            }
+            if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) {
+                return Number(v);
+            }
+            return v;
+        };
+
+        return evalCell(row, col, new Set());
+    }
+
+    /**
      * Get the raw value for editing (shows formula if present)
      * @param {number} row
      * @param {number} col
