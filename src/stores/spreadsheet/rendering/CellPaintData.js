@@ -172,6 +172,12 @@ export function buildPaneData(params) {
     // Map of row -> { cellCol: overflowRightX }
     const overflowMap = new Map();
 
+    // Merge primaries whose primary row/col is outside the current range (scrolled off-screen).
+    // These are collected from MERGE_SHADOW cells and painted after the main loop so that
+    // merged cells remain visible even when their primary row is above the viewport.
+    // key = "pr,pc" → full merge record { startRow, startCol, endRow, endCol }
+    const reanchoredPrimaries = new Map();
+
     for (let r = rowRange.start; r <= rowRange.end; r++) {
         const isFrozenRow = r < frozenRows;
         const y = isFrozenRow
@@ -192,11 +198,26 @@ export function buildPaneData(params) {
             // ── Cell type dispatch ────────────────────────────────────────────
             const cellType = renderContext?.getCellType(r, c) ?? CELL_TYPE.REGULAR;
 
-            // Skip shadow and viewport-occupied cells (no rendering)
-            if (
-                cellType === CELL_TYPE.MERGE_SHADOW ||
-                cellType === CELL_TYPE.VIEWPORT_OCCUPIED
-            ) {
+            // Skip viewport-occupied cells (no rendering)
+            if (cellType === CELL_TYPE.VIEWPORT_OCCUPIED) {
+                continue;
+            }
+
+            // Merge shadow cells have no content of their own — their primary renders them.
+            // But if the primary is outside the current row/col range (scrolled off-screen),
+            // queue it so the merged region stays visible via re-anchoring below.
+            if (cellType === CELL_TYPE.MERGE_SHADOW) {
+                if (renderContext?.mergeEngine) {
+                    const merge = renderContext.mergeEngine.getMergeAt(r, c);
+                    if (merge) {
+                        const pr = merge.startRow, pc = merge.startCol;
+                        const key = `${pr},${pc}`;
+                        if (!reanchoredPrimaries.has(key) &&
+                            (pr < rowRange.start || pc < colRange.start)) {
+                            reanchoredPrimaries.set(key, merge);
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -619,6 +640,121 @@ export function buildPaneData(params) {
 
             cells.push(item);
         }
+    }
+
+    // ── Re-anchor merge primaries that scrolled outside the visible range ─────
+    // For each queued merge, build a paint item at the primary's true canvas
+    // position (which may be negative / above viewport). The pane's outer clip
+    // rect will crop the content to the visible area automatically.
+    for (const [, merge] of reanchoredPrimaries) {
+        const pr = merge.startRow, pc = merge.startCol;
+
+        const isFrozenRow = pr < frozenRows;
+        const ry = isFrozenRow
+            ? rowMetrics.offsetOf(pr)
+            : rowMetrics.offsetOf(pr) - scrollTop + frozenHeight;
+        const isFrozenCol = pc < frozenCols;
+        const rx = isFrozenCol
+            ? colMetrics.offsetOf(pc)
+            : colMetrics.offsetOf(pc) - scrollLeft + frozenWidth;
+
+        // Full merged span dimensions
+        const rw = colMetrics.offsetOf(merge.endCol + 1) - colMetrics.offsetOf(pc);
+        const rSpanH = rowMetrics.offsetOf(merge.endRow + 1) - rowMetrics.offsetOf(pr);
+
+        if (rw <= 0 || rSpanH <= 0) continue;
+
+        // Fetch cell data for the primary
+        const sheetCell = effectiveSheetStore?.getCell(pr, pc);
+        let dispV;
+        if (renderContext) {
+            dispV = renderContext.getRawDisplayValue(pr, pc, CELL_TYPE.MERGE_PRIMARY);
+        } else if (session) {
+            dispV = session.getCellDisplayValue(pr, pc);
+        } else {
+            dispV = sheetCell?.v ?? '';
+        }
+
+        const item = {
+            row: pr, col: pc,
+            x: rx, y: ry, width: rw, height: rSpanH,
+            renderType: 'text',
+            displayValue: '',
+            bgColor: null,
+            textColor: null,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+            fontSize: null,
+            fontFamily: null,
+            hAlign: 'left',
+            vAlign: 'top',
+            wrapText: false,
+            borders: null,
+            isRepeaterCopy: false,
+            _descriptor: null,
+            clipContent: true,
+        };
+
+        // Content (rich text or plain)
+        if (isRichText(dispV)) {
+            const runs = htmlStringToRuns(dispV);
+            item.richTextRuns = runs;
+            item.displayValue = runsToPlainText(runs);
+        } else {
+            item.displayValue = dispV != null ? String(dispV) : '';
+        }
+
+        // Apply formatting: col → row → cell (same priority order as main loop)
+        const raColFmt = effectiveSheetStore?.getColFormatting?.(pc) ?? null;
+        if (raColFmt) {
+            if (raColFmt.backgroundColor) item.bgColor = raColFmt.backgroundColor;
+            if (raColFmt.color) item.textColor = raColFmt.color;
+            if (raColFmt.bold) item.bold = true;
+            if (raColFmt.italic) item.italic = true;
+            if (raColFmt.underline) item.underline = true;
+            if (raColFmt.strikethrough) item.strikethrough = true;
+            if (raColFmt.fontSize) item.fontSize = raColFmt.fontSize;
+            if (raColFmt.fontFamily) item.fontFamily = raColFmt.fontFamily;
+            if (raColFmt.horizontalAlign) item.hAlign = raColFmt.horizontalAlign;
+            if (raColFmt.verticalAlign) item.vAlign = raColFmt.verticalAlign;
+            if (raColFmt.wrapText) item.wrapText = true;
+        }
+        const raRowFmt = effectiveSheetStore?.getRowFormatting?.(pr) ?? null;
+        if (raRowFmt) {
+            if (raRowFmt.backgroundColor) item.bgColor = raRowFmt.backgroundColor;
+            if (raRowFmt.color) item.textColor = raRowFmt.color;
+            if (raRowFmt.bold) item.bold = true;
+            if (raRowFmt.italic) item.italic = true;
+            if (raRowFmt.underline) item.underline = true;
+            if (raRowFmt.strikethrough) item.strikethrough = true;
+            if (raRowFmt.fontSize) item.fontSize = raRowFmt.fontSize;
+            if (raRowFmt.fontFamily) item.fontFamily = raRowFmt.fontFamily;
+            if (raRowFmt.horizontalAlign) item.hAlign = raRowFmt.horizontalAlign;
+            if (raRowFmt.verticalAlign) item.vAlign = raRowFmt.verticalAlign;
+            if (raRowFmt.wrapText) item.wrapText = true;
+        }
+        if (sheetCell?.exists) {
+            if (sheetCell.backgroundColor) item.bgColor = sheetCell.backgroundColor;
+            if (sheetCell.color) item.textColor = sheetCell.color;
+            if (sheetCell.bold) item.bold = true;
+            if (sheetCell.italic) item.italic = true;
+            if (sheetCell.underline) item.underline = true;
+            if (sheetCell.strikethrough) item.strikethrough = true;
+            if (sheetCell.fontSize) item.fontSize = sheetCell.fontSize;
+            if (sheetCell.fontFamily) item.fontFamily = sheetCell.fontFamily;
+            if (sheetCell.horizontalAlign) item.hAlign = sheetCell.horizontalAlign;
+            if (sheetCell.verticalAlign) item.vAlign = sheetCell.verticalAlign;
+            if (sheetCell.wrapText) item.wrapText = true;
+        }
+
+        // Merged cells always default to top alignment when vAlign not explicitly set
+        if (!sheetCell?.verticalAlign && !raRowFmt?.verticalAlign && !raColFmt?.verticalAlign) {
+            item.vAlign = 'top';
+        }
+
+        cells.push(item);
     }
 
     return cells;

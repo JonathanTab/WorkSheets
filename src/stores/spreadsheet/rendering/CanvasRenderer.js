@@ -617,10 +617,18 @@ export class CanvasRenderer {
         const lineHeight = defaultFontSize * 1.5;
         const totalTextH = allLines.length * lineHeight;
 
+        // Minimum startY so the first line's baseline never appears above the top pad
+        const minStartY = y + pad + defaultFontSize / 2;
+
         let startY;
-        if (vAlign === 'top') startY = y + pad + defaultFontSize / 2;
-        else if (vAlign === 'bottom') startY = y + height - pad - totalTextH + lineHeight / 2;
-        else startY = y + (height - totalTextH) / 2 + lineHeight / 2;
+        if (vAlign === 'top') {
+            startY = minStartY;
+        } else if (vAlign === 'bottom') {
+            startY = y + height - pad - totalTextH + lineHeight / 2;
+        } else {
+            // Center — clamp so first line doesn't bleed above the cell when content overflows
+            startY = Math.max(y + (height - totalTextH) / 2 + lineHeight / 2, minStartY);
+        }
 
         ctx.save();
         ctx.beginPath();

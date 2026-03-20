@@ -289,13 +289,26 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         }
     }
 
-    const lineH  = px2mm(defaultSizePx * 1.4, s);
+    // Use the same line-height multiplier as CanvasRenderer (1.5) for visual parity.
+    const lineH  = px2mm(defaultSizePx * 1.5, s);
     const totalH = lines.length * lineH;
 
+    // lineY = startY + li * lineH + halfFontMm  (baseline:'middle' offset)
+    // mirrors canvas: lineY = startY + li * lineH  where startY already includes fontSize/2.
+    const halfFontMm = px2mm(defaultSizePx / 2, s);
+
+    // Minimum startY so first line doesn't appear above the top padding
+    const minStartY = cy + padMm - halfFontMm;
+
     let startY;
-    if (vAlign === 'top')         startY = cy + padMm;
-    else if (vAlign === 'bottom') startY = cy + ch - totalH;
-    else                          startY = cy + (ch - totalH) / 2;
+    if (vAlign === 'top') {
+        startY = cy + padMm - halfFontMm;  // first lineY = cy + padMm + halfFontMm ≈ canvas top
+    } else if (vAlign === 'bottom') {
+        startY = cy + ch - totalH;
+    } else {
+        // Center — clamp so first line doesn't bleed above top padding when overflowing
+        startY = Math.max(cy + (ch - totalH) / 2, minStartY);
+    }
 
     // Rich text always clips to cell bounds to prevent bleed
     beginClip(pdf, cx, cy, cw, ch);
@@ -305,7 +318,7 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         if (!lineRuns.length) continue;
 
         // Vertical midpoint of this line (for baseline:'middle')
-        const lineY = startY + li * lineH + lineH / 2;
+        const lineY = startY + li * lineH + halfFontMm;
 
         // Measure total line width for horizontal alignment
         let lineW = 0;

@@ -116,7 +116,9 @@
                 sel?.addRange(range);
                 // Sync initial HTML so commit() works from the start
                 const initHtml = richEditEl.innerHTML;
-                editSessionState.liveRichHtml = isRichText(initHtml)
+                const initText = richEditEl.innerText;
+                const initHasContent = initText.trim() !== '';
+                editSessionState.liveRichHtml = (isRichText(initHtml) && initHasContent)
                     ? initHtml
                     : null;
                 // Register so toolbar can apply inline formatting
@@ -159,25 +161,28 @@
     function commitRichValue() {
         if (!richEditEl) return;
         const html = richEditEl.innerHTML;
-        // If no markup tags present, commit as plain string
-        const value = isRichText(html)
+        const plain = richEditEl.innerText ?? richEditEl.textContent ?? "";
+        // Commit as plain string when there's no markup or no visible content
+        const value = (isRichText(html) && plain.trim() !== '')
             ? html
-            : (richEditEl.innerText ?? richEditEl.textContent ?? "");
+            : plain;
         onCommitEdit?.(value);
     }
 
     function commitRichValueWithContent(html, innerText, textContent) {
         // Use captured content if available, fallback to element if still mounted
         const htmlContent = html ?? richEditEl?.innerHTML ?? "";
+        const plainContent = innerText ?? textContent ?? "";
 
-        // Determine value to commit
+        // Determine value to commit — treat as plain text when there's no visible
+        // content (e.g. user deleted everything, leaving only a bare <br>)
         let valueToCommit;
-        if (isRichText(htmlContent)) {
+        if (isRichText(htmlContent) && plainContent.trim() !== '') {
             // Rich text HTML should be committed (not the plain text version)
             valueToCommit = htmlContent;
         } else {
-            // No rich text markup, use plain text
-            valueToCommit = innerText ?? textContent ?? "";
+            // No rich text markup, or empty — use plain text
+            valueToCommit = plainContent;
         }
 
         // Store the HTML we're committing to avoid duplicate commits
@@ -243,10 +248,12 @@
         // Keep live HTML in sync so commitCurrentEdit() can commit rich text
         // even when triggered by a mousedown on another cell (before blur fires).
         const html = richEditEl.innerHTML;
-        const isRich = isRichText(html);
-        editSessionState.liveRichHtml = isRich ? html : null;
-        // Keep plain-text draft in sync for formula bar display
         const plain = richEditEl.innerText;
+        // Treat as empty (plain text) if there's no visible content — prevents
+        // storing bare <br>/<div><br></div> as rich text in otherwise-empty cells.
+        const hasContent = plain.trim() !== '';
+        editSessionState.liveRichHtml = (isRichText(html) && hasContent) ? html : null;
+        // Keep plain-text draft in sync for formula bar display
         onEditInput?.(plain, null, null);
     }
 
@@ -317,7 +324,9 @@
         }
         // Sync live HTML after formatting so commit() has the latest value
         const newHtml = richEditEl.innerHTML;
-        editSessionState.liveRichHtml = isRichText(newHtml) ? newHtml : null;
+        const newText = richEditEl.innerText;
+        const newHasContent = newText.trim() !== '';
+        editSessionState.liveRichHtml = (isRichText(newHtml) && newHasContent) ? newHtml : null;
         return true;
     }
 

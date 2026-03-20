@@ -151,11 +151,20 @@ export function stripHtmlProp(htmlStr, cellPropName) {
 export function htmlToRuns(el) {
     const runs = [];
 
+    // True when the most recent \n was added as a block-boundary separator
+    // (from a closing div/p), rather than from a <br> tag or text content.
+    // Used to prevent a <br> immediately after a block boundary from doubling
+    // the newline — while still allowing <br><br> to create a blank line.
+    let lastNewlineIsBlockBoundary = false;
+
     function parseNode(node, style) {
         if (node.nodeType === Node.TEXT_NODE) {
             // Strip zero-width spaces inserted by insertRichLineBreak
             const text = node.textContent.replace(/\u200B/g, '');
-            if (text) pushRun(runs, text, style);
+            if (text) {
+                pushRun(runs, text, style);
+                lastNewlineIsBlockBoundary = false;
+            }
             return;
         }
         if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -180,17 +189,25 @@ export function htmlToRuns(el) {
         if (tag === 's' || tag === 'strike') childStyle.s = true;
 
         if (tag === 'br') {
-            // Only add newline if previous run didn't already end with one
-            const last = runs[runs.length - 1];
-            if (!last || !last.t.endsWith('\n')) {
+            if (lastNewlineIsBlockBoundary) {
+                // A <br> immediately after a block boundary is part of that transition —
+                // absorb it so <div>text</div><br> stays as "text\n" not "text\n\n".
+                lastNewlineIsBlockBoundary = false;
+            } else {
+                // <br> after text or another <br>: always insert a newline.
+                // This correctly turns <br><br> into a blank line (\n\n).
                 pushRun(runs, '\n', {});
+                lastNewlineIsBlockBoundary = false;
             }
         } else if (tag === 'div' || tag === 'p') {
             // Block elements represent a new line. Only add the separator newline
             // if there's prior content and the last run doesn't already end with \n.
             if (runs.length > 0) {
                 const last = runs[runs.length - 1];
-                if (!last.t.endsWith('\n')) pushRun(runs, '\n', {});
+                if (!last.t.endsWith('\n')) {
+                    pushRun(runs, '\n', {});
+                    lastNewlineIsBlockBoundary = true;
+                }
             }
             // If the div contains only a single <br> (empty line), push an extra \n
             // to represent the blank paragraph content. This preserves consecutive
@@ -201,9 +218,12 @@ export function htmlToRuns(el) {
                 node.childNodes[0].tagName.toLowerCase() === 'br';
             if (onlyBr) {
                 pushRun(runs, '\n', {});
+                lastNewlineIsBlockBoundary = false;
             } else {
                 for (const child of node.childNodes) parseNode(child, childStyle);
             }
+            // Block end doesn't reset lastNewlineIsBlockBoundary — it was already
+            // set (or not) during the separator-\n push above.
         } else {
             for (const child of node.childNodes) parseNode(child, childStyle);
         }
