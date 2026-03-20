@@ -24,6 +24,11 @@
         onCancel = null,
     } = $props();
 
+    // Track original blobId so we can delete it if replaced
+    const originalBlobId = value || null;
+    // Track blobs uploaded this session for cleanup on cancel
+    let sessionUploads = $state(/** @type {string[]} */ ([]));
+
     let isDragging = $state(false);
     let isUploading = $state(false);
     let uploadProgress = $state(0);
@@ -68,6 +73,7 @@
                 parentId: docId ?? null,
             });
 
+            sessionUploads = [...sessionUploads, descriptor.id];
             pendingBlobId = descriptor.id;
             uploadProgress = 100;
         } catch (err) {
@@ -101,6 +107,16 @@
     }
 
     function handleConfirm() {
+        // Delete original blob if it was replaced
+        if (pendingBlobId !== originalBlobId && originalBlobId) {
+            storage.app.delete(originalBlobId).catch(() => {});
+        }
+        // Clean up intermediate session uploads that weren't committed
+        for (const id of sessionUploads) {
+            if (id !== pendingBlobId) {
+                storage.app.delete(id).catch(() => {});
+            }
+        }
         onCommit?.(pendingBlobId, fit);
     }
 
@@ -110,6 +126,12 @@
     }
 
     function handleCancel() {
+        // Clean up any blobs uploaded during this session that differ from original
+        for (const id of sessionUploads) {
+            if (id !== originalBlobId) {
+                storage.app.delete(id).catch(() => {});
+            }
+        }
         onCancel?.();
     }
 

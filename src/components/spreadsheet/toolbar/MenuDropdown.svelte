@@ -12,6 +12,7 @@
         isOpen = false,
         onOpenChange = undefined,
         menuId = undefined,
+        anyMenuOpen = false,
     } = $props();
 
     // Use controlled state if provided, otherwise internal state
@@ -42,9 +43,8 @@
     }
 
     function handleMouseEnter() {
-        // If any menu is open (we're in controlled mode and some menu is open),
-        // open this menu on hover
-        if (onOpenChange && !disabled) {
+        // Only switch menus on hover when another menu is already open
+        if (anyMenuOpen && !disabled && !open) {
             setOpen(true);
         }
     }
@@ -115,7 +115,12 @@
     });
 </script>
 
-<div class="menu-dropdown" class:open onmouseenter={handleMouseEnter}>
+<div
+    class="menu-dropdown"
+    class:open
+    class:menu-active={anyMenuOpen}
+    onmouseenter={handleMouseEnter}
+>
     <button
         bind:this={buttonRef}
         class="menu-button"
@@ -227,7 +232,7 @@
     }
 
     .menu-button:hover:not(.disabled) {
-        background: var(--color-fill);
+        background: var(--color-fill-secondary);
     }
 
     .menu-button.active {

@@ -20,7 +20,7 @@
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { COLUMN_TYPE_ICONS } from '../features/TableStore.svelte.js';
-import { isRichText, isRichTextArray, richTextToPlain, htmlStringToRuns } from '../richText.js';
+import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
 
 /**
  * @typedef {Object} CellPaintItem
@@ -279,7 +279,7 @@ export function buildPaneData(params) {
                     };
                 } else if (cellType === CELL_TYPE.TABLE_ENTRY) {
                     item.renderType = 'table_entry';
-                    item.bgColor = '#f8fafc';
+                    item.bgColor = '#ffffff'; /* White like regular cells */
                     item.isNonEntryCol = colDef?.isNonEntry ?? false;
                     // Show already-typed entry buffer value if present; otherwise placeholder.
                     const entryVal = colDef && !colDef.isNonEntry
@@ -360,18 +360,19 @@ export function buildPaneData(params) {
 
             const sheetCell = effectiveSheetStore?.getCell(mappedRow, mappedCol);
 
-            // Get display value
+            // Cell type config — for repeater cells use template cell coords
+            const ct = renderContext?.getCellTypeConfig(mappedRow, mappedCol);
+
+            // Get display value — use fast path that avoids redundant
+            // getCellType lookup (caller already resolved it)
             let dispV;
             if (renderContext) {
-                dispV = renderContext.getDisplayValue(r, c);
+                dispV = renderContext.getRawDisplayValue(r, c, cellType);
             } else if (session) {
                 dispV = session.getCellDisplayValue(r, c);
             } else {
                 dispV = sheetCell?.v ?? '';
             }
-
-            // Cell type config — for repeater cells use template cell coords
-            const ct = renderContext?.getCellTypeConfig(mappedRow, mappedCol);
             const descriptor = ct ? CellTypeRegistry.get(ct.type) : null;
 
             /** @type {CellPaintItem} */
@@ -393,6 +394,7 @@ export function buildPaneData(params) {
                 wrapText: false,
                 borders: null,
                 isRepeaterCopy,
+                _descriptor: null, // pre-resolved CellTypeRegistry descriptor for paint
                 // clipContent: set to true below only for cells that actually need clipping
                 // (rich text, wrap, overflow, table headers). Plain text cells skip
                 // ctx.save()/ctx.restore() entirely — that call is expensive in Chrome.
@@ -403,6 +405,11 @@ export function buildPaneData(params) {
             // This can be overridden by explicit formatting
             if (cellType === CELL_TYPE.MERGE_PRIMARY) {
                 item.vAlign = 'top';
+            }
+
+            // Pre-resolve descriptor for custom paint during rendering
+            if (descriptor?.paintCell) {
+                item._descriptor = descriptor;
             }
 
             // Determine render type
@@ -439,15 +446,10 @@ export function buildPaneData(params) {
                 }
 
                 if (isRichText(formattedValue)) {
-                    // New format: HTML string — convert to runs for canvas renderer
-                    item.richTextRuns = htmlStringToRuns(formattedValue);
-                    item.displayValue = richTextToPlain(formattedValue);
-                    item.clipContent = true; // rich text always clips
-                } else if (isRichTextArray(formattedValue)) {
-                    // Legacy format: run array — use directly
-                    item.richTextRuns = formattedValue;
-                    item.displayValue = richTextToPlain(formattedValue);
-                    item.clipContent = true; // rich text always clips
+                    const runs = htmlStringToRuns(formattedValue);
+                    item.richTextRuns = runs;
+                    item.displayValue = runsToPlainText(runs);
+                    item.clipContent = true;
                 } else {
                     item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
@@ -593,7 +595,7 @@ export function buildPaneData(params) {
                 item.displayValue &&
                 renderContext
             ) {
-                const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics);
+                const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics, item.displayValue, sheetCell);
                 if (overflowExtent > 0) {
                     // Preserve natural column width so gridlines stay at column boundaries
                     item.naturalWidth = width;

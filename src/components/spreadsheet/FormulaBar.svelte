@@ -4,7 +4,6 @@
     import { segmentFormula } from "../../formulas/reference-highlighter.js";
     import {
         isRichText,
-        isRichTextArray,
         richTextToPlain,
     } from "../../stores/spreadsheet/richText.js";
     import { untrack } from "svelte";
@@ -49,7 +48,7 @@
             selectedCell.col,
         );
         // Convert rich text to plain text for display in the formula bar
-        if (isRichText(raw) || isRichTextArray(raw))
+        if (isRichText(raw))
             return richTextToPlain(raw);
         return raw;
     });
@@ -71,7 +70,7 @@
     let selectedCellHasRichText = $derived(() => {
         if (!selectedCell) return false;
         const rawVal = editStartValue();
-        return isRichText(rawVal) || isRichTextArray(rawVal);
+        return isRichText(rawVal);
     });
 
     // During editing, also check active edit session state
@@ -93,7 +92,7 @@
         // Rich text cells must be edited in the cell editor, not the formula bar.
         // Check both the active session state AND the raw cell value (when not yet editing).
         const rawVal = editStartValue();
-        if (hasRichText || isRichText(rawVal) || isRichTextArray(rawVal))
+        if (hasRichText || isRichText(rawVal))
             return;
 
         // If already editing this cell (on grid), switch surface to formula bar

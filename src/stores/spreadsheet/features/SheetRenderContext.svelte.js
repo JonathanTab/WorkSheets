@@ -211,6 +211,25 @@ export class SheetRenderContext {
     }
 
     /**
+     * Raw display-value getter for buildPaneData — avoids redundant getCellType
+     * lookup when the caller already knows the cell type. Does NOT apply
+     * CellTypeRegistry formatting (caller handles that).
+     * @param {number} row
+     * @param {number} col
+     * @param {string} cellType - already-resolved CELL_TYPE value
+     * @returns {any}
+     */
+    getRawDisplayValue(row, col, cellType) {
+        if (cellType === CELL_TYPE.TABLE_DATA && this.tableManager) {
+            return this.tableManager.getCellDisplayValue(row, col);
+        }
+        if (cellType === CELL_TYPE.REPEATER && this.repeaterEngine) {
+            return this.repeaterEngine.getCellDisplayValue(row, col, this.#session);
+        }
+        return this.#session.getCellDisplayValue(row, col);
+    }
+
+    /**
      * Overflow extent: extra pixel width beyond the cell's own column width
      * when content spills into adjacent empty cells.
      *
@@ -223,20 +242,16 @@ export class SheetRenderContext {
      * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
      * @returns {number} extra pixels (0 = no overflow needed)
      */
-    getOverflowExtent(row, col, visibleColEnd, colMetrics) {
-        const cell = this.#sheetStore.getCell(row, col);
+    getOverflowExtent(row, col, visibleColEnd, colMetrics, displayValue, sheetCell) {
+        const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
         if (cell.wrapText) return 0;
         // Rich text cells always clip; HTML string width can't be measured as plain text
         if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
-        // Only REGULAR cells can overflow (not table/repeater/merge)
-        const type = this.getCellType(row, col);
-        if (type !== CELL_TYPE.REGULAR) return 0;
-
         // Get the display value and measure its width
-        const displayValue = this.getDisplayValue(row, col);
-        const textWidth = measureTextWidth(displayValue, cell);
+        const dv = displayValue ?? this.getDisplayValue(row, col);
+        const textWidth = measureTextWidth(dv, cell);
 
         // Get the column width (with padding)
         const colWidth = colMetrics.sizeOf(col);
@@ -264,8 +279,9 @@ export class SheetRenderContext {
             c++;
         }
 
-        // Return only what we need, capped at what's available
-        return Math.min(neededExtra, availableExtra);
+        // Return the total width of consumed cells (snapped to full cell boundaries).
+        // This ensures overspill happens in increments of one cell width.
+        return availableExtra;
     }
 
     /**

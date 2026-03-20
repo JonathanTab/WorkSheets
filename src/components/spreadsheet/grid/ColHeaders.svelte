@@ -38,7 +38,7 @@
                     class="col-header"
                     class:selected={isColSelected?.(col)}
                     style="width:{width}px;"
-                    onmousedown={() => onColHeaderMouseDown?.(col)}
+                    onmousedown={(e) => onColHeaderMouseDown?.(col, e)}
                     role="button"
                     tabindex="-1"
                 >
@@ -65,7 +65,7 @@
                     class="col-header"
                     class:selected={isColSelected?.(col)}
                     style="width:{width}px;"
-                    onmousedown={() => onColHeaderMouseDown?.(col)}
+                    onmousedown={(e) => onColHeaderMouseDown?.(col, e)}
                     role="button"
                     tabindex="-1"
                 >

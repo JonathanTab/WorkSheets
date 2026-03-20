@@ -63,6 +63,10 @@ export class CanvasRenderer {
     /** @type {string} Last font string set on ctx — avoids redundant ctx.font assignments */
     #lastFont = '';
 
+    /** @type {Map<string, Array>} Cache for word-wrap layout results */
+    #wrapCache = new Map();
+    #wrapCacheMax = 500;
+
     /**
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas
      */
@@ -417,24 +421,22 @@ export class CanvasRenderer {
     #paintCellContent(ctx, cell) {
         const { renderType } = cell;
 
-        // Check for custom paintCell from CellTypeRegistry
-        if (renderType !== 'table_header' && renderType !== 'table_entry') {
-            const descriptor = CellTypeRegistry.get(renderType);
-            if (descriptor?.paintCell) {
-                const rect = { x: cell.x, y: cell.y, width: cell.width, height: cell.height };
-                const style = {
-                    bgColor: cell.bgColor,
-                    textColor: cell.textColor,
-                    bold: cell.bold,
-                    italic: cell.italic,
-                    fontSize: cell.fontSize,
-                    fontFamily: cell.fontFamily,
-                    hAlign: cell.hAlign,
-                    vAlign: cell.vAlign,
-                };
-                descriptor.paintCell(ctx, cell.rawValue ?? cell.displayValue, cell, rect, style, this.#theme);
-                return;
-            }
+        // Use pre-resolved descriptor from buildPaneData (avoids CellTypeRegistry lookup per cell)
+        const descriptor = cell._descriptor;
+        if (descriptor) {
+            const rect = { x: cell.x, y: cell.y, width: cell.width, height: cell.height };
+            const style = {
+                bgColor: cell.bgColor,
+                textColor: cell.textColor,
+                bold: cell.bold,
+                italic: cell.italic,
+                fontSize: cell.fontSize,
+                fontFamily: cell.fontFamily,
+                hAlign: cell.hAlign,
+                vAlign: cell.vAlign,
+            };
+            descriptor.paintCell(ctx, cell.rawValue ?? cell.displayValue, cell, rect, style, this.#theme);
+            return;
         }
 
         switch (renderType) {
@@ -494,14 +496,16 @@ export class CanvasRenderer {
 
         ctx.textBaseline = 'middle';
 
-        // Round to integer pixels for crisp, native-looking text rendering
+        // Round to integer pixels for crisp, native-looking text rendering.
+        // Clamp so that large fonts don't bleed above the cell top (no clip on plain text).
+        const minTextY = Math.ceil(y + 1 + fontSize / 2);
         let textY;
         if (vAlign === 'top') {
             textY = Math.round(y + pad + fontSize / 2);
         } else if (vAlign === 'bottom') {
-            textY = Math.round(y + height - pad - fontSize / 2);
+            textY = Math.max(Math.round(y + height - pad - fontSize / 2), minTextY);
         } else {
-            textY = Math.round(y + height / 2);
+            textY = Math.max(Math.round(y + height / 2), minTextY);
         }
 
         let textX;
@@ -580,11 +584,34 @@ export class CanvasRenderer {
             }
         }
 
-        // Word-wrap each logical line into visual sub-lines
-        const allLines = [];
-        for (const logLine of logicalLines) {
-            const wrapped = this.#wrapLogicalLine(ctx, logLine, maxWidth, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
-            for (const vl of wrapped) allLines.push(vl);
+        // Word-wrap each logical line into visual sub-lines (cached)
+        // Build a cache key from runs content + maxWidth
+        let wrapCacheKey = '';
+        for (const run of runs) {
+            wrapCacheKey += run.t;
+            if (run.b) wrapCacheKey += '\x01b';
+            if (run.i) wrapCacheKey += '\x01i';
+            if (run.f) wrapCacheKey += '\x01' + run.f;
+            if (run.ff) wrapCacheKey += '\x01' + run.ff;
+            wrapCacheKey += '\x02';
+        }
+        wrapCacheKey += '\x03' + maxWidth;
+
+        let allLines = this.#wrapCache.get(wrapCacheKey);
+        if (!allLines) {
+            allLines = [];
+            for (const logLine of logicalLines) {
+                const wrapped = this.#wrapLogicalLine(ctx, logLine, maxWidth, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
+                for (const vl of wrapped) allLines.push(vl);
+            }
+            if (this.#wrapCache.size >= this.#wrapCacheMax) {
+                // Evict oldest half
+                const keys = this.#wrapCache.keys();
+                for (let i = 0; i < this.#wrapCacheMax / 2; i++) {
+                    this.#wrapCache.delete(keys.next().value);
+                }
+            }
+            this.#wrapCache.set(wrapCacheKey, allLines);
         }
 
         const lineHeight = defaultFontSize * 1.5;
@@ -877,24 +904,20 @@ export class CanvasRenderer {
 
         // If the user has typed a value in this column, render it like a normal cell.
         if (cell.displayValue) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(x, y, width, height);
-            ctx.clip();
             const entryFont = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
             if (entryFont !== this.#lastFont) { ctx.font = entryFont; this.#lastFont = entryFont; }
             ctx.fillStyle = this.#theme.defaultText;
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
             ctx.fillText(cell.displayValue, Math.round(x + 4 + accentBarOffset), textY, width - 8 - accentBarOffset);
-            ctx.restore();
             return;
         }
 
+        // Show placeholder text (column name) in italic gray
         const text = cell.placeholderText;
         if (!text) return;
 
-        const placeholderFont = `italic ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+        const placeholderFont = `italic 12px ${this.#theme.defaultFontFamily}`;
         if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
         ctx.fillStyle = this.#theme.entryPlaceholderText;
         ctx.textBaseline = 'middle';

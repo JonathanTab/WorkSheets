@@ -9,8 +9,9 @@
      *   - Tab key moves to next editable column (via onTabNext/onTabPrev callbacks)
      *   - Formula/computed columns show a disabled fx placeholder
      *   - Shift+Tab moves to previous column
-     *   - Enter commits the entry
+     *   - Enter commits the entry and returns to first field
      *   - Escape clears the entry
+     *   - Styled to match regular spreadsheet cells
      */
 
     let {
@@ -78,7 +79,9 @@
     class="table-entry-cell"
     class:has-error={!!error}
     class:is-formula={isFormula}
-    style="width:{width}px; height:{height}px;"
+    class:is-first-col={colIndex === 0}
+    style="width:{width}px; height:{height}px; --accent:{table?.accentColor ??
+        '#3b82f6'};"
     title={error ?? (isFormula ? "Computed column" : (col?.name ?? ""))}
 >
     {#if isFormula}
@@ -87,19 +90,22 @@
             <span class="fx-icon">fx</span>
         </div>
     {:else if col?.type === "checkbox"}
-        <input
-            bind:this={inputEl}
-            type="checkbox"
-            class="entry-checkbox"
-            checked={!!value}
-            onchange={handleInput}
-            onkeydown={handleKeydown}
-        />
+        <div class="checkbox-wrapper">
+            <input
+                bind:this={inputEl}
+                type="checkbox"
+                class="entry-checkbox"
+                checked={!!value}
+                onchange={handleInput}
+                onkeydown={handleKeydown}
+            />
+        </div>
     {:else if col?.type === "date"}
         <input
             bind:this={inputEl}
             type="date"
             class="entry-input"
+            class:has-value={!!value}
             {value}
             oninput={handleInput}
             onkeydown={handleKeydown}
@@ -108,10 +114,11 @@
         <input
             bind:this={inputEl}
             type="number"
-            class="entry-input"
+            class="entry-input align-right"
             {value}
             oninput={handleInput}
             onkeydown={handleKeydown}
+            step="any"
         />
     {:else}
         <input
@@ -134,13 +141,29 @@
     .table-entry-cell {
         display: flex;
         align-items: center;
-        background: var(--table-entry-bg, #f8fafc);
+        /* White background like regular cells */
+        background: var(--cell-bg, #ffffff);
         border-right: 1px solid var(--cell-border, #e2e8f0);
         border-bottom: 1px solid var(--cell-border, #e2e8f0);
         box-sizing: border-box;
         overflow: hidden;
         flex-shrink: 0;
         position: relative;
+        padding-left: 0;
+    }
+
+    .table-entry-cell.is-first-col {
+        padding-left: 3px;
+    }
+
+    .table-entry-cell.is-first-col::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: var(--accent, #3b82f6);
     }
 
     .table-entry-cell.has-error {
@@ -157,7 +180,11 @@
         border: none;
         background: transparent;
         padding: 0 4px;
-        font-size: 12px;
+        font-size: 13px;
+        font-family:
+            system-ui,
+            -apple-system,
+            sans-serif;
         height: 100%;
         outline: none;
         min-width: 0;
@@ -166,18 +193,42 @@
 
     .entry-input:focus {
         background: var(--input-bg, #ffffff);
-        outline: 1px solid rgba(59, 130, 246, 0.4);
-        outline-offset: -1px;
+        outline: 2px solid var(--accent, #3b82f6);
+        outline-offset: -2px;
+    }
+
+    .entry-input.align-right {
+        text-align: right;
     }
 
     .entry-input::placeholder {
         color: var(--placeholder-color, #94a3b8);
         font-style: italic;
-        font-size: 11px;
+        font-size: 12px;
+    }
+
+    /* Style date inputs to match text inputs */
+    .entry-input[type="date"] {
+        color-scheme: light;
+    }
+
+    .entry-input[type="date"]:not(.has-value) {
+        color: var(--placeholder-color, #94a3b8);
+    }
+
+    .checkbox-wrapper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
     }
 
     .entry-checkbox {
-        margin: 0 auto;
+        width: 14px;
+        height: 14px;
+        cursor: pointer;
+        accent-color: var(--accent, #3b82f6);
     }
 
     .formula-placeholder {
@@ -197,7 +248,7 @@
 
     .error-indicator {
         position: absolute;
-        right: 2px;
+        right: 4px;
         top: 50%;
         transform: translateY(-50%);
         color: var(--required-color, #ef4444);

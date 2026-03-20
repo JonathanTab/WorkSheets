@@ -25,6 +25,11 @@
 export class SelectionState {
     // ── Core anchor/focus (used for 'range' mode) ────────────────────────────
 
+    /** @type {number|null} Row anchor for row selection (the initially clicked row) */
+    #rowAnchor = null;
+    /** @type {number|null} Col anchor for col selection (the initially clicked col) */
+    #colAnchor = null;
+
     /** @type {{row: number, col: number} | null} */
     anchor = $state(null);
 
@@ -246,6 +251,8 @@ export class SelectionState {
         this.selectionMode = 'range';
         this.selectedRows = null;
         this.selectedCols = null;
+        this.#rowAnchor = null;
+        this.#colAnchor = null;
     }
 
     /**
@@ -258,10 +265,36 @@ export class SelectionState {
         this.selectionMode = 'rows';
         this.selectedRows = { start: Math.min(startRow, end), end: Math.max(startRow, end) };
         this.selectedCols = null;
+        this.#rowAnchor = startRow;
         // Keep anchor/focus at col 0 so keyboard nav and the formula bar work.
         this.anchor = { row: startRow, col: 0 };
         this.focus = { row: end, col: 0 };
         this.isSelecting = false;
+    }
+
+    /**
+     * Extend row selection from the existing row anchor to a new row.
+     * Used for shift-click and drag on row headers.
+     * @param {number} row
+     */
+    extendRowSelection(row) {
+        if (this.selectionMode !== 'rows' || this.#rowAnchor == null) {
+            this.selectRow(row);
+            return;
+        }
+        const start = Math.min(this.#rowAnchor, row);
+        const end = Math.max(this.#rowAnchor, row);
+        this.selectedRows = { start, end };
+        this.focus = { row, col: 0 };
+    }
+
+    /**
+     * Begin dragging row selection (sets isSelecting for mousemove).
+     * @param {number} row
+     */
+    startRowDrag(row) {
+        this.selectRow(row);
+        this.isSelecting = true;
     }
 
     /**
@@ -274,10 +307,36 @@ export class SelectionState {
         this.selectionMode = 'cols';
         this.selectedCols = { start: Math.min(startCol, end), end: Math.max(startCol, end) };
         this.selectedRows = null;
+        this.#colAnchor = startCol;
         // Keep anchor/focus at row 0 so the formula bar works.
         this.anchor = { row: 0, col: startCol };
         this.focus = { row: 0, col: end };
         this.isSelecting = false;
+    }
+
+    /**
+     * Extend column selection from the existing col anchor to a new column.
+     * Used for shift-click and drag on column headers.
+     * @param {number} col
+     */
+    extendColSelection(col) {
+        if (this.selectionMode !== 'cols' || this.#colAnchor == null) {
+            this.selectColumn(col);
+            return;
+        }
+        const start = Math.min(this.#colAnchor, col);
+        const end = Math.max(this.#colAnchor, col);
+        this.selectedCols = { start, end };
+        this.focus = { row: 0, col };
+    }
+
+    /**
+     * Begin dragging column selection (sets isSelecting for mousemove).
+     * @param {number} col
+     */
+    startColDrag(col) {
+        this.selectColumn(col);
+        this.isSelecting = true;
     }
 
     /**

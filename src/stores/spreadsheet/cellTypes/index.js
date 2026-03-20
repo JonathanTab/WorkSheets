@@ -78,6 +78,7 @@ import urlType from './types/url.js';
 import automaticType from './types/automatic.js';
 import dropdownType from './types/dropdown.js';
 import imageType from './types/image.js';
+import fileType from './types/file.js';
 
 // Default 'text' type
 CellTypeRegistry.register({
@@ -98,5 +99,6 @@ CellTypeRegistry.register(urlType);
 CellTypeRegistry.register(automaticType);
 CellTypeRegistry.register(dropdownType);
 CellTypeRegistry.register(imageType);
+CellTypeRegistry.register(fileType);
 
 export default CellTypeRegistry;

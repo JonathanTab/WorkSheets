@@ -4,6 +4,9 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 
 // Timeout for IndexedDB persistence sync (in milliseconds)
 const PERSISTENCE_TIMEOUT = 5000;
+// Timeout for initial WebSocket sync (in milliseconds)
+// This is the max wait for the server to deliver its document state on first load.
+const WS_SYNC_TIMEOUT = 5000;
 
 /**
  * YjsRuntime - Manages the lifecycle of active Y.Doc instances.
@@ -13,17 +16,78 @@ const PERSISTENCE_TIMEOUT = 5000;
  * 2. Connecting them to IndexedDB for local persistence (offline-first).
  * 3. Connecting them to WebSocket for synchronization.
  * 4. Cleaning up resources when a document is unloaded.
+ * 5. Handling offline/online transitions to manage WebSocket connections.
  */
 export class YjsRuntime {
     /**
      * @param {string} wsUrl - The WebSocket server URL.
+     * @param {function(string, {offline: boolean}): void} [onDocUpdate] - Called on local doc changes.
+     *   docId is the logical file ID; offline indicates whether the edit happened while offline.
      */
-    constructor(wsUrl) {
+    constructor(wsUrl, onDocUpdate) {
         this.wsUrl = wsUrl;
         /** @type {Map<string, {ydoc: Y.Doc, provider: WebsocketProvider, persistence: IndexeddbPersistence}>} */
         this.activeDocs = new Map();
         /** @type {Map<string, Promise<import('yjs').Doc>>} In-progress document loads */
         this.loadingDocs = new Map();
+
+        /** Called whenever a local (non-remote) update arrives on any active doc. */
+        this.onDocUpdate = onDocUpdate ?? null;
+
+        // Track offline state
+        this.isOffline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
+
+        // Set up offline/online listeners
+        this._setupNetworkListeners();
+    }
+
+    /**
+     * Set up listeners for online/offline events to manage WebSocket connections.
+     */
+    _setupNetworkListeners() {
+        if (typeof window === 'undefined') return;
+
+        this._handleOnline = () => {
+            console.log('[YjsRuntime] Network connection restored');
+            this.isOffline = false;
+            this._reconnectAll();
+        };
+
+        this._handleOffline = () => {
+            console.log('[YjsRuntime] Network connection lost');
+            this.isOffline = true;
+            this._disconnectAll();
+        };
+
+        window.addEventListener('online', this._handleOnline);
+        window.addEventListener('offline', this._handleOffline);
+    }
+
+    /**
+     * Disconnect all WebSocket providers when going offline.
+     * This prevents constant reconnection attempts.
+     */
+    _disconnectAll() {
+        console.log('[YjsRuntime] Disconnecting all WebSocket providers due to offline state');
+        for (const [docId, active] of this.activeDocs) {
+            if (active.provider && active.provider.wsconnected) {
+                console.log(`[YjsRuntime] Disconnecting WebSocket for ${docId}`);
+                active.provider.disconnect();
+            }
+        }
+    }
+
+    /**
+     * Reconnect all WebSocket providers when coming back online.
+     */
+    _reconnectAll() {
+        console.log('[YjsRuntime] Reconnecting all WebSocket providers due to online state');
+        for (const [docId, active] of this.activeDocs) {
+            if (active.provider && !active.provider.wsconnected) {
+                console.log(`[YjsRuntime] Reconnecting WebSocket for ${docId}`);
+                active.provider.connect();
+            }
+        }
     }
 
     /**
@@ -106,6 +170,48 @@ export class YjsRuntime {
 
         this.activeDocs.set(docId, { ydoc, provider, persistence });
 
+        // Fire onDocUpdate for local (non-remote) changes so the registry can update
+        // the file's updatedAt and queue an offline sync if needed.
+        if (this.onDocUpdate) {
+            ydoc.on('update', (_update, origin) => {
+                const active = this.activeDocs.get(docId);
+                const isRemote = active && origin === active.provider;
+                if (!isRemote) {
+                    this.onDocUpdate(docId, { offline: this.isOffline });
+                }
+            });
+        }
+
+        // 3. If IndexedDB was empty (first time this client opens this doc),
+        // wait for the WebSocket to deliver the server's state before returning.
+        //
+        // Why: the caller runs spreadsheetSchema.initialize() right after this.
+        // On an empty doc it creates fresh Y.Map structures. When the server's
+        // data arrives moments later those client-created maps are displaced by
+        // CRDT conflict resolution, leaving the UI watching orphaned empty maps
+        // and showing a blank document until reload.
+        //
+        // If IndexedDB already had data we return immediately — normal
+        // offline-first path, no waiting needed.
+        const root = ydoc.getMap('spreadsheet');
+        const hasLocalData = root.size > 0;
+        if (!hasLocalData && navigator.onLine) {
+            await new Promise((resolve) => {
+                if (provider.synced) {
+                    resolve();
+                    return;
+                }
+                const timeout = setTimeout(() => {
+                    console.warn(`[YjsRuntime] WebSocket sync timeout for ${roomId}, proceeding with empty doc`);
+                    resolve();
+                }, WS_SYNC_TIMEOUT);
+                provider.once('sync', () => {
+                    clearTimeout(timeout);
+                    resolve();
+                });
+            });
+        }
+
         console.log(`[YjsRuntime] Document ${docId} loaded in ${Math.round(performance.now() - startTime)}ms`);
 
         return ydoc;
@@ -138,6 +244,16 @@ export class YjsRuntime {
     }
 
     shutdown() {
+        // Remove network listeners
+        if (typeof window !== 'undefined') {
+            if (this._handleOnline) {
+                window.removeEventListener('online', this._handleOnline);
+            }
+            if (this._handleOffline) {
+                window.removeEventListener('offline', this._handleOffline);
+            }
+        }
+
         for (const docId of this.activeDocs.keys()) {
             this.unload(docId);
         }

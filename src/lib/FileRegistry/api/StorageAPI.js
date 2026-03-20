@@ -91,12 +91,13 @@ export class StorageAPI {
             mimeType:    raw.mimeType    ?? null,
             size:        raw.size        ?? null,
             filename:    raw.filename    ?? null,
-            publicRead:  !!raw.publicRead,
-            publicWrite: !!raw.publicWrite,
-            deleted:     !!raw.deleted,
-            createdAt:   raw.createdAt   ?? null,
-            updatedAt:   raw.updatedAt   ?? null,
-            sharedWith:  this._normalizeShares(raw.sharedWith),
+            publicRead:   !!raw.publicRead,
+            publicWrite:  !!raw.publicWrite,
+            deleted:      !!raw.deleted,
+            createdAt:    raw.createdAt    ?? null,
+            updatedAt:    raw.updatedAt    ?? null,
+            sharedWith:   this._normalizeShares(raw.sharedWith),
+            thumbnailKey: raw.thumbnailKey ?? null,
         };
     }
 
@@ -301,5 +302,99 @@ export class StorageAPI {
         const key = this.getApiKey();
         if (key) url.searchParams.set('apikey', key); // needed for img/video src
         return url.toString();
+    }
+
+    // -------------------------------------------------------
+    // Thumbnail
+    // -------------------------------------------------------
+
+    /**
+     * Upload a thumbnail image for any file (yjs or blob).
+     * The image is uploaded as multipart form data.
+     * @param {string} fileId
+     * @param {Blob} imageBlob
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setThumbnail(fileId, imageBlob) {
+        const url = this.baseUrl.startsWith('http')
+            ? new URL(this.baseUrl)
+            : new URL(this.baseUrl, window.location.origin);
+        const body = new FormData();
+        body.append('action', 'set_thumbnail');
+        body.append('id', fileId);
+        body.append('thumbnail', imageBlob, 'thumbnail.jpg');
+        const res = await fetch(url.toString(), {
+            method: 'POST',
+            body,
+            credentials: 'same-origin',
+            headers: this._authHeaders(),
+        });
+        return this._normalizeFile(await this._handleResponse(res));
+    }
+
+    /**
+     * Remove the thumbnail for a file.
+     * @param {string} fileId
+     * @returns {Promise<FileDescriptor>}
+     */
+    async clearThumbnail(fileId) {
+        return this._normalizeFile(await this._post({ action: 'clear_thumbnail', id: fileId }));
+    }
+
+    /**
+     * Returns the URL to fetch a file's thumbnail.
+     * Works for any file type (yjs or blob).
+     * @param {string} fileId
+     * @returns {string}
+     */
+    getThumbnailUrl(fileId) {
+        const url = this.blobUrl.startsWith('http')
+            ? new URL(this.blobUrl)
+            : new URL(this.blobUrl, window.location.origin);
+        url.searchParams.set('id', fileId);
+        url.searchParams.set('action', 'thumbnail');
+        const key = this.getApiKey();
+        if (key) url.searchParams.set('apikey', key);
+        return url.toString();
+    }
+
+    // -------------------------------------------------------
+    // Content search text
+    // -------------------------------------------------------
+
+    /**
+     * Store a plain-text representation of a file's content for server-side search.
+     * Pass an empty string to clear the search text.
+     * @param {string} fileId
+     * @param {string} text
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setSearchText(fileId, text) {
+        return this._normalizeFile(await this._post({ action: 'set_search_text', id: fileId, text }));
+    }
+
+    /**
+     * Update a Yjs file's updatedAt timestamp on the server.
+     * Called after offline edits are synced back to the server.
+     * @param {string} id
+     * @returns {Promise<void>}
+     */
+    async touchFile(id) {
+        await this._post({ action: 'touch', id });
+    }
+
+    /**
+     * Search files by title or stored content text (server-side).
+     * Returns files the authenticated user has access to.
+     * @param {string} query - Minimum 2 characters
+     * @param {{ scope?: 'drive'|'app', app?: string }} [opts]
+     * @returns {Promise<FileDescriptor[]>}
+     */
+    async search(query, opts = {}) {
+        const params = { action: 'search', q: query };
+        if (opts.scope) params.scope = opts.scope;
+        if (opts.app)   params.app   = opts.app;
+        const data = await this._get(params);
+        return (data.files ?? []).map(f => this._normalizeFile(f));
     }
 }

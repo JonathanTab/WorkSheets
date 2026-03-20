@@ -478,12 +478,13 @@
     }
 </script>
 
-<div class="menu-bar">
+<div class="menu-bar" class:menu-active={openMenuId !== null}>
     <MenuDropdown
         label="File"
         items={fileItems}
         menuId="file"
         isOpen={openMenuId === "file"}
+        anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
     <MenuDropdown
@@ -491,6 +492,7 @@
         items={editItems}
         menuId="edit"
         isOpen={openMenuId === "edit"}
+        anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
     <MenuDropdown
@@ -498,6 +500,7 @@
         items={viewItems}
         menuId="view"
         isOpen={openMenuId === "view"}
+        anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
     <MenuDropdown
@@ -505,6 +508,7 @@
         items={insertItems}
         menuId="insert"
         isOpen={openMenuId === "insert"}
+        anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
     <MenuDropdown
@@ -512,6 +516,7 @@
         items={formatItems}
         menuId="format"
         isOpen={openMenuId === "format"}
+        anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
 </div>
@@ -529,7 +534,12 @@
         display: flex;
         align-items: center;
         height: 28px;
-        background: var(--color-surface);
+        background: transparent;
         flex-shrink: 0;
+    }
+
+    /* Show hover hint on all menu buttons when any menu is open */
+    .menu-active :global(.menu-button:hover:not(.disabled):not(.active)) {
+        background: var(--color-fill-tertiary);
     }
 </style>

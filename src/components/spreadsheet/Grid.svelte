@@ -67,6 +67,7 @@
     import FloatingImages from "./FloatingImages.svelte";
     import ImageEditor from "./cellTypes/ImageEditor.svelte";
     import { setOnLoadCallback } from "../../stores/spreadsheet/rendering/ImageCache.js";
+    import storage from "../../stores/storage.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../modals/AlertModal.svelte";
 
@@ -1282,10 +1283,10 @@
                 handleCornerCellMouseDown();
                 break;
             case "colHeader":
-                handleColHeaderMouseDown(hit.col);
+                handleColHeaderMouseDown(hit.col, e);
                 break;
             case "rowHeader":
-                handleRowHeaderMouseDown(hit.row);
+                handleRowHeaderMouseDown(hit.row, e);
                 break;
             case "colResize":
                 startColResize(hit.resizeCol, e);
@@ -1311,8 +1312,14 @@
             rangeEndCell = { row: hit.row, col: hit.col };
             return;
         }
-        if (selectionState.isSelecting && hit.region === "cell") {
-            selectionState.extendSelection(hit.row, hit.col);
+        if (selectionState.isSelecting) {
+            if (selectionState.selectionMode === 'rows' && (hit.region === "rowHeader" || hit.region === "cell")) {
+                selectionState.extendRowSelection(hit.row);
+            } else if (selectionState.selectionMode === 'cols' && (hit.region === "colHeader" || hit.region === "cell")) {
+                selectionState.extendColSelection(hit.col);
+            } else if (selectionState.selectionMode === 'range' && hit.region === "cell") {
+                selectionState.extendSelection(hit.row, hit.col);
+            }
         }
     }
 
@@ -1329,6 +1336,21 @@
         const hit = hitTestEngine.hitTest(localX, localY);
         if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
             handleCellContextMenu(hit.row, hit.col, e);
+        } else if (hit.region === "rowHeader") {
+            // Select the row if not already in the selection
+            if (!selectionState.isRowHighlighted(hit.row)) {
+                selectionState.selectRow(hit.row);
+            }
+            e.preventDefault();
+            contextMenuPosition = { x: e.clientX, y: e.clientY };
+            contextMenuVisible = true;
+        } else if (hit.region === "colHeader") {
+            if (!selectionState.isColHighlighted(hit.col)) {
+                selectionState.selectColumn(hit.col);
+            }
+            e.preventDefault();
+            contextMenuPosition = { x: e.clientX, y: e.clientY };
+            contextMenuVisible = true;
         }
     }
 
@@ -1453,10 +1475,10 @@
                 handleCornerCellMouseDown();
                 break;
             case "colHeader":
-                handleColHeaderMouseDown(hit.col);
+                handleColHeaderMouseDown(hit.col, syntheticE);
                 break;
             case "rowHeader":
-                handleRowHeaderMouseDown(hit.row);
+                handleRowHeaderMouseDown(hit.row, syntheticE);
                 break;
             case "cell":
                 if (hit.row >= 0 && hit.col >= 0) {
@@ -1478,12 +1500,20 @@
         selectionState.selectAll();
     }
 
-    function handleRowHeaderMouseDown(row) {
-        selectionState.selectRow(row);
+    function handleRowHeaderMouseDown(row, e) {
+        if (e?.shiftKey && selectionState.selectionMode === 'rows') {
+            selectionState.extendRowSelection(row);
+        } else {
+            selectionState.startRowDrag(row);
+        }
     }
 
-    function handleColHeaderMouseDown(col) {
-        selectionState.selectColumn(col);
+    function handleColHeaderMouseDown(col, e) {
+        if (e?.shiftKey && selectionState.selectionMode === 'cols') {
+            selectionState.extendColSelection(col);
+        } else {
+            selectionState.startColDrag(col);
+        }
     }
 
     // ─── Cell mouse events ────────────────────────────────────────────────────
@@ -1930,6 +1960,16 @@
                 spreadsheetSession.getCellEditValue(row, col) ?? "";
             editSessionState.beginEdit(row, col, currentBlobId, surface, {
                 pickerMode: "image-picker",
+                sheetId: spreadsheetSession.activeSheetId,
+            });
+            return;
+        }
+        // File cells: set file picker mode and pass current blob ID as initial value
+        if (ct?.type === "file") {
+            const currentBlobId =
+                spreadsheetSession.getCellEditValue(row, col) ?? "";
+            editSessionState.beginEdit(row, col, currentBlobId, surface, {
+                pickerMode: "file-picker",
                 sheetId: spreadsheetSession.activeSheetId,
             });
             return;
@@ -2729,6 +2769,14 @@
                 ct === CELL_TYPE.VIEWPORT_OCCUPIED
             )
                 return;
+            // Delete blob files when clearing file or image cells
+            const ctConfig = sheetStore.getCellTypeConfig(r, c);
+            if (ctConfig?.type === "file" || ctConfig?.type === "image") {
+                const blobId = sheetStore.getCell(r, c)?.v;
+                if (blobId) {
+                    storage.app.delete(blobId).catch(() => {});
+                }
+            }
             sheetStore.clearCellValue(r, c);
         });
     }
@@ -2820,22 +2868,30 @@
     function insertRowAbove() {
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (eff) sheetStore.insertRowAt(eff.startRow);
+        if (!eff) return;
+        const count = eff.endRow - eff.startRow + 1;
+        for (let i = 0; i < count; i++) sheetStore.insertRowAt(eff.startRow);
     }
     function insertRowBelow() {
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (eff) sheetStore.insertRowAt(eff.endRow + 1);
+        if (!eff) return;
+        const count = eff.endRow - eff.startRow + 1;
+        for (let i = 0; i < count; i++) sheetStore.insertRowAt(eff.endRow + 1 + i);
     }
     function insertColumnLeft() {
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (eff) sheetStore.insertColumnAt(eff.startCol);
+        if (!eff) return;
+        const count = eff.endCol - eff.startCol + 1;
+        for (let i = 0; i < count; i++) sheetStore.insertColumnAt(eff.startCol);
     }
     function insertColumnRight() {
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (eff) sheetStore.insertColumnAt(eff.endCol + 1);
+        if (!eff) return;
+        const count = eff.endCol - eff.startCol + 1;
+        for (let i = 0; i < count; i++) sheetStore.insertColumnAt(eff.endCol + 1 + i);
     }
 
     function deleteSelectedRows() {
@@ -3050,6 +3106,8 @@
         return selection ? selection.endCol - selection.startCol + 1 : 1;
     });
 
+    let isHeaderSelection = $derived(selectionType === "row" || selectionType === "column");
+
     let contextMenuItems = $derived([
         {
             label: "Cut",
@@ -3074,134 +3132,192 @@
             shortcut: "Ctrl+V",
             action: () => pasteSelection("full"),
         },
-        {
-            label: "Paste Special...",
-            submenu: [
-                {
-                    label: "Values Only",
-                    action: () => pasteSelection("values"),
-                },
-                {
-                    label: "Formulas Only",
-                    action: () => pasteSelection("formulas"),
-                },
-                {
-                    label: "Formatting Only",
-                    action: () => pasteSelection("formatting"),
-                },
-                { divider: true },
-                {
-                    label: "Values & Formatting",
-                    action: () => pasteSelection("valuesFormat"),
-                },
-                {
-                    label: "Formulas & Formatting",
-                    action: () => pasteSelection("formulasFormat"),
-                },
-            ],
-        },
-        { divider: true },
-        {
-            label: "Insert Image in Cell",
-            icon: "🖼",
-            action: () => {
-                if (anchor) {
-                    // Apply image type then open the picker
-                    sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
-                        type: "image",
-                        fit: "contain",
-                    });
-                    beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
-                }
+        ...(!isHeaderSelection ? [
+            {
+                label: "Paste Special...",
+                submenu: [
+                    {
+                        label: "Values Only",
+                        action: () => pasteSelection("values"),
+                    },
+                    {
+                        label: "Formulas Only",
+                        action: () => pasteSelection("formulas"),
+                    },
+                    {
+                        label: "Formatting Only",
+                        action: () => pasteSelection("formatting"),
+                    },
+                    { divider: true },
+                    {
+                        label: "Values & Formatting",
+                        action: () => pasteSelection("valuesFormat"),
+                    },
+                    {
+                        label: "Formulas & Formatting",
+                        action: () => pasteSelection("formulasFormat"),
+                    },
+                ],
             },
-            disabled: !anchor,
-        },
-        {
-            label: "Insert Floating Image…",
-            icon: "🖼",
-            action: () => {
-                if (anchor && sheetStore) {
-                    showFloatingImageInsert = true;
-                }
-            },
-            disabled: !anchor,
-        },
+        ] : []),
         { divider: true },
-        {
-            label: "Merge Cells",
-            icon: mergeIcon,
-            isSvgIcon: true,
-            action: () => {
-                if (selection && sheetStore)
-                    sheetStore.mergeCells(
-                        selection.startRow,
-                        selection.startCol,
-                        selection.endRow,
-                        selection.endCol,
-                    );
+        ...(!isHeaderSelection ? [
+            {
+                label: "Insert Image in Cell",
+                icon: "🖼",
+                action: () => {
+                    if (anchor) {
+                        sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
+                            type: "image",
+                            fit: "contain",
+                        });
+                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
+                    }
+                },
+                disabled: !anchor,
             },
-            disabled: !canMerge,
-        },
-        {
-            label: "Unmerge Cells",
-            icon: mergeIcon,
-            isSvgIcon: true,
-            action: () => {
-                if (anchor && sheetStore)
-                    sheetStore.unmergeCells(anchor.row, anchor.col);
+            {
+                label: "Attach File to Cell",
+                icon: "📎",
+                action: () => {
+                    if (anchor) {
+                        sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
+                            type: "file",
+                        });
+                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
+                    }
+                },
+                disabled: !anchor,
             },
-            disabled: !isMergePrimary,
-        },
-        { divider: true },
-        {
-            label: "Insert Row Above",
-            icon: arrowUp,
-            isSvgIcon: true,
-            action: insertRowAbove,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: "Insert Row Below",
-            icon: arrowDown,
-            isSvgIcon: true,
-            action: insertRowBelow,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: "Insert Column Left",
-            icon: arrowLeft,
-            isSvgIcon: true,
-            action: insertColumnLeft,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: "Insert Column Right",
-            icon: arrowRight,
-            isSvgIcon: true,
-            action: insertColumnRight,
-            disabled: !hasAnySelection,
-        },
-        { divider: true },
-        {
-            label:
-                selectionType === "row" || selectionType === "all"
-                    ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
-                    : "Delete Row",
-            icon: trashIcon,
-            isSvgIcon: true,
-            action: deleteSelectedRows,
-            disabled: !hasAnySelection,
-        },
-        {
-            label:
-                selectionType === "column" || selectionType === "all"
-                    ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
-                    : "Delete Column",
-            icon: trashIcon,
-            isSvgIcon: true,
-            action: deleteSelectedColumns,
-            disabled: !hasAnySelection,
-        },
+            {
+                label: "Insert Floating Image…",
+                icon: "🖼",
+                action: () => {
+                    if (anchor && sheetStore) {
+                        showFloatingImageInsert = true;
+                    }
+                },
+                disabled: !anchor,
+            },
+            { divider: true },
+            {
+                label: "Merge Cells",
+                icon: mergeIcon,
+                isSvgIcon: true,
+                action: () => {
+                    if (selection && sheetStore)
+                        sheetStore.mergeCells(
+                            selection.startRow,
+                            selection.startCol,
+                            selection.endRow,
+                            selection.endCol,
+                        );
+                },
+                disabled: !canMerge,
+            },
+            {
+                label: "Unmerge Cells",
+                icon: mergeIcon,
+                isSvgIcon: true,
+                action: () => {
+                    if (anchor && sheetStore)
+                        sheetStore.unmergeCells(anchor.row, anchor.col);
+                },
+                disabled: !isMergePrimary,
+            },
+            { divider: true },
+        ] : []),
+        ...(selectionType === "row" ? [
+            {
+                label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
+                icon: arrowUp,
+                isSvgIcon: true,
+                action: insertRowAbove,
+            },
+            {
+                label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
+                icon: arrowDown,
+                isSvgIcon: true,
+                action: insertRowBelow,
+            },
+            { divider: true },
+            {
+                label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
+                icon: trashIcon,
+                isSvgIcon: true,
+                action: deleteSelectedRows,
+            },
+        ] : selectionType === "column" ? [
+            {
+                label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
+                icon: arrowLeft,
+                isSvgIcon: true,
+                action: insertColumnLeft,
+            },
+            {
+                label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
+                icon: arrowRight,
+                isSvgIcon: true,
+                action: insertColumnRight,
+            },
+            { divider: true },
+            {
+                label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
+                icon: trashIcon,
+                isSvgIcon: true,
+                action: deleteSelectedColumns,
+            },
+        ] : [
+            {
+                label: "Insert Row Above",
+                icon: arrowUp,
+                isSvgIcon: true,
+                action: insertRowAbove,
+                disabled: !hasAnySelection,
+            },
+            {
+                label: "Insert Row Below",
+                icon: arrowDown,
+                isSvgIcon: true,
+                action: insertRowBelow,
+                disabled: !hasAnySelection,
+            },
+            {
+                label: "Insert Column Left",
+                icon: arrowLeft,
+                isSvgIcon: true,
+                action: insertColumnLeft,
+                disabled: !hasAnySelection,
+            },
+            {
+                label: "Insert Column Right",
+                icon: arrowRight,
+                isSvgIcon: true,
+                action: insertColumnRight,
+                disabled: !hasAnySelection,
+            },
+            { divider: true },
+            {
+                label:
+                    selectionType === "all"
+                        ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
+                        : "Delete Row",
+                icon: trashIcon,
+                isSvgIcon: true,
+                action: deleteSelectedRows,
+                disabled: !hasAnySelection,
+            },
+            {
+                label:
+                    selectionType === "all"
+                        ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
+                        : "Delete Column",
+                icon: trashIcon,
+                isSvgIcon: true,
+                action: deleteSelectedColumns,
+                disabled: !hasAnySelection,
+            },
+        ]),
         ...(tableCellInfo
             ? [
                   { divider: true },
@@ -3399,6 +3515,18 @@
         }
     }
 
+    /** Handler — file metadata change from FileEditor (mimeType, filename, size, fit) */
+    function handleFileMetaChange(e) {
+        const meta = e.detail ?? {};
+        if (!sheetStore) return;
+        const cell = editSessionState.cell;
+        if (!cell) return;
+        const ct = sheetStore.getCellTypeConfig(cell.row, cell.col);
+        if (ct?.type === "file") {
+            sheetStore.setCellTypeConfig(cell.row, cell.col, { ...ct, ...meta });
+        }
+    }
+
     onMount(() => {
         // Trigger a canvas repaint when any image finishes loading
         setOnLoadCallback(() => {
@@ -3406,6 +3534,7 @@
         });
 
         window.addEventListener("image-fit-change", handleImageFitChange);
+        window.addEventListener("file-meta-change", handleFileMetaChange);
 
         document.addEventListener("mouseup", handleMouseUp);
 
@@ -3524,6 +3653,7 @@
         selectionRenderer?.destroy();
         setOnLoadCallback(null);
         window.removeEventListener("image-fit-change", handleImageFitChange);
+        window.removeEventListener("file-meta-change", handleFileMetaChange);
     });
 </script>
 

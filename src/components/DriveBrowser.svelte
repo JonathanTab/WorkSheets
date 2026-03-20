@@ -46,6 +46,8 @@
     let driveFiles = $state(storage.drive.listFiles());
     let driveFolders = $state(storage.drive.listFolders());
     let searchQuery = $state("");
+    let contentSearchResults = $state(/** @type {any[]} */ ([]));
+    let isContentSearching = $state(false);
     let viewMode = $state("list"); // "list" | "grid"
     let contextMenu = $state(null); // { x, y, item, type: 'file'|'folder' }
     let renamingFolderId = $state(null);
@@ -67,6 +69,28 @@
             }),
         ];
         return () => unsubs.forEach((u) => u());
+    });
+
+    // ---- Content search (server-side, debounced) ----
+    let _searchTimer = null;
+    $effect(() => {
+        const q = searchQuery.trim();
+        contentSearchResults = [];
+        if (_searchTimer) clearTimeout(_searchTimer);
+        if (!q || q.length < 2) {
+            isContentSearching = false;
+            return;
+        }
+        _searchTimer = setTimeout(async () => {
+            isContentSearching = true;
+            try {
+                contentSearchResults = await storage.drive.search(q);
+            } catch {
+                contentSearchResults = [];
+            } finally {
+                isContentSearching = false;
+            }
+        }, 400);
     });
 
     // ---- Folder tree for sidebar ----
@@ -175,15 +199,24 @@
         return combined;
     });
 
-    // Search filter
-    let displayItems = $derived(
-        searchQuery.trim()
-            ? allItems.filter((item) => {
-                  const name = item.name || item.title || "";
-                  return name.toLowerCase().includes(searchQuery.toLowerCase());
-              })
-            : allItems,
-    );
+    // Search filter — when active, searches all drive files by title + merges server content matches
+    let displayItems = $derived.by(() => {
+        const q = searchQuery.trim();
+        if (!q) return allItems;
+        const ql = q.toLowerCase();
+        // Title match across ALL drive files (not just current folder)
+        const titleMatches = driveFiles
+            .filter(
+                (f) => !f.deleted && (f.title || "").toLowerCase().includes(ql),
+            )
+            .map((f) => ({ ...f, itemType: "file" }));
+        const titleIds = new Set(titleMatches.map((f) => f.id));
+        // Content matches from server (deduped with title results)
+        const contentMatches = contentSearchResults
+            .filter((f) => !titleIds.has(f.id))
+            .map((f) => ({ ...f, itemType: "file", _contentMatch: true }));
+        return [...titleMatches, ...contentMatches];
+    });
 
     // ---- Breadcrumb ----
     let breadcrumb = $derived.by(() => {
@@ -741,7 +774,11 @@
                 <div class="empty-state">
                     <div class="empty-icon">{@html spreadsheet}</div>
                     {#if searchQuery}
-                        <h2>No results found</h2>
+                        <h2>
+                            {isContentSearching
+                                ? "Searching…"
+                                : "No results found"}
+                        </h2>
                         <p>No files or folders match "{searchQuery}"</p>
                     {:else if tab === "shared"}
                         <h2>No shared files</h2>
@@ -925,6 +962,12 @@
                                                         item.title ||
                                                         "Untitled"}</span
                                                 >
+                                                {#if item._contentMatch}
+                                                    <span
+                                                        class="content-match-badge"
+                                                        >content</span
+                                                    >
+                                                {/if}
                                             {/if}
                                         </div>
                                     </td>
@@ -988,12 +1031,26 @@
                             <div class="grid-item-icon">
                                 {#if item.itemType === "folder"}
                                     {@html folder}
+                                {:else if item.thumbnailKey}
+                                    <img
+                                        class="grid-item-thumbnail"
+                                        src={storage.drive.getThumbnailUrl(
+                                            item.id,
+                                        )}
+                                        alt=""
+                                        loading="lazy"
+                                    />
                                 {:else}
                                     {@html spreadsheet}
                                 {/if}
                             </div>
                             <div class="grid-item-name">
                                 {item.name || item.title || "Untitled"}
+                                {#if item._contentMatch}
+                                    <span class="content-match-badge"
+                                        >content</span
+                                    >
+                                {/if}
                             </div>
                             <div class="grid-item-meta">
                                 {getOwnerName(item)} · {formatDate(
@@ -1853,17 +1910,21 @@
     }
 
     .file-row td {
-        padding: 0.5rem;
+        padding: 0.5rem 0.5rem;
         border-bottom: 1px solid var(--color-border);
         vertical-align: middle;
+        height: 40px;
     }
 
     .file-row .col-check {
         text-align: center;
+        width: 36px;
+        padding: 0.5rem 0.25rem;
     }
 
     .file-row .col-check input {
         margin: 0;
+        vertical-align: middle;
     }
 
     .item-icon {
@@ -2012,6 +2073,27 @@
         text-overflow: ellipsis;
         white-space: nowrap;
         margin-bottom: 0.125rem;
+    }
+
+    .grid-item-thumbnail {
+        width: 2.25rem;
+        height: 2.25rem;
+        object-fit: cover;
+        border-radius: 4px;
+    }
+
+    .content-match-badge {
+        display: inline-block;
+        font-size: 0.6rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--color-primary);
+        background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+        border-radius: 3px;
+        padding: 0 4px;
+        margin-left: 5px;
+        vertical-align: middle;
     }
 
     .grid-item-meta {

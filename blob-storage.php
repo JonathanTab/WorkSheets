@@ -614,6 +614,64 @@ try {
             ]);
             break;
 
+        case 'thumbnail':
+            if ($method !== 'GET' && $method !== 'HEAD') {
+                jsonError('Method not allowed', 405);
+            }
+
+            // Fetch file record — thumbnails work for any file type (yjs or blob)
+            $stmt = $db->prepare("
+                SELECT owner, folder_id, public_read, parent_id, thumbnail_key, updated_at
+                FROM files
+                WHERE id = ? AND deleted = 0
+            ");
+            $stmt->execute([$docId]);
+            $doc = $stmt->fetch();
+
+            if (!$doc) jsonError('File not found', 404);
+            if (!$doc['thumbnail_key']) jsonError('No thumbnail for this file', 404);
+
+            // Access check (mirrors hasReadAccess but without blob-type requirement)
+            $hasAccess = false;
+            if ($doc['public_read']) {
+                $hasAccess = true;
+            } elseif ($authorized_user) {
+                if (isAdmin($authorized_user) || $doc['owner'] === $authorized_user) {
+                    $hasAccess = true;
+                } else {
+                    $stmt2 = $db->prepare("SELECT 1 FROM file_shares WHERE file_id = ? AND username = ? AND can_read = 1");
+                    $stmt2->execute([$docId, $authorized_user]);
+                    if ($stmt2->fetch()) {
+                        $hasAccess = true;
+                    } elseif ($doc['folder_id']) {
+                        $folderPublic = getFolderPublicFlags($db, $doc['folder_id']);
+                        if ($folderPublic['public_read']) {
+                            $hasAccess = true;
+                        } else {
+                            $folderPerms = getFolderSharePermissions($db, $doc['folder_id'], $authorized_user);
+                            if ($folderPerms['can_read']) $hasAccess = true;
+                        }
+                    }
+                }
+            }
+
+            if (!$hasAccess) jsonError('Read access denied', 403);
+
+            $thumbPath = BLOBS_DIR . $doc['thumbnail_key'];
+            if (!file_exists($thumbPath)) jsonError('Thumbnail file not found', 404);
+
+            $mimeType = mime_content_type($thumbPath) ?: 'image/jpeg';
+            $filesize = filesize($thumbPath);
+
+            header('Content-Type: ' . $mimeType);
+            header('Content-Length: ' . $filesize);
+            header('Cache-Control: private, max-age=3600');
+            header('X-Updated-At: ' . ($doc['updated_at'] ?? ''));
+
+            if ($method === 'HEAD') exit;
+            readfile($thumbPath);
+            break;
+
         default:
             jsonError('Unknown action: ' . $action, 400);
     }

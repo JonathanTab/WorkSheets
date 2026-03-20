@@ -45,7 +45,7 @@
                     class="row-header"
                     class:selected={isRowSelected?.(row)}
                     style="height:{height}px; top:{frozenTop(row)}px;"
-                    onmousedown={() => onRowHeaderMouseDown?.(row)}
+                    onmousedown={(e) => onRowHeaderMouseDown?.(row, e)}
                     role="button"
                     tabindex="-1"
                 >
@@ -72,7 +72,7 @@
                     class="row-header"
                     class:selected={isRowSelected?.(row)}
                     style="height:{height}px; top:{bodyTop(row)}px;"
-                    onmousedown={() => onRowHeaderMouseDown?.(row)}
+                    onmousedown={(e) => onRowHeaderMouseDown?.(row, e)}
                     role="button"
                     tabindex="-1"
                 >

@@ -5,8 +5,14 @@
         getDocManager,
     } from "../../../stores/spreadsheetStore.svelte.js";
 
-    // Connection states: 'disconnected' | 'connecting' | 'connected' | 'syncing'
+    // Connection states: 'offline' | 'disconnected' | 'connecting' | 'connected' | 'syncing'
+    // 'offline' - browser is offline (no network)
+    // 'disconnected' - browser is online but server is unreachable
+    // 'connecting' - attempting to connect
+    // 'connected' - connected and synced
+    // 'syncing' - actively syncing changes
     let connectionStatus = $state("disconnected");
+    let isBrowserOffline = $state(!navigator.onLine);
     let syncTimeout = null;
     let currentDocId = $state.raw(null); // Track which doc we've set up listeners for
     let providerPollInterval = null; // Polling for provider availability
@@ -329,6 +335,35 @@
         untrack(() => setupForDocId(docId));
     });
 
+    // Listen for browser online/offline events
+    $effect(() => {
+        const handleOnline = () => {
+            console.log("[ConnectionStatus] Browser online");
+            isBrowserOffline = false;
+            // Don't change connectionStatus here - let the provider listeners handle reconnection
+        };
+
+        const handleOffline = () => {
+            console.log("[ConnectionStatus] Browser offline");
+            isBrowserOffline = true;
+            // Immediately show offline status when browser goes offline
+            setStatus("offline");
+            // Clear any connection polling since we're offline
+            if (connectionPollInterval) {
+                clearInterval(connectionPollInterval);
+                connectionPollInterval = null;
+            }
+        };
+
+        window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
+
+        return () => {
+            window.removeEventListener("online", handleOnline);
+            window.removeEventListener("offline", handleOffline);
+        };
+    });
+
     // Cleanup on component destroy using $effect with no dependencies
     $effect(() => {
         return () => {
@@ -337,9 +372,16 @@
         };
     });
 
+    // Computed display status - shows offline when browser is offline
+    const displayStatus = $derived(
+        isBrowserOffline ? "offline" : connectionStatus,
+    );
+
     // Status label for tooltip
     const statusLabel = $derived.by(() => {
-        switch (connectionStatus) {
+        switch (displayStatus) {
+            case "offline":
+                return "You are offline";
             case "disconnected":
                 return "Disconnected from server";
             case "connecting":
@@ -355,7 +397,24 @@
 </script>
 
 <div class="connection-status" title={statusLabel}>
-    {#if connectionStatus === "disconnected"}
+    {#if displayStatus === "offline"}
+        <!-- Cloud with slash icon (offline) -->
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="icon offline"
+        >
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+            <path d="m2 2 20 20" />
+        </svg>
+    {:else if displayStatus === "disconnected"}
         <!-- Cloud with X icon -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -373,7 +432,7 @@
             <path d="m9 15 6-6" />
             <path d="m15 15-6-6" />
         </svg>
-    {:else if connectionStatus === "connecting"}
+    {:else if displayStatus === "connecting"}
         <!-- Cloud with loading indicator -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -391,7 +450,7 @@
             <path d="M12 12v-2" />
             <path d="M12 15h.01" />
         </svg>
-    {:else if connectionStatus === "syncing"}
+    {:else if displayStatus === "syncing"}
         <!-- Cloud with arrows icon -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -442,6 +501,10 @@
 
     .icon {
         transition: stroke 0.2s ease;
+    }
+
+    .offline {
+        stroke: var(--color-error, #ef4444);
     }
 
     .disconnected {

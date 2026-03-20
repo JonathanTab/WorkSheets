@@ -42,6 +42,7 @@
             checkbox: {},
             url: {},
             image: { fit: 'contain' },
+            file: {},
             dropdown: { source: 'list', options: [], allowCustom: false, validation: 'none' },
         };
         return defaults[type] || {};
@@ -135,6 +136,7 @@
         { id: "rating",    label: "Rating",    icon: star, isSvg: true },
         { id: "url",       label: "Link",      icon: link, isSvg: true },
         { id: "image",     label: "Image",     icon: imageIcon, isSvg: true },
+        { id: "file",      label: "File",      icon: "📎" },
         { id: "dropdown",  label: "Dropdown",  icon: "▾" },
     ];
 </script>

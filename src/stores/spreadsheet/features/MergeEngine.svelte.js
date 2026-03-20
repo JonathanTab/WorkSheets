@@ -11,6 +11,11 @@
  */
 import * as Y from 'yjs';
 
+// Numeric key avoids string allocation in hot loops.
+// Supports up to ~1M columns (2^20) which is far beyond any real sheet.
+const MERGE_KEY_SHIFT = 20;
+function mergeKey(row, col) { return (row << MERGE_KEY_SHIFT) | col; }
+
 export class MergeEngine {
     /** @type {Y.Array} */
     #mergesYArray;
@@ -21,7 +26,7 @@ export class MergeEngine {
     /** @type {Function|null} */
     #cleanup = null;
 
-    /** @type {Map<string, Object>} "row,col" → merge object (all cells in all merges) */
+    /** @type {Map<number, Object>} numericKey(row,col) → merge object (all cells in all merges) */
     #index = new Map();
 
     // Reactive merge list (plain objects, not Y.Maps)
@@ -75,7 +80,7 @@ export class MergeEngine {
         for (const merge of valid) {
             for (let r = merge.startRow; r <= merge.endRow; r++) {
                 for (let c = merge.startCol; c <= merge.endCol; c++) {
-                    this.#index.set(`${r},${c}`, merge);
+                    this.#index.set(mergeKey(r, c), merge);
                 }
             }
         }
@@ -91,7 +96,7 @@ export class MergeEngine {
      * @returns {boolean}
      */
     isMergeCell(row, col) {
-        return this.#index.has(`${row},${col}`);
+        return this.#index.has(mergeKey(row, col));
     }
 
     /**
@@ -101,7 +106,7 @@ export class MergeEngine {
      * @returns {boolean}
      */
     isMergePrimary(row, col) {
-        const m = this.#index.get(`${row},${col}`);
+        const m = this.#index.get(mergeKey(row, col));
         return m !== undefined && m.startRow === row && m.startCol === col;
     }
 
@@ -112,7 +117,7 @@ export class MergeEngine {
      * @returns {{ startRow, startCol, endRow, endCol } | null}
      */
     getMergeAt(row, col) {
-        return this.#index.get(`${row},${col}`) ?? null;
+        return this.#index.get(mergeKey(row, col)) ?? null;
     }
 
     /**
@@ -122,7 +127,7 @@ export class MergeEngine {
      * @returns {{ rowSpan: number, colSpan: number } | null}
      */
     getMergeSpan(row, col) {
-        const m = this.#index.get(`${row},${col}`);
+        const m = this.#index.get(mergeKey(row, col));
         if (!m || m.startRow !== row || m.startCol !== col) return null;
         return {
             rowSpan: m.endRow - m.startRow + 1,

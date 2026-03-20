@@ -22,6 +22,8 @@ import { StorageAPI } from './api/StorageAPI.js';
 import { LocalStore } from './core/LocalStore.js';
 import { YjsRuntime } from './core/YjsRuntime.js';
 import { BlobCache } from './core/BlobCache.js';
+import { OfflineSyncStore } from './core/OfflineSyncStore.js';
+import { YjsSyncCoordinator } from './core/YjsSyncCoordinator.js';
 
 // ============================================================
 // Internal EventEmitter
@@ -255,6 +257,55 @@ class AppView {
         this._r._upsertFile(file);
         return file;
     }
+
+    // -------------------------------------------------------
+    // Thumbnail
+    // -------------------------------------------------------
+
+    /**
+     * Upload a thumbnail image for a file. Accepts any image Blob.
+     * @param {string} id
+     * @param {Blob} imageBlob
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setThumbnail(id, imageBlob) {
+        const file = await this._r._api.setThumbnail(id, imageBlob);
+        this._r._upsertFile(file);
+        return file;
+    }
+
+    /** @returns {Promise<FileDescriptor>} */
+    async clearThumbnail(id) {
+        const file = await this._r._api.clearThumbnail(id);
+        this._r._upsertFile(file);
+        return file;
+    }
+
+    /** Returns the URL to display a file's thumbnail image. @param {string} id @returns {string} */
+    getThumbnailUrl(id) { return this._r._api.getThumbnailUrl(id); }
+
+    // -------------------------------------------------------
+    // Content search
+    // -------------------------------------------------------
+
+    /**
+     * Store plain-text content for server-side search (e.g. extracted from a Yjs doc).
+     * @param {string} id
+     * @param {string} text
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setSearchText(id, text) {
+        return this._r._api.setSearchText(id, text);
+    }
+
+    /**
+     * Search app-scoped files by title or stored content text.
+     * @param {string} query - Minimum 2 characters
+     * @returns {Promise<FileDescriptor[]>}
+     */
+    async search(query) {
+        return this._r._api.search(query, { scope: 'app', app: this._appName });
+    }
 }
 
 // ============================================================
@@ -340,13 +391,21 @@ class DriveView {
     }
 
     /**
-     * Recently opened drive files for this app (tracked locally in localStorage).
-     * Returns files that still exist in the current index, most recent first.
+     * Recently modified drive files.
+     * Returns files sorted by updatedAt field, most recent first.
      * @param {number} [limit=10]
      * @returns {FileDescriptor[]}
      */
     recentlyOpened(limit = 10) {
-        return this._r._getRecentlyOpened(limit);
+        const files = [...this._r._files.values()].filter(
+            f => f.scope === 'drive' && !f.deleted && f.updatedAt
+        );
+        files.sort((a, b) => {
+            const aTime = new Date(a.updatedAt).getTime();
+            const bTime = new Date(b.updatedAt).getTime();
+            return bTime - aTime;
+        });
+        return files.slice(0, limit);
     }
 
     /**
@@ -548,6 +607,55 @@ class DriveView {
     }
 
     // -------------------------------------------------------
+    // Thumbnail
+    // -------------------------------------------------------
+
+    /**
+     * Upload a thumbnail image for a drive file. Accepts any image Blob.
+     * @param {string} id
+     * @param {Blob} imageBlob
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setThumbnail(id, imageBlob) {
+        const file = await this._r._api.setThumbnail(id, imageBlob);
+        this._r._upsertFile(file);
+        return file;
+    }
+
+    /** @returns {Promise<FileDescriptor>} */
+    async clearThumbnail(id) {
+        const file = await this._r._api.clearThumbnail(id);
+        this._r._upsertFile(file);
+        return file;
+    }
+
+    /** Returns the URL to display a file's thumbnail image. @param {string} id @returns {string} */
+    getThumbnailUrl(id) { return this._r._api.getThumbnailUrl(id); }
+
+    // -------------------------------------------------------
+    // Content search
+    // -------------------------------------------------------
+
+    /**
+     * Store plain-text content for server-side search (e.g. extracted from a Yjs doc).
+     * @param {string} id
+     * @param {string} text
+     * @returns {Promise<FileDescriptor>}
+     */
+    async setSearchText(id, text) {
+        return this._r._api.setSearchText(id, text);
+    }
+
+    /**
+     * Search drive files by title or stored content text.
+     * @param {string} query - Minimum 2 characters
+     * @returns {Promise<FileDescriptor[]>}
+     */
+    async search(query) {
+        return this._r._api.search(query, { scope: 'drive' });
+    }
+
+    // -------------------------------------------------------
     // Folder operations
     // -------------------------------------------------------
 
@@ -631,8 +739,12 @@ export class FileRegistry extends EventEmitter {
 
         this._api = new StorageAPI(options.baseUrl, options.blobUrl, options.getApiKey);
         this._localStore = null;
-        this._runtime = new YjsRuntime(options.wsUrl);
+        this._runtime = new YjsRuntime(options.wsUrl, (docId, { offline }) => {
+            this._onYjsDocUpdated(docId, offline);
+        });
         this._blobCache = new BlobCache();
+        this._pendingStore = null;
+        this._coordinator = null;
 
         /** @type {Map<string, object>} */
         this._files = new Map();
@@ -676,6 +788,19 @@ export class FileRegistry extends EventEmitter {
         for (const f of files) this._files.set(f.id, f);
         for (const f of folders) this._folders.set(f.id, f);
         this.emit('change');
+
+        // Shared cross-app pending sync store (user-scoped, not app-scoped)
+        this._pendingStore = new OfflineSyncStore(this._username);
+        await this._pendingStore.open();
+
+        // Cross-tab/cross-app sync coordinator
+        this._coordinator = new YjsSyncCoordinator({
+            username: this._username,
+            pendingStore: this._pendingStore,
+            api: this._api,
+            runtime: this._runtime,
+        });
+        this._coordinator.start();
 
         // Background sync
         this._setupNetworkListeners();
@@ -728,8 +853,10 @@ export class FileRegistry extends EventEmitter {
     async shutdown() {
         this._stopSyncInterval();
         this._removeNetworkListeners();
+        this._coordinator?.shutdown();
         this._runtime.shutdown();
         this._localStore?.close();
+        this._pendingStore?.close();
         this._files.clear();
         this._folders.clear();
         this._initPromise = null;
@@ -800,6 +927,40 @@ export class FileRegistry extends EventEmitter {
         await this._blobCache.invalidate(descriptor.id);
         this._upsertFile(descriptor);
         return descriptor;
+    }
+
+    // -------------------------------------------------------
+    // Yjs doc update handler
+    // -------------------------------------------------------
+
+    /**
+     * Called by YjsRuntime whenever a local (non-remote) edit happens to a Yjs doc.
+     * Updates the file's updatedAt in memory and on disk, then queues server sync.
+     * @param {string} docId
+     * @param {boolean} offline - true if the edit happened while the network was down
+     */
+    _onYjsDocUpdated(docId, offline) {
+        const file = this._files.get(docId);
+        if (!file) return;
+
+        const now = new Date().toISOString();
+        const updated = { ...file, updatedAt: now };
+        this._files.set(docId, updated);
+        this._localStore?.putFile(updated);
+        this.emit('change');
+
+        if (!this._coordinator) return;
+
+        if (offline) {
+            // Mark this room as needing a WebSocket sync push once we come back online.
+            // Any open app for this user can handle it.
+            this._coordinator.markNeedsSync(docId, file.roomId, this._options.wsUrl)
+                .catch(() => { });
+        }
+
+        // Always queue a server touch so updatedAt is reflected in file listings.
+        // The coordinator sends these when online (debounced by the IDB put being idempotent).
+        this._coordinator.queueTouch(docId).catch(() => { });
     }
 
     // -------------------------------------------------------
@@ -892,6 +1053,7 @@ export class FileRegistry extends EventEmitter {
  * @property {string|null} createdAt
  * @property {string|null} updatedAt
  * @property {{username: string, permissions: string[]}[]} sharedWith
+ * @property {string|null} thumbnailKey - key used to fetch thumbnail via getThumbnailUrl()
  */
 
 /**

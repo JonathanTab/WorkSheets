@@ -13,7 +13,7 @@
  */
 import * as Y from 'yjs';
 import { createCellYMap } from './schema.js';
-import { isRichText, isRichTextArray, stripRunProp, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
+import { isRichText, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
 import {
     CELL_KEYS,
     CELL_TYPE_CONFIG_KEY,
@@ -544,16 +544,8 @@ export class SheetStore {
                 if (hasMappedProp) {
                     const currentValue = cellMap.get(CELL_KEYS.VALUE);
                     if (isRichText(currentValue)) {
-                        // New HTML string format
                         const stripped = Object.keys(props).reduce((html, cellProp) => {
                             return RUN_STYLE_PROP_MAP[cellProp] ? stripHtmlProp(html, cellProp) : html;
-                        }, currentValue);
-                        cellMap.set(CELL_KEYS.VALUE, stripped);
-                    } else if (isRichTextArray(currentValue)) {
-                        // Legacy run-array format
-                        const stripped = Object.keys(props).reduce((runs, cellProp) => {
-                            const rk = RUN_STYLE_PROP_MAP[cellProp];
-                            return rk ? stripRunProp(runs, rk) : runs;
                         }, currentValue);
                         cellMap.set(CELL_KEYS.VALUE, stripped);
                     }
@@ -793,18 +785,24 @@ export class SheetStore {
                 this.#cells.set(newKey, newCellMap);
             }
 
-            // 2. Shift borders
+            // 2. Adjust formulas in non-shifted cells (rows above the insertion)
+            this.#adjustFormulasInCells(
+                (row) => row >= rowIndex + 1, // skip shifted cells (already adjusted above)
+                (formula) => this.#adjustFormulaForRowInsert(formula, rowIndex)
+            );
+
+            // 3. Shift borders
             this.#shiftBordersForRowInsert(rowIndex);
 
-            // 3. Shift row metadata
+            // 4. Shift row metadata
             this.#shiftRowMetaForInsert(rowIndex);
 
-            // 4. Shift features (merges, tables, repeaters)
+            // 5. Shift features (merges, tables, repeaters)
             this.mergeEngine.shiftAxes('row', rowIndex, 1);
             this.#shiftTables('row', rowIndex, 1);
             this.#shiftRepeaters('row', rowIndex, 1);
 
-            // 5. Increment rowCount
+            // 6. Increment rowCount
             const currentRowCount = this.#sheet.get('rowCount') ?? DEFAULT_ROW_COUNT;
             this.#sheet.set('rowCount', currentRowCount + 1);
         });
@@ -842,18 +840,24 @@ export class SheetStore {
                 this.#cells.set(newKey, newCellMap);
             }
 
-            // 2. Shift borders
+            // 2. Adjust formulas in non-shifted cells (columns left of the insertion)
+            this.#adjustFormulasInCells(
+                (row, col) => col >= colIndex + 1, // skip shifted cells (already adjusted above)
+                (formula) => this.#adjustFormulaForColInsert(formula, colIndex)
+            );
+
+            // 3. Shift borders
             this.#shiftBordersForColInsert(colIndex);
 
-            // 3. Shift column metadata
+            // 4. Shift column metadata
             this.#shiftColMetaForInsert(colIndex);
 
-            // 4. Shift features
+            // 5. Shift features
             this.mergeEngine.shiftAxes('col', colIndex, 1);
             this.#shiftTables('col', colIndex, 1);
             this.#shiftRepeaters('col', colIndex, 1);
 
-            // 5. Increment colCount
+            // 6. Increment colCount
             const currentColCount = this.#sheet.get('colCount') ?? DEFAULT_COL_COUNT;
             this.#sheet.set('colCount', currentColCount + 1);
         });
@@ -903,18 +907,24 @@ export class SheetStore {
                 this.#cells.set(newKey, newCellMap);
             }
 
-            // 3. Shift borders
+            // 3. Adjust formulas in non-shifted cells (rows above the deletion)
+            this.#adjustFormulasInCells(
+                (row) => row >= rowIndex, // skip shifted cells (already adjusted above; row is now post-shift)
+                (formula) => this.#adjustFormulaForRowDelete(formula, rowIndex)
+            );
+
+            // 4. Shift borders
             this.#shiftBordersForRowDelete(rowIndex);
 
-            // 4. Shift row metadata
+            // 5. Shift row metadata
             this.#shiftRowMetaForDelete(rowIndex);
 
-            // 5. Shift features
+            // 6. Shift features
             this.mergeEngine.shiftAxes('row', rowIndex, -1);
             this.#shiftTables('row', rowIndex, -1);
             this.#shiftRepeaters('row', rowIndex, -1);
 
-            // 6. Decrement rowCount
+            // 7. Decrement rowCount
             const currentRowCount = this.#sheet.get('rowCount') ?? DEFAULT_ROW_COUNT;
             this.#sheet.set('rowCount', Math.max(1, currentRowCount - 1));
         });
@@ -964,18 +974,24 @@ export class SheetStore {
                 this.#cells.set(newKey, newCellMap);
             }
 
-            // 3. Shift borders
+            // 3. Adjust formulas in non-shifted cells (columns left of the deletion)
+            this.#adjustFormulasInCells(
+                (row, col) => col >= colIndex, // skip shifted cells (already adjusted above; col is post-shift)
+                (formula) => this.#adjustFormulaForColDelete(formula, colIndex)
+            );
+
+            // 4. Shift borders
             this.#shiftBordersForColDelete(colIndex);
 
-            // 4. Shift column metadata
+            // 5. Shift column metadata
             this.#shiftColMetaForDelete(colIndex);
 
-            // 5. Shift features
+            // 6. Shift features
             this.mergeEngine.shiftAxes('col', colIndex, -1);
             this.#shiftTables('col', colIndex, -1);
             this.#shiftRepeaters('col', colIndex, -1);
 
-            // 6. Decrement colCount
+            // 7. Decrement colCount
             const currentColCount = this.#sheet.get('colCount') ?? DEFAULT_COL_COUNT;
             this.#sheet.set('colCount', Math.max(1, currentColCount - 1));
         });
@@ -1052,16 +1068,36 @@ export class SheetStore {
     }
 
     /**
+     * Adjust formulas in cells that were not shifted during a row/col insert or delete.
+     * @param {function} shouldSkip - (row, col) => boolean, returns true for cells already adjusted
+     * @param {function} adjustFn - (formula) => string, the formula adjustment function
+     */
+    #adjustFormulasInCells(shouldSkip, adjustFn) {
+        this.#cells.forEach((cellYMap, key) => {
+            const [row, col] = key.split(',').map(Number);
+            if (shouldSkip(row, col)) return;
+            const val = cellYMap.get(CELL_KEYS.VALUE);
+            if (val && typeof val === 'string' && val.startsWith('=')) {
+                const adjusted = adjustFn(val);
+                if (adjusted !== val) {
+                    cellYMap.set(CELL_KEYS.VALUE, adjusted);
+                }
+            }
+        });
+    }
+
+    /**
      * Adjust formula references when a row is inserted
      * @param {string} formula
      * @param {number} insertedRowIndex
      * @returns {string}
      */
     #adjustFormulaForRowInsert(formula, insertedRowIndex) {
+        // insertedRowIndex is 0-based internal; formula rows are 1-based
+        const formulaRow = insertedRowIndex + 1;
         return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
             const rowNum = parseInt(row, 10);
-            // Adjust if row reference is at or below the inserted row (and not absolute)
-            if (!rowAbs && rowNum >= insertedRowIndex) {
+            if (!rowAbs && rowNum >= formulaRow) {
                 return `${colAbs}${col}${rowAbs}${rowNum + 1}`;
             }
             return match;
@@ -1094,13 +1130,14 @@ export class SheetStore {
      * @returns {string}
      */
     #adjustFormulaForRowDelete(formula, deletedRowIndex) {
+        // deletedRowIndex is 0-based internal; formula rows are 1-based
+        const formulaRow = deletedRowIndex + 1;
         return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
             const rowNum = parseInt(row, 10);
             if (!rowAbs) {
-                if (rowNum > deletedRowIndex) {
+                if (rowNum > formulaRow) {
                     return `${colAbs}${col}${rowAbs}${rowNum - 1}`;
-                } else if (rowNum === deletedRowIndex) {
-                    // Reference to deleted row becomes error
+                } else if (rowNum === formulaRow) {
                     return `#REF!`;
                 }
             }

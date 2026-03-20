@@ -104,6 +104,10 @@ try {
         CREATE INDEX IF NOT EXISTS idx_closure_descendant    ON folder_closure(descendant_id);
         CREATE INDEX IF NOT EXISTS idx_closure_ancestor      ON folder_closure(ancestor_id);
     ");
+
+    // Schema migrations (idempotent ALTER TABLE — ignored if column already exists)
+    try { $db->exec("ALTER TABLE files ADD COLUMN thumbnail_key TEXT"); } catch (PDOException $e) {}
+    try { $db->exec("ALTER TABLE files ADD COLUMN search_text TEXT"); } catch (PDOException $e) {}
 } catch (PDOException $e) {
     http_response_code(500);
     die(json_encode(['error' => 'Database error: ' . $e->getMessage()]));
@@ -206,6 +210,7 @@ function normalizeFile(array $row): array {
         'createdAt'   => $row['created_at'],
         'updatedAt'   => $row['updated_at'],
         'sharedWith'  => parseShares($row['shares_raw'] ?? null),
+        'thumbnailKey' => $row['thumbnail_key'] ?? null,
     ];
 }
 
@@ -986,6 +991,136 @@ try {
                ->execute($params);
 
             respond(fetchFolder($db, $id));
+        }
+
+        // ====================================================
+        // THUMBNAIL OPERATIONS
+        // ====================================================
+
+        case 'set_thumbnail': {
+            requirePost();
+            $user = requireAuth();
+            $id   = post('id');
+            if (!$id) error('id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            if (!isset($_FILES['thumbnail']) || $_FILES['thumbnail']['error'] !== UPLOAD_ERR_OK) {
+                error('thumbnail file required');
+            }
+
+            $file          = $_FILES['thumbnail'];
+            $allowedTypes  = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            $detectedMime  = mime_content_type($file['tmp_name']);
+            if (!in_array($detectedMime, $allowedTypes)) error('Invalid image type: ' . $detectedMime);
+            if ($file['size'] > 5 * 1024 * 1024) error('Thumbnail too large (max 5 MB)');
+
+            $thumbKey  = $id . '_thumb';
+            $thumbPath = BLOBS_DIR . $thumbKey;
+            $tempPath  = $thumbPath . '.tmp.' . getmypid();
+
+            if (!move_uploaded_file($file['tmp_name'], $tempPath)) error('Failed to save thumbnail');
+            if (!rename($tempPath, $thumbPath)) { @unlink($tempPath); error('Failed to finalize thumbnail'); }
+
+            $db->prepare("UPDATE files SET thumbnail_key = ?, updated_at = datetime('now') WHERE id = ?")
+               ->execute([$thumbKey, $id]);
+
+            respond(fetchFile($db, $id));
+        }
+
+        case 'clear_thumbnail': {
+            requirePost();
+            $user = requireAuth();
+            $id   = post('id');
+            if (!$id) error('id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            $stmt = $db->prepare("SELECT thumbnail_key FROM files WHERE id = ?");
+            $stmt->execute([$id]);
+            $row = $stmt->fetch();
+            if ($row && $row['thumbnail_key']) {
+                $thumbPath = BLOBS_DIR . $row['thumbnail_key'];
+                if (file_exists($thumbPath)) @unlink($thumbPath);
+            }
+
+            $db->prepare("UPDATE files SET thumbnail_key = NULL, updated_at = datetime('now') WHERE id = ?")
+               ->execute([$id]);
+
+            respond(fetchFile($db, $id));
+        }
+
+        // ====================================================
+        // CONTENT SEARCH TEXT
+        // ====================================================
+
+        case 'touch': {
+            requirePost();
+            $user = requireAuth();
+            $id   = post('id');
+            if (!$id) error('id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            $db->prepare("UPDATE files SET updated_at = datetime('now') WHERE id = ?")
+               ->execute([$id]);
+            respond(['success' => true]);
+        }
+
+        case 'set_search_text': {
+            requirePost();
+            $user = requireAuth();
+            $id   = post('id');
+            $text = trim($_POST['text'] ?? '');
+            if (!$id) error('id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            $db->prepare("UPDATE files SET search_text = ?, updated_at = datetime('now') WHERE id = ?")
+               ->execute([$text !== '' ? $text : null, $id]);
+
+            respond(fetchFile($db, $id));
+        }
+
+        case 'search': {
+            $user = requireAuth();
+            $q    = trim($_GET['q'] ?? $_POST['q'] ?? '');
+            if (strlen($q) < 2) error('Query must be at least 2 characters');
+
+            $scope = trim($_GET['scope'] ?? $_POST['scope'] ?? '');
+            $app   = trim($_GET['app']   ?? $_POST['app']   ?? '');
+
+            $like   = '%' . $q . '%';
+            $params = [':user' => $user, ':like' => $like];
+
+            $extraClauses = '';
+            if ($scope) { $extraClauses .= ' AND f.scope = :scope'; $params[':scope'] = $scope; }
+            if ($app)   { $extraClauses .= ' AND f.app   = :app';   $params[':app']   = $app; }
+
+            $stmt = $db->prepare("
+                SELECT f.*, GROUP_CONCAT(fs.username || '|' || fs.can_read || '|' || fs.can_write, ',') as shares_raw
+                FROM files f
+                LEFT JOIN file_shares fs ON fs.file_id = f.id
+                WHERE f.deleted = 0
+                  AND (f.title LIKE :like OR f.search_text LIKE :like)
+                  AND (
+                      f.owner = :user
+                      OR f.public_read = 1
+                      OR EXISTS (SELECT 1 FROM file_shares WHERE file_id = f.id AND username = :user AND can_read = 1)
+                      OR (f.folder_id IS NOT NULL AND (
+                          EXISTS (SELECT 1 FROM folders WHERE id = f.folder_id AND owner = :user)
+                          OR EXISTS (SELECT 1 FROM folders WHERE id = f.folder_id AND public_read = 1)
+                          OR EXISTS (
+                              SELECT 1 FROM folder_closure fc
+                              JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
+                              WHERE fc.descendant_id = f.folder_id AND fsh.username = :user AND fsh.can_read = 1
+                          )
+                      ))
+                  )
+                  $extraClauses
+                GROUP BY f.id
+                ORDER BY f.updated_at DESC
+                LIMIT 100
+            ");
+            $stmt->execute($params);
+
+            respond(['files' => array_map('normalizeFile', $stmt->fetchAll())]);
         }
 
         default:

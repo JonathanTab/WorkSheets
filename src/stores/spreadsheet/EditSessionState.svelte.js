@@ -1,5 +1,5 @@
 import { formulaEditState } from './FormulaEditState.svelte.js';
-import { isRichText, isRichTextArray, richTextToPlain, runsToHtml } from './richText.js';
+import { isRichText, richTextToPlain } from './richText.js';
 
 /**
  * EditSessionState - Canonical editing lifecycle for spreadsheet cells.
@@ -148,12 +148,7 @@ export class EditSessionState {
     beginEdit(row, col, initialValue = '', surface = 'grid', options = {}) {
         let html = null;
         let text = '';
-        if (isRichTextArray(initialValue)) {
-            // Legacy run-array: convert to HTML string
-            html = runsToHtml(initialValue);
-            text = richTextToPlain(initialValue);
-        } else if (isRichText(initialValue)) {
-            // New HTML string format
+        if (isRichText(initialValue)) {
             html = initialValue;
             text = richTextToPlain(initialValue);
         } else {

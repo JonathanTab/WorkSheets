@@ -23,6 +23,7 @@
     import FormulaValuePopup from "../FormulaValuePopup.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
+    import FileEditor from "../cellTypes/FileEditor.svelte";
 
     let {
         /**
@@ -50,12 +51,22 @@
 
     let pickerMode = $derived(editSessionState.pickerMode);
     let isImagePickerMode = $derived(pickerMode === 'image-picker');
+    let isFilePickerMode  = $derived(pickerMode === 'file-picker');
     let isFormulaMode = $derived(
         isEditing &&
             typeof editValue === "string" &&
             editValue?.startsWith("="),
     );
-    // Use contenteditable for all non-formula, non-picker, non-image text cells
+    // Current cell type config, used by FileEditor
+    let cellCtConfig = $derived.by(() => {
+        if (!editSessionState.isEditing || !editSessionState.cell) return null;
+        const { row, col } = editSessionState.cell;
+        const sheetStore = spreadsheetSession?.activeSheetStore;
+        if (!sheetStore) return null;
+        return sheetStore.getCellTypeConfig(row, col);
+    });
+
+    // Use contenteditable for all non-formula, non-picker, non-image, non-file text cells
     let isContentEditable = $derived(
         isEditing && !pickerMode && !isFormulaMode,
     );
@@ -348,6 +359,19 @@
                         // Signal fit change via a custom event so Grid can update ct
                         if (typeof window !== 'undefined') {
                             window.dispatchEvent(new CustomEvent('image-fit-change', { detail: { fit } }));
+                        }
+                    }}
+                    onCancel={onCancelEdit}
+                />
+            {:else if isFilePickerMode}
+                <FileEditor
+                    value={editValue}
+                    {docId}
+                    ctConfig={cellCtConfig}
+                    onCommit={(blobId, meta) => {
+                        onCommitEdit?.(blobId ?? '');
+                        if (typeof window !== 'undefined') {
+                            window.dispatchEvent(new CustomEvent('file-meta-change', { detail: meta }));
                         }
                     }}
                     onCancel={onCancelEdit}
