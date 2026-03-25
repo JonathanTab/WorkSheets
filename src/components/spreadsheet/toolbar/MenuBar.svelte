@@ -2,8 +2,7 @@
     import MenuDropdown from "./MenuDropdown.svelte";
     import {
         spreadsheetSession,
-        createDocument,
-        deleteDocument,
+        selectionState,
     } from "../../../stores/spreadsheetStore.svelte.js";
     import {
         paste,
@@ -11,11 +10,17 @@
         cut,
         copy,
         table,
+        download,
+        printer,
+        filter,
+        share,
+        info,
+        grid,
+        imageIcon,
+        link,
+        functionIcon,
     } from "../../../lib/icons/index.js";
-    import {
-        clipboardManager,
-        selectionState,
-    } from "../../../stores/spreadsheet/index.js";
+    import { clipboardManager } from "../../../stores/spreadsheet/index.js";
     import { VectorPrintEngine } from "../../../stores/spreadsheet/rendering/VectorPrintEngine.js";
     import { AxisMetrics } from "../../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
     import {
@@ -24,13 +29,14 @@
     } from "../../../stores/spreadsheetStore.svelte.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
-    import {
-        openModal,
-        closeTopModal,
-    } from "../../../lib/ui/modalStore.svelte.js";
+    import { openModal } from "../../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../../modals/AlertModal.svelte";
+    import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
+    import DataValidationPanel from "../DataValidationPanel.svelte";
 
     let isExportingPDF = $state(false);
+    let showCFPanel = $state(false);
+    let showDVPanel = $state(false);
 
     // Helper to show alert modal
     function showAlert(title, message, type = "info") {
@@ -88,7 +94,6 @@
         isExportingPDF = true;
         try {
             const { rowMetrics, colMetrics } = buildMetricsForPrint(sheetStore);
-            // Use saved print settings from the sheet (or defaults)
             const printSettings = sheetStore.getPrintSettings?.() ?? {};
             const engine = new VectorPrintEngine();
             const docName =
@@ -117,60 +122,66 @@
         }
     }
 
-    // File menu items (most are stubbed)
+    // Dialog state for table/repeater creation
+    let showCreateTableDialog = $state(false);
+    let showCreateRepeaterDialog = $state(false);
+
+    // ─── FILE MENU ────────────────────────────────────────────────────────────
     const fileItems = [
         {
             label: "New",
-            action: () =>
-                showAlert("New Document", "New document - not implemented"),
+            action: () => (window.location.hash = "/new"),
             shortcut: "Ctrl+N",
         },
         {
             label: "Open...",
-            action: () =>
-                showAlert("Open Document", "Open document - not implemented"),
+            action: () => (window.location.hash = "/"),
             shortcut: "Ctrl+O",
         },
         { divider: true },
         {
-            label: "Save",
-            action: () =>
-                showAlert("Save", "Document is auto-saved via Yjs", "success"),
-            shortcut: "Ctrl+S",
-        },
-        {
-            label: "Save As...",
-            action: () => showAlert("Save As", "Save as - not implemented"),
+            label: "Share",
+            icon: share,
+            isSvgIcon: true,
+            action: () => showAlert("Share", "Share document - coming soon"),
         },
         { divider: true },
         {
-            label: isExportingPDF ? "Exporting PDF…" : "Export as PDF",
-            icon: paste,
+            label: "Download",
+            submenu: [
+                {
+                    label: "PDF Document (.pdf)",
+                    icon: download,
+                    isSvgIcon: true,
+                    action: exportPDF,
+                },
+                {
+                    label: "CSV (.csv)",
+                    action: () => exportCSV(),
+                },
+            ],
+        },
+        { divider: true },
+        {
+            label: isExportingPDF ? "Printing…" : "Print",
+            icon: printer,
             isSvgIcon: true,
             action: exportPDF,
             shortcut: "Ctrl+P",
         },
-        { divider: true },
-        {
-            label: "Close",
-            action: () => (window.location.hash = ""),
-            shortcut: "Ctrl+W",
-        },
     ];
 
-    // Edit menu items
+    // ─── EDIT MENU ────────────────────────────────────────────────────────────
     const editItems = [
         {
             label: "Undo",
             action: () => spreadsheetSession.undo(),
             shortcut: "Ctrl+Z",
-            icon: "↶",
         },
         {
             label: "Redo",
             action: () => spreadsheetSession.redo(),
             shortcut: "Ctrl+Y",
-            icon: "↷",
         },
         { divider: true },
         {
@@ -198,12 +209,6 @@
             label: "Paste Special",
             submenu: [
                 {
-                    label: "Paste All",
-                    action: () => handlePaste("full"),
-                    shortcut: "Ctrl+V",
-                },
-                { divider: true },
-                {
                     label: "Values Only",
                     action: () => handlePaste("values"),
                 },
@@ -220,10 +225,6 @@
                     label: "Values & Formatting",
                     action: () => handlePaste("valuesFormat"),
                 },
-                {
-                    label: "Formulas & Formatting",
-                    action: () => handlePaste("formulasFormat"),
-                },
             ],
         },
         { divider: true },
@@ -239,64 +240,110 @@
             action: () => handleSelectAll(),
             shortcut: "Ctrl+A",
         },
+        { divider: true },
+        {
+            label: "Find and Replace",
+            action: () => showAlert("Find", "Find and replace - coming soon"),
+            shortcut: "Ctrl+H",
+        },
     ];
 
-    // View menu items
+    // ─── VIEW MENU ────────────────────────────────────────────────────────────
+    let showGridlines = $state(true);
+    let showFormulaBar = $state(true);
+    let showRowColHeaders = $state(true);
+
     const viewItems = [
         {
-            label: "Zoom 100%",
-            action: () => showAlert("Zoom", "Zoom - not implemented"),
+            label: showGridlines ? "Hide Gridlines" : "Show Gridlines",
+            action: () => {
+                showGridlines = !showGridlines;
+                // Toggle gridlines on renderContext
+                const sheetStore = spreadsheetSession.activeSheetStore;
+                if (sheetStore) {
+                    sheetStore.setGridlinesVisible?.(showGridlines);
+                }
+            },
         },
         {
-            label: "Zoom 125%",
-            action: () => showAlert("Zoom", "Zoom - not implemented"),
+            label: showFormulaBar ? "Hide Formula Bar" : "Show Formula Bar",
+            action: () => {
+                showFormulaBar = !showFormulaBar;
+            },
         },
         {
-            label: "Zoom 150%",
-            action: () => showAlert("Zoom", "Zoom - not implemented"),
+            label: showRowColHeaders
+                ? "Hide Row & Column Headers"
+                : "Show Row & Column Headers",
+            action: () => {
+                showRowColHeaders = !showRowColHeaders;
+            },
         },
         { divider: true },
         {
-            label: "Show Gridlines",
-            action: () =>
-                showAlert("Gridlines", "Toggle gridlines - not implemented"),
+            label: "Freeze",
+            submenu: [
+                {
+                    label: "No Frozen Rows",
+                    action: () => setFreezeRows(0),
+                },
+                {
+                    label: "1 Row",
+                    action: () => setFreezeRows(1),
+                },
+                {
+                    label: "2 Rows",
+                    action: () => setFreezeRows(2),
+                },
+                { divider: true },
+                {
+                    label: "No Frozen Columns",
+                    action: () => setFreezeCols(0),
+                },
+                {
+                    label: "1 Column",
+                    action: () => setFreezeCols(1),
+                },
+            ],
         },
+        { divider: true },
         {
-            label: "Show Formula Bar",
-            action: () =>
-                showAlert(
-                    "Formula Bar",
-                    "Toggle formula bar - not implemented",
-                ),
+            label: "Zoom",
+            submenu: [
+                { label: "50%", action: () => setZoom(0.5) },
+                { label: "75%", action: () => setZoom(0.75) },
+                { label: "100%", action: () => setZoom(1) },
+                { label: "125%", action: () => setZoom(1.25) },
+                { label: "150%", action: () => setZoom(1.5) },
+                { label: "200%", action: () => setZoom(2) },
+            ],
         },
     ];
 
-    // Merge handlers - must be declared before formatItems
-    let canMerge = $derived.by(() => {
-        const range = selectionState.range;
-        if (!range) return false;
-        return (
-            range.startRow !== range.endRow || range.startCol !== range.endCol
-        );
-    });
-
-    let canUnmerge = $derived.by(() => {
+    function setFreezeRows(count) {
         const sheetStore = spreadsheetSession.activeSheetStore;
-        const anchor = selectionState.anchor;
-        if (!sheetStore?.mergeEngine || !anchor) return false;
-        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
-    });
+        if (sheetStore) {
+            sheetStore.setFrozenRows?.(count);
+        }
+    }
 
-    // Dialog state for table/repeater creation
-    let showCreateTableDialog = $state(false);
-    let showCreateRepeaterDialog = $state(false);
+    function setFreezeCols(count) {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (sheetStore) {
+            sheetStore.setFrozenColumns?.(count);
+        }
+    }
 
-    // Insert menu items
+    function setZoom(level) {
+        // Zoom functionality placeholder
+        showAlert("Zoom", `Zoom to ${Math.round(level * 100)}% - coming soon`);
+    }
+
+    // ─── INSERT MENU ──────────────────────────────────────────────────────────
     const insertItems = [
         {
             label: "Row Above",
             action: () => insertRowAbove(),
-            shortcut: "Ctrl+I then R",
         },
         {
             label: "Row Below",
@@ -305,7 +352,6 @@
         {
             label: "Column Left",
             action: () => insertColumnLeft(),
-            shortcut: "Ctrl+I then C",
         },
         {
             label: "Column Right",
@@ -327,20 +373,86 @@
         },
         { divider: true },
         {
+            label: "Image in Cell",
+            icon: imageIcon,
+            isSvgIcon: true,
+            action: () => insertImageInCell(),
+        },
+        {
+            label: "Floating Image",
+            icon: imageIcon,
+            isSvgIcon: true,
+            action: () => insertFloatingImage(),
+        },
+        {
+            label: "Link",
+            icon: link,
+            isSvgIcon: true,
+            action: () => insertLink(),
+        },
+        { divider: true },
+        {
+            label: "Chart",
+            icon: grid,
+            isSvgIcon: true,
+            action: () => showAlert("Chart", "Insert chart - coming soon"),
+        },
+        {
             label: "New Sheet",
             action: () => spreadsheetSession.addSheet("Sheet"),
             icon: "+",
         },
-        { divider: true },
-        {
-            label: "Chart...",
-            action: () =>
-                showAlert("Insert Chart", "Insert chart - not implemented"),
-        },
     ];
 
-    // Format menu items
+    // ─── FORMAT MENU ──────────────────────────────────────────────────────────
+    let canMerge = $derived.by(() => {
+        const range = selectionState.range;
+        if (!range) return false;
+        return (
+            range.startRow !== range.endRow || range.startCol !== range.endCol
+        );
+    });
+
+    let canUnmerge = $derived.by(() => {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const anchor = selectionState.anchor;
+        if (!sheetStore?.mergeEngine || !anchor) return false;
+        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
+    });
+
     const formatItems = [
+        {
+            label: "Number",
+            submenu: [
+                {
+                    label: "Automatic",
+                    action: () => applyNumberFormat("automatic"),
+                },
+                { divider: true },
+                {
+                    label: "Number (1,000)",
+                    action: () => applyNumberFormat("number"),
+                },
+                {
+                    label: "Currency ($1,000.00)",
+                    action: () => applyNumberFormat("currency"),
+                },
+                {
+                    label: "Percent (10%)",
+                    action: () => applyNumberFormat("percent"),
+                },
+                { divider: true },
+                {
+                    label: "Date (3/20/2026)",
+                    action: () => applyNumberFormat("date"),
+                },
+                {
+                    label: "Time (1:30 PM)",
+                    action: () => applyNumberFormat("time"),
+                },
+            ],
+        },
+        { divider: true },
         {
             label: "Bold",
             action: () => applyFormat("bold", true),
@@ -356,6 +468,10 @@
             action: () => applyFormat("underline", true),
             shortcut: "Ctrl+U",
         },
+        {
+            label: "Strikethrough",
+            action: () => applyFormat("strikethrough", true),
+        },
         { divider: true },
         {
             label: "Merge Cells",
@@ -369,27 +485,160 @@
         },
         { divider: true },
         {
-            label: "Number Format...",
-            action: () =>
-                showAlert("Number Format", "Number format - not implemented"),
+            label: "Text Wrapping",
+            submenu: [
+                { label: "Overflow", action: () => setTextWrap("overflow") },
+                { label: "Wrap", action: () => setTextWrap("wrap") },
+                { label: "Clip", action: () => setTextWrap("clip") },
+            ],
         },
         { divider: true },
-        { label: "Clear Formatting", action: () => clearFormatting() },
+        {
+            label: "Clear Formatting",
+            action: () => clearFormatting(),
+            shortcut: "Ctrl+\\",
+        },
     ];
 
+    // ─── DATA MENU ────────────────────────────────────────────────────────────
+    const dataItems = [
+        {
+            label: "Sort Range",
+            submenu: [
+                {
+                    label: "Sort A → Z (ascending)",
+                    action: () => sortRange("asc"),
+                },
+                {
+                    label: "Sort Z → A (descending)",
+                    action: () => sortRange("desc"),
+                },
+            ],
+        },
+        { divider: true },
+        {
+            label: "Filter Views",
+            submenu: [
+                {
+                    label: "Create New Filter View",
+                    action: () =>
+                        showAlert("Filter", "Filter views - coming soon"),
+                },
+            ],
+        },
+        { divider: true },
+        {
+            label: "Data Validation",
+            icon: functionIcon,
+            isSvgIcon: true,
+            action: () => (showDVPanel = !showDVPanel),
+        },
+        {
+            label: "Conditional Formatting",
+            action: () => (showCFPanel = !showCFPanel),
+        },
+        { divider: true },
+        {
+            label: "Split Text to Columns",
+            action: () =>
+                showAlert("Split", "Split text to columns - coming soon"),
+        },
+        {
+            label: "Remove Duplicates",
+            action: () =>
+                showAlert("Duplicates", "Remove duplicates - coming soon"),
+        },
+    ];
+
+    // ─── HELP MENU ────────────────────────────────────────────────────────────
+    const helpItems = [
+        {
+            label: "Keyboard Shortcuts",
+            shortcut: "Ctrl+/",
+            action: () => showKeyboardShortcuts(),
+        },
+        { divider: true },
+        {
+            label: "Help",
+            icon: info,
+            isSvgIcon: true,
+            action: () => showAlert("Help", "Visit our documentation for help"),
+        },
+        {
+            label: "Report a Problem",
+            action: () =>
+                showAlert("Feedback", "Report a problem - coming soon"),
+        },
+    ];
+
+    // ─── ACTION HANDLERS ──────────────────────────────────────────────────────
+
     function applyFormat(property, value) {
-        // This will be handled by FormattingToolbar
-        showAlert(
-            "Format",
-            `Apply ${property}: ${value} - use formatting toolbar`,
-        );
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = range.startRow; r <= range.endRow; r++) {
+                for (let c = range.startCol; c <= range.endCol; c++) {
+                    sheetStore.setCellProperties(r, c, { [property]: value });
+                }
+            }
+        });
+    }
+
+    function applyNumberFormat(type) {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+
+        const typeConfigs = {
+            automatic: { type: "automatic" },
+            number: { type: "number", decimals: 2 },
+            currency: { type: "currency", decimals: 2, symbol: "$" },
+            percent: { type: "percent", decimals: 1 },
+            date: { type: "date", format: "MM/DD/YYYY" },
+            time: { type: "time", format: "h:mm A" },
+        };
+
+        const config = typeConfigs[type] || { type };
+
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = range.startRow; r <= range.endRow; r++) {
+                for (let c = range.startCol; c <= range.endCol; c++) {
+                    sheetStore.setCellTypeConfig(r, c, config);
+                }
+            }
+        });
+    }
+
+    function setTextWrap(mode) {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = range.startRow; r <= range.endRow; r++) {
+                for (let c = range.startCol; c <= range.endCol; c++) {
+                    sheetStore.setCellProperties(r, c, { textWrap: mode });
+                }
+            }
+        });
     }
 
     function clearFormatting() {
-        showAlert("Clear Formatting", "Clear formatting - not implemented");
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+
+        sheetStore.clearRangeFormatting?.(
+            range.startRow,
+            range.startCol,
+            range.endRow,
+            range.endCol,
+        );
     }
 
-    // Clipboard handlers
     function handleCopy() {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (sheetStore) {
@@ -429,7 +678,6 @@
         selectionState.selectAll();
     }
 
-    // Row/Column insert handlers
     function insertRowAbove() {
         const sheetStore = spreadsheetSession.activeSheetStore;
         const range = selectionState.range;
@@ -476,6 +724,132 @@
         if (!sheetStore || !anchor) return;
         sheetStore.unmergeCells(anchor.row, anchor.col);
     }
+
+    function sortRange(direction) {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+        // Sort functionality would need to be implemented in SheetStore
+        showAlert(
+            "Sort",
+            `Sort ${direction === "asc" ? "ascending" : "descending"} - coming soon`,
+        );
+    }
+
+    function insertImageInCell() {
+        const anchor = selectionState.anchor;
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!anchor || !sheetStore) return;
+        sheetStore.setCellTypeConfig(anchor.row, anchor.col, {
+            type: "image",
+            fit: "contain",
+        });
+        showAlert("Insert Image", "Click the cell and use the image picker");
+    }
+
+    function insertFloatingImage() {
+        showAlert(
+            "Floating Image",
+            "Use the context menu (right-click) to insert floating images",
+        );
+    }
+
+    function insertLink() {
+        const anchor = selectionState.anchor;
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!anchor || !sheetStore) return;
+        const url = prompt("Enter URL:");
+        if (url) {
+            sheetStore.setCellTypeConfig(anchor.row, anchor.col, {
+                type: "url",
+            });
+            sheetStore.setCellValue(anchor.row, anchor.col, url);
+        }
+    }
+
+    function exportCSV() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
+
+        let csv = "";
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+
+        for (let r = 0; r < rowCount; r++) {
+            const row = [];
+            for (let c = 0; c < colCount; c++) {
+                const cell = sheetStore.getCell(r, c);
+                let val = cell?.v ?? "";
+                // Escape quotes and wrap in quotes if contains comma
+                if (
+                    typeof val === "string" &&
+                    (val.includes(",") || val.includes('"'))
+                ) {
+                    val = '"' + val.replace(/"/g, '""') + '"';
+                }
+                row.push(String(val));
+            }
+            csv += row.join(",") + "\n";
+        }
+
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${spreadsheetSession.docTitle || "sheet"}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function showKeyboardShortcuts() {
+        const shortcuts = `Keyboard Shortcuts:
+
+Navigation:
+Ctrl+Arrow - Jump to edge of data region
+Home - Go to first column of current row
+Ctrl+Home - Go to cell A1
+
+Selection:
+Ctrl+A - Select all
+Shift+Arrow - Extend selection
+Ctrl+Space - Select entire column
+Shift+Space - Select entire row
+
+Editing:
+F2 - Edit cell
+Enter - Confirm edit, move down
+Tab - Confirm edit, move right
+Escape - Cancel edit
+Ctrl+Enter - Fill selection with current entry
+
+Formatting:
+Ctrl+B - Bold
+Ctrl+I - Italic
+Ctrl+U - Underline
+Ctrl+\\ - Clear formatting
+
+Clipboard:
+Ctrl+C - Copy
+Ctrl+X - Cut
+Ctrl+V - Paste
+Ctrl+Shift+V - Paste values only
+
+Insert:
+Ctrl+; - Insert current date
+Ctrl+Shift+; - Insert current time
+
+Other:
+Ctrl+Z - Undo
+Ctrl+Y - Redo
+Ctrl+P - Print / Export PDF
+Ctrl+/ - Show keyboard shortcuts`;
+
+        openModal(AlertModal, {
+            title: "Keyboard Shortcuts",
+            message: shortcuts,
+            type: "info",
+        });
+    }
 </script>
 
 <div class="menu-bar" class:menu-active={openMenuId !== null}>
@@ -519,6 +893,22 @@
         anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
+    <MenuDropdown
+        label="Data"
+        items={dataItems}
+        menuId="data"
+        isOpen={openMenuId === "data"}
+        anyMenuOpen={openMenuId !== null}
+        onOpenChange={handleMenuOpenChange}
+    />
+    <MenuDropdown
+        label="Help"
+        items={helpItems}
+        menuId="help"
+        isOpen={openMenuId === "help"}
+        anyMenuOpen={openMenuId !== null}
+        onOpenChange={handleMenuOpenChange}
+    />
 </div>
 
 {#if showCreateTableDialog}
@@ -527,6 +917,14 @@
 
 {#if showCreateRepeaterDialog}
     <RepeaterCreateDialog onClose={() => (showCreateRepeaterDialog = false)} />
+{/if}
+
+{#if showCFPanel}
+    <ConditionalFormatPanel onclose={() => (showCFPanel = false)} />
+{/if}
+
+{#if showDVPanel}
+    <DataValidationPanel onclose={() => (showDVPanel = false)} />
 {/if}
 
 <style>

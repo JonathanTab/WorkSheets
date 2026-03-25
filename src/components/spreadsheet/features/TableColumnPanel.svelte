@@ -1,24 +1,15 @@
 <script>
     /**
-     * TableColumnPanel - Full column configuration panel
+     * TableColumnPanel - Column configuration panel.
      *
-     * Floats near the column header. Allows:
-     *   - Rename column
-     *   - Change type (grid of type buttons)
-     *   - Toggle required
-     *   - Set alignment (L/C/R)
-     *   - Toggle formula column + enter formula
-     *   - Add one conditional format rule
+     * Covers table-specific column settings:
+     *   - Column type (cell type for this column)
+     *   - Alignment override
+     *   - Computed (formula) column with full formula reference and live preview
      *   - Delete column
      */
 
-    import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
-    import { COLUMN_TYPE_ICONS } from "../../../stores/spreadsheet/features/TableStore.svelte.js";
     import {
-        date,
-        checkbox,
-        star,
-        link,
         close,
         trash,
         alignLeft,
@@ -26,50 +17,39 @@
         alignRight,
         menu,
     } from "../../../lib/icons/index.js";
+    import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
 
     let {
-        /** @type {import('../../../stores/spreadsheet/features/TableStore.svelte.js').TableStore} */
         table,
-        /** Column ID to configure */
         colId,
         onClose,
     } = $props();
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
 
-    // Local form state (initialized from col)
-    let localName = $state("");
-    let localType = $state("text");
-    let localRequired = $state(false);
     let localHAlign = $state(null);
     let localIsFormula = $state(false);
     let localFormula = $state("");
-    let localCondFmt = $state(null); // single rule: { condition, value, style }
+    let formulaInputEl = $state(null);
+    let showRef = $state(false);
 
-    // Initialize when col changes
     $effect(() => {
         if (col) {
-            localName = col.name ?? "";
-            localType = col.type ?? "text";
-            localRequired = col.required ?? false;
             localHAlign = col.hAlign ?? null;
             localIsFormula = col.isNonEntry ?? false;
             localFormula = col.formula ?? "";
-            localCondFmt = col.conditionalFormats?.[0] ?? null;
         }
     });
 
-    const ALL_TYPES = [
-        { id: "text", label: "Text", icon: "A" },
-        { id: "number", label: "Number", icon: "#" },
-        { id: "currency", label: "Currency", icon: "$" },
-        { id: "percent", label: "Percent", icon: "%" },
-        { id: "date", label: "Date", icon: date, isSvg: true },
-        { id: "checkbox", label: "Checkbox", icon: checkbox, isSvg: true },
-        { id: "rating", label: "Rating", icon: star, isSvg: true },
-        { id: "url", label: "URL", icon: link, isSvg: true },
-        { id: "dropdown", label: "Dropdown", icon: "▾" },
-    ];
+    /** Full type config for the controlled CellTypeConfigurator */
+    let colTypeConfig = $derived(
+        col ? (col.typeConfig ?? (col.type && col.type !== "text" ? { type: col.type } : null)) : null
+    );
+
+    function handleTypeConfigChange(config) {
+        if (!table || !colId) return;
+        table.updateColumnTypeConfig(colId, config);
+    }
 
     const ALIGN_OPTIONS = [
         { value: null, label: "Auto", icon: menu, isSvg: true },
@@ -77,32 +57,6 @@
         { value: "center", label: "Center", icon: alignCenter, isSvg: true },
         { value: "right", label: "Right", icon: alignRight, isSvg: true },
     ];
-
-    const COND_OPS = [
-        { value: "gt", label: "> Greater than" },
-        { value: "lt", label: "< Less than" },
-        { value: "gte", label: "≥ Greater or equal" },
-        { value: "lte", label: "≤ Less or equal" },
-        { value: "eq", label: "= Equals" },
-        { value: "neq", label: "≠ Not equals" },
-        { value: "contains", label: "Contains" },
-    ];
-
-    function applyName() {
-        const n = localName.trim();
-        if (!n || !table || !colId) return;
-        table.renameColumn(colId, n);
-    }
-
-    function applyType(type) {
-        localType = type;
-        if (table && colId) table.updateColumnDef(colId, { type });
-    }
-
-    function applyRequired(val) {
-        localRequired = val;
-        if (table && colId) table.updateColumnDef(colId, { required: val });
-    }
 
     function applyAlign(val) {
         localHAlign = val;
@@ -126,28 +80,9 @@
         }
     }
 
-    function applyCondFmt() {
-        if (!table || !colId) return;
-        const fmts = localCondFmt ? [localCondFmt] : [];
-        table.updateColumnDef(colId, { conditionalFormats: fmts });
-    }
-
-    function addCondFmt() {
-        localCondFmt = {
-            condition: "gt",
-            value: "0",
-            style: { backgroundColor: "#fef3c7" },
-        };
-    }
-
-    function removeCondFmt() {
-        localCondFmt = null;
-        applyCondFmt();
-    }
-
     function handleDelete() {
         if (!table || !colId) return;
-        if (table.columns.length <= 1) return; // don't delete last column
+        if (table.columns.length <= 1) return;
         table.deleteColumn(colId);
         onClose?.();
     }
@@ -159,85 +94,119 @@
         }
     }
 
-    // Column name input: commit on Enter or blur
-    function handleNameKeydown(e) {
-        if (e.key === "Enter") {
-            e.stopPropagation();
-            applyName();
-        } else if (e.key === "Escape") {
-            e.stopPropagation();
-            localName = col?.name ?? "";
+    /** Insert text at the cursor position in the formula input */
+    function insertAtCursor(text) {
+        if (!formulaInputEl) {
+            localFormula += text;
+            return;
         }
+        const start = formulaInputEl.selectionStart ?? localFormula.length;
+        const end = formulaInputEl.selectionEnd ?? localFormula.length;
+        localFormula = localFormula.slice(0, start) + text + localFormula.slice(end);
+        // Move cursor after inserted text
+        setTimeout(() => {
+            formulaInputEl?.focus();
+            formulaInputEl?.setSelectionRange(start + text.length, start + text.length);
+        }, 0);
     }
 
-    let formulaPlaceholder = $derived(
-        localType === "number" ||
-            localType === "currency" ||
-            localType === "percent"
-            ? "e.g. CUMSUM(amount) or {price}*{qty}"
-            : "e.g. CUMSUM(amount)",
+    /** Non-formula columns available for reference */
+    let inputCols = $derived(
+        (table?.columns ?? []).filter(c => !c.isNonEntry && c.id !== colId)
     );
 
+    /** Live preview: compute formula for first 3 rows */
+    let previewRows = $derived.by(() => {
+        if (!localIsFormula || !localFormula.trim() || !table) return [];
+        const count = Math.min(3, table.sortedFilteredRows.length);
+        const results = [];
+        for (let i = 0; i < count; i++) {
+            try {
+                const val = table.evaluateFormula(localFormula.trim(), i);
+                const row = table.sortedFilteredRows[i];
+                // Show a label column (first non-formula col) if available
+                const labelCol = inputCols[0];
+                const label = labelCol ? String(row?.[labelCol.id] ?? '').slice(0, 20) : `Row ${i + 1}`;
+                results.push({ label, value: val });
+            } catch {
+                results.push({ label: `Row ${i + 1}`, value: null });
+            }
+        }
+        return results;
+    });
+
     let canDelete = $derived(table ? table.columns.length > 1 : false);
+
+    const REF_SECTIONS = [
+        {
+            title: "Row values",
+            items: [
+                { syntax: "{colName}", desc: "Value from this row's column" },
+                { syntax: "ROW", desc: "0-based row index" },
+                { syntax: "ROW1", desc: "1-based row index" },
+            ]
+        },
+        {
+            title: "Running totals (up to this row)",
+            items: [
+                { syntax: "CUMSUM(col)", desc: "Running sum of col" },
+                { syntax: 'RUNNINGIF(sum, filter, "op", val)', desc: "Running sum where condition met" },
+                { syntax: 'RUNNINGIFS(sum, col1,"op1",val1, ...)', desc: "Running sum, multiple conditions" },
+            ]
+        },
+        {
+            title: "Aggregates (all rows)",
+            items: [
+                { syntax: "SUM(col)", desc: "Total sum" },
+                { syntax: "AVG(col)", desc: "Average" },
+                { syntax: "MIN(col) / MAX(col)", desc: "Min or max value" },
+                { syntax: "COUNT", desc: "Total row count" },
+                { syntax: 'SUMIF(sum, filter, "op", val)', desc: "Sum where condition met" },
+                { syntax: 'SUMIFS(sum, col1,"op1",val1, ...)', desc: "Sum, multiple conditions" },
+                { syntax: 'COUNTIF(filter, "op", val)', desc: "Count where condition met" },
+                { syntax: 'AVGIF(sum, filter, "op", val)', desc: "Average where condition met" },
+                { syntax: 'MINIF(col, filter, "op", val)', desc: "Min where condition met" },
+                { syntax: 'MAXIF(col, filter, "op", val)', desc: "Max where condition met" },
+            ]
+        },
+        {
+            title: "Logic & arithmetic",
+            items: [
+                { syntax: "{price} * {qty}", desc: "Arithmetic over columns" },
+                { syntax: 'IF({col} = "x", 1, 0)', desc: "Conditional value" },
+                { syntax: 'IF({type}="income", {amt}, -{amt})', desc: "Signed amount" },
+            ]
+        },
+        {
+            title: "Operators for op argument",
+            items: [
+                { syntax: '"="  "<>"  ">"  "<"  ">="  "<="', desc: "Numeric / string compare" },
+                { syntax: '"contains"  "startswith"', desc: "Text match" },
+            ]
+        }
+    ];
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-    class="col-panel"
-    onkeydown={handleKeydown}
-    role="dialog"
-    aria-label="Column settings"
->
-    <!-- Header -->
-    <div
-        class="panel-header"
-        style="--accent: {table?.accentColor ?? '#3b82f6'};"
-    >
-        <div class="accent-bar"></div>
-        <div class="header-content">
-            <span class="header-icon"
-                >{COLUMN_TYPE_ICONS[localType] ?? "A"}</span
-            >
-            <input
-                class="name-input"
-                type="text"
-                bind:value={localName}
-                onblur={applyName}
-                onkeydown={handleNameKeydown}
-                placeholder="Column name"
-            />
-            <button
-                class="close-btn"
-                onclick={() => onClose?.()}
-                aria-label="Close">{@html close}</button
-            >
-        </div>
+<div class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings">
+    <div class="panel-header">
+        <span class="panel-title">Column</span>
+        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
     </div>
 
     <div class="panel-body">
         <!-- Type picker -->
         <section class="section">
             <div class="section-label">Type</div>
-            <div class="type-grid">
-                {#each ALL_TYPES as t}
-                    <button
-                        class="type-btn"
-                        class:active={localType === t.id}
-                        onclick={() => applyType(t.id)}
-                        title={t.label}
-                    >
-                        <span class="type-icon"
-                            >{#if t.isSvg}{@html t.icon}{:else}{t.icon}{/if}</span
-                        >
-                        <span class="type-label">{t.label}</span>
-                    </button>
-                {/each}
-            </div>
+            <CellTypeConfigurator
+                controlledConfig={colTypeConfig}
+                onControlledChange={handleTypeConfigChange}
+            />
         </section>
 
         <!-- Alignment -->
         <section class="section section-row">
-            <div class="section-label">Alignment</div>
+            <div class="section-label" style="margin:0;">Alignment</div>
             <div class="align-group">
                 {#each ALIGN_OPTIONS as opt}
                     <button
@@ -245,39 +214,18 @@
                         class:active={localHAlign === opt.value}
                         onclick={() => applyAlign(opt.value)}
                         title={opt.label}
-                        >{#if opt.isSvg}{@html opt.icon}{:else}{opt.icon}{/if}</button
-                    >
+                    >{#if opt.isSvg}{@html opt.icon}{:else}{opt.icon}{/if}</button>
                 {/each}
             </div>
         </section>
 
-        <!-- Required toggle -->
-        <section class="section section-row">
-            <label class="toggle-label">
-                <span class="section-label" style="margin:0;">Required</span>
-                <div class="toggle-wrapper">
-                    <input
-                        type="checkbox"
-                        class="toggle-input"
-                        bind:checked={localRequired}
-                        onchange={() => applyRequired(localRequired)}
-                    />
-                    <div class="toggle-track" class:on={localRequired}></div>
-                </div>
-            </label>
-        </section>
-
-        <!-- Formula column -->
+        <!-- Computed column -->
         <section class="section">
             <div class="section-row" style="margin-bottom:6px;">
                 <label class="toggle-label">
                     <div>
-                        <div class="section-label" style="margin:0;">
-                            Computed column
-                        </div>
-                        <div class="section-sublabel">
-                            Value is calculated, not entered
-                        </div>
+                        <div class="section-label" style="margin:0;">Computed column</div>
+                        <div class="section-sublabel">Value is calculated, not entered</div>
                     </div>
                     <div class="toggle-wrapper">
                         <input
@@ -286,148 +234,104 @@
                             bind:checked={localIsFormula}
                             onchange={() => toggleFormula(localIsFormula)}
                         />
-                        <div
-                            class="toggle-track"
-                            class:on={localIsFormula}
-                        ></div>
+                        <div class="toggle-track" class:on={localIsFormula}></div>
                     </div>
                 </label>
             </div>
+
             {#if localIsFormula}
+                <!-- Formula input -->
                 <div class="formula-input-row">
                     <span class="fx-badge">fx</span>
                     <input
+                        bind:this={formulaInputEl}
                         class="formula-input"
                         type="text"
                         bind:value={localFormula}
-                        placeholder={formulaPlaceholder}
+                        placeholder="e.g. CUMSUM(amount) or {'{price}'}*{'{qty}'}"
                         onblur={applyFormula}
                         onkeydown={(e) => {
-                            if (e.key === "Enter") {
-                                e.stopPropagation();
-                                applyFormula();
-                            }
+                            if (e.key === "Enter") { e.stopPropagation(); applyFormula(); }
                         }}
                     />
                 </div>
-                <div class="formula-help">
-                    <code>CUMSUM(colId)</code> • <code>SUM(colId)</code> •
-                    <code>AVG(colId)</code>
-                    •
-                    <code>{"{colId}"}</code> for row values
-                </div>
-            {/if}
-        </section>
 
-        <!-- Conditional format (single rule) -->
-        <section class="section">
-            <div class="section-row" style="margin-bottom:4px;">
-                <div class="section-label">Conditional format</div>
-                {#if !localCondFmt}
-                    <button class="add-rule-btn" onclick={addCondFmt}
-                        >+ Add rule</button
-                    >
-                {/if}
-            </div>
-            {#if localCondFmt}
-                <div class="cond-fmt-row">
-                    <select
-                        class="cond-select"
-                        value={localCondFmt.condition}
-                        onchange={(e) => {
-                            localCondFmt = {
-                                ...localCondFmt,
-                                condition: e.currentTarget.value,
-                            };
-                        }}
-                    >
-                        {#each COND_OPS as op}
-                            <option value={op.value}>{op.label}</option>
+                <!-- Column chips -->
+                {#if inputCols.length > 0}
+                    <div class="chips-label">Insert column reference:</div>
+                    <div class="chips-row">
+                        {#each inputCols as c}
+                            <button
+                                class="col-chip"
+                                onclick={() => insertAtCursor(`{${c.id}}`)}
+                                title="Insert {'{' + c.id + '}'}"
+                            >{c.name}</button>
                         {/each}
-                    </select>
-                    <input
-                        class="cond-value"
-                        type="text"
-                        value={localCondFmt.value ?? ""}
-                        oninput={(e) => {
-                            localCondFmt = {
-                                ...localCondFmt,
-                                value: e.currentTarget.value,
-                            };
-                        }}
-                        placeholder="Value"
-                    />
+                    </div>
+                {/if}
+
+                <!-- Live preview -->
+                {#if previewRows.length > 0}
+                    <div class="preview-label">Preview:</div>
+                    <div class="preview-table">
+                        {#each previewRows as row}
+                            <div class="preview-row">
+                                <span class="preview-key">{row.label}</span>
+                                <span class="preview-val" class:preview-null={row.value === null}>
+                                    {row.value === null ? '—' : String(row.value)}
+                                </span>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+
+                <!-- Formula reference -->
+                <div class="ref-toggle">
+                    <button class="ref-toggle-btn" onclick={() => showRef = !showRef}>
+                        {showRef ? '▾' : '▸'} Formula reference
+                    </button>
                 </div>
-                <div class="cond-fmt-style">
-                    <label class="style-label">
-                        <span>Bg</span>
-                        <input
-                            type="color"
-                            value={localCondFmt.style?.backgroundColor ??
-                                "#fef3c7"}
-                            oninput={(e) => {
-                                localCondFmt = {
-                                    ...localCondFmt,
-                                    style: {
-                                        ...localCondFmt.style,
-                                        backgroundColor: e.currentTarget.value,
-                                    },
-                                };
-                            }}
-                        />
-                    </label>
-                    <label class="style-label">
-                        <span>Text</span>
-                        <input
-                            type="color"
-                            value={localCondFmt.style?.color ?? "#000000"}
-                            oninput={(e) => {
-                                localCondFmt = {
-                                    ...localCondFmt,
-                                    style: {
-                                        ...localCondFmt.style,
-                                        color: e.currentTarget.value,
-                                    },
-                                };
-                            }}
-                        />
-                    </label>
-                    <label class="style-label checkbox-label">
-                        <input
-                            type="checkbox"
-                            checked={localCondFmt.style?.bold ?? false}
-                            onchange={(e) => {
-                                localCondFmt = {
-                                    ...localCondFmt,
-                                    style: {
-                                        ...localCondFmt.style,
-                                        bold: e.currentTarget.checked,
-                                    },
-                                };
-                            }}
-                        />
-                        <span>Bold</span>
-                    </label>
-                    <button class="apply-cond-btn" onclick={applyCondFmt}
-                        >Apply</button
-                    >
-                    <button class="remove-cond-btn" onclick={removeCondFmt}
-                        >{@html close}</button
-                    >
-                </div>
+
+                {#if showRef}
+                    <div class="ref-panel">
+                        {#each REF_SECTIONS as section}
+                            <div class="ref-section">
+                                <div class="ref-section-title">{section.title}</div>
+                                {#each section.items as item}
+                                    <div class="ref-item">
+                                        <code class="ref-syntax">{item.syntax}</code>
+                                        <span class="ref-desc">{item.desc}</span>
+                                    </div>
+                                {/each}
+                            </div>
+                        {/each}
+                        <div class="ref-examples">
+                            <div class="ref-section-title">Examples</div>
+                            <div class="ref-example">
+                                <code>RUNNINGIF(amount, account, "=", {"{account}"})</code>
+                                <span class="ref-desc">Running balance per account</span>
+                            </div>
+                            <div class="ref-example">
+                                <code>SUMIFS(cost, payee, "=", "Amazon", date, "&gt;=", "2024-01-01")</code>
+                                <span class="ref-desc">Amazon spending in 2024</span>
+                            </div>
+                            <div class="ref-example">
+                                <code>IF({"{type}"} = "income", {"{amount}"}, -{"{amount}"})</code>
+                                <span class="ref-desc">Signed transaction amount</span>
+                            </div>
+                        </div>
+                    </div>
+                {/if}
             {/if}
         </section>
     </div>
 
-    <!-- Footer -->
     <div class="panel-footer">
         <button
             class="delete-btn"
             onclick={handleDelete}
             disabled={!canDelete}
-            title={canDelete
-                ? "Delete this column"
-                : "Cannot delete the only column"}
+            title={canDelete ? "Delete this column" : "Cannot delete the only column"}
         >
             {@html trash} Delete Column
         </button>
@@ -439,8 +343,8 @@
         background: var(--cell-bg, #fff);
         border: 1px solid var(--border-color, #e2e8f0);
         border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.14);
-        width: 260px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+        width: 280px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
@@ -450,44 +354,18 @@
     }
 
     .panel-header {
-        position: relative;
+        display: flex;
+        align-items: center;
+        padding: 8px 10px;
         border-bottom: 1px solid var(--border-color, #e2e8f0);
         background: var(--header-bg, #f8fafc);
     }
 
-    .accent-bar {
-        height: 3px;
-        background: var(--accent);
-        width: 100%;
-    }
-
-    .header-content {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 8px 10px;
-    }
-
-    .header-icon {
-        font-size: 14px;
-        color: var(--color-text-secondary, #64748b);
-        flex-shrink: 0;
-    }
-
-    .name-input {
+    .panel-title {
         flex: 1;
-        border: none;
-        background: transparent;
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 600;
         color: var(--text-color, #1e293b);
-        outline: none;
-        min-width: 0;
-        padding: 0;
-    }
-
-    .name-input:focus {
-        border-bottom: 1.5px solid var(--color-primary, #3b82f6);
     }
 
     .close-btn {
@@ -495,10 +373,8 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 14px;
         padding: 2px;
         border-radius: 3px;
-        flex-shrink: 0;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -506,10 +382,7 @@
         height: 20px;
     }
 
-    .close-btn:hover {
-        background: #e2e8f0;
-        color: #475569;
-    }
+    .close-btn:hover { background: #e2e8f0; color: #475569; }
 
     .panel-body {
         padding: 4px 0;
@@ -521,10 +394,7 @@
         padding: 8px 12px;
         border-bottom: 1px solid var(--border-color, #f1f5f9);
     }
-
-    .section:last-child {
-        border-bottom: none;
-    }
+    .section:last-child { border-bottom: none; }
 
     .section-row {
         display: flex;
@@ -547,53 +417,7 @@
         margin-top: 1px;
     }
 
-    /* Type grid */
-    .type-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 4px;
-    }
-
-    .type-btn {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 2px;
-        padding: 6px 4px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 5px;
-        background: var(--cell-bg, #fff);
-        cursor: pointer;
-        font-size: 10px;
-        color: #64748b;
-        transition: all 0.1s;
-    }
-
-    .type-btn:hover {
-        background: var(--color-fill, #f1f5f9);
-        border-color: #94a3b8;
-    }
-
-    .type-btn.active {
-        background: #eff6ff;
-        border-color: #3b82f6;
-        color: #1d4ed8;
-    }
-
-    .type-icon {
-        font-size: 13px;
-        line-height: 1;
-    }
-
-    .type-label {
-        font-size: 9px;
-    }
-
-    /* Alignment */
-    .align-group {
-        display: flex;
-        gap: 2px;
-    }
+    .align-group { display: flex; gap: 2px; }
 
     .align-btn {
         width: 26px;
@@ -609,17 +433,9 @@
         justify-content: center;
     }
 
-    .align-btn:hover {
-        background: var(--color-fill, #f1f5f9);
-    }
+    .align-btn:hover { background: var(--color-fill, #f1f5f9); }
+    .align-btn.active { background: #f1f5f9; border-color: #64748b; color: #1e293b; }
 
-    .align-btn.active {
-        background: #eff6ff;
-        border-color: #3b82f6;
-        color: #1d4ed8;
-    }
-
-    /* Toggle */
     .toggle-label {
         display: flex;
         align-items: center;
@@ -629,17 +445,8 @@
         gap: 8px;
     }
 
-    .toggle-wrapper {
-        position: relative;
-        flex-shrink: 0;
-    }
-
-    .toggle-input {
-        position: absolute;
-        opacity: 0;
-        width: 0;
-        height: 0;
-    }
+    .toggle-wrapper { position: relative; flex-shrink: 0; }
+    .toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
 
     .toggle-track {
         width: 28px;
@@ -663,30 +470,25 @@
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
     }
 
-    .toggle-track.on {
-        background: #3b82f6;
-    }
+    .toggle-track.on { background: #475569; }
+    .toggle-track.on::after { transform: translateX(12px); }
 
-    .toggle-track.on::after {
-        transform: translateX(12px);
-    }
-
-    /* Formula */
     .formula-input-row {
         display: flex;
         align-items: center;
         gap: 4px;
-        margin-bottom: 4px;
+        margin-bottom: 6px;
     }
 
     .fx-badge {
         font-size: 10px;
         font-weight: 600;
-        color: #7c3aed;
-        background: rgba(139, 92, 246, 0.1);
+        color: #64748b;
+        background: #f1f5f9;
         padding: 1px 5px;
         border-radius: 3px;
         flex-shrink: 0;
+        font-family: monospace;
     }
 
     .formula-input {
@@ -702,119 +504,152 @@
         min-width: 0;
     }
 
-    .formula-input:focus {
-        border-color: #7c3aed;
-    }
+    .formula-input:focus { border-color: #94a3b8; }
 
-    .formula-help {
+    /* ── Column chips ─────────────────────────────────────────────── */
+    .chips-label {
         font-size: 9px;
         color: #94a3b8;
-        line-height: 1.6;
+        margin-bottom: 3px;
     }
 
-    .formula-help code {
-        background: #f1f5f9;
-        padding: 0 3px;
-        border-radius: 2px;
-        font-family: monospace;
-    }
-
-    /* Conditional format */
-    .add-rule-btn {
-        font-size: 10px;
-        color: #3b82f6;
-        background: none;
-        border: none;
-        cursor: pointer;
-        padding: 0;
-    }
-
-    .add-rule-btn:hover {
-        text-decoration: underline;
-    }
-
-    .cond-fmt-row {
+    .chips-row {
         display: flex;
-        gap: 4px;
+        flex-wrap: wrap;
+        gap: 3px;
         margin-bottom: 6px;
     }
 
-    .cond-select {
-        flex: 1;
-        font-size: 11px;
-        border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 3px 4px;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        outline: none;
-    }
-
-    .cond-value {
-        width: 60px;
-        font-size: 11px;
-        border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 3px 5px;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        outline: none;
-    }
-
-    .cond-fmt-style {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        flex-wrap: wrap;
-    }
-
-    .style-label {
-        display: flex;
-        align-items: center;
-        gap: 3px;
+    .col-chip {
         font-size: 10px;
+        font-family: monospace;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 3px;
+        padding: 1px 6px;
+        cursor: pointer;
+        color: #475569;
+        white-space: nowrap;
+        max-width: 90px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .col-chip:hover { background: #e2e8f0; border-color: #94a3b8; color: #1e293b; }
+
+    /* ── Live preview ──────────────────────────────────────────────── */
+    .preview-label {
+        font-size: 9px;
+        font-weight: 600;
         color: #64748b;
-        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 3px;
     }
 
-    .style-label input[type="color"] {
-        width: 20px;
-        height: 20px;
+    .preview-table {
+        background: #f8fafc;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
-        padding: 1px;
-        cursor: pointer;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 6px;
     }
 
-    .checkbox-label {
-        gap: 3px;
-    }
-
-    .apply-cond-btn {
+    .preview-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 2px 6px;
         font-size: 10px;
-        padding: 3px 7px;
-        background: #3b82f6;
-        color: white;
-        border: none;
-        border-radius: 3px;
-        cursor: pointer;
-        margin-left: auto;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    .preview-row:last-child { border-bottom: none; }
+
+    .preview-key {
+        color: #64748b;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
-    .remove-cond-btn {
-        font-size: 10px;
-        color: #94a3b8;
+    .preview-val {
+        font-family: monospace;
+        color: #1e293b;
+        font-weight: 600;
+        flex-shrink: 0;
+        margin-left: 6px;
+    }
+
+    .preview-val.preview-null { color: #94a3b8; font-weight: 400; }
+
+    /* ── Formula reference ─────────────────────────────────────────── */
+    .ref-toggle { margin-bottom: 2px; }
+
+    .ref-toggle-btn {
         background: none;
         border: none;
         cursor: pointer;
-        padding: 2px 4px;
+        font-size: 10px;
+        color: #64748b;
+        padding: 2px 0;
+        font-weight: 600;
     }
 
-    .remove-cond-btn:hover {
-        color: #ef4444;
+    .ref-toggle-btn:hover { color: #475569; }
+
+    .ref-panel {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        padding: 6px 8px;
+        max-height: 240px;
+        overflow-y: auto;
     }
 
-    /* Footer */
+    .ref-section {
+        margin-bottom: 8px;
+    }
+    .ref-section:last-child { margin-bottom: 0; }
+
+    .ref-section-title {
+        font-size: 9px;
+        font-weight: 700;
+        color: #475569;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 3px;
+        padding-bottom: 2px;
+        border-bottom: 1px solid #e2e8f0;
+    }
+
+    .ref-item, .ref-example {
+        display: flex;
+        align-items: flex-start;
+        gap: 4px;
+        margin-bottom: 2px;
+        flex-wrap: wrap;
+    }
+
+    .ref-syntax, .ref-panel code {
+        font-size: 9px;
+        font-family: monospace;
+        background: #e8f0fe;
+        color: #1e40af;
+        padding: 1px 4px;
+        border-radius: 2px;
+        white-space: nowrap;
+    }
+
+    .ref-desc {
+        font-size: 9px;
+        color: #64748b;
+        line-height: 1.4;
+    }
+
+    .ref-examples { margin-top: 4px; }
+
     .panel-footer {
         padding: 8px 12px;
         border-top: 1px solid var(--border-color, #e2e8f0);
@@ -831,14 +666,11 @@
         cursor: pointer;
         width: 100%;
         text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 4px;
     }
 
-    .delete-btn:hover:not(:disabled) {
-        background: #fef2f2;
-    }
-
-    .delete-btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-    }
+    .delete-btn:hover:not(:disabled) { background: #fef2f2; }
+    .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

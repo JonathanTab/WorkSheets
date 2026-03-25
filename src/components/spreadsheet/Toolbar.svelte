@@ -2,8 +2,14 @@
     import DocumentName from "./toolbar/DocumentName.svelte";
     import MenuBar from "./toolbar/MenuBar.svelte";
     import FormattingToolbar from "./toolbar/FormattingToolbar.svelte";
+    import PresenceIndicator from "./PresenceIndicator.svelte";
 
-    let { onClose = undefined } = $props();
+    let {
+        onClose = undefined,
+        awareness = null,
+        currentUser = '',
+        onShowHistory = undefined,
+    } = $props();
 </script>
 
 <div class="toolbar">
@@ -20,6 +26,22 @@
             {/if}
             <DocumentName />
             <MenuBar />
+        </div>
+        <div class="row1-right">
+            <PresenceIndicator {awareness} {currentUser} />
+            {#if onShowHistory}
+                <button
+                    class="history-btn"
+                    onclick={onShowHistory}
+                    title="Document history"
+                    aria-label="View document history"
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/>
+                        <polyline points="12 6 12 12 16 14"/>
+                    </svg>
+                </button>
+            {/if}
         </div>
     </div>
     <div class="toolbar-row row2">
@@ -59,6 +81,32 @@
     .row1-right {
         display: flex;
         align-items: center;
+        gap: 6px;
+    }
+
+    .history-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        background: transparent;
+        border: none;
+        border-radius: 4px;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: all 0.1s ease;
+    }
+
+    .history-btn:hover {
+        background: var(--color-fill);
+        color: var(--color-text);
+    }
+
+    .history-btn:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 1px;
     }
 
     .row2 {

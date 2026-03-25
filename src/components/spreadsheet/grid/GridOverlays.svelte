@@ -22,6 +22,7 @@
     import { isRichText } from "../../../stores/spreadsheet/richText.js";
     import FormulaValuePopup from "../FormulaValuePopup.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
+    import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
     import FileEditor from "../cellTypes/FileEditor.svelte";
 
@@ -57,7 +58,7 @@
             typeof editValue === "string" &&
             editValue?.startsWith("="),
     );
-    // Current cell type config, used by FileEditor
+    // Current cell type config, used by FileEditor and DatePickerEditor
     let cellCtConfig = $derived.by(() => {
         if (!editSessionState.isEditing || !editSessionState.cell) return null;
         const { row, col } = editSessionState.cell;
@@ -65,6 +66,9 @@
         if (!sheetStore) return null;
         return sheetStore.getCellTypeConfig(row, col);
     });
+
+    // Date subFormat for DatePickerEditor (date, time, datetime)
+    let dateSubFormat = $derived(cellCtConfig?.subFormat ?? 'date');
 
     // Use contenteditable for all non-formula, non-picker, non-image, non-file text cells
     let isContentEditable = $derived(
@@ -95,9 +99,15 @@
     });
 
     // Initialize contenteditable when it becomes active.
+    // Track editSessionState.cell so this re-runs when the edited cell changes
+    // (e.g. Tab navigation in table entry row keeps isContentEditable=true but moves to
+    // a different cell — without the cell tracking the editor would show stale content).
     // Use untrack() for all inner reads so that changes to editValue or richTextValue
     // during the session don't re-run this effect and destroy formatting the user applied.
     $effect(() => {
+        // Track cell identity so the effect re-runs on cell change
+        const _cellRow = editSessionState.cell?.row;
+        const _cellCol = editSessionState.cell?.col;
         if (isContentEditable && richEditEl) {
             untrack(() => {
                 const html = editSessionState.richTextValue;
@@ -384,6 +394,14 @@
                         }
                     }}
                     onCancel={onCancelEdit}
+                />
+            {:else if pickerMode === 'date'}
+                <DatePickerEditor
+                    value={editValue}
+                    subFormat={dateSubFormat}
+                    onchange={(val) => onEditInput?.(val)}
+                    oncommit={(val) => handlePickerCommit(val)}
+                    oncancel={onCancelEdit}
                 />
             {:else if pickerMode}
                 <PickerEditor

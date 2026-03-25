@@ -57,6 +57,12 @@ export class SpreadsheetSession {
     /** @type {Object | null} */
     awareness = $state.raw(null);
 
+    /** @type {Array} Remote user selections (reactive for UI) */
+    remoteSelections = $state([]);
+
+    /** @type {Function | null} Cleanup for awareness observer */
+    #cleanupAwarenessObserver = null;
+
     /** @type {SheetStore | null} */
     activeSheetStore = $state.raw(null);
 
@@ -227,6 +233,7 @@ export class SpreadsheetSession {
             const provider = storage._runtime?.activeDocs?.get(docId)?.provider;
             if (provider) {
                 this.awareness = provider.awareness;
+                this.#setupAwarenessObserver();
             }
             console.log('[SpreadsheetSession] Awareness set up');
 
@@ -256,6 +263,13 @@ export class SpreadsheetSession {
      * Unload the current document
      */
     async unload() {
+        // Cleanup awareness observer
+        if (this.#cleanupAwarenessObserver) {
+            this.#cleanupAwarenessObserver();
+            this.#cleanupAwarenessObserver = null;
+        }
+        this.remoteSelections = [];
+
         // Cleanup undo observer
         if (this.#cleanupUndoObserver) {
             this.#cleanupUndoObserver();
@@ -1004,6 +1018,26 @@ export class SpreadsheetSession {
         if (namedRanges) {
             namedRanges.delete(name);
         }
+    }
+
+    /**
+     * Set up observer for awareness state changes (remote cursors)
+     */
+    #setupAwarenessObserver() {
+        if (!this.awareness) return;
+
+        const observer = () => {
+            this.remoteSelections = this.getRemoteSelections();
+        };
+
+        this.awareness.on('change', observer);
+
+        // Initial sync
+        observer();
+
+        this.#cleanupAwarenessObserver = () => {
+            this.awareness?.off('change', observer);
+        };
     }
 
     /**

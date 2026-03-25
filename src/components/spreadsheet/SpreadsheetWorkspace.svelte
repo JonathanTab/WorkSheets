@@ -4,6 +4,7 @@
     import FormulaBar from "./FormulaBar.svelte";
     import SheetTabs from "./SheetTabs.svelte";
     import Toolbar from "./Toolbar.svelte";
+    import HistoryPanel from "../HistoryPanel.svelte";
     import {
         spreadsheetSession,
         selectionState,
@@ -12,11 +13,19 @@
     } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+    import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
+    import { CellTypeRegistry } from "../../stores/spreadsheet/index.js";
+    import { authStore } from "../../stores/authStore.js";
 
-    let { docId } = $props();
+    let { docId, registry = null } = $props();
 
     let isLoading = $state(true);
     let error = $state(null);
+    let showHistory = $state(false);
+
+    // ── Awareness / presence ───────────────────────────────────────────────────
+    let awareness = $derived(spreadsheetSession.awareness);
+    let currentUser = $derived($authStore.user?.username ?? '');
 
     // ── Page break overlay state ───────────────────────────────────────────────
     let showPageBreaks = $state(false);
@@ -202,9 +211,23 @@
             </button>
         </div>
     {:else}
+        <div class="workspace-outer">
+        {#if showHistory && registry}
+            <HistoryPanel
+                {registry}
+                fileId={docId}
+                currentDoc={spreadsheetSession.ydoc ?? null}
+                onClose={() => { showHistory = false; }}
+            />
+        {/if}
         <div class="workspace-container">
             <!-- Toolbar -->
-            <Toolbar onClose={handleCloseDocument} />
+            <Toolbar
+                onClose={handleCloseDocument}
+                {awareness}
+                {currentUser}
+                onShowHistory={registry ? () => { showHistory = true; } : undefined}
+            />
 
             <!-- Formula Bar -->
             <FormulaBar
@@ -214,13 +237,43 @@
                     // otherwise fall back to current anchor
                     const targetRow = row ?? selectionState.anchor?.row;
                     const targetCol = col ?? selectionState.anchor?.col;
-                    if (targetRow !== undefined && targetCol !== undefined) {
-                        const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
-                        if (typeof value === 'string' && value.startsWith('=')) {
-                            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
-                        } else {
-                            spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
+                    if (targetRow === undefined || targetCol === undefined) return;
+
+                    // Route table cell edits to the table store, not the sheet store
+                    const renderContext = spreadsheetSession.renderContext;
+                    if (renderContext) {
+                        const cellType = renderContext.getCellType(targetRow, targetCol);
+                        if (cellType === CELL_TYPE.TABLE_DATA) {
+                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                            }
+                            return;
                         }
+                        if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                                info.table.setEntryValue(info.colDef.id, parsed);
+                            }
+                            return;
+                        }
+                        if (cellType === CELL_TYPE.TABLE_HEADER) {
+                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                            if (info?.table && info.colDef) {
+                                const newName = String(value ?? "").trim();
+                                if (newName) info.table.renameColumn(info.colDef.id, newName);
+                            }
+                            return;
+                        }
+                    }
+
+                    const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
+                    if (typeof value === 'string' && value.startsWith('=')) {
+                        spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
+                    } else {
+                        spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
                     }
                 }}
             />
@@ -254,6 +307,7 @@
                 onDeleteSheet={handleDeleteSheet}
                 onRenameSheet={handleRenameSheet}
             />
+        </div>
         </div>
     {/if}
 </div>
@@ -295,10 +349,18 @@
         }
     }
 
+    .workspace-outer {
+        display: flex;
+        flex-direction: row;
+        height: 100%;
+        overflow: hidden;
+        min-height: 0;
+    }
+
     .workspace-container {
         display: flex;
         flex-direction: column;
-        height: 100%;
+        flex: 1;
         overflow: hidden;
         min-height: 0;
     }

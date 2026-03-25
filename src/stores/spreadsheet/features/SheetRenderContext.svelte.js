@@ -188,12 +188,27 @@ export class SheetRenderContext {
         const type = this.getCellType(row, col);
         let rawValue;
 
-        // ── Phase 2+: table data ──────────────────────────────────────────
-        if (type === CELL_TYPE.TABLE_DATA && this.tableManager) {
-            rawValue = this.tableManager.getCellDisplayValue(row, col);
+        // ── Phase 2+: table cells ─────────────────────────────────────────
+        if (this.tableManager) {
+            if (type === CELL_TYPE.TABLE_HEADER) {
+                const info = this.tableManager.getCellInfo(row, col);
+                rawValue = info?.colDef?.name ?? '';
+            } else if (type === CELL_TYPE.TABLE_DATA) {
+                rawValue = this.tableManager.getCellDisplayValue(row, col);
+            } else if (type === CELL_TYPE.TABLE_ENTRY) {
+                const info = this.tableManager.getCellInfo(row, col);
+                rawValue = (info?.colDef && !info.colDef.isNonEntry)
+                    ? (info.table.entryBuffer?.[info.colDef.id] ?? null)
+                    : null;
+            }
+            if (rawValue !== undefined) {
+                const ct = this.getCellTypeConfig(row, col);
+                if (ct) return CellTypeRegistry.formatValue(ct, rawValue);
+                return rawValue;
+            }
         }
         // ── Phase 3+: repeater cells with $rep context ────────────────────
-        else if (type === CELL_TYPE.REPEATER && this.repeaterEngine) {
+        if (type === CELL_TYPE.REPEATER && this.repeaterEngine) {
             rawValue = this.repeaterEngine.getCellDisplayValue(row, col, this.#session);
         }
         // ── Phase 1 / REGULAR / MERGE_PRIMARY: standard formula engine path
@@ -220,8 +235,21 @@ export class SheetRenderContext {
      * @returns {any}
      */
     getRawDisplayValue(row, col, cellType) {
-        if (cellType === CELL_TYPE.TABLE_DATA && this.tableManager) {
-            return this.tableManager.getCellDisplayValue(row, col);
+        if (this.tableManager) {
+            if (cellType === CELL_TYPE.TABLE_HEADER) {
+                const info = this.tableManager.getCellInfo(row, col);
+                return info?.colDef?.name ?? '';
+            }
+            if (cellType === CELL_TYPE.TABLE_DATA) {
+                return this.tableManager.getCellDisplayValue(row, col);
+            }
+            if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                const info = this.tableManager.getCellInfo(row, col);
+                if (info?.colDef && !info.colDef.isNonEntry) {
+                    return info.table.entryBuffer?.[info.colDef.id] ?? null;
+                }
+                return null; // formula (non-entry) columns have no editable value
+            }
         }
         if (cellType === CELL_TYPE.REPEATER && this.repeaterEngine) {
             return this.repeaterEngine.getCellDisplayValue(row, col, this.#session);
@@ -295,13 +323,33 @@ export class SheetRenderContext {
     }
 
     /**
-     * Get effective cell type config — explicit first, then inferred from value.
-     * Inferred configs are never stored in Yjs; they exist only for display.
+     * Get effective cell type config — explicit first, then table column type,
+     * then inferred from value. For table cells, the column definition provides
+     * the default type; a sheet-level override (set via toolbar) takes priority.
      * @param {number} row
      * @param {number} col
      * @returns {Object|null}
      */
     getCellTypeConfig(row, col) {
+        // Table cells: header cells are plain text; data/entry cells use column type
+        if (this.tableManager) {
+            const info = this.tableManager.getCellInfo(row, col);
+            if (info) {
+                if (info.rowType === 'header') {
+                    // Header cells are always plain text (no type formatting)
+                    return null;
+                }
+                // data / entry: sheet-level override takes highest priority
+                // (allows toolbar CellTypeConfigurator to work on table cells)
+                const sheetOverride = this.#sheetStore.getCellTypeConfig(row, col);
+                if (sheetOverride) return sheetOverride;
+                // Column default type (full typeConfig takes priority over bare type string)
+                const typeConfig = info.colDef?.typeConfig ?? null;
+                if (typeConfig) return typeConfig;
+                const colType = info.colDef?.type ?? 'text';
+                return colType !== 'text' ? { type: colType } : null;
+            }
+        }
         const explicit = this.#sheetStore.getCellTypeConfig(row, col);
         if (explicit) return explicit;
         const cell = this.#sheetStore.getCell(row, col);

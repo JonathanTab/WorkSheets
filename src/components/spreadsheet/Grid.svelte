@@ -57,7 +57,6 @@
     import RowHeaders from "./grid/RowHeaders.svelte";
     import ContextMenu from "./ContextMenu.svelte";
     import TableFilterPopover from "./features/TableFilterPopover.svelte";
-    import TableEntryCell from "./features/TableEntryCell.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "./features/RepeaterCreateDialog.svelte";
     import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
@@ -66,6 +65,7 @@
     import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
     import FloatingImages from "./FloatingImages.svelte";
     import ImageEditor from "./cellTypes/ImageEditor.svelte";
+    import DatePickerEditor from "./cellTypes/DatePickerEditor.svelte";
     import { setOnLoadCallback } from "../../stores/spreadsheet/rendering/ImageCache.js";
     import storage from "../../stores/storage.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
@@ -329,19 +329,16 @@
             filterPopoverPosition = null;
         }
     });
-    /** @type {{ table:any, colIndex:number, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
-    let focusedEntryCell = $state(null);
-    /** @type {{ table:any, dataIndex:number, colDef:any, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
-    let focusedTableDataCell = $state(null);
+    /** Stores last TABLE_ENTRY edit info for post-commit navigation (rich-text path). */
+    let lastTableEntryEditInfo = $state(null);
     /** @type {{ row:number, col:number, options:string[], left:number, top:number, width:number, height:number }|null} */
     let focusedDropdownCell = $state(null);
     let dropdownFilter = $state("");
+    let dropdownFilterInputEl = $state(null);
     /** @type {{ type: 'table'|'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
     /** @type {{ table:any, colId:string, left:number, top:number }|null} */
     let activeColumnConfig = $state(null);
-    /** @type {{ table:any, colDef:any, row:number, col:number, left:number, top:number, width:number, height:number }|null} */
-    let activeHeaderRename = $state(null);
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -372,6 +369,53 @@
     let isFormulaEditMode = $derived(editSessionState.isFormulaMode);
     let rowCount = $derived(sheetStore?.rowCount ?? 0);
     let colCount = $derived(sheetStore?.colCount ?? 0);
+    let remoteSelections = $derived(spreadsheetSession.remoteSelections);
+
+    // ─── Broadcast local selection to awareness ───────────────────────────────
+    $effect(() => {
+        // Track selection and active sheet for broadcasting
+        const _sel = selectionState.range;
+        const _selMode = selectionState.selectionMode;
+        const _selRows = selectionState.selectedRows;
+        const _selCols = selectionState.selectedCols;
+        const _anch = selectionState.anchor;
+        const _sheetId = spreadsheetSession.activeSheetId;
+
+        untrack(() => {
+            if (!_sheetId) return;
+
+            // Build selection payload based on mode
+            if (_selMode === "range" && _sel) {
+                spreadsheetSession.setLocalSelection({
+                    mode: "range",
+                    startRow: _sel.startRow,
+                    startCol: _sel.startCol,
+                    endRow: _sel.endRow,
+                    endCol: _sel.endCol,
+                });
+            } else if (_selMode === "rows" && _selRows) {
+                spreadsheetSession.setLocalSelection({
+                    mode: "rows",
+                    startRow: _selRows.start,
+                    endRow: _selRows.end,
+                });
+            } else if (_selMode === "cols" && _selCols) {
+                spreadsheetSession.setLocalSelection({
+                    mode: "cols",
+                    startCol: _selCols.start,
+                    endCol: _selCols.end,
+                });
+            } else if (_selMode === "all") {
+                spreadsheetSession.setLocalSelection({ mode: "all" });
+            } else if (_anch) {
+                spreadsheetSession.setLocalSelection({
+                    mode: "cell",
+                    row: _anch.row,
+                    col: _anch.col,
+                });
+            }
+        });
+    });
 
     let hasLoggedZeroViewportWarning = $state(false);
 
@@ -559,7 +603,9 @@
     // dirtyPanes: Set of 'body'|'top'|'left'|'corner' to repaint.
     // When all four are present (default), the whole canvas is cleared first.
     // Partial sets are used by performScrollPaint to skip unchanged frozen panes.
-    function performPaint(dirtyPanes = new Set(['body', 'top', 'left', 'corner'])) {
+    function performPaint(
+        dirtyPanes = new Set(["body", "top", "left", "corner"]),
+    ) {
         if (!canvasEl || !canvasRenderer || !renderPlan || !virtualizer) return;
 
         const frozenRows = virtualizer.frozenRows;
@@ -589,9 +635,15 @@
         }
 
         // Body pane
-        if (dirtyPanes.has('body')) {
+        if (dirtyPanes.has("body")) {
             const bp = renderPlan.plans.body;
-            if (!isFullRepaint) canvasRenderer.clearPane(frozenWidth, frozenHeight, bodyW, bodyH);
+            if (!isFullRepaint)
+                canvasRenderer.clearPane(
+                    frozenWidth,
+                    frozenHeight,
+                    bodyW,
+                    bodyH,
+                );
             if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
                 canvasRenderer.paintPane(
                     buildPaneData({
@@ -601,15 +653,21 @@
                         scrollLeft,
                         scrollTop,
                     }),
-                    { clipX: frozenWidth, clipY: frozenHeight, clipW: bodyW, clipH: bodyH },
+                    {
+                        clipX: frozenWidth,
+                        clipY: frozenHeight,
+                        clipW: bodyW,
+                        clipH: bodyH,
+                    },
                 );
             }
         }
 
         // Top pane (frozen rows × scrollable cols)
-        if (dirtyPanes.has('top')) {
+        if (dirtyPanes.has("top")) {
             const tp = renderPlan.plans.top;
-            if (!isFullRepaint) canvasRenderer.clearPane(frozenWidth, 0, bodyW, frozenHeight);
+            if (!isFullRepaint)
+                canvasRenderer.clearPane(frozenWidth, 0, bodyW, frozenHeight);
             if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
                 canvasRenderer.paintPane(
                     buildPaneData({
@@ -619,15 +677,21 @@
                         scrollLeft,
                         scrollTop: 0,
                     }),
-                    { clipX: frozenWidth, clipY: 0, clipW: bodyW, clipH: frozenHeight },
+                    {
+                        clipX: frozenWidth,
+                        clipY: 0,
+                        clipW: bodyW,
+                        clipH: frozenHeight,
+                    },
                 );
             }
         }
 
         // Left pane (scrollable rows × frozen cols)
-        if (dirtyPanes.has('left')) {
+        if (dirtyPanes.has("left")) {
             const lp = renderPlan.plans.left;
-            if (!isFullRepaint) canvasRenderer.clearPane(0, frozenHeight, frozenWidth, bodyH);
+            if (!isFullRepaint)
+                canvasRenderer.clearPane(0, frozenHeight, frozenWidth, bodyH);
             if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
                 canvasRenderer.paintPane(
                     buildPaneData({
@@ -637,15 +701,21 @@
                         scrollLeft: 0,
                         scrollTop,
                     }),
-                    { clipX: 0, clipY: frozenHeight, clipW: frozenWidth, clipH: bodyH },
+                    {
+                        clipX: 0,
+                        clipY: frozenHeight,
+                        clipW: frozenWidth,
+                        clipH: bodyH,
+                    },
                 );
             }
         }
 
         // Corner pane (frozen rows × frozen cols)
-        if (dirtyPanes.has('corner')) {
+        if (dirtyPanes.has("corner")) {
             const cp = renderPlan.plans.corner;
-            if (!isFullRepaint) canvasRenderer.clearPane(0, 0, frozenWidth, frozenHeight);
+            if (!isFullRepaint)
+                canvasRenderer.clearPane(0, 0, frozenWidth, frozenHeight);
             if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
                 canvasRenderer.paintPane(
                     buildPaneData({
@@ -655,13 +725,18 @@
                         scrollLeft: 0,
                         scrollTop: 0,
                     }),
-                    { clipX: 0, clipY: 0, clipW: frozenWidth, clipH: frozenHeight },
+                    {
+                        clipX: 0,
+                        clipY: 0,
+                        clipW: frozenWidth,
+                        clipH: frozenHeight,
+                    },
                 );
             }
         }
 
         // Sticky table headers — repaint whenever top or body changes (they live in the top strip)
-        if (dirtyPanes.has('top') || dirtyPanes.has('body') || isFullRepaint) {
+        if (dirtyPanes.has("top") || dirtyPanes.has("body") || isFullRepaint) {
             const stickyHeaders = renderContext?.getStickyTableHeaders?.(
                 virtualizer.scrollTop,
                 renderPlan.frozenHeight,
@@ -710,27 +785,52 @@
         const colMetrics = virtualizer.colMetrics;
 
         const commonParams = {
-            rowMetrics, colMetrics, renderContext, sheetStore,
+            rowMetrics,
+            colMetrics,
+            renderContext,
+            sheetStore,
             session: spreadsheetSession,
-            frozenRows, frozenCols, frozenHeight, frozenWidth,
+            frozenRows,
+            frozenCols,
+            frozenHeight,
+            frozenWidth,
         };
 
         // Helper: build a strip row range from pixel offsets (visible-viewport based)
         function rowStripRange(fromOffset, toOffset) {
-            const s = Math.max(frozenRows, rowMetrics.indexAtOffset(fromOffset));
-            const e = Math.min(virtualizer.rowCount - 1, rowMetrics.indexAtOffset(toOffset) + 1);
+            const s = Math.max(
+                frozenRows,
+                rowMetrics.indexAtOffset(fromOffset),
+            );
+            const e = Math.min(
+                virtualizer.rowCount - 1,
+                rowMetrics.indexAtOffset(toOffset) + 1,
+            );
             return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
         }
         function colStripRange(fromOffset, toOffset) {
-            const s = Math.max(frozenCols, colMetrics.indexAtOffset(fromOffset));
-            const e = Math.min(virtualizer.colCount - 1, colMetrics.indexAtOffset(toOffset) + 1);
+            const s = Math.max(
+                frozenCols,
+                colMetrics.indexAtOffset(fromOffset),
+            );
+            const e = Math.min(
+                virtualizer.colCount - 1,
+                colMetrics.indexAtOffset(toOffset) + 1,
+            );
             return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
         }
 
         const bp = renderPlan.plans.body;
 
         // ── Body pane: blit + repaint exposed strips ──────────────────────────
-        canvasRenderer.blitScroll(dx, dy, frozenWidth, frozenHeight, bodyW, bodyH);
+        canvasRenderer.blitScroll(
+            dx,
+            dy,
+            frozenWidth,
+            frozenHeight,
+            bodyW,
+            bodyH,
+        );
 
         if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
             // Vertical strip (rows entering top or bottom)
@@ -738,7 +838,10 @@
                 let stripRows, clipY, clipH;
                 if (dy > 0) {
                     // Scrolling down → bottom strip
-                    stripRows = rowStripRange(prevST + bodyH, scrollTop + bodyH);
+                    stripRows = rowStripRange(
+                        prevST + bodyH,
+                        scrollTop + bodyH,
+                    );
                     clipY = frozenHeight + bodyH - dy;
                     clipH = dy;
                 } else {
@@ -749,7 +852,13 @@
                 }
                 if (stripRows) {
                     canvasRenderer.paintPane(
-                        buildPaneData({ ...commonParams, rowRange: stripRows, colRange: bp.colRange, scrollLeft, scrollTop }),
+                        buildPaneData({
+                            ...commonParams,
+                            rowRange: stripRows,
+                            colRange: bp.colRange,
+                            scrollLeft,
+                            scrollTop,
+                        }),
                         { clipX: frozenWidth, clipY, clipW: bodyW, clipH },
                     );
                 }
@@ -759,7 +868,10 @@
             if (dx !== 0) {
                 let stripCols, clipX, clipW;
                 if (dx > 0) {
-                    stripCols = colStripRange(prevSL + bodyW, scrollLeft + bodyW);
+                    stripCols = colStripRange(
+                        prevSL + bodyW,
+                        scrollLeft + bodyW,
+                    );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
@@ -769,7 +881,13 @@
                 }
                 if (stripCols) {
                     canvasRenderer.paintPane(
-                        buildPaneData({ ...commonParams, rowRange: bp.rowRange, colRange: stripCols, scrollLeft, scrollTop }),
+                        buildPaneData({
+                            ...commonParams,
+                            rowRange: bp.rowRange,
+                            colRange: stripCols,
+                            scrollLeft,
+                            scrollTop,
+                        }),
                         { clipX, clipY: frozenHeight, clipW, clipH: bodyH },
                     );
                 }
@@ -780,10 +898,20 @@
         if (dx !== 0) {
             const tp = renderPlan.plans.top;
             if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
-                canvasRenderer.blitScroll(dx, 0, frozenWidth, 0, bodyW, frozenHeight);
+                canvasRenderer.blitScroll(
+                    dx,
+                    0,
+                    frozenWidth,
+                    0,
+                    bodyW,
+                    frozenHeight,
+                );
                 let stripCols, clipX, clipW;
                 if (dx > 0) {
-                    stripCols = colStripRange(prevSL + bodyW, scrollLeft + bodyW);
+                    stripCols = colStripRange(
+                        prevSL + bodyW,
+                        scrollLeft + bodyW,
+                    );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
@@ -793,14 +921,23 @@
                 }
                 if (stripCols) {
                     canvasRenderer.paintPane(
-                        buildPaneData({ ...commonParams, rowRange: tp.rowRange, colRange: stripCols, scrollLeft, scrollTop: 0 }),
+                        buildPaneData({
+                            ...commonParams,
+                            rowRange: tp.rowRange,
+                            colRange: stripCols,
+                            scrollLeft,
+                            scrollTop: 0,
+                        }),
                         { clipX, clipY: 0, clipW, clipH: frozenHeight },
                     );
                 }
             }
             // Sticky table headers scroll horizontally
             const stickyHeaders = renderContext?.getStickyTableHeaders?.(
-                scrollTop, frozenHeight, rowMetrics, colMetrics,
+                scrollTop,
+                frozenHeight,
+                rowMetrics,
+                colMetrics,
             );
             if (stickyHeaders?.length > 0) {
                 const headersWithWidths = stickyHeaders.map((h) => ({
@@ -810,7 +947,10 @@
                     ),
                 }));
                 canvasRenderer.paintStickyHeaders(headersWithWidths, {
-                    frozenWidth, frozenHeight, scrollLeft, headerHeight: HEADER_HEIGHT,
+                    frozenWidth,
+                    frozenHeight,
+                    scrollLeft,
+                    headerHeight: HEADER_HEIGHT,
                 });
             }
         }
@@ -819,10 +959,20 @@
         if (dy !== 0) {
             const lp = renderPlan.plans.left;
             if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
-                canvasRenderer.blitScroll(0, dy, 0, frozenHeight, frozenWidth, bodyH);
+                canvasRenderer.blitScroll(
+                    0,
+                    dy,
+                    0,
+                    frozenHeight,
+                    frozenWidth,
+                    bodyH,
+                );
                 let stripRows, clipY, clipH;
                 if (dy > 0) {
-                    stripRows = rowStripRange(prevST + bodyH, scrollTop + bodyH);
+                    stripRows = rowStripRange(
+                        prevST + bodyH,
+                        scrollTop + bodyH,
+                    );
                     clipY = frozenHeight + bodyH - dy;
                     clipH = dy;
                 } else {
@@ -832,7 +982,13 @@
                 }
                 if (stripRows) {
                     canvasRenderer.paintPane(
-                        buildPaneData({ ...commonParams, rowRange: stripRows, colRange: lp.colRange, scrollLeft: 0, scrollTop }),
+                        buildPaneData({
+                            ...commonParams,
+                            rowRange: stripRows,
+                            colRange: lp.colRange,
+                            scrollLeft: 0,
+                            scrollTop,
+                        }),
                         { clipX: 0, clipY, clipW: frozenWidth, clipH },
                     );
                 }
@@ -1073,25 +1229,6 @@
     }
 
     /**
-     * Insert button info for the active entry row.
-     * Shown to the right of the entry row when the user is focused on an entry cell.
-     */
-    let entryInsertButtonInfo = $derived.by(() => {
-        if (!focusedEntryCell || !virtualizer || !renderPlan) return null;
-        const tbl = focusedEntryCell.table;
-        const entryRow = tbl.startRow + 1;
-        const top = cellContainerTop(entryRow);
-        const height = virtualizer.getRowHeight(entryRow);
-        // Position to the right of the last table column
-        let tableWidth = 0;
-        for (let c = tbl.startCol; c <= tbl.endCol; c++) {
-            tableWidth += virtualizer.getColWidth(c);
-        }
-        const left = cellContainerLeft(tbl.startCol) + tableWidth;
-        return { table: tbl, top, height, left };
-    });
-
-    /**
      * All visible table outlines (subtle, always-on, pointer-events:none).
      */
     let allTableOutlines = $derived.by(() => {
@@ -1231,8 +1368,14 @@
                     newRow = Math.max(0, Math.min(rowCount - 1, newRow));
                     newCol = Math.max(0, Math.min(colCount - 1, newCol));
                     const snapped = snapToMergePrimary(newRow, newCol);
-                    selectionState.anchor = { row: snapped.row, col: snapped.col };
-                    selectionState.focus  = { row: snapped.row, col: snapped.col };
+                    selectionState.anchor = {
+                        row: snapped.row,
+                        col: snapped.col,
+                    };
+                    selectionState.focus = {
+                        row: snapped.row,
+                        col: snapped.col,
+                    };
                     return;
                 }
             }
@@ -1246,8 +1389,14 @@
             if (anchor) {
                 const snapped = snapToMergePrimary(anchor.row, anchor.col);
                 if (snapped.row !== anchor.row || snapped.col !== anchor.col) {
-                    selectionState.anchor = { row: snapped.row, col: snapped.col };
-                    selectionState.focus  = { row: snapped.row, col: snapped.col };
+                    selectionState.anchor = {
+                        row: snapped.row,
+                        col: snapped.col,
+                    };
+                    selectionState.focus = {
+                        row: snapped.row,
+                        col: snapped.col,
+                    };
                 }
             }
         }
@@ -1313,11 +1462,20 @@
             return;
         }
         if (selectionState.isSelecting) {
-            if (selectionState.selectionMode === 'rows' && (hit.region === "rowHeader" || hit.region === "cell")) {
+            if (
+                selectionState.selectionMode === "rows" &&
+                (hit.region === "rowHeader" || hit.region === "cell")
+            ) {
                 selectionState.extendRowSelection(hit.row);
-            } else if (selectionState.selectionMode === 'cols' && (hit.region === "colHeader" || hit.region === "cell")) {
+            } else if (
+                selectionState.selectionMode === "cols" &&
+                (hit.region === "colHeader" || hit.region === "cell")
+            ) {
                 selectionState.extendColSelection(hit.col);
-            } else if (selectionState.selectionMode === 'range' && hit.region === "cell") {
+            } else if (
+                selectionState.selectionMode === "range" &&
+                hit.region === "cell"
+            ) {
                 selectionState.extendSelection(hit.row, hit.col);
             }
         }
@@ -1387,7 +1545,10 @@
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
                 const snappedHit = snapToMergePrimary(hit.row, hit.col);
                 if (!isSelected(snappedHit.row, snappedHit.col)) {
-                    selectionState.startSelection(snappedHit.row, snappedHit.col);
+                    selectionState.startSelection(
+                        snappedHit.row,
+                        snappedHit.col,
+                    );
                     selectionState.endSelection();
                 }
                 contextMenuPosition = { x: savedClientX, y: savedClientY };
@@ -1501,7 +1662,7 @@
     }
 
     function handleRowHeaderMouseDown(row, e) {
-        if (e?.shiftKey && selectionState.selectionMode === 'rows') {
+        if (e?.shiftKey && selectionState.selectionMode === "rows") {
             selectionState.extendRowSelection(row);
         } else {
             selectionState.startRowDrag(row);
@@ -1509,7 +1670,7 @@
     }
 
     function handleColHeaderMouseDown(col, e) {
-        if (e?.shiftKey && selectionState.selectionMode === 'cols') {
+        if (e?.shiftKey && selectionState.selectionMode === "cols") {
             selectionState.extendColSelection(col);
         } else {
             selectionState.startColDrag(col);
@@ -1540,31 +1701,6 @@
 
         // Close open filter popover
         activeFilterPopover = null;
-
-        // Close header rename overlay if clicking elsewhere
-        if (
-            activeHeaderRename &&
-            (activeHeaderRename.row !== row || activeHeaderRename.col !== col)
-        ) {
-            activeHeaderRename = null;
-        }
-
-        // Close entry cell if clicking elsewhere
-        if (
-            focusedEntryCell &&
-            (focusedEntryCell.row !== row || focusedEntryCell.col !== col)
-        ) {
-            focusedEntryCell = null;
-        }
-
-        // Close table data cell edit if clicking elsewhere
-        if (
-            focusedTableDataCell &&
-            (focusedTableDataCell.row !== row ||
-                focusedTableDataCell.col !== col)
-        ) {
-            focusedTableDataCell = null;
-        }
 
         // Close dropdown overlay if clicking elsewhere
         if (
@@ -1619,15 +1755,6 @@
                             left: cellLeft,
                             top: cellBottom,
                         };
-                    } else {
-                        // Sort toggle
-                        if (info.table.sortColId === colDef.id) {
-                            if (info.table.sortDir === "asc")
-                                info.table.setSort(colDef.id, "desc");
-                            else info.table.clearSort();
-                        } else {
-                            info.table.setSort(colDef.id, "asc");
-                        }
                     }
                 }
             }
@@ -1636,32 +1763,47 @@
             return;
         }
 
-        // ── TABLE_ENTRY: show DOM input overlay ──────────────────────────────
+        // ── TABLE_ENTRY: single click selects, Enter/typing starts editing ───
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table) {
-                let colIndex = info.table.colIndexForSheetCol?.(col) ?? 0;
-                // If clicked on formula col, jump to first editable col
-                if (info.table.columns?.[colIndex]?.isNonEntry) {
+                // Checkbox in entry row: toggle entryBuffer value on click
+                if (info.colDef?.type === "checkbox") {
+                    const cur = info.table.entryBuffer?.[info.colDef.id];
+                    info.table.setEntryValue(info.colDef.id, !cur);
+                    selectionState.startSelection(row, col);
+                    selectionState.endSelection();
+                    untrack(() => renderScheduler?.invalidateAll());
+                    return;
+                }
+                // Rating in entry row: click to set value
+                if (info.colDef?.type === "rating") {
+                    const ct = renderContext?.getCellTypeConfig(row, col);
+                    const max = ct?.max || 5;
+                    const cellLeft = cellContainerLeft(col);
+                    const cellWidth = virtualizer.getColWidth(col);
+                    const relX = Math.max(0, e.clientX - containerEl.getBoundingClientRect().left - cellLeft);
+                    const newVal = Math.max(1, Math.min(max, Math.ceil(relX / (cellWidth / max))));
+                    info.table.setEntryValue(info.colDef.id, newVal);
+                    selectionState.startSelection(row, col);
+                    selectionState.endSelection();
+                    untrack(() => renderScheduler?.invalidateAll());
+                    return;
+                }
+                // Formula columns: redirect selection to first editable column
+                let targetCol = col;
+                if (info.colDef?.isNonEntry) {
                     const firstEditable = info.table.columns.findIndex(
                         (c) => !c.isNonEntry,
                     );
-                    if (firstEditable >= 0) colIndex = firstEditable;
+                    if (firstEditable >= 0) {
+                        targetCol = info.table.startCol + firstEditable;
+                    }
                 }
-                const sheetCol = info.table.startCol + colIndex;
-                focusedEntryCell = {
-                    table: info.table,
-                    colIndex,
-                    row,
-                    col: sheetCol,
-                    left: cellContainerLeft(sheetCol),
-                    top: cellContainerTop(row),
-                    width: virtualizer.getColWidth(sheetCol),
-                    height: virtualizer.getRowHeight(row),
-                };
+                // Single click = just select. User presses Enter/F2/types to start editing.
+                selectionState.startSelection(row, targetCol);
+                selectionState.endSelection();
             }
-            selectionState.startSelection(row, col);
-            selectionState.endSelection();
             return;
         }
 
@@ -1823,12 +1965,11 @@
             if (repCtx && repCtx.repIndex > 0) return; // block edit
         }
 
-        // ── TABLE_DATA: show inline cell editor overlay ───────────────────────
+        // ── TABLE_DATA: begin edit on double-click ────────────────────────────
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
                 const colType = info.colDef.type;
-                // Checkbox/rating handled by single click; formula columns not editable
                 if (
                     colType !== "checkbox" &&
                     colType !== "rating" &&
@@ -1836,67 +1977,24 @@
                 ) {
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
-                    focusedTableDataCell = {
-                        table: info.table,
-                        dataIndex: info.dataIndex,
-                        colDef: info.colDef,
-                        row,
-                        col,
-                        left: cellContainerLeft(col),
-                        top: cellContainerTop(row),
-                        width: virtualizer.getColWidth(col),
-                        height: virtualizer.getRowHeight(row),
-                    };
+                    beginCellEdit(row, col, { surface: "grid" });
                 }
             }
             return;
         }
 
-        // ── TABLE_HEADER: inline rename on double-click ──────────────────────
+        // ── TABLE_HEADER: rename on double-click ─────────────────────────────
         if (cellType === CELL_TYPE.TABLE_HEADER) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                activeHeaderRename = {
-                    table: info.table,
-                    colDef: info.colDef,
-                    row,
-                    col,
-                    left: cellContainerLeft(col),
-                    top: cellContainerTop(row),
-                    width: virtualizer.getColWidth(col),
-                    height: virtualizer.getRowHeight(row),
-                };
+                selectionState.startSelection(row, col);
+                selectionState.endSelection();
+                beginCellEdit(row, col, { surface: "grid" });
             }
             return;
         }
 
-        // ── TABLE_ENTRY: no plain-text editing ───────────────────────────────
-        if (cellType === CELL_TYPE.TABLE_ENTRY) {
-            return;
-        }
-
         beginCellEdit(row, col, { surface: "grid" });
-    }
-
-    /** Commit an inline table data cell edit. */
-    function commitTableDataEdit(value) {
-        if (!focusedTableDataCell) return;
-        const { table, dataIndex, colDef } = focusedTableDataCell;
-        // Coerce value to correct type
-        let typedValue = value;
-        const colType = colDef.type;
-        if (
-            colType === "number" ||
-            colType === "currency" ||
-            colType === "percent"
-        ) {
-            const n = parseFloat(value);
-            typedValue = isNaN(n) ? null : n;
-        }
-        table.updateCell(dataIndex, colDef.id, typedValue);
-        focusedTableDataCell = null;
-        // Force canvas repaint for table cell data changes
-        untrack(() => renderScheduler?.invalidateAll());
     }
 
     function handleCellContextMenu(row, col, e) {
@@ -1912,9 +2010,18 @@
             // Anchor may have drifted onto a shadow cell via keyboard nav — re-snap it
             const anchor = selectionState.anchor;
             if (anchor) {
-                const anchorSnapped = snapToMergePrimary(anchor.row, anchor.col);
-                if (anchorSnapped.row !== anchor.row || anchorSnapped.col !== anchor.col) {
-                    selectionState.anchor = { row: anchorSnapped.row, col: anchorSnapped.col };
+                const anchorSnapped = snapToMergePrimary(
+                    anchor.row,
+                    anchor.col,
+                );
+                if (
+                    anchorSnapped.row !== anchor.row ||
+                    anchorSnapped.col !== anchor.col
+                ) {
+                    selectionState.anchor = {
+                        row: anchorSnapped.row,
+                        col: anchorSnapped.col,
+                    };
                 }
             }
         }
@@ -1929,6 +2036,118 @@
     // ─── Editing ──────────────────────────────────────────────────────────────
     function beginCellEdit(row, col, options = {}) {
         const { seedText = null, surface = "grid" } = options;
+
+        // ── Table cell editing ──────────────────────────────────────────────────
+        const tblCellType = renderContext?.getCellType(row, col);
+
+        // Block editing in table buffer zone (rows below last data row)
+        if (renderContext?.tableManager?.isTableShadowCell(row, col)) return;
+
+        if (
+            tblCellType === CELL_TYPE.TABLE_DATA ||
+            tblCellType === CELL_TYPE.TABLE_ENTRY ||
+            tblCellType === CELL_TYPE.TABLE_HEADER
+        ) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (!info?.table) return;
+
+            if (tblCellType === CELL_TYPE.TABLE_HEADER) {
+                const colName = info.colDef?.name ?? "";
+                editSessionState.beginEdit(
+                    row,
+                    col,
+                    seedText !== null ? seedText : colName,
+                    surface,
+                    {
+                        sheetId: spreadsheetSession.activeSheetId,
+                    },
+                );
+                return;
+            }
+
+            if (info.colDef?.isNonEntry) return; // Formula columns not editable
+
+            // Get initial value from the right source (entry buffer or table data)
+            let initialValue;
+            if (tblCellType === CELL_TYPE.TABLE_ENTRY) {
+                initialValue = info.table.entryBuffer?.[info.colDef?.id] ?? "";
+            } else {
+                initialValue = info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+            }
+
+            // Use unified cell type config (column typeConfig → column type → sheet override)
+            const ct = renderContext?.getCellTypeConfig(row, col);
+
+            // Checkbox/rating: handled by click events, not a text editor
+            if (ct?.type === "checkbox" || ct?.type === "rating") return;
+
+            // Dropdown: show overlay list
+            if (ct?.type === "dropdown") {
+                let ddOptions = [];
+                if (ct.source === "range" && ct.range) {
+                    ddOptions = resolveRangeOptions(ct.range);
+                } else if (Array.isArray(ct.options)) {
+                    ddOptions = ct.options;
+                }
+                if (ddOptions.length > 0) {
+                    dropdownFilter = seedText ?? "";
+                    const capturedInfo = info;
+                    const capturedCt = ct;
+                    const capturedCellType = tblCellType;
+                    focusedDropdownCell = {
+                        row, col,
+                        options: ddOptions,
+                        left: cellContainerLeft(col),
+                        top: cellContainerTop(row),
+                        width: virtualizer.getColWidth(col),
+                        height: virtualizer.getRowHeight(row),
+                        onCommit: (opt) => {
+                            const parsed = CellTypeRegistry.parseInput(capturedCt ?? { type: 'text' }, opt);
+                            if (capturedCellType === CELL_TYPE.TABLE_ENTRY) {
+                                capturedInfo.table.setEntryValue(capturedInfo.colDef.id, parsed);
+                            } else {
+                                capturedInfo.table.updateCell(capturedInfo.dataIndex, capturedInfo.colDef.id, parsed);
+                            }
+                            untrack(() => renderScheduler?.invalidateAll());
+                        },
+                    };
+                    return;
+                }
+            }
+
+            // Image picker
+            if (ct?.type === "image") {
+                editSessionState.beginEdit(row, col, String(initialValue), surface, {
+                    pickerMode: "image-picker",
+                    sheetId: spreadsheetSession.activeSheetId,
+                });
+                return;
+            }
+
+            // File picker
+            if (ct?.type === "file") {
+                editSessionState.beginEdit(row, col, String(initialValue), surface, {
+                    pickerMode: "file-picker",
+                    sheetId: spreadsheetSession.activeSheetId,
+                });
+                return;
+            }
+
+            // Date/time pickers
+            const pickerMode =
+                ct?.type === "date" ? "date" :
+                ct?.type === "time" ? "time" :
+                ct?.type === "datetime" ? "datetime-local" : null;
+
+            editSessionState.beginEdit(
+                row, col,
+                seedText !== null ? seedText : String(initialValue),
+                surface,
+                { pickerMode, sheetId: spreadsheetSession.activeSheetId },
+            );
+            return;
+        }
+
         const rawValue = spreadsheetSession.getCellEditValue(row, col);
         const ct = renderContext?.getCellTypeConfig(row, col);
 
@@ -1941,7 +2160,8 @@
                 ddOptions = ct.options;
             }
             if (ddOptions.length > 0) {
-                dropdownFilter = "";
+                dropdownFilter = seedText ?? "";
+                const capturedRow = row, capturedCol = col;
                 focusedDropdownCell = {
                     row,
                     col,
@@ -1950,6 +2170,9 @@
                     top: cellContainerTop(row),
                     width: virtualizer.getColWidth(col),
                     height: virtualizer.getRowHeight(row),
+                    onCommit: (opt) => {
+                        sheetStore?.setCellValue(capturedRow, capturedCol, opt);
+                    },
                 };
                 return;
             }
@@ -2023,6 +2246,117 @@
                 col,
                 parsedValue,
             );
+        }
+    }
+
+    /**
+     * Persist a cell edit to the correct store (table or sheet).
+     * Handles TABLE_DATA → table.updateCell, TABLE_ENTRY → table.setEntryValue,
+     * TABLE_HEADER → table.renameColumn, regular cells → persistEditOnSheet.
+     * @param {string|null} sheetId
+     * @param {{ row:number, col:number, value:string }} payload
+     */
+    function persistCellEdit(sheetId, payload) {
+        const { row, col, value } = payload;
+        const cellType = renderContext?.getCellType(row, col);
+
+        if (cellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const parsed = CellTypeRegistry.parseInput(
+                    { type: info.colDef.type },
+                    value,
+                );
+                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                untrack(() => renderScheduler?.invalidateAll());
+            }
+            return;
+        }
+        if (cellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const parsed = CellTypeRegistry.parseInput(
+                    { type: info.colDef.type },
+                    value,
+                );
+                info.table.setEntryValue(info.colDef.id, parsed);
+                untrack(() => renderScheduler?.invalidateAll());
+            }
+            return;
+        }
+        if (cellType === CELL_TYPE.TABLE_HEADER) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                const newName = String(value ?? "").trim();
+                if (newName) info.table.renameColumn(info.colDef.id, newName);
+            }
+            return;
+        }
+        persistEditOnSheet(sheetId, payload);
+    }
+
+    /**
+     * Navigate within a table entry row after a commit.
+     * @param {number} entryRow  Grid row of the entry row
+     * @param {number} currentCol  Grid column that was just committed
+     * @param {number} dRow  0 or 1 (1 = Enter, moving down)
+     * @param {number} dCol  0 or ±1 (Tab navigation)
+     * @param {any} table
+     */
+    function navigateEntryRow(entryRow, currentCol, dRow, dCol, table) {
+        const cols = table.columns;
+        const curColIndex = table.colIndexForSheetCol
+            ? table.colIndexForSheetCol(currentCol)
+            : cols.findIndex((_, i) => table.startCol + i === currentCol);
+
+        if (dRow === 1 && dCol === 0) {
+            // Enter: commit entry row and refocus first editable column
+            table.commitEntry();
+            const firstEditable = cols.findIndex((c) => !c.isNonEntry);
+            if (firstEditable >= 0) {
+                const firstCol = table.startCol + firstEditable;
+                selectionState.startSelection(entryRow, firstCol);
+                selectionState.endSelection();
+                beginCellEdit(entryRow, firstCol, { surface: "grid" });
+            }
+        } else if (dCol !== 0) {
+            if (dCol > 0) {
+                // Tab forward: wrap to next editable; commit entry on wrap
+                let nextIdx = null;
+                let wrapped = false;
+                for (let i = 1; i <= cols.length; i++) {
+                    const idx = (curColIndex + i) % cols.length;
+                    if (idx < curColIndex || (idx === 0 && curColIndex > 0))
+                        wrapped = true;
+                    if (!cols[idx]?.isNonEntry) {
+                        nextIdx = idx;
+                        break;
+                    }
+                }
+                if (wrapped && nextIdx != null) table.commitEntry();
+                if (nextIdx != null) {
+                    const nextCol = table.startCol + nextIdx;
+                    selectionState.startSelection(entryRow, nextCol);
+                    selectionState.endSelection();
+                    beginCellEdit(entryRow, nextCol, { surface: "grid" });
+                }
+            } else {
+                // Shift+Tab: go to prev editable column
+                let prevIdx = null;
+                for (let i = 1; i <= cols.length; i++) {
+                    const idx = (curColIndex - i + cols.length) % cols.length;
+                    if (!cols[idx]?.isNonEntry) {
+                        prevIdx = idx;
+                        break;
+                    }
+                }
+                if (prevIdx != null) {
+                    const prevCol = table.startCol + prevIdx;
+                    selectionState.startSelection(entryRow, prevCol);
+                    selectionState.endSelection();
+                    beginCellEdit(entryRow, prevCol, { surface: "grid" });
+                }
+            }
         }
     }
 
@@ -2131,9 +2465,25 @@
     }
 
     function commitCurrentEdit() {
+        const editRow = editSessionState.cell?.row;
+        const editCol = editSessionState.cell?.col;
         const editingSheetId = editSessionState.editingSheetId;
+        const editCellType =
+            editRow != null
+                ? renderContext?.getCellType(editRow, editCol)
+                : null;
         const payload = editSessionState.commit();
         if (!payload) return;
+
+        if (
+            editCellType === CELL_TYPE.TABLE_DATA ||
+            editCellType === CELL_TYPE.TABLE_ENTRY ||
+            editCellType === CELL_TYPE.TABLE_HEADER
+        ) {
+            persistCellEdit(editingSheetId, payload);
+            return;
+        }
+
         persistEditOnSheet(editingSheetId, payload);
         // Return to origin sheet if we navigated away for cross-sheet ref picking
         if (
@@ -2145,9 +2495,71 @@
     }
 
     function commitEditAndMove(dRow, dCol) {
+        const editRow = editSessionState.cell?.row;
+        const editCol = editSessionState.cell?.col;
         const editingSheetId = editSessionState.editingSheetId;
+        const editCellType =
+            editRow != null
+                ? renderContext?.getCellType(editRow, editCol)
+                : null;
         const payload = editSessionState.commit();
         if (!payload) return;
+
+        if (editCellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext?.tableManager?.getCellInfo(
+                payload.row,
+                payload.col,
+            );
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const parsed = CellTypeRegistry.parseInput(
+                    { type: info.colDef.type },
+                    payload.value,
+                );
+                info.table.setEntryValue(info.colDef.id, parsed);
+                untrack(() => renderScheduler?.invalidateAll());
+            }
+            if (info?.table) {
+                navigateEntryRow(
+                    payload.row,
+                    payload.col,
+                    dRow,
+                    dCol,
+                    info.table,
+                );
+            }
+            return;
+        }
+        if (editCellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext?.tableManager?.getCellInfo(
+                payload.row,
+                payload.col,
+            );
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const parsed = CellTypeRegistry.parseInput(
+                    { type: info.colDef.type },
+                    payload.value,
+                );
+                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                untrack(() => renderScheduler?.invalidateAll());
+            }
+            selectionState.moveSelection(dRow, dCol);
+            scrollToAnchor();
+            return;
+        }
+        if (editCellType === CELL_TYPE.TABLE_HEADER) {
+            const info = renderContext?.tableManager?.getCellInfo(
+                payload.row,
+                payload.col,
+            );
+            if (info?.table && info.colDef) {
+                const newName = String(payload.value ?? "").trim();
+                if (newName) info.table.renameColumn(info.colDef.id, newName);
+            }
+            selectionState.moveSelection(dRow, dCol);
+            scrollToAnchor();
+            return;
+        }
+
         persistEditOnSheet(editingSheetId, payload);
         if (
             editingSheetId &&
@@ -2163,10 +2575,71 @@
     function commitEdit(value = undefined) {
         if (value !== undefined && editSessionState.isEditing) {
             // Rich text / contenteditable passes value (HTML string or plain string) directly
+            const editRow = editSessionState.cell.row;
+            const editCol = editSessionState.cell.col;
             const editingSheetId = editSessionState.editingSheetId;
-            const { row, col } = editSessionState.cell;
+            const editCellType = renderContext?.getCellType(editRow, editCol);
             editSessionState.cancel();
-            persistEditOnSheet(editingSheetId, { row, col, value });
+
+            if (editCellType === CELL_TYPE.TABLE_ENTRY) {
+                const info = renderContext?.tableManager?.getCellInfo(
+                    editRow,
+                    editCol,
+                );
+                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                    const parsed = CellTypeRegistry.parseInput(
+                        { type: info.colDef.type },
+                        value,
+                    );
+                    info.table.setEntryValue(info.colDef.id, parsed);
+                    untrack(() => renderScheduler?.invalidateAll());
+                    // Store for onTabCommit navigation (rich-text Enter path)
+                    if (info.table)
+                        lastTableEntryEditInfo = {
+                            row: editRow,
+                            col: editCol,
+                            table: info.table,
+                        };
+                }
+                return;
+            }
+            if (editCellType === CELL_TYPE.TABLE_DATA) {
+                const info = renderContext?.tableManager?.getCellInfo(
+                    editRow,
+                    editCol,
+                );
+                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                    const parsed = CellTypeRegistry.parseInput(
+                        { type: info.colDef.type },
+                        value,
+                    );
+                    info.table.updateCell(
+                        info.dataIndex,
+                        info.colDef.id,
+                        parsed,
+                    );
+                    untrack(() => renderScheduler?.invalidateAll());
+                }
+                return;
+            }
+            if (editCellType === CELL_TYPE.TABLE_HEADER) {
+                const info = renderContext?.tableManager?.getCellInfo(
+                    editRow,
+                    editCol,
+                );
+                if (info?.table && info.colDef) {
+                    const newName = String(value ?? "").trim();
+                    if (newName)
+                        info.table.renameColumn(info.colDef.id, newName);
+                }
+                return;
+            }
+
+            persistEditOnSheet(editingSheetId, {
+                row: editRow,
+                col: editCol,
+                value,
+            });
             if (
                 editingSheetId &&
                 editingSheetId !== spreadsheetSession.activeSheetId
@@ -2178,8 +2651,22 @@
         }
     }
     function cancelEdit() {
+        const editRow = editSessionState.cell?.row;
+        const editCol = editSessionState.cell?.col;
         const editingSheetId = editSessionState.editingSheetId;
+        const editCellType =
+            editRow != null
+                ? renderContext?.getCellType(editRow, editCol)
+                : null;
         editSessionState.cancel();
+        // For TABLE_ENTRY: clear the entry buffer on Escape
+        if (editCellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext?.tableManager?.getCellInfo(
+                editRow,
+                editCol,
+            );
+            info?.table?.clearEntry();
+        }
         if (
             editingSheetId &&
             editingSheetId !== spreadsheetSession.activeSheetId
@@ -2353,7 +2840,10 @@
         if (!scrollPending) {
             scrollPending = true;
             requestAnimationFrame(() => {
-                if (!virtualizer) { scrollPending = false; return; }
+                if (!virtualizer) {
+                    scrollPending = false;
+                    return;
+                }
 
                 // Capture pre-scroll positions (the visible viewport bounds, not
                 // the overscan-inflated body range).
@@ -2372,13 +2862,15 @@
 
                 // Incremental blit when delta fits within viewport; full repaint
                 // for large jumps (page-down, programmatic scroll, first frame).
-                const canIncremental = (dy !== 0 || dx !== 0) &&
-                    Math.abs(dy) < bodyH && Math.abs(dx) < bodyW;
+                const canIncremental =
+                    (dy !== 0 || dx !== 0) &&
+                    Math.abs(dy) < bodyH &&
+                    Math.abs(dx) < bodyW;
 
                 if (canIncremental) {
                     performScrollPaint(dx, dy, prevST, prevSL);
                 } else {
-                    performPaint(new Set(['body', 'top', 'left', 'corner']));
+                    performPaint(new Set(["body", "top", "left", "corner"]));
                 }
 
                 if (selectionRenderer && renderPlan) {
@@ -2422,6 +2914,50 @@
             return;
         }
 
+        // Space: toggle checkbox cells without starting an edit
+        if (e.key === ' ' && anchor && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            const spaceCt = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
+            if (spaceCt?.type === 'checkbox') {
+                const spaceCellType = renderContext?.getCellType(anchor.row, anchor.col);
+                if (spaceCellType === CELL_TYPE.TABLE_DATA) {
+                    const info = renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
+                    if (info?.table && info.colDef) {
+                        const cur = info.table.getValue(info.dataIndex, info.colDef.id);
+                        info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
+                        untrack(() => renderScheduler?.invalidateAll());
+                    }
+                } else if (spaceCellType === CELL_TYPE.TABLE_ENTRY) {
+                    const info = renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
+                    if (info?.table && info.colDef) {
+                        const cur = info.table.entryBuffer?.[info.colDef.id];
+                        info.table.setEntryValue(info.colDef.id, !cur);
+                        untrack(() => renderScheduler?.invalidateAll());
+                    }
+                } else {
+                    const cell = sheetStore?.getCell(anchor.row, anchor.col);
+                    sheetStore?.setCellValue(anchor.row, anchor.col, !cell?.v);
+                    untrack(() => renderScheduler?.invalidateAll());
+                }
+                e.preventDefault();
+                return;
+            }
+        }
+
+        // If dropdown overlay is open: Escape closes it, printable chars append to filter
+        if (focusedDropdownCell) {
+            if (e.key === 'Escape') {
+                focusedDropdownCell = null;
+                e.preventDefault();
+                return;
+            }
+            if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                dropdownFilter += e.key;
+                setTimeout(() => dropdownFilterInputEl?.focus(), 0);
+                e.preventDefault();
+                return;
+            }
+        }
+
         // Typing a printable character (no modifier) starts editing the selected cell
         if (
             e.key.length === 1 &&
@@ -2446,12 +2982,13 @@
                     return;
                 }
             }
-            // Block typing into table structural cells (headers and entry rows)
-            // TABLE_DATA cells: open inline editor with typed character as initial value
-            if (
-                anchorCellType === CELL_TYPE.TABLE_HEADER ||
-                anchorCellType === CELL_TYPE.TABLE_ENTRY
-            ) {
+            // Block typing into table header cells
+            if (anchorCellType === CELL_TYPE.TABLE_HEADER) {
+                e.preventDefault();
+                return;
+            }
+            // Block typing into table buffer zone (rows below last data row)
+            if (renderContext?.tableManager?.isTableShadowCell(anchor.row, anchor.col)) {
                 e.preventDefault();
                 return;
             }
@@ -2466,32 +3003,37 @@
                 return;
             }
 
-            // For TABLE_DATA cells, open the inline editor with the typed character
-            if (anchorCellType === CELL_TYPE.TABLE_DATA) {
+            // For TABLE_DATA and TABLE_ENTRY cells, use beginCellEdit with typed character
+            if (
+                anchorCellType === CELL_TYPE.TABLE_DATA ||
+                anchorCellType === CELL_TYPE.TABLE_ENTRY
+            ) {
                 const info = renderContext?.tableManager?.getCellInfo(
                     anchor.row,
                     anchor.col,
                 );
                 if (info?.table && info.colDef) {
                     const colType = info.colDef.type;
-                    // Only allow typing for editable columns (not checkbox/rating/formula)
                     if (
                         colType !== "checkbox" &&
                         colType !== "rating" &&
                         !info.colDef.isNonEntry
                     ) {
-                        focusedTableDataCell = {
-                            table: info.table,
-                            dataIndex: info.dataIndex,
-                            colDef: info.colDef,
-                            row: anchor.row,
-                            col: anchor.col,
-                            left: cellContainerLeft(anchor.col),
-                            top: cellContainerTop(anchor.row),
-                            width: virtualizer.getColWidth(anchor.col),
-                            height: virtualizer.getRowHeight(anchor.row),
-                            seedText: e.key, // Pass the typed character to initialize the editor
-                        };
+                        let targetCol = anchor.col;
+                        if (
+                            anchorCellType === CELL_TYPE.TABLE_ENTRY &&
+                            info.colDef.isNonEntry
+                        ) {
+                            const firstEditable = info.table.columns.findIndex(
+                                (c) => !c.isNonEntry,
+                            );
+                            if (firstEditable >= 0)
+                                targetCol = info.table.startCol + firstEditable;
+                        }
+                        beginCellEdit(anchor.row, targetCol, {
+                            seedText: e.key,
+                            surface: "grid",
+                        });
                     }
                 }
                 e.preventDefault();
@@ -2508,32 +3050,37 @@
 
         switch (e.key) {
             case "ArrowUp":
+                focusedDropdownCell = null;
                 moveSelectionMergeAware(-1, 0, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowDown":
+                focusedDropdownCell = null;
                 moveSelectionMergeAware(1, 0, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowLeft":
+                focusedDropdownCell = null;
                 moveSelectionMergeAware(0, -1, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowRight":
+                focusedDropdownCell = null;
                 moveSelectionMergeAware(0, 1, e.shiftKey);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "Tab":
+                focusedDropdownCell = null;
                 moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
                 scrollToAnchor();
                 e.preventDefault();
                 break;
             case "Enter":
-                // Enter moves selection down, but opens the image picker for image cells.
+                // Enter moves selection down, but opens editors for special cells.
                 if (anchor) {
                     const anchorCellType = renderContext?.getCellType(
                         anchor.row,
@@ -2550,15 +3097,13 @@
                         e.preventDefault();
                         break;
                     }
-                    if (
-                        anchorCellType !== CELL_TYPE.TABLE_HEADER &&
-                        anchorCellType !== CELL_TYPE.TABLE_ENTRY
-                    ) {
-                        moveSelectionMergeAware(
-                            1,
-                            0,
-                            false,
-                        );
+                    if (anchorCellType === CELL_TYPE.TABLE_ENTRY) {
+                        // Enter on entry row starts editing
+                        beginCellEdit(anchor.row, anchor.col, {
+                            surface: "grid",
+                        });
+                    } else if (anchorCellType !== CELL_TYPE.TABLE_HEADER) {
+                        moveSelectionMergeAware(1, 0, false);
                         scrollToAnchor();
                     }
                 }
@@ -2571,37 +3116,7 @@
                         anchor.row,
                         anchor.col,
                     );
-                    if (f2CellType === CELL_TYPE.TABLE_DATA) {
-                        const info = renderContext?.tableManager?.getCellInfo(
-                            anchor.row,
-                            anchor.col,
-                        );
-                        if (info?.table && info.colDef) {
-                            const colType = info.colDef.type;
-                            if (
-                                colType !== "checkbox" &&
-                                colType !== "rating" &&
-                                !info.colDef.isNonEntry
-                            ) {
-                                focusedTableDataCell = {
-                                    table: info.table,
-                                    dataIndex: info.dataIndex,
-                                    colDef: info.colDef,
-                                    row: anchor.row,
-                                    col: anchor.col,
-                                    left: cellContainerLeft(anchor.col),
-                                    top: cellContainerTop(anchor.row),
-                                    width: virtualizer.getColWidth(anchor.col),
-                                    height: virtualizer.getRowHeight(
-                                        anchor.row,
-                                    ),
-                                };
-                            }
-                        }
-                    } else if (
-                        f2CellType !== CELL_TYPE.TABLE_HEADER &&
-                        f2CellType !== CELL_TYPE.TABLE_ENTRY
-                    ) {
+                    if (f2CellType !== CELL_TYPE.TABLE_HEADER) {
                         beginCellEdit(anchor.row, anchor.col, {
                             surface: "grid",
                         });
@@ -2843,12 +3358,38 @@
 
     // ─── Insert today's date ──────────────────────────────────────────────────
     function insertDate() {
-        if (!sheetStore || !anchor) return;
-        const today = new Date();
-        const mm = String(today.getMonth() + 1).padStart(2, "0");
-        const dd = String(today.getDate()).padStart(2, "0");
-        const yyyy = today.getFullYear();
-        sheetStore.setCellValue(anchor.row, anchor.col, `${mm}/${dd}/${yyyy}`);
+        if (!anchor) return;
+        const t = new Date();
+        const mm = String(t.getMonth() + 1).padStart(2, "0");
+        const dd = String(t.getDate()).padStart(2, "0");
+        const yyyy = t.getFullYear();
+        const displayStr = `${mm}/${dd}/${yyyy}`;
+
+        // Table data cell: update via table store
+        const cellType = renderContext?.getCellType(anchor.row, anchor.col);
+        if (cellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext?.tableManager?.getCellInfo(
+                anchor.row,
+                anchor.col,
+            );
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const colType = info.colDef.type;
+                // For date columns store "YYYY-MM-DD"; for others store the display string
+                const val =
+                    colType === "date"
+                        ? `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`
+                        : displayStr;
+                info.table.updateCell(info.dataIndex, info.colDef.id, val);
+                untrack(() => renderScheduler?.invalidateAll());
+            }
+            return;
+        }
+
+        // Regular sheet cell: parse through the cell's type descriptor
+        if (!sheetStore) return;
+        const ct = sheetStore.getCellTypeConfig(anchor.row, anchor.col);
+        const parsedValue = CellTypeRegistry.parseInput(ct, displayStr);
+        sheetStore.setCellValue(anchor.row, anchor.col, parsedValue);
     }
 
     // ─── Clear formatting ─────────────────────────────────────────────────────
@@ -2877,7 +3418,8 @@
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
         const count = eff.endRow - eff.startRow + 1;
-        for (let i = 0; i < count; i++) sheetStore.insertRowAt(eff.endRow + 1 + i);
+        for (let i = 0; i < count; i++)
+            sheetStore.insertRowAt(eff.endRow + 1 + i);
     }
     function insertColumnLeft() {
         if (!sheetStore) return;
@@ -2891,7 +3433,8 @@
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
         const count = eff.endCol - eff.startCol + 1;
-        for (let i = 0; i < count; i++) sheetStore.insertColumnAt(eff.endCol + 1 + i);
+        for (let i = 0; i < count; i++)
+            sheetStore.insertColumnAt(eff.endCol + 1 + i);
     }
 
     function deleteSelectedRows() {
@@ -2935,90 +3478,6 @@
             anchor.col,
         );
     });
-
-    // ─── Entry cell Tab navigation ────────────────────────────────────────────
-
-    /**
-     * Move the focused entry cell to a different column index in the same table.
-     * Skips formula columns (isNonEntry).
-     */
-    function focusEntryCol(table, colIndex) {
-        if (!table || !virtualizer || !renderPlan) return;
-        const cols = table.columns;
-        if (!cols?.length) return;
-        const clampedIdx = Math.max(0, Math.min(colIndex, cols.length - 1));
-        const sheetCol = table.startCol + clampedIdx;
-        const entryRow = table.startRow + 1;
-        focusedEntryCell = {
-            table,
-            colIndex: clampedIdx,
-            row: entryRow,
-            col: sheetCol,
-            left: cellContainerLeft(sheetCol),
-            top: cellContainerTop(entryRow),
-            width: virtualizer.getColWidth(sheetCol),
-            height: virtualizer.getRowHeight(entryRow),
-        };
-    }
-
-    /**
-     * Commit the current entry and focus the first editable entry cell.
-     * Called by Enter key and the Insert button.
-     */
-    function commitEntryAndRefocus() {
-        if (!focusedEntryCell) return;
-        const { table } = focusedEntryCell;
-        const success = table.commitEntry();
-        if (success !== false) {
-            // Find first editable column
-            const firstIdx = table.columns.findIndex((c) => !c.isNonEntry);
-            if (firstIdx >= 0) {
-                focusEntryCol(table, firstIdx);
-            } else {
-                focusedEntryCell = null;
-            }
-        }
-    }
-
-    /**
-     * Tab to the next non-formula entry column; wraps around and commits on last.
-     */
-    function entryTabNext() {
-        if (!focusedEntryCell) return;
-        const { table, colIndex } = focusedEntryCell;
-        const cols = table.columns;
-        // Find next editable column
-        for (let i = 1; i <= cols.length; i++) {
-            const nextIdx = (colIndex + i) % cols.length;
-            if (nextIdx < colIndex) {
-                // Wrapped around — commit entry and refocus first
-                commitEntryAndRefocus();
-                return;
-            }
-            if (!cols[nextIdx]?.isNonEntry) {
-                focusEntryCol(table, nextIdx);
-                return;
-            }
-        }
-        // All columns are formula — commit
-        commitEntryAndRefocus();
-    }
-
-    /**
-     * Shift+Tab to the previous non-formula entry column.
-     */
-    function entryTabPrev() {
-        if (!focusedEntryCell) return;
-        const { table, colIndex } = focusedEntryCell;
-        const cols = table.columns;
-        for (let i = 1; i <= cols.length; i++) {
-            const prevIdx = (colIndex - i + cols.length) % cols.length;
-            if (!cols[prevIdx]?.isNonEntry) {
-                focusEntryCol(table, prevIdx);
-                return;
-            }
-        }
-    }
 
     function tableInsertRow() {
         if (tableCellInfo?.rowType === "data")
@@ -3106,7 +3565,9 @@
         return selection ? selection.endCol - selection.startCol + 1 : 1;
     });
 
-    let isHeaderSelection = $derived(selectionType === "row" || selectionType === "column");
+    let isHeaderSelection = $derived(
+        selectionType === "row" || selectionType === "column",
+    );
 
     let contextMenuItems = $derived([
         {
@@ -3132,192 +3593,212 @@
             shortcut: "Ctrl+V",
             action: () => pasteSelection("full"),
         },
-        ...(!isHeaderSelection ? [
-            {
-                label: "Paste Special...",
-                submenu: [
+        ...(!isHeaderSelection
+            ? [
+                  {
+                      label: "Paste Special...",
+                      submenu: [
+                          {
+                              label: "Values Only",
+                              action: () => pasteSelection("values"),
+                          },
+                          {
+                              label: "Formulas Only",
+                              action: () => pasteSelection("formulas"),
+                          },
+                          {
+                              label: "Formatting Only",
+                              action: () => pasteSelection("formatting"),
+                          },
+                          { divider: true },
+                          {
+                              label: "Values & Formatting",
+                              action: () => pasteSelection("valuesFormat"),
+                          },
+                          {
+                              label: "Formulas & Formatting",
+                              action: () => pasteSelection("formulasFormat"),
+                          },
+                      ],
+                  },
+              ]
+            : []),
+        { divider: true },
+        ...(!isHeaderSelection
+            ? [
+                  {
+                      label: "Insert Image in Cell",
+                      icon: "🖼",
+                      action: () => {
+                          if (anchor) {
+                              sheetStore?.setCellTypeConfig(
+                                  anchor.row,
+                                  anchor.col,
+                                  {
+                                      type: "image",
+                                      fit: "contain",
+                                  },
+                              );
+                              beginCellEdit(anchor.row, anchor.col, {
+                                  surface: "grid",
+                              });
+                          }
+                      },
+                      disabled: !anchor,
+                  },
+                  {
+                      label: "Attach File to Cell",
+                      icon: "📎",
+                      action: () => {
+                          if (anchor) {
+                              sheetStore?.setCellTypeConfig(
+                                  anchor.row,
+                                  anchor.col,
+                                  {
+                                      type: "file",
+                                  },
+                              );
+                              beginCellEdit(anchor.row, anchor.col, {
+                                  surface: "grid",
+                              });
+                          }
+                      },
+                      disabled: !anchor,
+                  },
+                  {
+                      label: "Insert Floating Image…",
+                      icon: "🖼",
+                      action: () => {
+                          if (anchor && sheetStore) {
+                              showFloatingImageInsert = true;
+                          }
+                      },
+                      disabled: !anchor,
+                  },
+                  { divider: true },
+                  {
+                      label: "Merge Cells",
+                      icon: mergeIcon,
+                      isSvgIcon: true,
+                      action: () => {
+                          if (selection && sheetStore)
+                              sheetStore.mergeCells(
+                                  selection.startRow,
+                                  selection.startCol,
+                                  selection.endRow,
+                                  selection.endCol,
+                              );
+                      },
+                      disabled: !canMerge,
+                  },
+                  {
+                      label: "Unmerge Cells",
+                      icon: mergeIcon,
+                      isSvgIcon: true,
+                      action: () => {
+                          if (anchor && sheetStore)
+                              sheetStore.unmergeCells(anchor.row, anchor.col);
+                      },
+                      disabled: !isMergePrimary,
+                  },
+                  { divider: true },
+              ]
+            : []),
+        ...(selectionType === "row"
+            ? [
+                  {
+                      label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
+                      icon: arrowUp,
+                      isSvgIcon: true,
+                      action: insertRowAbove,
+                  },
+                  {
+                      label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
+                      icon: arrowDown,
+                      isSvgIcon: true,
+                      action: insertRowBelow,
+                  },
+                  { divider: true },
+                  {
+                      label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
+                      icon: trashIcon,
+                      isSvgIcon: true,
+                      action: deleteSelectedRows,
+                  },
+              ]
+            : selectionType === "column"
+              ? [
                     {
-                        label: "Values Only",
-                        action: () => pasteSelection("values"),
+                        label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
+                        icon: arrowLeft,
+                        isSvgIcon: true,
+                        action: insertColumnLeft,
                     },
                     {
-                        label: "Formulas Only",
-                        action: () => pasteSelection("formulas"),
-                    },
-                    {
-                        label: "Formatting Only",
-                        action: () => pasteSelection("formatting"),
+                        label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
+                        icon: arrowRight,
+                        isSvgIcon: true,
+                        action: insertColumnRight,
                     },
                     { divider: true },
                     {
-                        label: "Values & Formatting",
-                        action: () => pasteSelection("valuesFormat"),
+                        label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
+                        icon: trashIcon,
+                        isSvgIcon: true,
+                        action: deleteSelectedColumns,
+                    },
+                ]
+              : [
+                    {
+                        label: "Insert Row Above",
+                        icon: arrowUp,
+                        isSvgIcon: true,
+                        action: insertRowAbove,
+                        disabled: !hasAnySelection,
                     },
                     {
-                        label: "Formulas & Formatting",
-                        action: () => pasteSelection("formulasFormat"),
+                        label: "Insert Row Below",
+                        icon: arrowDown,
+                        isSvgIcon: true,
+                        action: insertRowBelow,
+                        disabled: !hasAnySelection,
                     },
-                ],
-            },
-        ] : []),
-        { divider: true },
-        ...(!isHeaderSelection ? [
-            {
-                label: "Insert Image in Cell",
-                icon: "🖼",
-                action: () => {
-                    if (anchor) {
-                        sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
-                            type: "image",
-                            fit: "contain",
-                        });
-                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
-                    }
-                },
-                disabled: !anchor,
-            },
-            {
-                label: "Attach File to Cell",
-                icon: "📎",
-                action: () => {
-                    if (anchor) {
-                        sheetStore?.setCellTypeConfig(anchor.row, anchor.col, {
-                            type: "file",
-                        });
-                        beginCellEdit(anchor.row, anchor.col, { surface: "grid" });
-                    }
-                },
-                disabled: !anchor,
-            },
-            {
-                label: "Insert Floating Image…",
-                icon: "🖼",
-                action: () => {
-                    if (anchor && sheetStore) {
-                        showFloatingImageInsert = true;
-                    }
-                },
-                disabled: !anchor,
-            },
-            { divider: true },
-            {
-                label: "Merge Cells",
-                icon: mergeIcon,
-                isSvgIcon: true,
-                action: () => {
-                    if (selection && sheetStore)
-                        sheetStore.mergeCells(
-                            selection.startRow,
-                            selection.startCol,
-                            selection.endRow,
-                            selection.endCol,
-                        );
-                },
-                disabled: !canMerge,
-            },
-            {
-                label: "Unmerge Cells",
-                icon: mergeIcon,
-                isSvgIcon: true,
-                action: () => {
-                    if (anchor && sheetStore)
-                        sheetStore.unmergeCells(anchor.row, anchor.col);
-                },
-                disabled: !isMergePrimary,
-            },
-            { divider: true },
-        ] : []),
-        ...(selectionType === "row" ? [
-            {
-                label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
-                icon: arrowUp,
-                isSvgIcon: true,
-                action: insertRowAbove,
-            },
-            {
-                label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
-                icon: arrowDown,
-                isSvgIcon: true,
-                action: insertRowBelow,
-            },
-            { divider: true },
-            {
-                label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
-                icon: trashIcon,
-                isSvgIcon: true,
-                action: deleteSelectedRows,
-            },
-        ] : selectionType === "column" ? [
-            {
-                label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
-                icon: arrowLeft,
-                isSvgIcon: true,
-                action: insertColumnLeft,
-            },
-            {
-                label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
-                icon: arrowRight,
-                isSvgIcon: true,
-                action: insertColumnRight,
-            },
-            { divider: true },
-            {
-                label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
-                icon: trashIcon,
-                isSvgIcon: true,
-                action: deleteSelectedColumns,
-            },
-        ] : [
-            {
-                label: "Insert Row Above",
-                icon: arrowUp,
-                isSvgIcon: true,
-                action: insertRowAbove,
-                disabled: !hasAnySelection,
-            },
-            {
-                label: "Insert Row Below",
-                icon: arrowDown,
-                isSvgIcon: true,
-                action: insertRowBelow,
-                disabled: !hasAnySelection,
-            },
-            {
-                label: "Insert Column Left",
-                icon: arrowLeft,
-                isSvgIcon: true,
-                action: insertColumnLeft,
-                disabled: !hasAnySelection,
-            },
-            {
-                label: "Insert Column Right",
-                icon: arrowRight,
-                isSvgIcon: true,
-                action: insertColumnRight,
-                disabled: !hasAnySelection,
-            },
-            { divider: true },
-            {
-                label:
-                    selectionType === "all"
-                        ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
-                        : "Delete Row",
-                icon: trashIcon,
-                isSvgIcon: true,
-                action: deleteSelectedRows,
-                disabled: !hasAnySelection,
-            },
-            {
-                label:
-                    selectionType === "all"
-                        ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
-                        : "Delete Column",
-                icon: trashIcon,
-                isSvgIcon: true,
-                action: deleteSelectedColumns,
-                disabled: !hasAnySelection,
-            },
-        ]),
+                    {
+                        label: "Insert Column Left",
+                        icon: arrowLeft,
+                        isSvgIcon: true,
+                        action: insertColumnLeft,
+                        disabled: !hasAnySelection,
+                    },
+                    {
+                        label: "Insert Column Right",
+                        icon: arrowRight,
+                        isSvgIcon: true,
+                        action: insertColumnRight,
+                        disabled: !hasAnySelection,
+                    },
+                    { divider: true },
+                    {
+                        label:
+                            selectionType === "all"
+                                ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
+                                : "Delete Row",
+                        icon: trashIcon,
+                        isSvgIcon: true,
+                        action: deleteSelectedRows,
+                        disabled: !hasAnySelection,
+                    },
+                    {
+                        label:
+                            selectionType === "all"
+                                ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
+                                : "Delete Column",
+                        icon: trashIcon,
+                        isSvgIcon: true,
+                        action: deleteSelectedColumns,
+                        disabled: !hasAnySelection,
+                    },
+                ]),
         ...(tableCellInfo
             ? [
                   { divider: true },
@@ -3523,7 +4004,10 @@
         if (!cell) return;
         const ct = sheetStore.getCellTypeConfig(cell.row, cell.col);
         if (ct?.type === "file") {
-            sheetStore.setCellTypeConfig(cell.row, cell.col, { ...ct, ...meta });
+            sheetStore.setCellTypeConfig(cell.row, cell.col, {
+                ...ct,
+                ...meta,
+            });
         }
     }
 
@@ -3743,6 +4227,52 @@
                 <div class="anchor-border" style={anchorBorderStyle}></div>
             {/if}
 
+            <!-- Remote user cursors -->
+            {#each remoteSelections as rs}
+                {#if rs.mode === "cell" && rs.row != null && rs.col != null}
+                    {@const left = cellContainerLeft(rs.col)}
+                    {@const top = cellContainerTop(rs.row)}
+                    {@const width =
+                        virtualizer?.getColWidth(rs.col) ?? COL_WIDTH}
+                    {@const height =
+                        virtualizer?.getRowHeight(rs.row) ?? ROW_HEIGHT}
+                    <div
+                        class="remote-cursor"
+                        style="left:{left}px; top:{top}px; width:{width}px; height:{height}px; --cursor-color: {rs.color ||
+                            '#22c55e'};"
+                        title={rs.user || "Remote user"}
+                    >
+                        <span class="remote-cursor-label"
+                            >{rs.user || "Remote user"}</span
+                        >
+                    </div>
+                {:else if rs.mode === "range" && rs.startRow != null}
+                    {@const left = cellContainerLeft(rs.startCol)}
+                    {@const top = cellContainerTop(rs.startRow)}
+                    {@const right =
+                        cellContainerLeft(rs.endCol) +
+                        (virtualizer?.getColWidth(rs.endCol) ?? COL_WIDTH)}
+                    {@const bottom =
+                        cellContainerTop(rs.endRow) +
+                        (virtualizer?.getRowHeight(rs.endRow) ?? ROW_HEIGHT)}
+                    <div
+                        class="remote-selection"
+                        style="left:{left}px; top:{top}px; width:{Math.max(
+                            0,
+                            right - left,
+                        )}px; height:{Math.max(
+                            0,
+                            bottom - top,
+                        )}px; --cursor-color: {rs.color || '#22c55e'};"
+                        title={rs.user || "Remote user"}
+                    >
+                        <span class="remote-cursor-label"
+                            >{rs.user || "Remote user"}</span
+                        >
+                    </div>
+                {/if}
+            {/each}
+
             <!-- Always-visible repeater outlines (all repeaters, subtle) -->
             {#each allRepeaterOutlines as { repeater: rep, rect }}
                 <div
@@ -3769,14 +4299,8 @@
                 >
             {/each}
 
-            <!-- Always-visible table outlines (all tables, subtle) -->
-            {#each allTableOutlines as { table: tbl, rect }}
-                <div
-                    class="range-outline range-outline--table"
-                    class:range-outline--active={tableCellInfo?.table === tbl}
-                    style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
-                ></div>
-                <!-- Settings button anchored to top-right of table header row -->
+            <!-- Table settings buttons (no outline — tables look like regular cells) -->
+            {#each allTableOutlines as { table: tbl }}
                 {@const btnLeft =
                     cellContainerLeft(tbl.endCol) +
                     (virtualizer?.getColWidth(tbl.endCol) ?? 0)}
@@ -3819,45 +4343,6 @@
                 </div>
             {/if}
 
-            <!-- TABLE_DATA inline cell edit overlay (shown on Enter or typing) -->
-            {#if focusedTableDataCell}
-                {@const cellValue = focusedTableDataCell.table.getValue(
-                    focusedTableDataCell.dataIndex,
-                    focusedTableDataCell.colDef.id,
-                )}
-                {@const initialValue =
-                    focusedTableDataCell.seedText ??
-                    (cellValue != null ? String(cellValue) : "")}
-                <div
-                    class="table-data-edit-overlay"
-                    style="position:absolute; left:{focusedTableDataCell.left}px; top:{focusedTableDataCell.top}px; width:{focusedTableDataCell.width}px; height:{focusedTableDataCell.height}px; z-index:22;"
-                >
-                    <input
-                        type="text"
-                        class="table-data-edit-input"
-                        value={initialValue}
-                        onblur={(e) =>
-                            commitTableDataEdit(
-                                /** @type {HTMLInputElement} */ (e.target)
-                                    .value,
-                            )}
-                        onkeydown={(e) => {
-                            if (e.key === "Enter" || e.key === "Tab") {
-                                e.stopPropagation();
-                                commitTableDataEdit(
-                                    /** @type {HTMLInputElement} */ (e.target)
-                                        .value,
-                                );
-                            } else if (e.key === "Escape") {
-                                e.stopPropagation();
-                                focusedTableDataCell = null;
-                            }
-                        }}
-                        autofocus
-                    />
-                </div>
-            {/if}
-
             <!-- Dropdown cell overlay -->
             {#if focusedDropdownCell}
                 {@const filteredOpts = dropdownFilter
@@ -3880,16 +4365,17 @@
                         type="text"
                         placeholder="Search..."
                         bind:value={dropdownFilter}
+                        bind:this={dropdownFilterInputEl}
                         autofocus
                         onkeydown={(e) => {
                             if (e.key === "Enter") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
-                                    sheetStore?.setCellValue(
-                                        focusedDropdownCell.row,
-                                        focusedDropdownCell.col,
-                                        filteredOpts[0],
-                                    );
+                                    if (focusedDropdownCell.onCommit) {
+                                        focusedDropdownCell.onCommit(filteredOpts[0]);
+                                    } else {
+                                        sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                    }
                                     focusedDropdownCell = null;
                                 }
                             } else if (e.key === "Escape") {
@@ -3902,11 +4388,11 @@
                             class="dropdown-option"
                             onmousedown={(e) => {
                                 e.preventDefault();
-                                sheetStore?.setCellValue(
-                                    focusedDropdownCell.row,
-                                    focusedDropdownCell.col,
-                                    opt,
-                                );
+                                if (focusedDropdownCell.onCommit) {
+                                    focusedDropdownCell.onCommit(opt);
+                                } else {
+                                    sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, opt);
+                                }
                                 focusedDropdownCell = null;
                             }}>{opt}</button
                         >
@@ -3936,8 +4422,14 @@
                         // Session still active (formula/plain text) — commit+move together
                         commitEditAndMove(dRow, dCol);
                     } else {
-                        // Rich text: session was committed inside commitRichValue(),
-                        // just move selection now.
+                        // Rich text path: session was committed inside commitRichValue().
+                        // Check if we just committed a TABLE_ENTRY cell.
+                        if (lastTableEntryEditInfo) {
+                            const { row, col, table } = lastTableEntryEditInfo;
+                            lastTableEntryEditInfo = null;
+                            navigateEntryRow(row, col, dRow, dCol, table);
+                            return;
+                        }
                         selectionState.moveSelection(dRow, dCol);
                         scrollToAnchor();
                     }
@@ -3967,101 +4459,6 @@
                         table={activeFilterPopover.table}
                         colId={activeFilterPopover.colId}
                         onClose={() => (activeFilterPopover = null)}
-                    />
-                </div>
-            {/if}
-
-            <!-- Table entry cell DOM input (shown when focused) -->
-            {#if focusedEntryCell}
-                <div
-                    class="entry-cell-overlay"
-                    style="position:absolute; left:{focusedEntryCell.left}px; top:{focusedEntryCell.top}px; width:{focusedEntryCell.width}px; height:{focusedEntryCell.height}px; z-index:22;"
-                >
-                    <TableEntryCell
-                        table={focusedEntryCell.table}
-                        colIndex={focusedEntryCell.colIndex}
-                        width={focusedEntryCell.width}
-                        height={focusedEntryCell.height}
-                        onTabNext={entryTabNext}
-                        onTabPrev={entryTabPrev}
-                        onCommit={commitEntryAndRefocus}
-                        onValueChange={() =>
-                            untrack(() => renderScheduler?.invalidateAll())}
-                    />
-                </div>
-                <!-- Entry action buttons — inline to the right of the table, same row height -->
-                {#if entryInsertButtonInfo}
-                    <div
-                        class="entry-action-bar"
-                        style="position:absolute; left:{entryInsertButtonInfo.left +
-                            4}px; top:{entryInsertButtonInfo.top}px; height:{entryInsertButtonInfo.height}px; z-index:23;"
-                    >
-                        <button
-                            class="entry-add-btn"
-                            onclick={commitEntryAndRefocus}
-                            onmousedown={(e) => e.preventDefault()}
-                            title="Add row (Enter)"
-                            aria-label="Add row"
-                        >
-                            {@html plusIcon} Add
-                        </button>
-                        <button
-                            class="entry-clear-btn"
-                            onclick={() => {
-                                focusedEntryCell.table.clearEntry();
-                                focusedEntryCell = null;
-                            }}
-                            onmousedown={(e) => e.preventDefault()}
-                            title="Clear entry (Escape)"
-                            aria-label="Clear entry"
-                        >
-                            {@html closeIcon}
-                        </button>
-                    </div>
-                {/if}
-            {/if}
-
-            <!-- Table header inline rename overlay (shown on double-click) -->
-            {#if activeHeaderRename}
-                <div
-                    class="header-rename-overlay"
-                    style="position:absolute; left:{activeHeaderRename.left}px; top:{activeHeaderRename.top}px; width:{activeHeaderRename.width}px; height:{activeHeaderRename.height}px; z-index:25;"
-                >
-                    <input
-                        type="text"
-                        class="header-rename-input"
-                        value={activeHeaderRename.colDef.name ?? ""}
-                        autofocus
-                        onkeydown={(e) => {
-                            if (e.key === "Enter" || e.key === "Tab") {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                const newName =
-                                    /** @type {HTMLInputElement} */ (
-                                        e.target
-                                    ).value.trim();
-                                if (newName)
-                                    activeHeaderRename.table.renameColumn(
-                                        activeHeaderRename.colDef.id,
-                                        newName,
-                                    );
-                                activeHeaderRename = null;
-                            } else if (e.key === "Escape") {
-                                e.stopPropagation();
-                                activeHeaderRename = null;
-                            }
-                        }}
-                        onblur={(e) => {
-                            const newName = /** @type {HTMLInputElement} */ (
-                                e.target
-                            ).value.trim();
-                            if (newName)
-                                activeHeaderRename?.table.renameColumn(
-                                    activeHeaderRename.colDef.id,
-                                    newName,
-                                );
-                            activeHeaderRename = null;
-                        }}
                     />
                 </div>
             {/if}
@@ -4618,5 +5015,42 @@
     /* ── Column config panel anchor ── */
     .col-config-anchor {
         pointer-events: auto;
+    }
+
+    /* ── Remote user cursors ── */
+    .remote-cursor {
+        position: absolute;
+        border: 2px solid var(--cursor-color, #22c55e);
+        pointer-events: none;
+        z-index: 12;
+        box-sizing: border-box;
+        border-radius: 2px;
+    }
+
+    .remote-cursor-label {
+        position: absolute;
+        top: -18px;
+        left: -2px;
+        background: var(--cursor-color, #22c55e);
+        color: white;
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        white-space: nowrap;
+        font-weight: 500;
+    }
+
+    .remote-selection {
+        position: absolute;
+        border: 2px solid var(--cursor-color, #22c55e);
+        background: color-mix(
+            in srgb,
+            var(--cursor-color, #22c55e) 15%,
+            transparent
+        );
+        pointer-events: none;
+        z-index: 12;
+        box-sizing: border-box;
+        border-radius: 2px;
     }
 </style>

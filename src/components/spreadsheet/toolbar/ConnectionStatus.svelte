@@ -6,24 +6,29 @@
     } from "../../../stores/spreadsheetStore.svelte.js";
 
     // Connection states: 'offline' | 'disconnected' | 'connecting' | 'connected' | 'syncing'
-    // 'offline' - browser is offline (no network)
-    // 'disconnected' - browser is online but server is unreachable
-    // 'connecting' - attempting to connect
-    // 'connected' - connected and synced
-    // 'syncing' - actively syncing changes
-    let connectionStatus = $state("disconnected");
-    let isBrowserOffline = $state(!navigator.onLine);
-    let syncTimeout = null;
-    let currentDocId = $state.raw(null); // Track which doc we've set up listeners for
-    let providerPollInterval = null; // Polling for provider availability
-    let connectionPollInterval = null; // Polling for connection status
-    let listenerCleanup = null; // Cleanup for provider listeners
+    // All state uses $state.raw to prevent reactive triggers from value changes
+    let connectionStatus = $state.raw("disconnected");
+    let isBrowserOffline = $state.raw(!navigator.onLine);
 
-    // Helper to set status only if it actually changes
+    // Non-reactive internal state
+    let syncTimeout = null;
+    let currentDocId = null;
+    let providerPollInterval = null;
+    let connectionPollInterval = null;
+    let listenerCleanup = null;
+    let previousDocId = null;
+    let isUpdating = false; // Guard against reentrant updates
+
+    // Helper to set status with guard against reentrant updates
     function setStatus(newStatus) {
-        if (connectionStatus !== newStatus) {
-            connectionStatus = newStatus;
-        }
+        if (isUpdating) return;
+        if (connectionStatus === newStatus) return;
+        isUpdating = true;
+        connectionStatus = newStatus;
+        // Use queueMicrotask to reset the flag after the current update cycle
+        queueMicrotask(() => {
+            isUpdating = false;
+        });
     }
 
     // Get the provider from the active document
@@ -76,6 +81,7 @@
             console.log("[ConnectionStatus] Status event:", event.status);
             if (event.status === "connected") {
                 setStatus("connected");
+                clearConnectionPoll();
             } else if (event.status === "connecting") {
                 setStatus("connecting");
             } else if (event.status === "disconnected") {
@@ -87,37 +93,23 @@
         const handleSync = (isSynced) => {
             console.log("[ConnectionStatus] Sync event:", isSynced);
             if (isSynced) {
-                // When sync completes, we're connected
                 setStatus("connected");
-                triggerSyncing();
+                clearConnectionPoll();
+                // Don't call triggerSyncing on sync - it causes loops
             }
         };
 
         provider.on("status", handleStatus);
         provider.on("sync", handleSync);
 
-        // Also listen for document updates to show activity
-        const ydoc = spreadsheetSession.ydoc;
-        const handleUpdate = () => {
-            triggerSyncing();
-        };
-
-        if (ydoc) {
-            ydoc.on("update", handleUpdate);
-        }
-
         // Return cleanup function
         listenerCleanup = () => {
             console.log("[ConnectionStatus] Cleaning up provider listeners");
             provider.off("status", handleStatus);
             provider.off("sync", handleSync);
-            if (ydoc) {
-                ydoc.off("update", handleUpdate);
-            }
         };
 
         // NOW check current status after listeners are set up
-        // Check wsconnected first
         if (provider.wsconnected) {
             console.log("[ConnectionStatus] Provider already connected");
             setStatus("connected");
@@ -128,97 +120,82 @@
                 provider.wsconnecting,
             );
             setStatus("connecting");
-
-            // Set up polling to detect connection state changes
-            // This is a safety net in case events are missed
-            let pollAttempts = 0;
-            const maxPollAttempts = 100; // 10 seconds (100 * 100ms)
-            let notConnectingCount = 0; // Count consecutive "not connecting" states
-
-            connectionPollInterval = setInterval(() => {
-                pollAttempts++;
-
-                // Log every 10 attempts (1 second)
-                if (pollAttempts % 10 === 0) {
-                    // Also check the underlying WebSocket if available
-                    const ws = provider.ws;
-                    const wsState = ws
-                        ? {
-                              readyState: ws.readyState,
-                              readyStateText:
-                                  ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][
-                                      ws.readyState
-                                  ] || "UNKNOWN",
-                          }
-                        : "no ws";
-
-                    console.log(
-                        "[ConnectionStatus] Polling... attempt",
-                        pollAttempts,
-                        "wsconnected:",
-                        provider.wsconnected,
-                        "wsconnecting:",
-                        provider.wsconnecting,
-                        "ws:",
-                        wsState,
-                    );
-                }
-
-                // Check both y-websocket flags AND underlying WebSocket state
-                const ws = provider.ws;
-                const isWsOpen = ws && ws.readyState === WebSocket.OPEN;
-
-                if (provider.wsconnected || isWsOpen) {
-                    console.log(
-                        "[ConnectionStatus] Poll detected connection (wsconnected:",
-                        provider.wsconnected,
-                        "isWsOpen:",
-                        isWsOpen,
-                        ")",
-                    );
-                    setStatus("connected");
-                    clearInterval(connectionPollInterval);
-                    connectionPollInterval = null;
-                } else if (!provider.wsconnecting && !isWsOpen) {
-                    // Not connecting and not connected
-                    notConnectingCount++;
-
-                    // If we've been "not connecting" for 3 seconds (30 attempts),
-                    // the WebSocket failed to establish or was disconnected
-                    if (notConnectingCount >= 30) {
-                        console.log(
-                            "[ConnectionStatus] WebSocket not connecting for 3+ seconds, assuming disconnected",
-                        );
-                        setStatus("disconnected");
-                        clearInterval(connectionPollInterval);
-                        connectionPollInterval = null;
-                    }
-                } else {
-                    // Is connecting, reset the counter
-                    notConnectingCount = 0;
-                }
-
-                if (pollAttempts >= maxPollAttempts) {
-                    // Timed out
-                    console.log(
-                        "[ConnectionStatus] Connection poll timeout after",
-                        pollAttempts * 100,
-                        "ms. Final state - wsconnected:",
-                        provider.wsconnected,
-                        "wsconnecting:",
-                        provider.wsconnecting,
-                    );
-                    clearInterval(connectionPollInterval);
-                    connectionPollInterval = null;
-                    // Set to whatever the current state actually is
-                    if (provider.wsconnected) {
-                        setStatus("connected");
-                    } else {
-                        setStatus("disconnected");
-                    }
-                }
-            }, 100);
+            startConnectionPoll(provider);
         }
+    }
+
+    // Clear connection polling
+    function clearConnectionPoll() {
+        if (connectionPollInterval) {
+            clearInterval(connectionPollInterval);
+            connectionPollInterval = null;
+        }
+    }
+
+    // Start polling for connection state (safety net)
+    function startConnectionPoll(provider) {
+        let pollAttempts = 0;
+        const maxPollAttempts = 100; // 10 seconds
+        let notConnectingCount = 0;
+
+        connectionPollInterval = setInterval(() => {
+            pollAttempts++;
+
+            // Log every 10 attempts (1 second)
+            if (pollAttempts % 10 === 0) {
+                const ws = provider.ws;
+                const wsState = ws
+                    ? {
+                          readyState: ws.readyState,
+                          readyStateText:
+                              ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][
+                                  ws.readyState
+                              ] || "UNKNOWN",
+                      }
+                    : "no ws";
+
+                console.log(
+                    "[ConnectionStatus] Polling... attempt",
+                    pollAttempts,
+                    "wsconnected:",
+                    provider.wsconnected,
+                    "wsconnecting:",
+                    provider.wsconnecting,
+                    "ws:",
+                    wsState,
+                );
+            }
+
+            const ws = provider.ws;
+            const isWsOpen = ws && ws.readyState === WebSocket.OPEN;
+
+            if (provider.wsconnected || isWsOpen) {
+                console.log("[ConnectionStatus] Poll detected connection");
+                setStatus("connected");
+                clearConnectionPoll();
+            } else if (!provider.wsconnecting && !isWsOpen) {
+                notConnectingCount++;
+                if (notConnectingCount >= 30) {
+                    console.log(
+                        "[ConnectionStatus] WebSocket not connecting for 3+ seconds, assuming disconnected",
+                    );
+                    setStatus("disconnected");
+                    clearConnectionPoll();
+                }
+            } else {
+                notConnectingCount = 0;
+            }
+
+            if (pollAttempts >= maxPollAttempts) {
+                console.log(
+                    "[ConnectionStatus] Connection poll timeout after",
+                    pollAttempts * 100,
+                    "ms",
+                );
+                clearConnectionPoll();
+                setStatus(provider.wsconnected ? "connected" : "disconnected");
+            }
+        }, 100);
     }
 
     // Track connection status changes
@@ -241,11 +218,10 @@
             console.log(
                 "[ConnectionStatus] Provider not found, polling for availability",
             );
-            setStatus("connecting"); // Show connecting while we wait for provider
+            setStatus("connecting");
 
-            // Poll for provider availability
             let attempts = 0;
-            const maxAttempts = 50; // 5 seconds max
+            const maxAttempts = 50;
 
             providerPollInterval = setInterval(() => {
                 attempts++;
@@ -272,47 +248,11 @@
         }
     }
 
-    // Trigger syncing state with a timeout
-    function triggerSyncing() {
-        // Don't transition from disconnected or connecting
-        if (
-            connectionStatus === "disconnected" ||
-            connectionStatus === "connecting"
-        ) {
-            return;
-        }
-
-        // Only update if not already syncing (prevents redundant updates)
-        if (connectionStatus !== "syncing") {
-            setStatus("syncing");
-        }
-
-        // Clear any existing timeout
-        if (syncTimeout) {
-            clearTimeout(syncTimeout);
-            syncTimeout = null;
-        }
-
-        // Reset to connected after 500ms of no activity
-        syncTimeout = setTimeout(() => {
-            syncTimeout = null;
-            const provider = getProvider(currentDocId);
-            if (provider?.wsconnected) {
-                setStatus("connected");
-            } else {
-                setStatus("disconnected");
-            }
-        }, 500);
-    }
-
-    // Track previous docId to detect changes
-    let previousDocId = null;
-
     // Reactive effect to setup listeners when docId changes
     $effect(() => {
         const docId = spreadsheetSession.docId;
 
-        // Use previousDocId to detect actual changes (not reactive)
+        // Use previousDocId to detect actual changes
         if (docId === previousDocId) {
             return;
         }
@@ -324,12 +264,8 @@
             docId,
         );
 
-        // Update previous docId BEFORE setting up (to avoid effect re-trigger)
         previousDocId = docId;
         currentDocId = docId;
-
-        // Clear any existing timers from previous setup
-        clearAllTimers();
 
         // Setup in untracked context
         untrack(() => setupForDocId(docId));
@@ -340,19 +276,13 @@
         const handleOnline = () => {
             console.log("[ConnectionStatus] Browser online");
             isBrowserOffline = false;
-            // Don't change connectionStatus here - let the provider listeners handle reconnection
         };
 
         const handleOffline = () => {
             console.log("[ConnectionStatus] Browser offline");
             isBrowserOffline = true;
-            // Immediately show offline status when browser goes offline
             setStatus("offline");
-            // Clear any connection polling since we're offline
-            if (connectionPollInterval) {
-                clearInterval(connectionPollInterval);
-                connectionPollInterval = null;
-            }
+            clearConnectionPoll();
         };
 
         window.addEventListener("online", handleOnline);
@@ -364,7 +294,7 @@
         };
     });
 
-    // Cleanup on component destroy using $effect with no dependencies
+    // Cleanup on component destroy
     $effect(() => {
         return () => {
             console.log("[ConnectionStatus] Component destroy cleanup");
@@ -372,14 +302,16 @@
         };
     });
 
-    // Computed display status - shows offline when browser is offline
-    const displayStatus = $derived(
-        isBrowserOffline ? "offline" : connectionStatus,
-    );
+    // Computed display status - derived from raw state values
+    // This is safe because the source values are $state.raw
+    function getDisplayStatus() {
+        return isBrowserOffline ? "offline" : connectionStatus;
+    }
 
     // Status label for tooltip
-    const statusLabel = $derived.by(() => {
-        switch (displayStatus) {
+    function getStatusLabel() {
+        const status = getDisplayStatus();
+        switch (status) {
             case "offline":
                 return "You are offline";
             case "disconnected":
@@ -393,11 +325,11 @@
             default:
                 return "Unknown status";
         }
-    });
+    }
 </script>
 
-<div class="connection-status" title={statusLabel}>
-    {#if displayStatus === "offline"}
+<div class="connection-status" title={getStatusLabel()}>
+    {#if getDisplayStatus() === "offline"}
         <!-- Cloud with slash icon (offline) -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -414,7 +346,7 @@
             <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
             <path d="m2 2 20 20" />
         </svg>
-    {:else if displayStatus === "disconnected"}
+    {:else if getDisplayStatus() === "disconnected"}
         <!-- Cloud with X icon -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -432,7 +364,7 @@
             <path d="m9 15 6-6" />
             <path d="m15 15-6-6" />
         </svg>
-    {:else if displayStatus === "connecting"}
+    {:else if getDisplayStatus() === "connecting"}
         <!-- Cloud with loading indicator -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -450,7 +382,7 @@
             <path d="M12 12v-2" />
             <path d="M12 15h.01" />
         </svg>
-    {:else if displayStatus === "syncing"}
+    {:else if getDisplayStatus() === "syncing"}
         <!-- Cloud with arrows icon -->
         <svg
             xmlns="http://www.w3.org/2000/svg"

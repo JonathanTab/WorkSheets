@@ -156,144 +156,92 @@
         <div class="divider"></div>
     {/if}
 
-    <!-- Split panel: Tree | Browser -->
-    <div class="split-panel">
-        <!-- Tree View (Left) -->
-        <div class="tree-panel">
-            <p class="section-label">Folder tree</p>
-            <div class="tree-view">
-                <!-- Root -->
+    <!-- Single panel folder browser -->
+    <div class="folder-panel">
+        <!-- Breadcrumb navigation -->
+        <div class="breadcrumb">
+            <button
+                class="crumb root"
+                class:active={browseFolderId === null}
+                onclick={() => navigateTo(null)}
+            >
+                <span class="crumb-icon">{@html home}</span>
+                <span>My Drive</span>
+            </button>
+            {#each breadcrumb as crumb, i}
+                <span class="crumb-sep">{@html chevronRight}</span>
                 <button
-                    class="tree-item root"
-                    class:selected={selectedFolderId === null}
-                    onclick={() => selectFolder(null)}
+                    class="crumb"
+                    class:active={i === breadcrumb.length - 1}
+                    onclick={() => navigateTo(crumb.id)}
                 >
-                    <span class="tree-icon">{@html home}</span>
-                    <span class="tree-name">My Drive</span>
-                    {#if selectedFolderId === null}
-                        <span class="check-icon">{@html check}</span>
-                    {/if}
+                    {crumb.name}
                 </button>
-
-                <!-- Tree items -->
-                {#each flattenedFolders as fld (fld.id)}
-                    <button
-                        class="tree-item"
-                        style="padding-left: {8 + fld.depth * 14}px"
-                        class:selected={selectedFolderId === fld.id}
-                        onclick={() => selectFolder(fld.id)}
-                    >
-                        {#if hasChildren(fld.id)}
-                            <button
-                                class="expand-btn"
-                                onclick={(e) => {
-                                    e.stopPropagation();
-                                    toggleFolderExpand(fld.id);
-                                }}
-                            >
-                                {#if expandedFolders.has(fld.id)}
-                                    {@html chevronDown}
-                                {:else}
-                                    {@html chevronRight}
-                                {/if}
-                            </button>
-                        {:else}
-                            <span class="expand-placeholder"></span>
-                        {/if}
-                        <span class="tree-icon">{@html folder}</span>
-                        <span class="tree-name">{fld.name}</span>
-                        {#if selectedFolderId === fld.id}
-                            <span class="check-icon">{@html check}</span>
-                        {/if}
-                    </button>
-                {/each}
-            </div>
+            {/each}
         </div>
 
-        <!-- Divider -->
-        <div class="panel-divider"></div>
-
-        <!-- Browser View (Right) -->
-        <div class="browser-panel">
-            <p class="section-label">Browse</p>
-
-            <!-- Breadcrumb -->
-            <div class="breadcrumb">
-                <button class="crumb root" onclick={() => navigateTo(null)}>
-                    <span class="crumb-icon">{@html home}</span>
-                    <span>My Drive</span>
-                </button>
-                {#each breadcrumb as crumb}
-                    <span class="crumb-sep">{@html chevronRight}</span>
-                    <button class="crumb" onclick={() => navigateTo(crumb.id)}>
-                        {crumb.name}
-                    </button>
-                {/each}
-            </div>
-
-            <!-- Folder list -->
-            <div class="folder-list">
-                {#if browseFolderId !== null}
-                    <button
-                        class="folder-item parent-folder"
-                        onclick={() =>
-                            navigateTo(
-                                breadcrumb.length > 0
-                                    ? (breadcrumb[breadcrumb.length - 1]
-                                          .parentId ?? null)
-                                    : null,
-                            )}
-                    >
-                        <span class="folder-icon up">{@html chevronRight}</span>
-                        <span>..</span>
-                    </button>
-                {/if}
-
-                <!-- Root option when at root level -->
+        <!-- Folder list -->
+        <div class="folder-list">
+            <!-- Root option when at root level -->
+            {#if browseFolderId === null}
                 <button
                     class="folder-item"
-                    class:selected={selectedFolderId === null &&
-                        browseFolderId === null}
+                    class:selected={selectedFolderId === null}
                     onclick={() => selectFolder(null)}
                     ondblclick={() => confirm()}
                 >
-                    <span class="folder-icon">{@html home}</span>
-                    <span>My Drive (root)</span>
+                    <span class="folder-icon root-icon">{@html home}</span>
+                    <span class="folder-name">My Drive (root)</span>
                     {#if selectedFolderId === null}
                         <span class="check-icon">{@html check}</span>
                     {/if}
                 </button>
+            {:else}
+                <!-- Parent folder navigation -->
+                <button
+                    class="folder-item parent-folder"
+                    onclick={() =>
+                        navigateTo(
+                            breadcrumb.length > 0
+                                ? (breadcrumb[breadcrumb.length - 1].parentId ??
+                                      null)
+                                : null,
+                        )}
+                >
+                    <span class="folder-icon up">{@html chevronRight}</span>
+                    <span class="folder-name">..</span>
+                </button>
+            {/if}
 
-                {#each currentFolderChildren as fld (fld.id)}
-                    <button
-                        class="folder-item"
-                        class:selected={selectedFolderId === fld.id}
-                        onclick={() => selectFolder(fld.id)}
-                        ondblclick={() => navigateInto(fld.id)}
-                    >
-                        <span class="folder-icon">{@html folder}</span>
-                        <span class="folder-name">{fld.name}</span>
-                        {#if selectedFolderId === fld.id}
-                            <span class="check-icon">{@html check}</span>
-                        {/if}
-                        {#if hasChildren(fld.id)}
-                            <button
-                                class="into-btn"
-                                onclick={(e) => {
-                                    e.stopPropagation();
-                                    navigateInto(fld.id);
-                                }}
-                            >
-                                {@html chevronRight}
-                            </button>
-                        {/if}
-                    </button>
-                {/each}
+            {#each currentFolderChildren as fld (fld.id)}
+                <button
+                    class="folder-item"
+                    class:selected={selectedFolderId === fld.id}
+                    onclick={() => selectFolder(fld.id)}
+                    ondblclick={() => navigateInto(fld.id)}
+                >
+                    <span class="folder-icon">{@html folder}</span>
+                    <span class="folder-name">{fld.name}</span>
+                    {#if selectedFolderId === fld.id}
+                        <span class="check-icon">{@html check}</span>
+                    {/if}
+                    {#if hasChildren(fld.id)}
+                        <button
+                            class="into-btn"
+                            onclick={(e) => {
+                                e.stopPropagation();
+                                navigateInto(fld.id);
+                            }}
+                        >
+                            {@html chevronRight}
+                        </button>
+                    {/if}
+                </button>
+            {/each}
 
-                {#if currentFolderChildren.length === 0 && browseFolderId !== null}
-                    <p class="empty-hint">No sub-folders</p>
-                {/if}
-            </div>
+            {#if currentFolderChildren.length === 0 && browseFolderId !== null}
+                <p class="empty-hint">No sub-folders</p>
+            {/if}
         </div>
     </div>
 
@@ -397,116 +345,12 @@
         margin: 4px 0;
     }
 
-    .split-panel {
-        display: grid;
-        grid-template-columns: 1fr auto 1fr;
-        gap: 0;
-        min-height: 240px;
-        max-height: 320px;
+    /* Folder Panel */
+    .folder-panel {
         border: 1px solid var(--color-border);
         border-radius: 8px;
         overflow: hidden;
-    }
-
-    .tree-panel,
-    .browser-panel {
-        padding: 8px;
-        overflow-y: auto;
-    }
-
-    .tree-panel {
-        background: var(--color-bg);
-    }
-
-    .browser-panel {
         background: var(--color-surface);
-    }
-
-    .panel-divider {
-        width: 1px;
-        background: var(--color-border);
-    }
-
-    /* Tree View */
-    .tree-view {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-    }
-
-    .tree-item {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        width: 100%;
-        padding: 5px 6px;
-        border: 1px solid transparent;
-        border-radius: 4px;
-        background: transparent;
-        color: var(--color-text);
-        font-size: 12px;
-        cursor: pointer;
-        text-align: left;
-        transition: all 0.1s;
-    }
-
-    .tree-item:hover {
-        background: var(--color-fill);
-    }
-
-    .tree-item.selected {
-        background: var(--color-primary-soft);
-        border-color: var(--color-primary);
-    }
-
-    .tree-item.root {
-        font-weight: 500;
-    }
-
-    .expand-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 14px;
-        height: 14px;
-        padding: 0;
-        border: none;
-        background: transparent;
-        color: var(--color-text-muted);
-        cursor: pointer;
-        flex-shrink: 0;
-    }
-
-    .expand-btn :global(svg) {
-        width: 12px;
-        height: 12px;
-    }
-
-    .expand-placeholder {
-        width: 14px;
-        height: 14px;
-        flex-shrink: 0;
-    }
-
-    .tree-icon {
-        display: flex;
-        align-items: center;
-        width: 14px;
-        height: 14px;
-        color: #f59e0b;
-        flex-shrink: 0;
-    }
-
-    .tree-icon :global(svg) {
-        width: 14px;
-        height: 14px;
-    }
-
-    .tree-name {
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
     }
 
     /* Breadcrumb */
@@ -515,11 +359,10 @@
         align-items: center;
         gap: 2px;
         font-size: 11px;
-        margin-bottom: 8px;
         flex-wrap: wrap;
-        padding: 4px 6px;
+        padding: 8px 10px;
         background: var(--color-fill);
-        border-radius: 4px;
+        border-bottom: 1px solid var(--color-border);
     }
 
     .crumb {
@@ -538,6 +381,11 @@
     .crumb:hover {
         background: var(--color-surface);
         color: var(--color-text);
+    }
+
+    .crumb.active {
+        color: var(--color-text);
+        font-weight: 500;
     }
 
     .crumb.root {
@@ -574,6 +422,10 @@
         display: flex;
         flex-direction: column;
         gap: 2px;
+        padding: 8px;
+        min-height: 200px;
+        max-height: 280px;
+        overflow-y: auto;
     }
 
     .folder-item {
@@ -581,7 +433,7 @@
         align-items: center;
         gap: 6px;
         width: 100%;
-        padding: 6px 8px;
+        padding: 8px 10px;
         border: 1px solid transparent;
         border-radius: 4px;
         background: transparent;
@@ -590,6 +442,7 @@
         cursor: pointer;
         text-align: left;
         transition: all 0.1s;
+        min-height: 36px;
     }
 
     .folder-item:hover {

@@ -3,6 +3,7 @@
     import DriveBrowser from "../components/DriveBrowser.svelte";
     import SpreadsheetWorkspace from "../components/spreadsheet/SpreadsheetWorkspace.svelte";
     import { spreadsheetSession } from "../stores/spreadsheetStore.svelte.js";
+    import storage from "../stores/storage.js";
 
     const APP_NAME = "WorkSheets";
 
@@ -70,7 +71,7 @@
 
 <div class="home-container">
     {#if currentDocId}
-        <SpreadsheetWorkspace docId={currentDocId} />
+        <SpreadsheetWorkspace docId={currentDocId} registry={storage} />
     {:else}
         <DriveBrowser />
     {/if}

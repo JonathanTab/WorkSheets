@@ -23,8 +23,11 @@ export class YjsRuntime {
      * @param {string} wsUrl - The WebSocket server URL.
      * @param {function(string, {offline: boolean}): void} [onDocUpdate] - Called on local doc changes.
      *   docId is the logical file ID; offline indicates whether the edit happened while offline.
+     * @param {object} [options]
+     * @param {() => string|null} [options.getApiKey] - Returns Bearer token for WebSocket auth.
+     * @param {() => {username: string, color: string}|null} [options.getUserInfo] - Returns user info for awareness.
      */
-    constructor(wsUrl, onDocUpdate) {
+    constructor(wsUrl, onDocUpdate, options = {}) {
         this.wsUrl = wsUrl;
         /** @type {Map<string, {ydoc: Y.Doc, provider: WebsocketProvider, persistence: IndexeddbPersistence}>} */
         this.activeDocs = new Map();
@@ -33,6 +36,11 @@ export class YjsRuntime {
 
         /** Called whenever a local (non-remote) update arrives on any active doc. */
         this.onDocUpdate = onDocUpdate ?? null;
+
+        /** @type {() => string|null} */
+        this.getApiKey = options.getApiKey ?? null;
+        /** @type {() => {username: string, color: string}|null} */
+        this.getUserInfo = options.getUserInfo ?? null;
 
         // Track offline state
         this.isOffline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
@@ -166,7 +174,24 @@ export class YjsRuntime {
 
         // 2. WebSocket second
         console.log(`[YjsRuntime] Connecting WebSocket for ${roomId}...`);
-        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc);
+        /** @type {Record<string, string>} */
+        const wsParams = {};
+        const apiKey = this.getApiKey?.();
+        if (apiKey) wsParams['auth'] = apiKey;
+        wsParams['fileId'] = docId; // server uses this to group snapshots by file
+
+        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, {
+            params: wsParams,
+        });
+
+        // Set local awareness state so remote users can see who is editing
+        const userInfo = this.getUserInfo?.();
+        if (userInfo && provider.awareness) {
+            provider.awareness.setLocalStateField('user', {
+                name: userInfo.username,
+                color: userInfo.color,
+            });
+        }
 
         this.activeDocs.set(docId, { ydoc, provider, persistence });
 
@@ -265,6 +290,54 @@ export class YjsRuntime {
      */
     isConnected(docId) {
         return this.activeDocs.get(docId)?.provider.wsconnected || false;
+    }
+
+    /**
+     * Returns the Awareness instance for a loaded document, or null.
+     * @param {string} docId
+     * @returns {object|null}
+     */
+    getAwareness(docId) {
+        return this.activeDocs.get(docId)?.provider?.awareness ?? null;
+    }
+
+    /**
+     * Clears the IndexedDB data for the current room, then loads the document
+     * under a new roomId. Used after a snapshot restore to prevent offline
+     * clients contaminating the restored room.
+     * @param {string} docId
+     * @param {string} newRoomId
+     * @returns {Promise<import('yjs').Doc>}
+     */
+    async clearAndSwitchRoom(docId, newRoomId) {
+        const active = this.activeDocs.get(docId);
+        if (active) {
+            active.provider.disconnect();
+            active.provider.destroy();
+            try {
+                await active.persistence.clearData();
+            } catch { /* ignore */ }
+            active.persistence.destroy();
+            active.ydoc.destroy();
+            this.activeDocs.delete(docId);
+        }
+        return this.load(docId, newRoomId);
+    }
+
+    /**
+     * Update the user info broadcast via awareness (e.g. after login).
+     * @param {string} docId
+     */
+    refreshAwareness(docId) {
+        const active = this.activeDocs.get(docId);
+        if (!active?.provider?.awareness) return;
+        const userInfo = this.getUserInfo?.();
+        if (userInfo) {
+            active.provider.awareness.setLocalStateField('user', {
+                name: userInfo.username,
+                color: userInfo.color,
+            });
+        }
     }
 
     /**

@@ -223,12 +223,14 @@
         padding: 4px 8px;
         font-size: 0.8125rem;
         font-weight: 500;
+        font-family: inherit;
         color: var(--color-text);
         background: transparent;
         border: none;
         border-radius: 4px;
         cursor: pointer;
         line-height: 1.4;
+        transition: background 0.08s ease;
     }
 
     .menu-button:hover:not(.disabled) {
@@ -260,16 +262,29 @@
         position: absolute;
         top: 100%;
         left: 0;
-        min-width: 200px;
+        min-width: 220px;
+        max-width: 300px;
         margin-top: 2px;
         padding: 6px 0;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: 6px;
         box-shadow:
-            0 1px 3px rgba(0, 0, 0, 0.08),
-            0 4px 12px rgba(0, 0, 0, 0.12);
+            0 2px 8px rgba(0, 0, 0, 0.12),
+            0 8px 24px rgba(0, 0, 0, 0.14);
         z-index: 1000;
+        animation: dropdown-enter 0.1s ease-out;
+    }
+
+    @keyframes dropdown-enter {
+        from {
+            opacity: 0;
+            transform: translateY(-4px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
     }
 
     .menu-item {
@@ -277,13 +292,15 @@
         align-items: center;
         gap: 10px;
         width: 100%;
-        padding: 7px 12px;
+        padding: 7px 14px;
         font-size: 0.8125rem;
+        font-family: inherit;
         color: var(--color-text);
         background: transparent;
         border: none;
         cursor: pointer;
         text-align: left;
+        transition: background 0.08s ease;
     }
 
     .menu-item:hover:not(.disabled) {
@@ -297,7 +314,7 @@
 
     .menu-item:focus-visible {
         outline: none;
-        background: var(--color-fill-secondary);
+        background: var(--color-primary-soft);
     }
 
     .item-icon {
@@ -312,9 +329,16 @@
         justify-content: center;
     }
 
+    .item-icon :global(svg) {
+        width: 16px;
+        height: 16px;
+    }
+
     .item-label {
         flex: 1;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .shortcut {
@@ -328,7 +352,7 @@
     .divider {
         height: 1px;
         background: var(--color-border);
-        margin: 6px 8px;
+        margin: 6px 10px;
     }
 
     .has-submenu {
@@ -353,9 +377,21 @@
         border: 1px solid var(--color-border);
         border-radius: 6px;
         box-shadow:
-            0 1px 3px rgba(0, 0, 0, 0.08),
-            0 4px 12px rgba(0, 0, 0, 0.12);
+            0 2px 8px rgba(0, 0, 0, 0.12),
+            0 8px 24px rgba(0, 0, 0, 0.14);
         z-index: 1001;
+        animation: submenu-enter 0.1s ease-out;
+    }
+
+    @keyframes submenu-enter {
+        from {
+            opacity: 0;
+            transform: translateX(-4px);
+        }
+        to {
+            opacity: 1;
+            transform: translateX(0);
+        }
     }
 
     .menu-item.submenu-open {

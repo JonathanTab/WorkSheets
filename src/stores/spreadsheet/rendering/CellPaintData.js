@@ -19,7 +19,6 @@
 
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
-import { COLUMN_TYPE_ICONS } from '../features/TableStore.svelte.js';
 import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
 
 /**
@@ -32,7 +31,7 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  * @property {number} height     CSS height
  * @property {boolean} [selected]  @deprecated  Selection is now on the SelectionRenderer canvas
  * @property {boolean} [isAnchor]  @deprecated  Selection is now on the SelectionRenderer canvas
- * @property {'text'|'checkbox'|'rating'|'url'|'image'|'table_header'|'table_entry'|'table_data'} renderType
+ * @property {'text'|'checkbox'|'rating'|'url'|'image'|'dropdown'} renderType
  * @property {string} [displayValue]
  * @property {string|null} [bgColor]
  * @property {string|null} [textColor]
@@ -48,8 +47,8 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  * @property {any} [rawValue]          For checkbox (boolean), rating (number), image (string blobId)
  * @property {number} [ratingMax]      For rating cells
  * @property {any} [ctConfig]          Raw cell type config object (used by image type for fit mode)
- * @property {{colName:string,sortIcon:string,hasFilter:boolean,filterActive:boolean,typeIcon?:string,isFormula?:boolean,accentColor?:string,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
- * @property {string} [placeholderText] For table entry cells
+ * @property {{colName?:string,sortIcon?:string,hasFilter?:boolean,filterActive?:boolean,typeIcon?:string,isFormula?:boolean,accentColor?:string,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
+ * @property {string} [placeholderText] For entry cells or empty typed cells — shown in placeholder style
  * @property {boolean} [isNonEntryCol]  For table entry cells — formula columns
  * @property {{top?,right?,bottom?,left?}} [borders]
  * @property {string} [formulaHighlight] Formula edit mode reference highlight color
@@ -59,6 +58,12 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  * @property {boolean} [zebraRow]       True for even data rows (zebra striping)
  * @property {boolean} [isRepeaterCopy] True for non-template repeater cells (visual dimming)
  * @property {Array|null} [richTextRuns] Rich-text run array when cell value is rich text
+ * @property {boolean} [clipContent]    True when cell content needs ctx.save/clip/restore
+ * @property {any} [dropdownOptions]    Options array for dropdown cells
+ * @property {any} [_descriptor]        Pre-resolved CellTypeRegistry descriptor for paint
+ * @property {boolean} [gridlineOnly]   True for overflow-shadow cells (gridlines only, no content)
+ * @property {number} [naturalWidth]    Original column width before overflow extension
+ * @property {boolean} [dvInvalid]      True when cell value fails data validation
  */
 
 /**
@@ -155,6 +160,7 @@ export function buildPaneData(params) {
     const cells = [];
 
     // Hoist sheet-level rule lookups outside the cell loops — same value for every cell
+    /** @type {any[]|null} */
     const cfRules = effectiveSheetStore?.getConditionalFormats?.() ?? null;
     const dvRules = effectiveSheetStore?.getDataValidations?.() ?? null;
 
@@ -251,127 +257,23 @@ export function buildPaneData(params) {
                 }
             }
 
-            // ── Table cell types ──────────────────────────────────────────────
+            // ── Table cell: fetch info for later use in unified path ──────────
+            // TABLE_HEADER / TABLE_ENTRY / TABLE_DATA now route through the same
+            // pipeline as regular cells.  Display value and cell-type config come
+            // from SheetRenderContext (delegating to TableManager), so CellTypeRegistry,
+            // toolbar formatting, conditional formats, borders, etc. all work
+            // identically to regular spreadsheet cells.
+            let tableCellInfo = null;
             if (
                 cellType === CELL_TYPE.TABLE_HEADER ||
                 cellType === CELL_TYPE.TABLE_ENTRY ||
                 cellType === CELL_TYPE.TABLE_DATA
             ) {
-                const info = renderContext?.tableManager?.getCellInfo(r, c);
-                if (!info?.table) continue;
-
-                const colIndex = info.table.colIndexForSheetCol(c);
-                const colDef = info.table.columns?.[colIndex] ?? null;
-
-                // Build a ct-compatible config object from column type string
-                const colCt = colDef?.type ? { type: colDef.type } : null;
-
-                // Column index within the table (first col = 0)
-                const isFirstCol = colIndex === 0;
-                const isLastCol = colIndex === (info.table.columns.length - 1);
-                const accentColor = info.table.accentColor ?? '#3b82f6';
-
-                /** @type {CellPaintItem} */
-                const item = {
-                    row: r, col: c,
-                    x, y, width, height: spanHeight,
-                    renderType: 'text',
-                    bgColor: null,
-                    borders: null,
-                    isFirstTableCol: isFirstCol,
-                    tableAccentColor: accentColor,
-                };
-
-                if (cellType === CELL_TYPE.TABLE_HEADER) {
-                    item.renderType = 'table_header';
-                    item.bgColor = '#f1f5f9';
-                    item.tableHeaderInfo = {
-                        colName: colDef?.name ?? '',
-                        sortIcon: info.table.sortColId === colDef?.id
-                            ? (info.table.sortDir === 'asc' ? '▲' : '▼')
-                            : '',
-                        hasFilter: !!(colDef?.id && info.table.filters?.[colDef.id]),
-                        filterActive: !!(colDef?.id && info.table.filters?.[colDef.id]),
-                        typeIcon: colDef?.type ? (COLUMN_TYPE_ICONS[colDef.type] ?? 'A') : 'A',
-                        isFormula: colDef?.isNonEntry ?? false,
-                        accentColor,
-                        isFirstCol,
-                        isLastCol,
-                    };
-                } else if (cellType === CELL_TYPE.TABLE_ENTRY) {
-                    item.renderType = 'table_entry';
-                    item.bgColor = '#ffffff'; /* White like regular cells */
-                    item.isNonEntryCol = colDef?.isNonEntry ?? false;
-                    // Show already-typed entry buffer value if present; otherwise placeholder.
-                    const entryVal = colDef && !colDef.isNonEntry
-                        ? info.table.entryBuffer?.[colDef.id]
-                        : undefined;
-                    if (entryVal !== undefined && entryVal !== null && entryVal !== '') {
-                        item.displayValue = String(entryVal);
-                    } else {
-                        item.placeholderText = colDef?.isNonEntry ? '=' : (colDef?.name ?? '');
-                    }
-                } else {
-                    // TABLE_DATA
-                    const rawValue = (colDef && info.dataIndex >= 0)
-                        ? info.table.getValue(info.dataIndex, colDef.id)
-                        : null;
-
-                    const colType = colDef?.type ?? 'text';
-
-                    if (colType === 'checkbox') {
-                        item.renderType = 'checkbox';
-                        item.rawValue = !!rawValue;
-                    } else if (colType === 'rating') {
-                        item.renderType = 'rating';
-                        item.rawValue = Number(rawValue) || 0;
-                        item.ratingMax = 5; // default; can be extended per-column
-                    } else {
-                        item.renderType = 'text';
-                        const dispV = colCt
-                            ? CellTypeRegistry.formatValue(colCt, rawValue)
-                            : (rawValue != null ? String(rawValue) : '');
-                        item.displayValue = dispV;
-                        // Column-level alignment (column def overrides type default)
-                        if (colDef?.hAlign) {
-                            item.hAlign = colDef.hAlign;
-                        } else if (colType === 'number' || colType === 'currency' || colType === 'percent') {
-                            item.hAlign = 'right';
-                        } else {
-                            item.hAlign = 'left';
-                        }
-                    }
-
-                    // Column-level color overrides
-                    if (colDef?.bgColor) item.bgColor = colDef.bgColor;
-                    if (colDef?.textColor) item.textColor = colDef.textColor;
-
-                    // Formula column indicator
-                    item.isFormulaCol = colDef?.isNonEntry ?? false;
-
-                    // Zebra striping (even rows get a subtle tint)
-                    if (info.dataIndex % 2 === 0 && !item.bgColor) {
-                        item.zebraRow = true;
-                    }
-
-                    // Conditional formatting for table data cells
-                    if (colDef?.conditionalFormats?.length && rawValue != null) {
-                        for (const fmt of colDef.conditionalFormats) {
-                            if (matchesCondition(rawValue, fmt.condition, fmt.value)) {
-                                if (fmt.style?.backgroundColor) item.bgColor = fmt.style.backgroundColor;
-                                if (fmt.style?.color) item.textColor = fmt.style.color;
-                                if (fmt.style?.bold) item.bold = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                cells.push(item);
-                continue;
+                tableCellInfo = renderContext?.tableManager?.getCellInfo(r, c);
+                if (!tableCellInfo?.table) continue; // safety: skip if not found
             }
 
-            // ── Regular / Merge / Repeater cells ──────────────────────────────
+            // ── Regular / Merge / Repeater / Table cells ──────────────────────
             const repeaterCtx = cellType === CELL_TYPE.REPEATER
                 ? renderContext?.repeaterEngine?.getCellRepeaterContext(r, c)
                 : null;
@@ -381,8 +283,12 @@ export function buildPaneData(params) {
 
             const sheetCell = effectiveSheetStore?.getCell(mappedRow, mappedCol);
 
-            // Cell type config — for repeater cells use template cell coords
-            const ct = renderContext?.getCellTypeConfig(mappedRow, mappedCol);
+            // Cell type config — for repeater cells use template cell coords;
+            // for table cells use (r, c) directly so SheetRenderContext can route
+            // to the column type definition (or sheet override if the toolbar set one).
+            const ctRow = tableCellInfo ? r : mappedRow;
+            const ctCol = tableCellInfo ? c : mappedCol;
+            const ct = renderContext?.getCellTypeConfig(ctRow, ctCol);
 
             // Get display value — use fast path that avoids redundant
             // getCellType lookup (caller already resolved it)
@@ -420,6 +326,11 @@ export function buildPaneData(params) {
                 // (rich text, wrap, overflow, table headers). Plain text cells skip
                 // ctx.save()/ctx.restore() entirely — that call is expensive in Chrome.
                 clipContent: false,
+                // Table-specific fields (set below for TABLE_* cells)
+                tableHeaderInfo: undefined,
+                zebraRow: undefined,
+                isFormulaCol: undefined,
+                placeholderText: undefined,
             };
 
             // For merged primary cells, default to top vertical alignment (supports paragraph-style text)
@@ -433,14 +344,20 @@ export function buildPaneData(params) {
                 item._descriptor = descriptor;
             }
 
+            // For table cells (DATA/ENTRY), the authoritative value is in dispV (from
+            // TableManager / entryBuffer), not in sheetCell.v.  For regular cells,
+            // sheetCell.v is used for checkbox/rating/image raw values as before.
+            const isTableDataOrEntry = cellType === CELL_TYPE.TABLE_DATA || cellType === CELL_TYPE.TABLE_ENTRY;
+            const cellRawValue = isTableDataOrEntry ? dispV : (sheetCell?.v ?? null);
+
             // Determine render type
             if (ct?.type === 'checkbox') {
                 item.renderType = 'checkbox';
-                item.rawValue = !!sheetCell?.v;
+                item.rawValue = !!cellRawValue;
                 item.hAlign = 'center';
             } else if (ct?.type === 'rating') {
                 item.renderType = 'rating';
-                item.rawValue = Number(sheetCell?.v) || 0;
+                item.rawValue = Number(cellRawValue) || 0;
                 item.ratingMax = ct.max || 5;
                 item.hAlign = 'center';
             } else if (ct?.type === 'url') {
@@ -452,7 +369,7 @@ export function buildPaneData(params) {
                 item.dropdownOptions = ct.options || [];
             } else if (ct?.type === 'image') {
                 item.renderType = 'image';
-                item.rawValue = sheetCell?.v ?? null; // blob ID string
+                item.rawValue = cellRawValue ?? null; // blob ID string
                 item.ctConfig = ct;
                 item.clipContent = true;
                 item.hAlign = 'center';
@@ -491,11 +408,77 @@ export function buildPaneData(params) {
                     if (defStyle.underline) item.underline = true;
                     if (defStyle.color && !sheetCell?.color) item.textColor = defStyle.color;
                 }
+
+                // Value-dependent color (e.g. red negatives) — set before cascade so
+                // explicit user/conditional-format color still overrides it
+                if (ct) {
+                    const typeColor = CellTypeRegistry.getTextColor(ct, cellRawValue ?? dispV);
+                    if (typeColor) item.textColor = typeColor;
+                }
             }
 
-            // Apply formatting: col-level → row-level → cell-level (cell wins)
+            // ── Table-specific defaults (applied before sheet/row/col formatting) ──
+            // These establish baseline style for table cells; sheet formatting always wins.
+            if (tableCellInfo) {
+                const colDef = tableCellInfo.colDef;
+
+                if (cellType === CELL_TYPE.TABLE_HEADER) {
+                    // Default: bold header with subtle background and bottom border
+                    item.bold = true;
+                    if (!item.bgColor) item.bgColor = '#f1f5f9';
+                    item.borders = { bottom: { color: '#94a3b8', width: 1.5 } };
+                    item.clipContent = true;
+                    // Filter-icon info for CanvasRenderer
+                    item.tableHeaderInfo = {
+                        filterActive: !!(colDef?.id && tableCellInfo.table.filters?.[colDef.id]),
+                    };
+
+                } else if (cellType === CELL_TYPE.TABLE_DATA) {
+                    // Column-level color overrides (lower priority than sheet formatting applied below)
+                    if (colDef?.bgColor) item.bgColor = colDef.bgColor;
+                    if (colDef?.textColor) item.textColor = colDef.textColor;
+                    if (colDef?.isNonEntry) item.isFormulaCol = true;
+                    // Subtle zebra striping — only when no explicit bg set
+                    if (tableCellInfo.dataIndex % 2 === 0 && !item.bgColor) item.zebraRow = true;
+                    // Column-level alignment override
+                    if (colDef?.hAlign) item.hAlign = colDef.hAlign;
+                    // Column-level conditional formatting
+                    if (colDef?.conditionalFormats?.length && dispV != null) {
+                        for (const fmt of colDef.conditionalFormats) {
+                            if (matchesCondition(dispV, fmt.condition, fmt.value)) {
+                                if (fmt.style?.backgroundColor) item.bgColor = fmt.style.backgroundColor;
+                                if (fmt.style?.color) item.textColor = fmt.style.color;
+                                if (fmt.style?.bold) item.bold = true;
+                                break;
+                            }
+                        }
+                    }
+
+                } else if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                    if (colDef?.isNonEntry) {
+                        // Formula/computed column — show 'fx' placeholder, non-editable
+                        item.displayValue = '';
+                        item.renderType = 'text';
+                        item.placeholderText = 'fx';
+                        item.isFormulaCol = true;
+                    } else if (!item.displayValue && !item.rawValue) {
+                        // Empty entry cell — show column name as placeholder hint
+                        item.placeholderText = colDef?.name ?? '';
+                    }
+                    // Column-level alignment override (overrides type default, overridden by sheet formatting below)
+                    // @ts-ignore — hAlign is in CellPaintItem typedef; TS JSDoc checker false positive
+                    if (colDef?.hAlign) item.hAlign = colDef.hAlign;
+                }
+            }
+
+            // Apply sheet formatting: col-level → row-level → cell-level (cell wins).
+            // TABLE_DATA and TABLE_ENTRY skip this — only borders bleed through from the
+            // underlying sheet into table cells (applied separately below).
+            const applySheetFmt = !(tableCellInfo &&
+                (cellType === CELL_TYPE.TABLE_DATA || cellType === CELL_TYPE.TABLE_ENTRY));
+
             // Col-level formatting (lowest priority) — use pre-built cache (populated above)
-            const colFmt = colFmtCache[mappedCol] ?? null;
+            const colFmt = applySheetFmt ? (colFmtCache[mappedCol] ?? null) : null;
             if (colFmt) {
                 if (colFmt.backgroundColor) item.bgColor = colFmt.backgroundColor;
                 if (colFmt.color) item.textColor = colFmt.color;
@@ -511,7 +494,9 @@ export function buildPaneData(params) {
             }
             // Row-level formatting (overrides col)
             // Use pre-cached value for non-repeater cells; re-fetch for repeater rows
-            const rowFmt = (mappedRow === r) ? rowFmtCache : effectiveSheetStore?.getRowFormatting?.(mappedRow);
+            const rowFmt = applySheetFmt
+                ? ((mappedRow === r) ? rowFmtCache : effectiveSheetStore?.getRowFormatting?.(mappedRow))
+                : null;
             if (rowFmt) {
                 if (rowFmt.backgroundColor) item.bgColor = rowFmt.backgroundColor;
                 if (rowFmt.color) item.textColor = rowFmt.color;
@@ -526,7 +511,7 @@ export function buildPaneData(params) {
                 if (rowFmt.wrapText) item.wrapText = true;
             }
             // Cell-level formatting (highest priority, overrides row/col)
-            if (sheetCell?.exists) {
+            if (applySheetFmt && sheetCell?.exists) {
                 if (sheetCell.backgroundColor) item.bgColor = sheetCell.backgroundColor;
                 if (sheetCell.color) item.textColor = sheetCell.color;
                 if (sheetCell.bold) item.bold = true;

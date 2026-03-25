@@ -19,6 +19,7 @@ define('DATA_ROOT', dirname(__DIR__) . '/data/congruum-docs/');
 require_once "iauth.php";
 define('DB_FILE', DATA_ROOT . 'storage.sqlite');
 define('BLOBS_DIR', DATA_ROOT . 'blobs/');
+define('YJS_SERVER_URL', rtrim(getenv('YJS_SERVER_URL') ?: 'http://localhost:1889', '/'));
 
 header('Content-Type: application/json');
 
@@ -154,6 +155,94 @@ function validateId(string $id): bool {
 
 function generateId(): string {
     return bin2hex(random_bytes(12));
+}
+
+/**
+ * Pass-through the user's own auth token to the Yjs server.
+ * Works for both API-key and session-cookie auth flows.
+ */
+function yjsToken(): string {
+    $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if (preg_match('/^Bearer ([a-f0-9]{64})$/i', $header, $m)) return $m[1];
+    if (!empty($_COOKIE['session_token']) && preg_match('/^[a-f0-9]{64}$/i', $_COOKIE['session_token'])) {
+        return $_COOKIE['session_token'];
+    }
+    return '';
+}
+
+/**
+ * Make an HTTP request to the Yjs server and return decoded JSON.
+ * @throws RuntimeException on connection failure or error response.
+ */
+function yjsGet(string $path): array {
+    $url  = YJS_SERVER_URL . '/' . ltrim($path, '/');
+    $tok  = yjsToken();
+    $opts = ['http' => [
+        'method'         => 'GET',
+        'timeout'        => 10,
+        'ignore_errors'  => true,
+        'header'         => $tok ? "Authorization: Bearer $tok\r\n" : '',
+    ]];
+    $body = @file_get_contents($url, false, stream_context_create($opts));
+    if ($body === false) throw new RuntimeException('Yjs server unavailable');
+    $data = json_decode($body, true);
+    if (!is_array($data)) throw new RuntimeException('Invalid response from Yjs server');
+    if (isset($data['error'])) throw new RuntimeException($data['error']);
+    return $data;
+}
+
+function yjsPost(string $path, array $payload): array {
+    $url  = YJS_SERVER_URL . '/' . ltrim($path, '/');
+    $tok  = yjsToken();
+    $json = json_encode($payload);
+    $hdrs = "Content-Type: application/json\r\nContent-Length: " . strlen($json) . "\r\n";
+    if ($tok) $hdrs .= "Authorization: Bearer $tok\r\n";
+    $opts = ['http' => [
+        'method'        => 'POST',
+        'header'        => $hdrs,
+        'content'       => $json,
+        'timeout'       => 10,
+        'ignore_errors' => true,
+    ]];
+    $body = @file_get_contents($url, false, stream_context_create($opts));
+    if ($body === false) throw new RuntimeException('Yjs server unavailable');
+    $data = json_decode($body, true);
+    if (!is_array($data)) throw new RuntimeException('Invalid response from Yjs server');
+    if (isset($data['error'])) throw new RuntimeException($data['error']);
+    return $data;
+}
+
+/**
+ * Fetch raw binary from the Yjs server and stream it to the client.
+ */
+function yjsStreamBinary(string $path): never {
+    $url  = YJS_SERVER_URL . '/' . ltrim($path, '/');
+    $tok  = yjsToken();
+    $opts = ['http' => [
+        'method'        => 'GET',
+        'timeout'       => 10,
+        'ignore_errors' => true,
+        'header'        => $tok ? "Authorization: Bearer $tok\r\n" : '',
+    ]];
+    $body = @file_get_contents($url, false, stream_context_create($opts));
+    if ($body === false) {
+        http_response_code(502);
+        echo json_encode(['error' => 'Yjs server unavailable']);
+        exit;
+    }
+    // Detect error JSON vs binary
+    if (strlen($body) < 512) {
+        $maybe = json_decode($body, true);
+        if (is_array($maybe) && isset($maybe['error'])) {
+            $code = str_contains($maybe['error'], 'not found') ? 404 : 502;
+            http_response_code($code);
+            echo $body;
+            exit;
+        }
+    }
+    header('Content-Type: application/octet-stream');
+    echo $body;
+    exit;
 }
 
 function generateRoomId(): string {
@@ -402,14 +491,14 @@ try {
             if ($isAdmin) {
                 $impersonate = trim($_GET['impersonate'] ?? '');
                 $adminMode   = !empty($_GET['admin_mode']); // explicit request to see all
-                
+
                 if ($impersonate && $impersonate !== $user) {
                     $viewAs = $impersonate; // show exactly what this user would see
                 } elseif ($adminMode) {
                     $adminAll = true; // explicit admin mode - see everything
                 }
                 // else: admin sees their normal user scope (no special treatment)
-                
+
                 $includeDeleted = !empty($_GET['include_deleted']);
             }
 
@@ -1064,6 +1153,19 @@ try {
             respond(['success' => true]);
         }
 
+        case 'update_room_id': {
+            requirePost();
+            $user    = requireAuth();
+            $id      = post('id');
+            $room_id = post('room_id');
+            if (!$id || !$room_id) error('id and room_id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            $db->prepare("UPDATE files SET room_id = ?, updated_at = datetime('now') WHERE id = ?")
+               ->execute([$room_id, $id]);
+            respond(fetchFile($db, $id));
+        }
+
         case 'set_search_text': {
             requirePost();
             $user = requireAuth();
@@ -1121,6 +1223,61 @@ try {
             $stmt->execute($params);
 
             respond(['files' => array_map('normalizeFile', $stmt->fetchAll())]);
+        }
+
+        // ====================================================
+        // SNAPSHOT / VERSION HISTORY  (proxied from Yjs server)
+        // ====================================================
+
+        case 'snapshot_list': {
+            $user   = requireAuth();
+            $fileId = trim($_GET['file_id'] ?? $_POST['file_id'] ?? '');
+            if (!$fileId) error('file_id required');
+            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
+
+            $data = yjsGet('api/snapshots?' . http_build_query(['fileId' => $fileId]));
+            respond(['snapshots' => $data['snapshots'] ?? []]);
+        }
+
+        case 'snapshot_data': {
+            // Returns raw binary — caller (client) decodes as Y.Doc for diffing.
+            $user       = requireAuth();
+            $fileId     = trim($_GET['file_id'] ?? '');
+            $snapshotId = trim($_GET['snapshot_id'] ?? '');
+            if (!$fileId || !$snapshotId) error('file_id and snapshot_id required');
+            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
+
+            // Validate the snapshot actually belongs to this file before streaming.
+            $meta = yjsGet('api/snapshot/' . urlencode($snapshotId));
+            if (($meta['file_id'] ?? '') !== $fileId) error('Snapshot does not belong to this file', 403);
+
+            yjsStreamBinary('api/snapshot/' . urlencode($snapshotId) . '/data');
+            // yjsStreamBinary exits; unreachable
+        }
+
+        case 'snapshot_restore': {
+            // Full restore: create new room on Yjs server + update room_id in DB.
+            requirePost();
+            $user       = requireAuth();
+            $fileId     = post('file_id');
+            $snapshotId = post('snapshot_id');
+            if (!$fileId || !$snapshotId) error('file_id and snapshot_id required');
+            if (!canWriteFile($db, $fileId, $user)) error('Access denied', 403);
+
+            // Validate the snapshot belongs to this file.
+            $meta = yjsGet('api/snapshot/' . urlencode($snapshotId));
+            if (($meta['file_id'] ?? '') !== $fileId) error('Snapshot does not belong to this file', 403);
+
+            // Ask Yjs server to create a new room pre-loaded with the snapshot.
+            $result    = yjsPost('api/restore', ['snapshotId' => $snapshotId]);
+            $newRoomId = $result['newRoomId'] ?? null;
+            if (!$newRoomId) error('Yjs server did not return a new room ID', 502);
+
+            // Update the file record so clients will connect to the restored room.
+            $db->prepare("UPDATE files SET room_id = ?, updated_at = datetime('now') WHERE id = ?")
+               ->execute([$newRoomId, $fileId]);
+
+            respond(fetchFile($db, $fileId));
         }
 
         default:

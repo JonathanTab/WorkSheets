@@ -25,6 +25,59 @@ import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 /** Extra buffer rows below the last data row so the table feels "infinite" */
 const BUFFER_ROWS = 10;
 
+/**
+ * Match a row field value against a filter condition.
+ * Supports date-aware ISO string comparison, numeric comparison, and string ops.
+ */
+function matchCond(rowVal, op, filterVal) {
+    const rv = rowVal;
+    const fv = filterVal;
+
+    // Date-aware comparison
+    if (typeof rv === 'string' && typeof fv === 'string' &&
+        rv.includes('-') && fv.includes('-')) {
+        const rvDate = Date.parse(rv);
+        const fvDate = Date.parse(fv);
+        if (!isNaN(rvDate) && !isNaN(fvDate)) {
+            switch (op) {
+                case '=': return rvDate === fvDate;
+                case '<>': case '!=': return rvDate !== fvDate;
+                case '>': return rvDate > fvDate;
+                case '<': return rvDate < fvDate;
+                case '>=': return rvDate >= fvDate;
+                case '<=': return rvDate <= fvDate;
+            }
+        }
+    }
+
+    // Numeric comparison
+    if (['>', '<', '>=', '<='].includes(op)) {
+        const rvNum = Number(rv);
+        const fvNum = Number(fv);
+        if (!isNaN(rvNum) && !isNaN(fvNum)) {
+            switch (op) {
+                case '>': return rvNum > fvNum;
+                case '<': return rvNum < fvNum;
+                case '>=': return rvNum >= fvNum;
+                case '<=': return rvNum <= fvNum;
+            }
+        }
+    }
+
+    switch (op) {
+        case '=': case '==': return String(rv ?? '') === String(fv ?? '');
+        case '<>': case '!=': return String(rv ?? '') !== String(fv ?? '');
+        case '>': return String(rv ?? '') > String(fv ?? '');
+        case '<': return String(rv ?? '') < String(fv ?? '');
+        case '>=': return String(rv ?? '') >= String(fv ?? '');
+        case '<=': return String(rv ?? '') <= String(fv ?? '');
+        case 'contains': return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        case 'startswith': return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
+        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        default: return false;
+    }
+}
+
 export class TableManager {
     /** @type {import('yjs').Map} tablesYMap from sheet */
     #tablesYMap;
@@ -113,6 +166,15 @@ export class TableManager {
         // This fires after TableStore's top-level observer (same attachment order)
         tableYMap.observe(rebuildOnChange);
         this.#observers.push(() => tableYMap.unobserve(rebuildOnChange));
+        // Observe column definition changes (type, name, typeConfig, etc.) so the
+        // canvas repaints when column metadata changes. Column changes don't affect
+        // row structure, so we just bump tableVersion without rebuilding the index.
+        const colArr = tableYMap.get("columns");
+        if (colArr) {
+            const bumpOnColChange = () => { this.tableVersion++; };
+            colArr.observeDeep(bumpOnColChange);
+            this.#observers.push(() => colArr.unobserveDeep(bumpOnColChange));
+        }
     }
 
     #removeTableStore(tableId) {
@@ -234,6 +296,24 @@ export class TableManager {
     }
 
     /**
+     * Returns true if the cell is in the buffer zone below a table's data rows —
+     * visually part of the table but not an actual header/entry/data row.
+     * Editing these cells should be blocked.
+     * @param {number} row
+     * @param {number} col
+     * @returns {boolean}
+     */
+    isTableShadowCell(row, col) {
+        for (const table of this.stores.values()) {
+            if (col < table.startCol || col > table.endCol) continue;
+            const lastDataRow = table.startRow + 1 + table.sortedFilteredRows.length;
+            const bufferEnd = lastDataRow + BUFFER_ROWS;
+            if (row > lastDataRow && row <= bufferEnd) return true;
+        }
+        return false;
+    }
+
+    /**
      * Maximum sheet row occupied by any inline table (used for effectiveRowCount).
      */
     get maxInlineTableRow() {
@@ -312,10 +392,6 @@ export class TableManager {
      * @param {import('../../../formulas/FormulaEngine.svelte.js').FormulaEngine} formulaEngine
      */
     registerFunctions(formulaEngine) {
-        /**
-         * Find a table store by name (case-insensitive).
-         * @param {string} name
-         */
         const byName = (name) => {
             const upper = String(name).toUpperCase();
             for (const t of this.stores.values()) {
@@ -324,6 +400,7 @@ export class TableManager {
             return null;
         };
 
+        // ── Single-cell access ─────────────────────────────────────────────────
         // TABLE_GET(tableName, rowIndex, colId) → value at display index
         formulaEngine.registerFunction("TABLE_GET", (tableName, rowIndex, colId) => {
             const t = byName(tableName);
@@ -331,21 +408,7 @@ export class TableManager {
             return t.getValue(Number(rowIndex), String(colId)) ?? null;
         });
 
-        // TABLE_SUM(tableName, colId) → sum of all values in colId
-        formulaEngine.registerFunction("TABLE_SUM", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            return t
-                .getColumn(String(colId))
-                .reduce((acc, v) => acc + (Number(v) || 0), 0);
-        });
-
-        // TABLE_COUNT(tableName) → number of rows
-        formulaEngine.registerFunction("TABLE_COUNT", (tableName) => {
-            const t = byName(tableName);
-            return t ? t.getRowCount() : 0;
-        });
-
+        // ── Column access ─────────────────────────────────────────────────────
         // TABLE_COL(tableName, colId) → flat array of all values
         formulaEngine.registerFunction("TABLE_COL", (tableName, colId) => {
             const t = byName(tableName);
@@ -353,6 +416,46 @@ export class TableManager {
             return t.getColumn(String(colId));
         });
 
+        // ── Row count ─────────────────────────────────────────────────────────
+        // TABLE_COUNT(tableName) → number of rows
+        formulaEngine.registerFunction("TABLE_COUNT", (tableName) => {
+            const t = byName(tableName);
+            return t ? t.getRowCount() : 0;
+        });
+
+        // ── Simple aggregates ─────────────────────────────────────────────────
+        // TABLE_SUM(tableName, colId) → sum of all values
+        formulaEngine.registerFunction("TABLE_SUM", (tableName, colId) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            return t.getColumn(String(colId)).reduce((acc, v) => acc + (Number(v) || 0), 0);
+        });
+
+        // TABLE_AVG(tableName, colId) → average
+        formulaEngine.registerFunction("TABLE_AVG", (tableName, colId) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const vals = t.getColumn(String(colId)).map(Number).filter(v => !isNaN(v));
+            return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : 0;
+        });
+
+        // TABLE_MIN(tableName, colId) → minimum
+        formulaEngine.registerFunction("TABLE_MIN", (tableName, colId) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const vals = t.getColumn(String(colId)).map(Number).filter(v => !isNaN(v));
+            return vals.length ? Math.min(...vals) : 0;
+        });
+
+        // TABLE_MAX(tableName, colId) → maximum
+        formulaEngine.registerFunction("TABLE_MAX", (tableName, colId) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const vals = t.getColumn(String(colId)).map(Number).filter(v => !isNaN(v));
+            return vals.length ? Math.max(...vals) : 0;
+        });
+
+        // ── Running / cumulative ───────────────────────────────────────────────
         // TABLE_CUMSUM(tableName, colId, upToIndex) → cumulative sum
         formulaEngine.registerFunction("TABLE_CUMSUM", (tableName, colId, upToIndex) => {
             const t = byName(tableName);
@@ -360,26 +463,84 @@ export class TableManager {
             return t.getCumulativeSum(String(colId), Number(upToIndex));
         });
 
+        // ── Conditional aggregates ────────────────────────────────────────────
+        // TABLE_SUMIF(tableName, sumColId, filterColId, op, filterValue) → conditional sum
+        formulaEngine.registerFunction("TABLE_SUMIF", (tableName, sumColId, filterColId, op, filterValue) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            return t.sortedFilteredRows.reduce((acc, row) =>
+                acc + (matchCond(row[String(filterColId)], String(op), filterValue) ? (Number(row[String(sumColId)]) || 0) : 0), 0);
+        });
+
+        // TABLE_SUMIFS(tableName, sumColId, col1, op1, val1, ...) → multi-condition sum
+        formulaEngine.registerFunction("TABLE_SUMIFS", (tableName, sumColId, ...triplets) => {
+            const t = byName(tableName);
+            if (!t || triplets.length < 3) return 0;
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: String(triplets[i]), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            return t.sortedFilteredRows.reduce((acc, row) => {
+                const allMatch = conds.every(c => matchCond(row[c.col], c.op, c.val));
+                return acc + (allMatch ? (Number(row[String(sumColId)]) || 0) : 0);
+            }, 0);
+        });
+
+        // TABLE_COUNTIF(tableName, filterColId, op, filterValue) → conditional count
+        formulaEngine.registerFunction("TABLE_COUNTIF", (tableName, filterColId, op, filterValue) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            return t.sortedFilteredRows.filter(row =>
+                matchCond(row[String(filterColId)], String(op), filterValue)).length;
+        });
+
+        // TABLE_COUNTIFS(tableName, col1, op1, val1, ...) → multi-condition count
+        formulaEngine.registerFunction("TABLE_COUNTIFS", (tableName, ...triplets) => {
+            const t = byName(tableName);
+            if (!t || triplets.length < 3) return 0;
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: String(triplets[i]), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            return t.sortedFilteredRows.filter(row =>
+                conds.every(c => matchCond(row[c.col], c.op, c.val))).length;
+        });
+
+        // TABLE_AVGIF(tableName, sumColId, filterColId, op, filterValue) → conditional average
+        formulaEngine.registerFunction("TABLE_AVGIF", (tableName, sumColId, filterColId, op, filterValue) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const matching = t.sortedFilteredRows.filter(row =>
+                matchCond(row[String(filterColId)], String(op), filterValue));
+            if (!matching.length) return 0;
+            return matching.reduce((acc, row) => acc + (Number(row[String(sumColId)]) || 0), 0) / matching.length;
+        });
+
+        // TABLE_MINIF(tableName, colId, filterColId, op, filterValue) → conditional min
+        formulaEngine.registerFunction("TABLE_MINIF", (tableName, colId, filterColId, op, filterValue) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const vals = t.sortedFilteredRows
+                .filter(row => matchCond(row[String(filterColId)], String(op), filterValue))
+                .map(row => Number(row[String(colId)])).filter(v => !isNaN(v));
+            return vals.length ? Math.min(...vals) : 0;
+        });
+
+        // TABLE_MAXIF(tableName, colId, filterColId, op, filterValue) → conditional max
+        formulaEngine.registerFunction("TABLE_MAXIF", (tableName, colId, filterColId, op, filterValue) => {
+            const t = byName(tableName);
+            if (!t) return 0;
+            const vals = t.sortedFilteredRows
+                .filter(row => matchCond(row[String(filterColId)], String(op), filterValue))
+                .map(row => Number(row[String(colId)])).filter(v => !isNaN(v));
+            return vals.length ? Math.max(...vals) : 0;
+        });
+
+        // TABLE_FILTER (legacy — use TABLE_COUNTIF instead)
         // TABLE_FILTER(tableName, colId, op, value) → count of matching rows
         formulaEngine.registerFunction("TABLE_FILTER", (tableName, colId, op, value) => {
             const t = byName(tableName);
             if (!t) return 0;
-            const col = String(colId);
-            const v = value;
-            const opStr = String(op);
-            return t.sortedFilteredRows.filter((row) => {
-                const rv = row[col];
-                switch (opStr) {
-                    case "=": return rv == v;
-                    case "<>": return rv != v;
-                    case ">": return Number(rv) > Number(v);
-                    case "<": return Number(rv) < Number(v);
-                    case ">=": return Number(rv) >= Number(v);
-                    case "<=": return Number(rv) <= Number(v);
-                    case "contains": return String(rv ?? "").toLowerCase().includes(String(v).toLowerCase());
-                    default: return false;
-                }
-            }).length;
+            return t.sortedFilteredRows.filter(row =>
+                matchCond(row[String(colId)], String(op), value)).length;
         });
     }
 

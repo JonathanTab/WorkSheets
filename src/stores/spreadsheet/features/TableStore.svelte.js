@@ -22,23 +22,174 @@
  *   isNonEntry, formula,
  *   conditionalFormats (JSON string)
  *
- * ## Cumulative-sum cache
- *   getCumulativeSum(colId, upToIndex) uses a per-column Float64Array.
- *   Mark dirty from index i with #markCumDirty(colId, i).
+ * ## Computed column formulas
+ * A column with isNonEntry=true uses the `formula` field to derive its value.
+ * The formula DSL supports:
  *
- * ## Formula columns
- *   A column with isNonEntry=true and a formula string is a computed column.
- *   Supported formulas:
- *     CUMSUM(colId)   → running sum up to current row
- *     SUM(colId)      → total sum of column
- *     AVG(colId)      → average of column
- *     ROW             → 0-based display index
- *     ROW1            → 1-based display index
- *     {colId}         → value of another column in same row (for arithmetic)
- *   Complex formulas: {price} * {qty} — arithmetic over column values
+ *   {colId}            Current row's value for that column
+ *   ROW / ROW1         0-based or 1-based row index
+ *   COUNT              Total number of rows
+ *
+ *   — Aggregates (all rows) —
+ *   SUM(colId)         Sum of all values in a column
+ *   AVG(colId)         Average of all values
+ *   MIN(colId)         Minimum value
+ *   MAX(colId)         Maximum value
+ *
+ *   — Conditional aggregates (all rows, filtered) —
+ *   SUMIF(sumCol, filterCol, op, filterVal)   Sum where condition is met
+ *   COUNTIF(filterCol, op, filterVal)          Count where condition is met
+ *   AVGIF(sumCol, filterCol, op, filterVal)   Average where condition is met
+ *   MINIF(colId, filterCol, op, filterVal)    Min where condition is met
+ *   MAXIF(colId, filterCol, op, filterVal)    Max where condition is met
+ *   SUMIFS(sumCol, col1,op1,val1, ...)         Sum with multiple conditions
+ *
+ *   — Running / position-aware (up to current row) —
+ *   CUMSUM(colId)                             Running total up to current row
+ *   RUNNINGIF(sumCol, filterCol, op, filterVal)  Running sum matching condition
+ *   RUNNINGIFS(sumCol, col1,op1,val1, ...)       Running sum with multiple conditions
+ *
+ *   — Operators supported in op argument —
+ *   "="  "<>"  ">"  "<"  ">="  "<="  "contains"  "startswith"  "notcontains"
+ *
+ *   — Arithmetic & logic —
+ *   {price} * {qty}                   Arithmetic over column values
+ *   IF({status} = "done", 1, 0)       Conditional expression (full formula syntax)
+ *   {amount} * IF({type}="income",1,-1)   Combined formula and arithmetic
+ *
+ * ## Examples
+ *   CUMSUM(amount)                    Running balance
+ *   RUNNINGIF(amount, account, "=", {account})   Balance per account up to this row
+ *   SUMIF(amount, category, "=", "Food")          Total food spending
+ *   IF({qty} > 0, {price} * {qty}, 0)             Row total (zero if no qty)
+ *   COUNTIF(status, "=", "done")                  Count completed items
  */
 
 import * as Y from "yjs";
+import { parseFormula } from '../../../formulas/parser.js';
+import { evaluate } from '../../../formulas/evaluator.js';
+
+// ─── Formula evaluation helpers (module-level) ─────────────────────────────
+
+/**
+ * Find the index of the closing ')' that matches the '(' at openPos.
+ * Handles nested parens and quoted strings.
+ */
+function findCloseParen(str, openPos) {
+    let depth = 0;
+    let inStr = false;
+    let strChar = null;
+    for (let i = openPos; i < str.length; i++) {
+        const ch = str[i];
+        if (inStr) {
+            if (ch === strChar) inStr = false;
+        } else if (ch === '"' || ch === "'") {
+            inStr = true; strChar = ch;
+        } else if (ch === '(') {
+            depth++;
+        } else if (ch === ')') {
+            depth--;
+            if (depth === 0) return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Split a comma-separated argument string, respecting quoted strings and nested parens.
+ * e.g. 'amount, account, "=", "Chase"' → ['amount', 'account', '"="', '"Chase"']
+ */
+function splitArgs(str) {
+    const args = [];
+    let current = '';
+    let depth = 0;
+    let inStr = false;
+    let strChar = null;
+    for (const ch of str) {
+        if (inStr) {
+            current += ch;
+            if (ch === strChar) inStr = false;
+        } else if (ch === '"' || ch === "'") {
+            inStr = true; strChar = ch; current += ch;
+        } else if (ch === '(') {
+            depth++; current += ch;
+        } else if (ch === ')') {
+            depth--; current += ch;
+        } else if (ch === ',' && depth === 0) {
+            args.push(current.trim());
+            current = '';
+        } else {
+            current += ch;
+        }
+    }
+    if (current.trim()) args.push(current.trim());
+    return args;
+}
+
+/**
+ * Convert a result value to an expression string safe for embedding in a formula.
+ */
+function resultToExpr(val) {
+    if (val === null || val === undefined) return '0';
+    if (typeof val === 'number') return isNaN(val) ? '0' : String(val);
+    if (typeof val === 'string') return JSON.stringify(val);
+    if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
+    return '0';
+}
+
+/**
+ * Match a row value against a filter condition.
+ * Supports date-aware ISO string comparisons, numeric comparisons, and string ops.
+ */
+function matchCondition(rowVal, op, filterVal) {
+    const rv = rowVal;
+    const fv = filterVal;
+
+    // Date-aware comparison: if both values look like ISO date strings
+    if (typeof rv === 'string' && typeof fv === 'string' &&
+        rv.includes('-') && fv.includes('-')) {
+        const rvDate = Date.parse(rv);
+        const fvDate = Date.parse(fv);
+        if (!isNaN(rvDate) && !isNaN(fvDate)) {
+            switch (op) {
+                case '=': case '==': return rvDate === fvDate;
+                case '<>': case '!=': return rvDate !== fvDate;
+                case '>': return rvDate > fvDate;
+                case '<': return rvDate < fvDate;
+                case '>=': return rvDate >= fvDate;
+                case '<=': return rvDate <= fvDate;
+            }
+        }
+    }
+
+    // Numeric comparison for ordered operators
+    if (['>', '<', '>=', '<='].includes(op)) {
+        const rvNum = Number(rv);
+        const fvNum = Number(fv);
+        if (!isNaN(rvNum) && !isNaN(fvNum)) {
+            switch (op) {
+                case '>': return rvNum > fvNum;
+                case '<': return rvNum < fvNum;
+                case '>=': return rvNum >= fvNum;
+                case '<=': return rvNum <= fvNum;
+            }
+        }
+    }
+
+    // String / equality comparison
+    switch (op) {
+        case '=': case '==': return String(rv ?? '') === String(fv ?? '');
+        case '<>': case '!=': return String(rv ?? '') !== String(fv ?? '');
+        case '>': return String(rv ?? '') > String(fv ?? '');
+        case '<': return String(rv ?? '') < String(fv ?? '');
+        case '>=': return String(rv ?? '') >= String(fv ?? '');
+        case '<=': return String(rv ?? '') <= String(fv ?? '');
+        case 'contains': return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        case 'startswith': return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
+        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        default: return false;
+    }
+}
 
 /** Accent color palette (cycles by table count) */
 export const TABLE_ACCENT_COLORS = [
@@ -164,6 +315,8 @@ export class TableStore {
         // Invalidate cumulative cache when the view changes
         this.#cumCache.clear();
         this.#cumDirtyFrom.clear();
+        this.#runningIfCache.clear();
+        this.#runningIfDirtyFrom.clear();
 
         return result;
     });
@@ -175,6 +328,9 @@ export class TableStore {
     // ── Cumulative sum cache ──────────────────────────────────────────────────
     #cumCache = new Map();     // colId → Float64Array
     #cumDirtyFrom = new Map(); // colId → first dirty index
+
+    #runningIfCache = new Map();     // key → Float64Array (keyed by sumCol|filterCol|op|filterVal)
+    #runningIfDirtyFrom = new Map(); // key → first dirty index
 
     /**
      * @param {import('yjs').Map} tableYMap
@@ -225,11 +381,17 @@ export class TableStore {
             if (typeof raw.conditionalFormats === "string") {
                 try { raw.conditionalFormats = JSON.parse(raw.conditionalFormats); } catch { raw.conditionalFormats = []; }
             }
+            // Parse typeConfig if stored as JSON string
+            let typeConfig = null;
+            if (typeof raw.typeConfig === "string") {
+                try { typeConfig = JSON.parse(raw.typeConfig); } catch { typeConfig = null; }
+            }
             // Ensure defaults
             return {
                 id: raw.id ?? "",
                 name: raw.name ?? "",
-                type: raw.type ?? "text",
+                type: typeConfig?.type ?? raw.type ?? "text",
+                typeConfig,
                 required: raw.required ?? false,
                 hAlign: raw.hAlign ?? null,
                 textColor: raw.textColor ?? null,
@@ -484,6 +646,20 @@ export class TableStore {
         } else {
             this.updateColumnDef(colId, { isNonEntry: false, formula: null });
         }
+    }
+
+    /**
+     * Update a column's full type config (type + options like subFormat, decimals, dropdown options, etc.).
+     * Stores the config as a JSON string in typeConfig and syncs the top-level `type` field.
+     * @param {string} colId
+     * @param {Object|null} config - Full config like { type: 'number', subFormat: 'currency', ... }
+     */
+    updateColumnTypeConfig(colId, config) {
+        const type = config?.type ?? 'text';
+        this.updateColumnDef(colId, {
+            type,
+            typeConfig: config ? JSON.stringify(config) : null,
+        });
     }
 
     /**
@@ -746,16 +922,25 @@ export class TableStore {
     // ─── Formula evaluation ───────────────────────────────────────────────────
 
     /**
+     * Public wrapper for formula evaluation — used for live preview in UI.
+     * @param {string} formula
+     * @param {number} rowIndex  display index
+     * @returns {any}
+     */
+    evaluateFormula(formula, rowIndex) {
+        return this.#evaluateFormula(formula, rowIndex);
+    }
+
+    /**
      * Evaluate a column formula for a specific row.
-     * Supported:
-     *   CUMSUM(colId)    → running sum up to rowIndex
-     *   SUM(colId)       → total sum of column
-     *   AVG(colId)       → average of column
-     *   COUNT            → total row count
-     *   ROW              → 0-based index
-     *   ROW1             → 1-based index
-     *   {colId}          → value of another column in same row
-     *   Arithmetic: {price} * {qty}, {amount} + 10, etc.
+     *
+     * Pipeline:
+     *   1. Substitute {colId} references with the current row's values
+     *   2. Substitute ROW / ROW1 tokens
+     *   3. Substitute table-specific function calls (CUMSUM, RUNNINGIF, etc.)
+     *   4. Evaluate the remaining expression with the formula parser/evaluator
+     *
+     * See the class-level docstring for the full list of supported formulas.
      *
      * @param {string} formula
      * @param {number} rowIndex  display index
@@ -765,49 +950,282 @@ export class TableStore {
         try {
             let expr = formula.trim();
 
-            // CUMSUM(colId) shorthand
-            const cumsumMatch = expr.match(/^CUMSUM\(([^)]+)\)$/i);
-            if (cumsumMatch) {
-                return this.getCumulativeSum(cumsumMatch[1].trim(), rowIndex);
-            }
+            // Fast path: standalone COUNT
+            if (/^COUNT$/i.test(expr)) return this.getRowCount();
 
-            // SUM(colId)
-            const sumMatch = expr.match(/^SUM\(([^)]+)\)$/i);
-            if (sumMatch) {
-                return this.getColumn(sumMatch[1].trim()).reduce((a, v) => a + (Number(v) || 0), 0);
-            }
+            // Step 1: substitute {colId} with current row values
+            expr = this.#substituteColRefs(expr, rowIndex);
 
-            // AVG(colId)
-            const avgMatch = expr.match(/^AVG\(([^)]+)\)$/i);
-            if (avgMatch) {
-                const col = this.getColumn(avgMatch[1].trim());
-                const nums = col.map(v => Number(v)).filter(v => !isNaN(v));
-                return nums.length ? nums.reduce((a, v) => a + v, 0) / nums.length : 0;
-            }
+            // Step 2: substitute ROW / ROW1 tokens (as standalone tokens or function-style)
+            expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
+            expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
 
-            // COUNT
-            if (/^COUNT$/i.test(expr)) {
-                return this.getRowCount();
-            }
+            // Step 3: substitute table-specific function calls
+            expr = this.#substituteTableFuncs(expr, rowIndex);
 
-            // ROW1 (1-based)
-            expr = expr.replace(/\bROW1\b/g, String(rowIndex + 1));
-            // ROW (0-based)
-            expr = expr.replace(/\bROW\b/g, String(rowIndex));
-
-            // {colId} → column value
-            expr = expr.replace(/\{([^}]+)\}/g, (_match, colId) => {
-                const val = this.sortedFilteredRows[rowIndex]?.[colId.trim()];
-                return val == null ? '0' : String(Number(val) || 0);
-            });
-
-            // Evaluate arithmetic expression
-            // eslint-disable-next-line no-new-func
-            const result = new Function(`"use strict"; return (${expr});`)();
-            return typeof result === 'number' && !isNaN(result) ? result : null;
+            // Step 4: evaluate the remaining expression
+            return this.#evalExpression(expr);
         } catch {
             return null;
         }
+    }
+
+    /**
+     * Substitute {colId} references with the current row's values.
+     * Strings are JSON-escaped; numbers become numeric literals.
+     */
+    #substituteColRefs(expr, rowIndex) {
+        return expr.replace(/\{([^}]+)\}/g, (_match, rawColId) => {
+            const colId = rawColId.trim();
+            const val = this.sortedFilteredRows[rowIndex]?.[colId];
+            if (val === null || val === undefined || val === '') return '""';
+            if (typeof val === 'string') return JSON.stringify(val);
+            const num = Number(val);
+            return !isNaN(num) ? String(num) : JSON.stringify(String(val));
+        });
+    }
+
+    /**
+     * Replace table-specific function calls in the expression with their computed values.
+     * Processes multiple calls and handles them left-to-right (non-nested).
+     */
+    #substituteTableFuncs(expr, rowIndex) {
+        const KNOWN = ['RUNNINGIFS', 'RUNNINGIF', 'SUMIFS', 'SUMIF',
+                       'AVGIF', 'MINIF', 'MAXIF', 'COUNTIF',
+                       'CUMSUM', 'AVG', 'MIN', 'MAX', 'SUM'];
+
+        // Make up to 20 passes to replace all occurrences
+        for (let pass = 0; pass < 20; pass++) {
+            let replaced = false;
+            for (const fn of KNOWN) {
+                const re = new RegExp(`\\b${fn}\\s*\\(`, 'i');
+                const m = re.exec(expr);
+                if (!m) continue;
+                replaced = true;
+                const openIdx = m.index + m[0].length - 1;
+                const closeIdx = findCloseParen(expr, openIdx);
+                if (closeIdx === -1) continue;
+
+                const argsStr = expr.slice(openIdx + 1, closeIdx);
+                const rawArgs = splitArgs(argsStr);
+                const result = this.#callTableFunc(fn.toUpperCase(), rawArgs, rowIndex);
+
+                expr = expr.slice(0, m.index) + resultToExpr(result) + expr.slice(closeIdx + 1);
+                break; // restart loop after replacement
+            }
+            if (!replaced) break;
+        }
+        return expr;
+    }
+
+    /**
+     * Dispatch to the appropriate table aggregate function.
+     */
+    #callTableFunc(fn, rawArgs, rowIndex) {
+        const args = rawArgs.map(a => this.#evalArg(a.trim()));
+        switch (fn) {
+            case 'CUMSUM':
+                return this.getCumulativeSum(String(args[0] ?? ''), rowIndex);
+            case 'SUM': {
+                const col = this.getColumn(String(args[0] ?? ''));
+                return col.reduce((a, v) => a + (Number(v) || 0), 0);
+            }
+            case 'AVG': {
+                const col = this.getColumn(String(args[0] ?? ''));
+                const nums = col.map(Number).filter(v => !isNaN(v));
+                return nums.length ? nums.reduce((a, v) => a + v, 0) / nums.length : 0;
+            }
+            case 'MIN': {
+                const col = this.getColumn(String(args[0] ?? ''));
+                const nums = col.map(Number).filter(v => !isNaN(v));
+                return nums.length ? Math.min(...nums) : 0;
+            }
+            case 'MAX': {
+                const col = this.getColumn(String(args[0] ?? ''));
+                const nums = col.map(Number).filter(v => !isNaN(v));
+                return nums.length ? Math.max(...nums) : 0;
+            }
+            case 'RUNNINGIF':
+                if (args.length >= 4)
+                    return this.#getRunningIf(String(args[0]), String(args[1]), String(args[2]), args[3], rowIndex);
+                return 0;
+            case 'RUNNINGIFS': {
+                if (args.length < 4) return 0;
+                const [sumCol, ...rest] = args;
+                const conds = [];
+                for (let i = 0; i + 2 < rest.length; i += 3)
+                    conds.push({ col: String(rest[i]), op: String(rest[i + 1]), val: rest[i + 2] });
+                return this.#getRunningIfs(String(sumCol), conds, rowIndex);
+            }
+            case 'SUMIF':
+                if (args.length >= 4)
+                    return this.#getSumIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                return 0;
+            case 'SUMIFS': {
+                if (args.length < 4) return 0;
+                const [sumCol, ...rest] = args;
+                const conds = [];
+                for (let i = 0; i + 2 < rest.length; i += 3)
+                    conds.push({ col: String(rest[i]), op: String(rest[i + 1]), val: rest[i + 2] });
+                return this.#getSumIfs(String(sumCol), conds);
+            }
+            case 'COUNTIF':
+                if (args.length >= 3)
+                    return this.#getCountIf(String(args[0]), String(args[1]), args[2]);
+                return 0;
+            case 'AVGIF':
+                if (args.length >= 4)
+                    return this.#getAvgIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                return 0;
+            case 'MINIF':
+                if (args.length >= 4)
+                    return this.#getMinIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                return 0;
+            case 'MAXIF':
+                if (args.length >= 4)
+                    return this.#getMaxIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                return 0;
+            default:
+                return 0;
+        }
+    }
+
+    /**
+     * Parse a raw argument string to its JavaScript value.
+     * Quoted strings are unquoted; numeric strings become numbers; bare identifiers stay as strings.
+     */
+    #evalArg(arg) {
+        if ((arg.startsWith('"') && arg.endsWith('"')) ||
+            (arg.startsWith("'") && arg.endsWith("'"))) {
+            return arg.slice(1, -1);
+        }
+        const num = Number(arg);
+        if (arg !== '' && !isNaN(num)) return num;
+        return arg; // bare column ID or other identifier
+    }
+
+    /**
+     * Evaluate the final expression (after all substitutions) using the formula parser.
+     * Falls back to simple numeric parse for plain numbers.
+     */
+    #evalExpression(expr) {
+        const trimmed = expr.trim();
+        if (!trimmed || trimmed === '""') return null;
+
+        // Fast path for plain numbers
+        const num = Number(trimmed);
+        if (trimmed !== '' && !isNaN(num)) return num;
+
+        // Use the formula parser/evaluator for everything else (IF, AND, arithmetic, etc.)
+        try {
+            const ast = parseFormula('=' + trimmed);
+            const result = evaluate(ast, () => null, {});
+            return result;
+        } catch {
+            return null;
+        }
+    }
+
+    // ─── Position-aware aggregates (cached running sums) ─────────────────────
+
+    /**
+     * Running conditional sum: sum of `sumCol` for rows where `filterCol op filterVal`,
+     * from row 0 up to `upToIndex` (inclusive). Cached per condition key.
+     */
+    #getRunningIf(sumCol, filterCol, op, filterVal, upToIndex) {
+        const key = `${sumCol}|${filterCol}|${op}|${String(filterVal)}`;
+        const rows = this.sortedFilteredRows;
+        const n = rows.length;
+        if (n === 0) return 0;
+
+        let cache = this.#runningIfCache.get(key);
+        const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
+        const clampedIdx = Math.min(upToIndex, n - 1);
+
+        if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
+            if (!cache || cache.length < n) cache = new Float64Array(n);
+            const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
+            let running = startVal;
+            for (let i = dirtyFrom; i < n; i++) {
+                const row = rows[i];
+                running += matchCondition(row[filterCol], op, filterVal) ? (Number(row[sumCol]) || 0) : 0;
+                cache[i] = running;
+            }
+            this.#runningIfCache.set(key, cache);
+            this.#runningIfDirtyFrom.set(key, n);
+        }
+
+        return cache[clampedIdx] ?? 0;
+    }
+
+    /**
+     * Running conditional sum with multiple conditions (all must match).
+     */
+    #getRunningIfs(sumCol, conditions, upToIndex) {
+        const key = `${sumCol}||${conditions.map(c => `${c.col}|${c.op}|${String(c.val)}`).join('||')}`;
+        const rows = this.sortedFilteredRows;
+        const n = rows.length;
+        if (n === 0) return 0;
+
+        let cache = this.#runningIfCache.get(key);
+        const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
+        const clampedIdx = Math.min(upToIndex, n - 1);
+
+        if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
+            if (!cache || cache.length < n) cache = new Float64Array(n);
+            const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
+            let running = startVal;
+            for (let i = dirtyFrom; i < n; i++) {
+                const row = rows[i];
+                const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
+                running += allMatch ? (Number(row[sumCol]) || 0) : 0;
+                cache[i] = running;
+            }
+            this.#runningIfCache.set(key, cache);
+            this.#runningIfDirtyFrom.set(key, n);
+        }
+
+        return cache[clampedIdx] ?? 0;
+    }
+
+    // ─── Total conditional aggregates ─────────────────────────────────────────
+
+    #getSumIf(sumCol, filterCol, op, filterVal) {
+        return this.sortedFilteredRows.reduce((acc, row) =>
+            acc + (matchCondition(row[filterCol], op, filterVal) ? (Number(row[sumCol]) || 0) : 0), 0);
+    }
+
+    #getSumIfs(sumCol, conditions) {
+        return this.sortedFilteredRows.reduce((acc, row) => {
+            const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
+            return acc + (allMatch ? (Number(row[sumCol]) || 0) : 0);
+        }, 0);
+    }
+
+    #getCountIf(filterCol, op, filterVal) {
+        return this.sortedFilteredRows.filter(row =>
+            matchCondition(row[filterCol], op, filterVal)).length;
+    }
+
+    #getAvgIf(sumCol, filterCol, op, filterVal) {
+        const matching = this.sortedFilteredRows.filter(row =>
+            matchCondition(row[filterCol], op, filterVal));
+        if (!matching.length) return 0;
+        return matching.reduce((acc, row) => acc + (Number(row[sumCol]) || 0), 0) / matching.length;
+    }
+
+    #getMinIf(colId, filterCol, op, filterVal) {
+        const vals = this.sortedFilteredRows
+            .filter(row => matchCondition(row[filterCol], op, filterVal))
+            .map(row => Number(row[colId])).filter(v => !isNaN(v));
+        return vals.length ? Math.min(...vals) : 0;
+    }
+
+    #getMaxIf(colId, filterCol, op, filterVal) {
+        const vals = this.sortedFilteredRows
+            .filter(row => matchCondition(row[filterCol], op, filterVal))
+            .map(row => Number(row[colId])).filter(v => !isNaN(v));
+        return vals.length ? Math.max(...vals) : 0;
     }
 
     #markCumDirty(colId, fromIndex) {

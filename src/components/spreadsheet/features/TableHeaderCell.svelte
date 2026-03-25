@@ -1,22 +1,20 @@
 <script>
     /**
-     * TableHeaderCell - Column header for an inline or sticky table header
+     * TableHeaderCell - Column header for a viewport-mode table.
      *
-     * Renders the column name, sort indicator (▲/▼ when this column is sorted),
-     * and a filter toggle button.
+     * Looks like a regular spreadsheet column header: bold name, subtle bg,
+     * heavy bottom border. Filter button is shown only when active or on hover.
+     * Renaming is handled by double-clicking the cell (via parent).
      */
 
     import TableFilterPopover from "./TableFilterPopover.svelte";
-    import { sortAsc, sortDesc, filter } from "../../../lib/icons/index.js";
+    import { filter } from "../../../lib/icons/index.js";
 
     let { table, colIndex, width = 80, height = 24 } = $props();
 
     let col = $derived(table?.columns?.[colIndex] ?? null);
-    let isSorted = $derived(table?.sortColId === col?.id);
-    let sortDir = $derived(table?.sortDir ?? "asc");
     let hasFilter = $derived(col?.id && table?.filters?.[col.id]);
 
-    // Filter popover state
     let showFilterPopover = $state(false);
 
     function handleFilterClick(e) {
@@ -27,10 +25,6 @@
     function closeFilterPopover() {
         showFilterPopover = false;
     }
-
-    let sortIcon = $derived(
-        isSorted ? (sortDir === "asc" ? sortAsc : sortDesc) : null,
-    );
 </script>
 
 <div
@@ -38,20 +32,12 @@
     style="width:{width}px; height:{height}px;"
     title={col?.name ?? ""}
 >
-    <button class="sort-area" type="button">
-        <span class="col-name">{col?.name ?? ""}</span>
-        {#if sortIcon}
-            <span class="sort-icon">{@html sortIcon}</span>
-        {/if}
-    </button>
-    {#if col?.required}
-        <span class="required-badge" title="Required">*</span>
-    {/if}
+    <span class="col-name">{col?.name ?? ""}</span>
     <button
         class="filter-btn"
         class:active={hasFilter}
         onclick={handleFilterClick}
-        title={hasFilter ? "Filter active" : "Add filter"}
+        title={hasFilter ? "Filter active" : "Filter"}
         type="button"
     >
         {@html filter}
@@ -73,75 +59,49 @@
         align-items: center;
         background: var(--table-header-bg, #f1f5f9);
         border-right: 1px solid var(--cell-border, #e2e8f0);
-        border-bottom: 2px solid var(--table-header-border, #94a3b8);
+        border-bottom: 1.5px solid var(--table-header-border, #94a3b8);
         box-sizing: border-box;
         overflow: visible;
         flex-shrink: 0;
         position: relative;
-    }
-
-    .sort-area {
-        flex: 1;
-        display: flex;
-        align-items: center;
-        gap: 3px;
-        padding: 0 4px;
-        background: none;
-        border: none;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--table-header-text, #334155);
-        min-width: 0;
-        height: 100%;
+        padding: 0 2px 0 4px;
+        gap: 2px;
     }
 
     .col-name {
+        flex: 1;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        flex: 1;
-        text-align: left;
-    }
-
-    .sort-icon {
-        font-size: 9px;
-        color: var(--table-sort-color, #3b82f6);
-        flex-shrink: 0;
-    }
-
-    .required-badge {
-        color: var(--required-color, #ef4444);
-        font-size: 10px;
-        padding: 0 2px;
-        flex-shrink: 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--table-header-text, #334155);
     }
 
     .filter-btn {
         width: 18px;
         height: 18px;
         padding: 0;
-        margin-right: 2px;
         background: transparent;
         border: none;
         border-radius: 3px;
         cursor: pointer;
-        font-size: 12px;
         color: var(--color-text-secondary, #94a3b8);
         display: flex;
         align-items: center;
         justify-content: center;
         flex-shrink: 0;
-        opacity: 0.5;
+        opacity: 0.3;
     }
 
     .filter-btn:hover {
-        background: var(--table-header-hover, #e2e8f0);
         opacity: 1;
+        background: var(--color-fill, #e2e8f0);
     }
 
     .filter-btn.active {
-        color: var(--color-primary, #3b82f6);
         opacity: 1;
+        color: var(--color-text, #475569);
     }
 
     .filter-popover-wrapper {

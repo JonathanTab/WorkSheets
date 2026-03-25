@@ -1,6 +1,14 @@
 <script>
     import { spreadsheetSession, selectionState } from "../../../stores/spreadsheetStore.svelte.js";
     import { date, checkbox, star, link, imageIcon } from "../../../lib/icons/index.js";
+    import { DATE_PRESETS, TIME_PRESETS } from "../../../stores/spreadsheet/cellTypes/types/date.js";
+
+    /**
+     * Controlled mode: when both props are provided the component reads/writes
+     * through these instead of the spreadsheet store.
+     * @type {{ type: string, [key: string]: any } | null}
+     */
+    let { controlledConfig = null, onControlledChange = null } = $props();
 
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
     let selection = $derived(selectionState.range);
@@ -9,9 +17,29 @@
     /** @type {any} */
     let options = $state({});
 
+    // Whether the current type is in the number family (number, currency, percent — legacy)
+    let isNumberFamily = $derived(
+        currentType === 'number' || currentType === 'currency' || currentType === 'percent'
+    );
+
+    // Effective sub-format considering legacy type IDs
+    let subFormat = $derived(() => {
+        if (options.subFormat) return options.subFormat;
+        if (currentType === 'currency') return 'currency';
+        if (currentType === 'percent') return 'percent';
+        return 'default';
+    });
+
     $effect(() => {
-        // Synchronize state from sheet when selection changes or cell data changes.
-        // Track rowMetaVersion and colMetaVersion so we re-read after row/col type changes.
+        // Controlled mode: read from external config prop (use onControlledChange presence as indicator,
+        // since controlledConfig may legitimately be null for plain-text columns)
+        if (onControlledChange !== null) {
+            currentType = controlledConfig?.type || "text";
+            options = controlledConfig
+                ? Object.fromEntries(Object.entries(controlledConfig).filter(([key]) => key !== "type"))
+                : {};
+            return;
+        }
         if (selection && sheetStore) {
             const _cellVer = sheetStore.cellsVersion;
             const _rowMetaVer = sheetStore.rowMetaVersion;
@@ -34,10 +62,8 @@
         const defaults = {
             automatic: {},
             text: {},
-            number: { decimals: 2 },
-            currency: { decimals: 2, symbol: "$" },
-            percent: { decimals: 2 },
-            date: {},
+            number: { subFormat: 'default', decimals: 2, thousandsSep: true, negativeStyle: 'minus' },
+            date: { subFormat: 'date', datePreset: 'MM/DD/YYYY', timePreset: 'h:mm A' },
             rating: { max: 5 },
             checkbox: {},
             url: {},
@@ -65,11 +91,12 @@
     }
 
     function applyToSelection(config) {
+        // Controlled mode: delegate to parent
+        if (onControlledChange) {
+            onControlledChange(config);
+            return;
+        }
         if (!selection || !sheetStore) return;
-        // Delegate to the session-level handler (which respects row/col selection mode)
-        // We call the toolbar handler via a synthetic event-like approach:
-        // Actually, we apply directly here — the toolbar's handleCellTypeChange is separate.
-        // CellTypeConfigurator applies to the cell range directly.
         spreadsheetSession.ydoc.transact(() => {
             for (let r = selection.startRow; r <= selection.endRow; r++) {
                 for (let c = selection.startCol; c <= selection.endCol; c++) {
@@ -85,8 +112,75 @@
         applyToSelection(config);
     }
 
-    // Dropdown options management
+    // ── Number sub-format helpers ─────────────────────────────────────────────
+
+    const SUB_FORMATS = [
+        { id: 'default',    label: '123',   title: 'Number' },
+        { id: 'currency',   label: '$',     title: 'Currency' },
+        { id: 'accounting', label: '$()',   title: 'Accounting' },
+        { id: 'financial',  label: '()',    title: 'Financial' },
+        { id: 'percent',    label: '%',     title: 'Percent' },
+        { id: 'scientific', label: '1ᴱ',   title: 'Scientific' },
+    ];
+
+    /** Switch number sub-format, migrating legacy currency/percent type IDs → number */
+    function setSubFormat(sf) {
+        if (!selection || !sheetStore) return;
+
+        // Normalise to type:'number' — wipes legacy currency/percent type IDs
+        const sym = options.symbol ?? '$';
+        const decimals = options.decimals ?? 2;
+        const thousandsSep = options.thousandsSep ?? (sf !== 'percent' && sf !== 'scientific');
+        const negativeStyle = (sf === 'accounting' || sf === 'financial') ? 'parens' : (options.negativeStyle ?? 'minus');
+
+        currentType = 'number';
+        options = { subFormat: sf, decimals, thousandsSep, negativeStyle, symbol: sym, symbolAfter: options.symbolAfter ?? false };
+        applyToSelection({ type: 'number', ...options });
+    }
+
+    function incrementDecimals() {
+        const d = Math.min(10, (options.decimals ?? 2) + 1);
+        updateOption('decimals', d);
+        // Normalise type to number
+        if (currentType !== 'number') { currentType = 'number'; }
+        applyToSelection({ type: 'number', ...options });
+    }
+
+    function decrementDecimals() {
+        const d = Math.max(0, (options.decimals ?? 2) - 1);
+        updateOption('decimals', d);
+        if (currentType !== 'number') { currentType = 'number'; }
+        applyToSelection({ type: 'number', ...options });
+    }
+
+    function toggleThousands() {
+        const next = !(options.thousandsSep ?? true);
+        options.thousandsSep = next;
+        if (currentType !== 'number') { currentType = 'number'; }
+        applyToSelection({ type: 'number', ...options });
+    }
+
+    // ── Date/Time helpers ─────────────────────────────────────────────────────
+
+    let isDateFamily = $derived(currentType === 'date');
+    let dateSubFormat = $derived(/** @type {string} */ (options.subFormat || 'date'));
+
+    /** Switch date sub-format, initialising missing presets with sensible defaults. */
+    function setDateSubFormat(sf) {
+        if (!selection || !sheetStore) return;
+        const newOpts = {
+            subFormat:   sf,
+            datePreset:  options.datePreset  ?? 'MM/DD/YYYY',
+            timePreset:  options.timePreset  ?? 'h:mm A',
+        };
+        options = newOpts;
+        applyToSelection({ type: 'date', ...newOpts });
+    }
+
+    // ── Dropdown options management ───────────────────────────────────────────
+
     let dropdownOptionInput = $state('');
+
     function addDropdownOption() {
         const val = dropdownOptionInput.trim();
         if (!val) return;
@@ -94,6 +188,7 @@
         updateOption('options', [...current, val]);
         dropdownOptionInput = '';
     }
+
     function removeDropdownOption(idx) {
         const current = [...(options.options || [])];
         current.splice(idx, 1);
@@ -112,7 +207,6 @@
         applyToSelection(config);
     }
 
-    // Range picker: use current grid selection as the dropdown source range
     function useSelectionAsRange() {
         const sel = selectionState.range;
         if (!sel) return;
@@ -129,8 +223,6 @@
         { id: "automatic", label: "Automatic", icon: "✦" },
         { id: "text",      label: "Text",      icon: "abc" },
         { id: "number",    label: "Number",    icon: "123" },
-        { id: "currency",  label: "Currency",  icon: "$" },
-        { id: "percent",   label: "Percent",   icon: "%" },
         { id: "date",      label: "Date",      icon: date, isSvg: true },
         { id: "checkbox",  label: "Checkbox",  icon: checkbox, isSvg: true },
         { id: "rating",    label: "Rating",    icon: star, isSvg: true },
@@ -139,6 +231,9 @@
         { id: "file",      label: "File",      icon: "📎" },
         { id: "dropdown",  label: "Dropdown",  icon: "▾" },
     ];
+
+    // Active type button — number family all map to 'number'
+    let activeTypeId = $derived(isNumberFamily ? 'number' : currentType);
 </script>
 
 <div class="configurator">
@@ -146,57 +241,139 @@
         {#each types as type}
             <button
                 class="type-btn"
-                class:active={currentType === type.id}
+                class:active={activeTypeId === type.id}
                 onclick={() => setType(type.id)}
                 title={type.label}
             >
-                <span class="icon"
-                    >{#if type.isSvg}{@html type.icon}{:else}{type.icon}{/if}</span
-                >
+                <span class="icon">{#if type.isSvg}{@html type.icon}{:else}{type.icon}{/if}</span>
                 <span class="label">{type.label}</span>
             </button>
         {/each}
     </div>
 
-    {#if currentType === "number" || currentType === "currency" || currentType === "percent"}
+    <!-- ── Number options ──────────────────────────────────────────────────── -->
+    {#if isNumberFamily}
         <div class="options-panel">
-            <div class="option-row">
-                <label for="decimals">Decimals</label>
-                <input
-                    id="decimals"
-                    type="number"
-                    min="0"
-                    max="10"
-                    value={options.decimals ?? 2}
-                    onchange={(e) => {
-                        const target = /** @type {HTMLInputElement} */ (e.target);
-                        updateOption("decimals", parseInt(target.value));
-                    }}
-                />
+
+            <!-- Sub-format presets -->
+            <div class="subformat-row">
+                {#each SUB_FORMATS as sf}
+                    <button
+                        class="sf-btn"
+                        class:active={subFormat() === sf.id}
+                        onclick={() => setSubFormat(sf.id)}
+                        title={sf.title}
+                    >{sf.label}</button>
+                {/each}
             </div>
+
+            <!-- Decimals +/- and thousands toggle -->
+            <div class="num-controls-row">
+                <div class="decimals-group" title="Decimal places">
+                    <button class="dec-btn" onclick={decrementDecimals} title="Fewer decimals">.0</button>
+                    <span class="dec-value">{options.decimals ?? 2}</span>
+                    <button class="dec-btn" onclick={incrementDecimals} title="More decimals">.00</button>
+                </div>
+                <button
+                    class="toggle-btn"
+                    class:active={options.thousandsSep ?? (subFormat() !== 'percent' && subFormat() !== 'scientific')}
+                    onclick={toggleThousands}
+                    title="Thousands separator"
+                >,</button>
+            </div>
+
+            <!-- More options (less common) -->
+            <details class="more-options">
+                <summary>More options</summary>
+                <div class="more-body">
+
+                    {#if subFormat() === 'currency' || subFormat() === 'accounting'}
+                        <div class="option-row">
+                            <label>Symbol</label>
+                            <div class="symbol-row">
+                                <input
+                                    type="text"
+                                    class="symbol-input"
+                                    value={options.symbol ?? '$'}
+                                    onchange={(e) => updateOption('symbol', /** @type {HTMLInputElement} */(e.target).value)}
+                                />
+                                <label class="inline-label">
+                                    <input
+                                        type="checkbox"
+                                        checked={options.symbolAfter ?? false}
+                                        onchange={(e) => updateOption('symbolAfter', /** @type {HTMLInputElement} */(e.target).checked)}
+                                    />
+                                    After
+                                </label>
+                            </div>
+                        </div>
+                    {/if}
+
+                    <div class="option-row">
+                        <label>Negatives</label>
+                        <select
+                            value={options.negativeStyle ?? ((subFormat() === 'accounting' || subFormat() === 'financial') ? 'parens' : 'minus')}
+                            onchange={(e) => updateOption('negativeStyle', /** @type {HTMLSelectElement} */(e.target).value)}
+                        >
+                            <option value="minus">−1,234</option>
+                            <option value="parens">(1,234)</option>
+                            <option value="red">Red −1,234</option>
+                            <option value="redParens">Red (1,234)</option>
+                        </select>
+                    </div>
+                </div>
+            </details>
         </div>
     {/if}
 
-    {#if currentType === "currency"}
+    <!-- ── Date / Time options ───────────────────────────────────────────── -->
+    {#if isDateFamily}
         <div class="options-panel">
-            <div class="option-row">
-                <label for="symbol">Symbol</label>
-                <input
-                    id="symbol"
-                    type="text"
-                    value={options.symbol ?? "$"}
-                    onchange={(e) => {
-                        const target = /** @type {HTMLInputElement} */ (e.target);
-                        updateOption("symbol", target.value);
-                    }}
-                />
+
+            <!-- Sub-format tabs -->
+            <div class="subformat-row">
+                <button class="sf-btn" class:active={dateSubFormat === 'date'}
+                    onclick={() => setDateSubFormat('date')} title="Date only">Date</button>
+                <button class="sf-btn" class:active={dateSubFormat === 'time'}
+                    onclick={() => setDateSubFormat('time')} title="Time only">Time</button>
+                <button class="sf-btn" class:active={dateSubFormat === 'datetime'}
+                    onclick={() => setDateSubFormat('datetime')} title="Date and time">Date+Time</button>
             </div>
+
+            {#if dateSubFormat !== 'time'}
+                <div class="preset-section-label">Date format</div>
+                <div class="preset-grid">
+                    {#each DATE_PRESETS as preset}
+                        <button
+                            class="preset-btn"
+                            class:active={(options.datePreset ?? options.format ?? 'MM/DD/YYYY') === preset.id}
+                            onclick={() => updateOption('datePreset', preset.id)}
+                            title={preset.id}
+                        >{preset.example}</button>
+                    {/each}
+                </div>
+            {/if}
+
+            {#if dateSubFormat !== 'date'}
+                <div class="preset-section-label">Time format</div>
+                <div class="preset-grid">
+                    {#each TIME_PRESETS as preset}
+                        <button
+                            class="preset-btn"
+                            class:active={(options.timePreset ?? 'h:mm A') === preset.id}
+                            onclick={() => updateOption('timePreset', preset.id)}
+                            title={preset.id}
+                        >{preset.example}</button>
+                    {/each}
+                </div>
+            {/if}
+
         </div>
     {/if}
 
+    <!-- ── Dropdown options ──────────────────────────────────────────────── -->
     {#if currentType === "dropdown"}
         <div class="options-panel">
-            <!-- Source toggle: List vs Range -->
             <div class="option-row">
                 <label>Source</label>
                 <div class="source-toggle">
@@ -222,17 +399,12 @@
                             class="range-input"
                             value={options.range ?? ''}
                             placeholder="e.g. A1:A10"
-                            onchange={(e) => {
-                                const target = /** @type {HTMLInputElement} */ (e.target);
-                                updateDropdownRange(target.value.trim());
-                            }}
+                            onchange={(e) => updateDropdownRange(/** @type {HTMLInputElement} */(e.target).value.trim())}
                         />
                     </div>
                     <div class="range-hint">
                         <span class="hint-text">Select cells on the sheet, then:</span>
-                        <button class="use-sel-btn" onclick={useSelectionAsRange}>
-                            Use selection
-                        </button>
+                        <button class="use-sel-btn" onclick={useSelectionAsRange}>Use selection</button>
                     </div>
                 </div>
             {:else}
@@ -259,28 +431,20 @@
                 </div>
             {/if}
 
-            <!-- Allow custom entry -->
             <div class="option-row" style="margin-top:6px">
                 <label>Allow custom</label>
                 <input
                     type="checkbox"
                     checked={options.allowCustom ?? false}
-                    onchange={(e) => {
-                        const target = /** @type {HTMLInputElement} */ (e.target);
-                        updateOption("allowCustom", target.checked);
-                    }}
+                    onchange={(e) => updateOption("allowCustom", /** @type {HTMLInputElement} */(e.target).checked)}
                 />
             </div>
 
-            <!-- Validation -->
             <div class="option-row">
                 <label>Validation</label>
                 <select
                     value={options.validation ?? 'none'}
-                    onchange={(e) => {
-                        const target = /** @type {HTMLSelectElement} */ (e.target);
-                        updateOption('validation', target.value);
-                    }}
+                    onchange={(e) => updateOption('validation', /** @type {HTMLSelectElement} */(e.target).value)}
                 >
                     <option value="none">None</option>
                     <option value="soft">Warn</option>
@@ -343,25 +507,177 @@
         border-top: 1px solid #e2e8f0;
     }
 
+    /* Sub-format preset row */
+    .subformat-row {
+        display: flex;
+        gap: 3px;
+        margin-bottom: 8px;
+    }
+
+    .sf-btn {
+        flex: 1;
+        padding: 4px 2px;
+        border: 1px solid #e2e8f0;
+        background: white;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.8rem;
+        font-weight: 500;
+        color: #374151;
+        text-align: center;
+        line-height: 1.2;
+        min-width: 0;
+    }
+
+    .sf-btn:hover { background: #f8fafc; }
+
+    .sf-btn.active {
+        background: #eff6ff;
+        border-color: #3b82f6;
+        color: #1d4ed8;
+    }
+
+    /* Decimals + thousands row */
+    .num-controls-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+
+    .decimals-group {
+        display: flex;
+        align-items: center;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .dec-btn {
+        padding: 3px 8px;
+        background: white;
+        border: none;
+        cursor: pointer;
+        font-size: 0.8rem;
+        color: #374151;
+        font-family: monospace;
+    }
+
+    .dec-btn:hover { background: #f1f5f9; }
+
+    .dec-value {
+        padding: 3px 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #1e293b;
+        border-left: 1px solid #e2e8f0;
+        border-right: 1px solid #e2e8f0;
+        min-width: 22px;
+        text-align: center;
+    }
+
+    .toggle-btn {
+        padding: 3px 10px;
+        border: 1px solid #e2e8f0;
+        background: white;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #94a3b8;
+    }
+
+    .toggle-btn:hover { background: #f8fafc; }
+
+    .toggle-btn.active {
+        background: #eff6ff;
+        border-color: #3b82f6;
+        color: #1d4ed8;
+    }
+
+    /* More options */
+    .more-options {
+        margin-top: 4px;
+    }
+
+    .more-options summary {
+        font-size: 0.75rem;
+        color: #64748b;
+        cursor: pointer;
+        user-select: none;
+        padding: 2px 0;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .more-options summary::before {
+        content: '▸';
+        font-size: 0.65rem;
+        transition: transform 0.15s;
+    }
+
+    .more-options[open] summary::before {
+        transform: rotate(90deg);
+    }
+
+    .more-body {
+        margin-top: 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
     .option-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
         font-size: 0.8125rem;
-        margin-bottom: 4px;
     }
 
-    .option-row input[type="number"],
-    .option-row input[type="text"] {
-        width: 60px;
+    .option-row label {
+        color: #374151;
+        white-space: nowrap;
+    }
+
+    .option-row select {
+        flex: 1;
         padding: 2px 4px;
         border: 1px solid #cbd5e1;
-        border-radius: 2px;
+        border-radius: 3px;
+        font-size: 0.8125rem;
     }
 
-    .option-row input[type="checkbox"] { width: 16px; height: 16px; }
+    .option-row input[type="checkbox"] { width: 14px; height: 14px; }
 
+    .symbol-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .symbol-input {
+        width: 36px;
+        padding: 2px 4px;
+        border: 1px solid #cbd5e1;
+        border-radius: 3px;
+        font-size: 0.8125rem;
+        text-align: center;
+    }
+
+    .inline-label {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        font-size: 0.8125rem;
+        color: #64748b;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    /* Dropdown options */
     .dropdown-list-label {
         font-size: 0.75rem;
         color: #64748b;
@@ -450,14 +766,6 @@
         font-weight: 500;
     }
 
-    .option-row select {
-        flex: 1;
-        padding: 2px 4px;
-        border: 1px solid #cbd5e1;
-        border-radius: 3px;
-        font-size: 0.8125rem;
-    }
-
     .range-input {
         flex: 1;
         padding: 2px 6px;
@@ -467,9 +775,7 @@
         font-family: monospace;
     }
 
-    .range-picker-section {
-        margin-bottom: 4px;
-    }
+    .range-picker-section { margin-bottom: 4px; }
 
     .range-hint {
         display: flex;
@@ -480,10 +786,7 @@
         font-size: 0.75rem;
     }
 
-    .hint-text {
-        color: #94a3b8;
-        flex: 1;
-    }
+    .hint-text { color: #94a3b8; flex: 1; }
 
     .use-sel-btn {
         padding: 2px 7px;
@@ -496,7 +799,47 @@
         white-space: nowrap;
     }
 
-    .use-sel-btn:hover {
-        background: #e2e8f0;
+    .use-sel-btn:hover { background: #e2e8f0; }
+
+    /* Date / time preset grid */
+    .preset-section-label {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: #94a3b8;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        margin: 6px 0 3px;
+    }
+
+    .preset-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3px;
+        margin-bottom: 4px;
+        max-height: 180px;
+        overflow-y: auto;
+    }
+
+    .preset-btn {
+        padding: 4px 6px;
+        border: 1px solid #e2e8f0;
+        background: white;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.78rem;
+        color: #374151;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .preset-btn:hover { background: #f8fafc; }
+
+    .preset-btn.active {
+        background: #eff6ff;
+        border-color: #3b82f6;
+        color: #1d4ed8;
     }
 </style>

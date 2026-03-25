@@ -6,10 +6,35 @@
         isRichText,
         richTextToPlain,
     } from "../../stores/spreadsheet/richText.js";
+    import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { untrack } from "svelte";
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
     import { close, check } from "../../lib/icons/index.js";
     import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+
+    /** Get the raw editable value for a cell, including table cells. */
+    function getTableAwareEditValue(row, col) {
+        const renderContext = spreadsheetSession.renderContext;
+        if (!renderContext) return spreadsheetSession.getCellEditValue(row, col);
+        const cellType = renderContext.getCellType(row, col);
+        if (cellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                return info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+            }
+        }
+        if (cellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                return info.table.entryBuffer?.[info.colDef.id] ?? "";
+            }
+        }
+        if (cellType === CELL_TYPE.TABLE_HEADER) {
+            const info = renderContext.tableManager?.getCellInfo(row, col);
+            return info?.colDef?.name ?? "";
+        }
+        return spreadsheetSession.getCellEditValue(row, col);
+    }
 
     let { selectedCell = null, onEdit } = $props();
 
@@ -43,24 +68,17 @@
     // Display value - show formula if present, plain text for rich text cells
     let displayValue = $derived(() => {
         if (!selectedCell) return "";
-        const raw = spreadsheetSession.getCellEditValue(
-            selectedCell.row,
-            selectedCell.col,
-        );
+        const raw = getTableAwareEditValue(selectedCell.row, selectedCell.col);
         // Convert rich text to plain text for display in the formula bar
         if (isRichText(raw))
             return richTextToPlain(raw);
-        return raw;
+        return raw ?? "";
     });
 
     // Edit value - show raw value (formula if present)
     let editStartValue = $derived(() => {
         if (!selectedCell) return "";
-        // Get the raw value for editing (shows formula if present)
-        return spreadsheetSession.getCellEditValue(
-            selectedCell.row,
-            selectedCell.col,
-        );
+        return getTableAwareEditValue(selectedCell.row, selectedCell.col) ?? "";
     });
 
     let isEditing = $derived(editSessionState.isEditing);

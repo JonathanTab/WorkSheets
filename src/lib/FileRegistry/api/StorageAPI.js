@@ -384,6 +384,68 @@ export class StorageAPI {
     }
 
     /**
+     * Update a Yjs file's room_id. Used after a snapshot restore to migrate
+     * to a fresh room that is not contaminated by offline clients.
+     * @param {string} id - File ID
+     * @param {string} roomId - New room ID
+     * @returns {Promise<FileDescriptor>}
+     */
+    async updateRoomId(id, roomId) {
+        return this._normalizeFile(await this._post({ action: 'update_room_id', id, room_id: roomId }));
+    }
+
+    // -------------------------------------------------------
+    // Version history (snapshot proxy — access-controlled via storage.php)
+    // -------------------------------------------------------
+
+    /**
+     * List snapshot history for a Yjs file.
+     * @param {string} fileId
+     * @returns {Promise<SnapshotMeta[]>}
+     */
+    async listSnapshots(fileId) {
+        const data = await this._get({ action: 'snapshot_list', file_id: fileId });
+        return data.snapshots ?? [];
+    }
+
+    /**
+     * Fetch the raw Yjs state for a snapshot as a Uint8Array.
+     * Apply to a Y.Doc with Y.applyUpdate(doc, data) to reconstruct the doc for diffing.
+     * @param {string} fileId - The file this snapshot belongs to (used for access control)
+     * @param {string} snapshotId
+     * @returns {Promise<Uint8Array>}
+     */
+    async getSnapshotData(fileId, snapshotId) {
+        const url = this.baseUrl.startsWith('http')
+            ? new URL(this.baseUrl)
+            : new URL(this.baseUrl, window.location.origin);
+        url.searchParams.set('action', 'snapshot_data');
+        url.searchParams.set('file_id', fileId);
+        url.searchParams.set('snapshot_id', snapshotId);
+        const res = await fetch(url.toString(), {
+            credentials: 'same-origin',
+            headers: this._authHeaders(),
+        });
+        if (res.status === 401) throw new Error('AUTH_EXPIRED');
+        if (!res.ok) throw new Error(`HTTP_${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+    }
+
+    /**
+     * Restore a file to a snapshot version.
+     * Creates a fresh Yjs room with the snapshot state and updates the file record.
+     * All current clients will need to reconnect to the new room.
+     * @param {string} fileId
+     * @param {string} snapshotId
+     * @returns {Promise<FileDescriptor>} updated file with new roomId
+     */
+    async restoreVersion(fileId, snapshotId) {
+        return this._normalizeFile(
+            await this._post({ action: 'snapshot_restore', file_id: fileId, snapshot_id: snapshotId })
+        );
+    }
+
+    /**
      * Search files by title or stored content text (server-side).
      * Returns files the authenticated user has access to.
      * @param {string} query - Minimum 2 characters
@@ -398,3 +460,14 @@ export class StorageAPI {
         return (data.files ?? []).map(f => this._normalizeFile(f));
     }
 }
+
+/**
+ * @typedef {object} SnapshotMeta
+ * @property {string}  id
+ * @property {string}  file_id
+ * @property {string}  room_id
+ * @property {number}  created_at  Unix ms timestamp
+ * @property {'auto'|'manual'|'room_empty'} trigger
+ * @property {string|null} created_by  comma-separated usernames
+ * @property {string|null} description
+ */

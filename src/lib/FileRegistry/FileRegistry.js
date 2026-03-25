@@ -19,11 +19,23 @@
  */
 
 import { StorageAPI } from './api/StorageAPI.js';
+import { YjsServerAPI } from './api/YjsServerAPI.js';
 import { LocalStore } from './core/LocalStore.js';
 import { YjsRuntime } from './core/YjsRuntime.js';
 import { BlobCache } from './core/BlobCache.js';
 import { OfflineSyncStore } from './core/OfflineSyncStore.js';
 import { YjsSyncCoordinator } from './core/YjsSyncCoordinator.js';
+
+// Deterministic color from username so presence color is consistent
+const _PRESENCE_COLORS = [
+    '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6',
+    '#1abc9c', '#e67e22', '#16a085', '#d35400', '#2980b9',
+];
+function _userColor(username) {
+    let h = 0;
+    for (let i = 0; i < username.length; i++) h = (h * 31 + username.charCodeAt(i)) >>> 0;
+    return _PRESENCE_COLORS[h % _PRESENCE_COLORS.length];
+}
 
 // ============================================================
 // Internal EventEmitter
@@ -726,7 +738,7 @@ export class FileRegistry extends EventEmitter {
      * @param {string}              options.appName      - Application name (namespaces app scope and IndexedDB)
      * @param {string}              options.baseUrl      - URL to storage.php
      * @param {string}              options.blobUrl      - URL to blob-storage.php
-     * @param {string}              options.wsUrl        - Yjs WebSocket server URL
+     * @param {string}              options.wsUrl        - Yjs WebSocket server URL (also used to derive Yjs HTTP API URL)
      * @param {() => string|null}   options.getApiKey    - Returns current API key (called on each request)
      * @param {() => string}        options.getUsername  - Returns current username
      * @param {number}             [options.syncInterval=300000] - Background sync interval (ms)
@@ -738,9 +750,16 @@ export class FileRegistry extends EventEmitter {
         this._username = 'anonymous';
 
         this._api = new StorageAPI(options.baseUrl, options.blobUrl, options.getApiKey);
+        this._yjsApi = new YjsServerAPI(options.wsUrl, options.getApiKey);
         this._localStore = null;
         this._runtime = new YjsRuntime(options.wsUrl, (docId, { offline }) => {
             this._onYjsDocUpdated(docId, offline);
+        }, {
+            getApiKey: options.getApiKey,
+            getUserInfo: () => ({
+                username: this._username,
+                color: _userColor(this._username),
+            }),
         });
         this._blobCache = new BlobCache();
         this._pendingStore = null;
@@ -849,6 +868,85 @@ export class FileRegistry extends EventEmitter {
 
     /** @returns {{ isSyncing: boolean, lastSync: Date|null, error: Error|null }} */
     getSyncState() { return { ...this._syncState }; }
+
+    // -------------------------------------------------------
+    // Awareness / presence
+    // -------------------------------------------------------
+
+    /**
+     * Returns the Yjs Awareness instance for an open document.
+     * Subscribe to changes with awareness.on('change', handler).
+     * Read states with awareness.getStates().
+     * @param {string} fileId
+     * @returns {object|null}
+     */
+    getAwareness(fileId) {
+        return this._runtime.getAwareness(fileId);
+    }
+
+    // -------------------------------------------------------
+    // Snapshot / history
+    // -------------------------------------------------------
+
+    /**
+     * List snapshots for a file. Proxied through storage.php for access control.
+     * @param {string} fileId
+     * @returns {Promise<import('./api/StorageAPI.js').SnapshotMeta[]>}
+     */
+    async listSnapshots(fileId) {
+        const file = this._files.get(fileId);
+        if (!file) return [];
+        return this._api.listSnapshots(fileId);
+    }
+
+    /**
+     * Create a manual snapshot of an actively open document.
+     * @param {string} fileId
+     * @param {string} [description]
+     * @returns {Promise<{ id: string }>}
+     */
+    async createSnapshot(fileId, description) {
+        const file = this._files.get(fileId);
+        if (!file?.roomId) throw new Error('No active room for file');
+        return this._yjsApi.createSnapshot(file.roomId, description);
+    }
+
+    /**
+     * Fetch the raw Yjs binary state for a snapshot.
+     * Proxied through storage.php for per-file access control.
+     * Apply to a Y.Doc with Y.applyUpdate(doc, data) to reconstruct the state.
+     * @param {string} fileId
+     * @param {string} snapshotId
+     * @returns {Promise<Uint8Array>}
+     */
+    async getSnapshotData(fileId, snapshotId) {
+        return this._api.getSnapshotData(fileId, snapshotId);
+    }
+
+    /**
+     * Restore a snapshot:
+     *   1. storage.php validates access, asks the Yjs server to create a new room
+     *      pre-loaded with the snapshot state, and updates the file's roomId atomically.
+     *   2. Reconnects the local Y.Doc to the new room (clearing old IndexedDB data).
+     *
+     * After this returns, the live document reflects the restored state and
+     * offline clients on the old roomId can no longer contaminate it.
+     *
+     * @param {string} fileId
+     * @param {string} snapshotId
+     * @returns {Promise<object>} Updated FileDescriptor
+     */
+    async restoreSnapshot(fileId, snapshotId) {
+        // 1. storage.php: validate canWriteFile, validate snapshot ownership,
+        //    call Yjs server to create new room, update file's room_id — atomically.
+        const updatedFile = await this._api.restoreVersion(fileId, snapshotId);
+        this._upsertFile(updatedFile);
+
+        // 2. Reconnect local Y.Doc to the new room (clears old IndexedDB)
+        await this._runtime.clearAndSwitchRoom(fileId, updatedFile.roomId);
+
+        return updatedFile;
+    }
 
     async shutdown() {
         this._stopSyncInterval();

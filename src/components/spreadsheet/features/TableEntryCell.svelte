@@ -1,31 +1,21 @@
 <script>
     /**
-     * TableEntryCell - Input cell for the table's persistent entry row
+     * TableEntryCell - Input cell for the table's persistent entry row.
      *
-     * Renders a single column's input in the entry row. On Enter, calls
-     * table.commitEntry() which validates and inserts the whole row.
-     *
-     * Features:
-     *   - Tab key moves to next editable column (via onTabNext/onTabPrev callbacks)
-     *   - Formula/computed columns show a disabled fx placeholder
-     *   - Shift+Tab moves to previous column
-     *   - Enter commits the entry and returns to first field
-     *   - Escape clears the entry
-     *   - Styled to match regular spreadsheet cells
+     * Visually identical to a blank regular spreadsheet cell. Becomes an active
+     * input when focused. Tab moves between columns, Enter commits the row.
      */
+
+    import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
 
     let {
         table,
         colIndex,
         width = 80,
         height = 24,
-        /** Callback: request focus on the next entry cell */
         onTabNext = null,
-        /** Callback: request focus on the previous entry cell */
         onTabPrev = null,
-        /** Callback: called when Enter is pressed to commit the entry row */
         onCommit = null,
-        /** Callback: called on any input change (e.g. to repaint canvas) */
         onValueChange = null,
     } = $props();
 
@@ -68,7 +58,6 @@
         }
     }
 
-    // Focus management
     let inputEl = $state(null);
     export function focus() {
         inputEl?.focus();
@@ -79,13 +68,10 @@
     class="table-entry-cell"
     class:has-error={!!error}
     class:is-formula={isFormula}
-    class:is-first-col={colIndex === 0}
-    style="width:{width}px; height:{height}px; --accent:{table?.accentColor ??
-        '#3b82f6'};"
+    style="width:{width}px; height:{height}px;"
     title={error ?? (isFormula ? "Computed column" : (col?.name ?? ""))}
 >
     {#if isFormula}
-        <!-- Formula column: show a visual placeholder only, not interactive -->
         <div class="formula-placeholder">
             <span class="fx-icon">fx</span>
         </div>
@@ -101,14 +87,26 @@
             />
         </div>
     {:else if col?.type === "date"}
-        <input
+        <DatePickerEditor
             bind:this={inputEl}
-            type="date"
-            class="entry-input"
-            class:has-value={!!value}
             {value}
-            oninput={handleInput}
-            onkeydown={handleKeydown}
+            subFormat={col.typeConfig?.subFormat ?? 'date'}
+            autofocus={false}
+            oncommit={(val) => {
+                if (!col || !table || isFormula) return;
+                table.setEntryValue(col.id, val);
+                onValueChange?.();
+            }}
+            oncancel={() => table?.clearEntry()}
+            ontabnext={onTabNext}
+            ontabprev={onTabPrev}
+            onrowcommit={() => {
+                if (onCommit) {
+                    onCommit();
+                } else {
+                    table?.commitEntry();
+                }
+            }}
         />
     {:else if col?.type === "number" || col?.type === "currency" || col?.type === "percent"}
         <input
@@ -141,7 +139,6 @@
     .table-entry-cell {
         display: flex;
         align-items: center;
-        /* White background like regular cells */
         background: var(--cell-bg, #ffffff);
         border-right: 1px solid var(--cell-border, #e2e8f0);
         border-bottom: 1px solid var(--cell-border, #e2e8f0);
@@ -149,21 +146,6 @@
         overflow: hidden;
         flex-shrink: 0;
         position: relative;
-        padding-left: 0;
-    }
-
-    .table-entry-cell.is-first-col {
-        padding-left: 3px;
-    }
-
-    .table-entry-cell.is-first-col::before {
-        content: "";
-        position: absolute;
-        left: 0;
-        top: 0;
-        bottom: 0;
-        width: 3px;
-        background: var(--accent, #3b82f6);
     }
 
     .table-entry-cell.has-error {
@@ -171,7 +153,7 @@
     }
 
     .table-entry-cell.is-formula {
-        background: rgba(139, 92, 246, 0.04);
+        background: rgba(0, 0, 0, 0.015);
         cursor: not-allowed;
     }
 
@@ -181,10 +163,7 @@
         background: transparent;
         padding: 0 4px;
         font-size: 13px;
-        font-family:
-            system-ui,
-            -apple-system,
-            sans-serif;
+        font-family: system-ui, -apple-system, sans-serif;
         height: 100%;
         outline: none;
         min-width: 0;
@@ -193,7 +172,7 @@
 
     .entry-input:focus {
         background: var(--input-bg, #ffffff);
-        outline: 2px solid var(--accent, #3b82f6);
+        outline: 2px solid var(--editor-outline, #3b82f6);
         outline-offset: -2px;
     }
 
@@ -205,15 +184,6 @@
         color: var(--placeholder-color, #94a3b8);
         font-style: italic;
         font-size: 12px;
-    }
-
-    /* Style date inputs to match text inputs */
-    .entry-input[type="date"] {
-        color-scheme: light;
-    }
-
-    .entry-input[type="date"]:not(.has-value) {
-        color: var(--placeholder-color, #94a3b8);
     }
 
     .checkbox-wrapper {
@@ -228,7 +198,6 @@
         width: 14px;
         height: 14px;
         cursor: pointer;
-        accent-color: var(--accent, #3b82f6);
     }
 
     .formula-placeholder {
@@ -242,7 +211,7 @@
     .fx-icon {
         font-size: 10px;
         font-weight: 600;
-        color: rgba(139, 92, 246, 0.4);
+        color: rgba(100, 116, 139, 0.4);
         font-family: monospace;
     }
 

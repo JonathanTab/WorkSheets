@@ -1095,6 +1095,7 @@
 {#if contextMenu}
     <div
         class="context-menu"
+        class:mobile={typeof window !== "undefined" && window.innerWidth <= 768}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
         onclick={(e) => e.stopPropagation()}
     >
@@ -2133,6 +2134,15 @@
         min-width: 160px;
     }
 
+    .context-menu.mobile {
+        position: fixed;
+        left: 50% !important;
+        top: 50% !important;
+        transform: translate(-50%, -50%);
+        min-width: 200px;
+        box-shadow: 0 12px 48px rgba(0, 0, 0, 0.25);
+    }
+
     .ctx-item {
         display: flex;
         align-items: center;
@@ -2252,6 +2262,13 @@
 
         .grid-item {
             padding: 0.75rem;
+        }
+
+        /* Mobile context menu improvements */
+        .context-menu.mobile .ctx-item {
+            padding: 0.75rem 1rem;
+            font-size: 0.9375rem;
+            min-height: 44px;
         }
     }
 </style>

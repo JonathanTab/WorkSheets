@@ -1,37 +1,38 @@
 /**
- * Percent cell type descriptor
+ * Percent cell type — backward-compatible wrapper around the number formatter.
  *
- * Stores the percentage as a plain number (50 = 50%).
- * Does NOT use the 0–1 fraction convention to avoid confusion.
+ * Storage convention: raw value 50 = 50% (NOT 0.5). Natural human value.
+ * Existing cells stored with { type: 'percent', decimals } continue to work.
+ * New cells should use { type: 'number', subFormat: 'percent', ... }.
  */
+import { formatNumber, getNumberTextColor } from './number.js';
+
 export const percentType = {
     id: 'percent',
+
     formatValue(rawValue, config) {
-        if (rawValue === undefined || rawValue === null || rawValue === '') return '';
-        const num = Number(rawValue);
-        if (isNaN(num)) return String(rawValue);
-
-        const decimals = config?.decimals ?? 2;
-
-        const formatted = new Intl.NumberFormat(undefined, {
-            minimumFractionDigits: decimals,
-            maximumFractionDigits: decimals,
-        }).format(num);
-
-        return `${formatted}%`;
+        return formatNumber(rawValue, {
+            subFormat: 'percent',
+            decimals: config?.decimals ?? 2,
+            thousandsSep: config?.thousandsSep ?? false,
+            negativeStyle: config?.negativeStyle ?? 'minus',
+        });
     },
+
     parseInput(inputString) {
-        if (inputString === '') return null;
-        // Strip % and whitespace, keep digits, dot, minus
-        const clean = inputString.replace(/[^\d.\-]/g, '');
+        if (inputString === '' || inputString == null) return null;
+        const clean = String(inputString).replace(/[%\s]/g, '');
         const num = Number(clean);
-        if (isNaN(num)) return inputString;
-        // Store as-is — 50% is stored as 50
-        return num;
+        return isNaN(num) ? String(inputString) : num;
     },
+
     defaultStyle() {
         return { horizontalAlign: 'right' };
-    }
+    },
+
+    getTextColor(rawValue, config) {
+        return getNumberTextColor(rawValue, config);
+    },
 };
 
 export default percentType;

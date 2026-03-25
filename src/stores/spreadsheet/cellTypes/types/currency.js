@@ -1,37 +1,39 @@
 /**
- * Currency cell type descriptor
+ * Currency cell type — backward-compatible wrapper around the number formatter.
+ *
+ * Existing cells stored with { type: 'currency', decimals, symbol } continue to
+ * render correctly. New cells should use { type: 'number', subFormat: 'currency', ... }.
  */
+import { formatNumber, getNumberTextColor } from './number.js';
+
 export const currencyType = {
     id: 'currency',
+
     formatValue(rawValue, config) {
-        if (rawValue === undefined || rawValue === null || rawValue === '') return '';
-        const num = Number(rawValue);
-        if (isNaN(num)) return String(rawValue);
-
-        const symbol = config?.symbol || '$';
-        const decimals = config?.decimals ?? 2;
-        const locale = config?.locale || undefined;
-
-        // We use Intl.NumberFormat but might need to handle custom symbols manually
-        // if they aren't standard ISO codes. For simplicity here, we prepend the symbol.
-        const formatted = new Intl.NumberFormat(locale, {
-            minimumFractionDigits: decimals,
-            maximumFractionDigits: decimals,
-            useGrouping: true
-        }).format(num);
-
-        return `${symbol}${formatted}`;
+        return formatNumber(rawValue, {
+            subFormat: 'currency',
+            symbol: config?.symbol ?? '$',
+            symbolAfter: config?.symbolAfter ?? false,
+            decimals: config?.decimals ?? 2,
+            thousandsSep: config?.thousandsSep ?? true,
+            negativeStyle: config?.negativeStyle ?? 'minus',
+        });
     },
+
     parseInput(inputString) {
-        if (inputString === '') return null;
-        // Strip symbol and commas
-        const clean = inputString.replace(/[^\d.-]/g, '');
+        if (inputString === '' || inputString == null) return null;
+        const clean = String(inputString).replace(/[, $]/g, '');
         const num = Number(clean);
-        return isNaN(num) ? inputString : num;
+        return isNaN(num) ? String(inputString) : num;
     },
+
     defaultStyle() {
         return { horizontalAlign: 'right' };
-    }
+    },
+
+    getTextColor(rawValue, config) {
+        return getNumberTextColor(rawValue, config);
+    },
 };
 
 export default currencyType;

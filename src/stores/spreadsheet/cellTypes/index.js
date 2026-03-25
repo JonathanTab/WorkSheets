@@ -54,6 +54,22 @@ export const CellTypeRegistry = {
     },
 
     /**
+     * Get an optional value-dependent text color (e.g. red for negative numbers).
+     * Returns null if no override is needed.
+     * @param {Object} ct - Cell type config
+     * @param {any} rawValue
+     * @returns {string|null}
+     */
+    getTextColor(ct, rawValue) {
+        const typeId = ct?.type || 'text';
+        const descriptor = this.get(typeId);
+        if (descriptor && typeof descriptor.getTextColor === 'function') {
+            return descriptor.getTextColor(rawValue, ct);
+        }
+        return null;
+    },
+
+    /**
      * Get default style overrides for a cell type
      * @param {Object} ct - Cell type config
      * @returns {Object}
