@@ -93,6 +93,14 @@ try {
             PRIMARY KEY (ancestor_id, descendant_id)
         );
 
+        CREATE TABLE IF NOT EXISTS recent_files (
+            user       TEXT NOT NULL,
+            file_id    TEXT NOT NULL,
+            app_name   TEXT,
+            opened_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user, file_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_files_owner           ON files(owner);
         CREATE INDEX IF NOT EXISTS idx_files_scope           ON files(scope);
         CREATE INDEX IF NOT EXISTS idx_files_folder          ON files(folder_id);
@@ -104,6 +112,7 @@ try {
         CREATE INDEX IF NOT EXISTS idx_folder_shares_user    ON folder_shares(username);
         CREATE INDEX IF NOT EXISTS idx_closure_descendant    ON folder_closure(descendant_id);
         CREATE INDEX IF NOT EXISTS idx_closure_ancestor      ON folder_closure(ancestor_id);
+        CREATE INDEX IF NOT EXISTS idx_recent_user           ON recent_files(user, opened_at DESC);
     ");
 
     // Schema migrations (idempotent ALTER TABLE — ignored if column already exists)
@@ -158,14 +167,21 @@ function generateId(): string {
 }
 
 /**
- * Pass-through the user's own auth token to the Yjs server.
- * Works for both API-key and session-cookie auth flows.
+ * Return the Bearer token to use when proxying requests to the Yjs server.
+ * For Bearer-auth callers the token is passed through directly.
+ * For session/cookie-auth callers we look up the user's api_key so we never
+ * forward a session_token (which the Yjs server does not understand).
  */
 function yjsToken(): string {
     $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
     if (preg_match('/^Bearer ([a-f0-9]{64})$/i', $header, $m)) return $m[1];
-    if (!empty($_COOKIE['session_token']) && preg_match('/^[a-f0-9]{64}$/i', $_COOKIE['session_token'])) {
-        return $_COOKIE['session_token'];
+    // Session/cookie auth: use the authenticated user's api_key
+    global $authorized_user;
+    if ($authorized_user) {
+        $users = instrumenta_get_users();
+        if (!empty($users[$authorized_user]['api_key'])) {
+            return $users[$authorized_user]['api_key'];
+        }
     }
     return '';
 }
@@ -571,9 +587,21 @@ try {
             $files   = array_map('normalizeFile',   $filesStmt->fetchAll());
             $folders = array_map('normalizeFolder', $foldersStmt->fetchAll());
 
+            // Top-50 recently opened files for this user (cross-device sync)
+            $recentsStmt = $db->prepare("
+                SELECT file_id, app_name, opened_at
+                FROM recent_files
+                WHERE user = :user
+                ORDER BY opened_at DESC
+                LIMIT 50
+            ");
+            $recentsStmt->execute([':user' => $viewAs]);
+            $recents = $recentsStmt->fetchAll();
+
             respond([
                 'files'    => $files,
                 'folders'  => $folders,
+                'recents'  => $recents,
                 'viewAs'   => $viewAs,
                 'adminAll' => $adminAll,
             ]);
@@ -588,6 +616,7 @@ try {
             $user = requireAuth();
 
             $id          = post('id');
+            $clientRoomId = post('room_id') ?: null;
             $title       = post('title') ?: 'Untitled';
             $type        = post('type')  ?: 'yjs';
             $scope       = post('scope') ?: 'drive';
@@ -605,13 +634,32 @@ try {
             if (!$id) $id = ($app ? $app . '_' : '') . generateId();
             if (!validateId($id)) error('Invalid id format');
 
+            // Idempotency: if this client-provided ID already exists for this user, return it
+            if ($id) {
+                $stmt = $db->prepare("SELECT owner FROM files WHERE id = ?");
+                $stmt->execute([$id]);
+                $existing = $stmt->fetch();
+                if ($existing) {
+                    if ($existing['owner'] !== $user) error('ID conflict', 409);
+                    respond(fetchFile($db, $id));
+                    break;
+                }
+            }
+
             // Access checks
             if ($folderId && !canWriteFolder($db, $folderId, $user)) error('No write access to folder', 403);
             if ($parentId && !canWriteFile($db, $parentId, $user))   error('No write access to parent', 403);
 
             $roomId  = null;
             $blobKey = null;
-            if ($type === 'yjs')  $roomId  = generateRoomId();
+            if ($type === 'yjs') {
+                // Accept client-provided room_id (for offline-created docs); generate if absent
+                if ($clientRoomId && preg_match('/^[a-f0-9\-]{36}$/', $clientRoomId)) {
+                    $roomId = $clientRoomId;
+                } else {
+                    $roomId = generateRoomId();
+                }
+            }
             if ($type === 'blob') $blobKey = $id;
 
             $mimeType = $type === 'blob' ? (post('mime_type') ?: null)  : null;
@@ -770,14 +818,31 @@ try {
         case 'create_folder': {
             requirePost();
             $user        = requireAuth();
+            $id          = post('id') ?: null;
             $name        = post('name');
             $parentId    = post('parent_id') ?: null;
             $publicRead  = postBool('public_read');
             $publicWrite = postBool('public_write');
             if (!$name) error('name required');
+
+            // Validate or generate ID
+            if ($id) {
+                if (!validateId($id)) error('Invalid id format');
+                // Idempotency: if folder with this ID already exists for this user, return it
+                $stmt = $db->prepare("SELECT owner FROM folders WHERE id = ?");
+                $stmt->execute([$id]);
+                $existing = $stmt->fetch();
+                if ($existing) {
+                    if ($existing['owner'] !== $user) error('ID conflict', 409);
+                    respond(fetchFolder($db, $id));
+                    break;
+                }
+            } else {
+                $id = generateId();
+            }
+
             if ($parentId && !canWriteFolder($db, $parentId, $user)) error('No write access to parent', 403);
 
-            $id = generateId();
             $db->beginTransaction();
             $db->prepare("
                 INSERT INTO folders (id, owner, name, parent_id, public_read, public_write)
@@ -1278,6 +1343,25 @@ try {
                ->execute([$newRoomId, $fileId]);
 
             respond(fetchFile($db, $fileId));
+        }
+
+        case 'record_open': {
+            requirePost();
+            $user    = requireAuth();
+            $fileId  = post('file_id');
+            $appName = post('app_name') ?: null;
+            if (!$fileId) error('file_id required');
+            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
+
+            $db->prepare("
+                INSERT INTO recent_files (user, file_id, app_name, opened_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(user, file_id) DO UPDATE
+                    SET app_name = excluded.app_name,
+                        opened_at = excluded.opened_at
+            ")->execute([$user, $fileId, $appName]);
+
+            respond(['success' => true]);
         }
 
         default:

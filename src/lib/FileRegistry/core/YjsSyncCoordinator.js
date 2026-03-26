@@ -38,12 +38,14 @@ export class YjsSyncCoordinator {
      * @param {import('./OfflineSyncStore.js').OfflineSyncStore} opts.pendingStore
      * @param {import('../api/StorageAPI.js').StorageAPI}        opts.api
      * @param {import('./YjsRuntime.js').YjsRuntime}             opts.runtime  - this tab's runtime
+     * @param {(() => string|null)|null} [opts.getApiKey] - Returns Bearer token for WebSocket auth
      */
-    constructor({ username, pendingStore, api, runtime }) {
+    constructor({ username, pendingStore, api, runtime, getApiKey = null }) {
         this.username      = username;
         this._pendingStore = pendingStore;
         this._api          = api;
         this._runtime      = runtime;
+        this._getApiKey    = getApiKey;
 
         this._isLeader      = false;
         this._channel       = null;
@@ -235,7 +237,10 @@ export class YjsSyncCoordinator {
         });
 
         // Connect WebSocket and wait for bidirectional sync
-        const provider = new WebsocketProvider(wsUrl, roomId, doc);
+        const wsParams = {};
+        const apiKey = this._getApiKey?.();
+        if (apiKey) wsParams['auth'] = apiKey;
+        const provider = new WebsocketProvider(wsUrl, roomId, doc, { params: wsParams });
         try {
             await new Promise((resolve, reject) => {
                 const t = setTimeout(

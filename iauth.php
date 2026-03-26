@@ -16,11 +16,36 @@ if (INSTRUMENTA_DEBUG) {
     ini_set('log_errors', '1');
 }
 
+define('INSTRUMENTA_TOKEN_DIR', INSTRUMENTA_ROOT . 'data/session_tokens/');
+
+// Ensure session token directory exists
+if (!is_dir(INSTRUMENTA_TOKEN_DIR)) {
+    mkdir(INSTRUMENTA_TOKEN_DIR, 0700, true);
+}
+
+/**
+ * Returns true when running on localhost (HTTP dev mode).
+ * Used to disable the `secure` cookie flag so session cookies work over plain HTTP.
+ */
+function isLocalhost(): bool {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $ip   = $_SERVER['REMOTE_ADDR'] ?? '';
+    return $host === 'localhost'
+        || str_starts_with($host, 'localhost:')
+        || $host === '127.0.0.1'
+        || str_starts_with($host, '127.0.0.1:')
+        || $host === '[::1]'
+        || $ip   === '127.0.0.1'
+        || $ip   === '::1';
+}
+
+$_secure_cookie = !isLocalhost();
+
 // Initialize session with secure settings
 session_set_cookie_params([
     'httponly' => true,
-    'secure'   => true,
-    'samesite' => 'Lax',   // Lax: allows same-site navigations and fetch (was Strict)
+    'secure'   => $_secure_cookie,
+    'samesite' => 'Lax',
 ]);
 session_start();
 
@@ -383,6 +408,42 @@ function instrumenta_get_tool_name($script_path) {
 
 
 // ============================================================
+// Session token helpers
+// ============================================================
+
+/** Cookie lifetime for persistent session tokens: 30 days */
+define('SESSION_TOKEN_LIFETIME', 60 * 60 * 24 * 30);
+
+/**
+ * Set the session_token cookie using consistent options.
+ */
+function _set_session_token_cookie(string $token, int $expires): void {
+    global $_secure_cookie;
+    setcookie('session_token', $token, [
+        'expires'  => $expires,
+        'path'     => '/',
+        'secure'   => $_secure_cookie,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+}
+
+/**
+ * Clear the session_token cookie.
+ */
+function _clear_session_token_cookie(): void {
+    global $_secure_cookie;
+    setcookie('session_token', '', [
+        'expires'  => 1,
+        'path'     => '/',
+        'secure'   => $_secure_cookie,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+}
+
+
+// ============================================================
 // Auth Resolution  (Priority order)
 // ============================================================
 // 1. Bearer token in Authorization header  — preferred for PWA / embedded apps
@@ -404,74 +465,120 @@ if ($authorized_user === null && isset($_GET['apikey'])) {
 // --- Priority 3 & 4: Cookie / session ---
 if ($authorized_user === null) {
 
-    // Hydrate $_SESSION from the persistent session_token cookie if needed
-    if (!isset($_SESSION['user']) && isset($_COOKIE['session_token'])) {
-        $token     = $_COOKIE['session_token'];
-        $tokenFile = INSTRUMENTA_ROOT . 'data/session_tokens/' . $token;
+    // Hydrate $_SESSION from the persistent session_token cookie if needed.
+    //
+    // Race condition fix: when the PHP session expires, multiple concurrent
+    // requests can all arrive with the same session_token cookie. Without
+    // serialisation only one would succeed (after rotation deletes the file).
+    //
+    // We fix this with two measures:
+    //   a) flock() on a per-token lock file ensures only ONE request rotates.
+    //   b) After rotation we KEEP the old token file valid for a short grace
+    //      period (30 s) so concurrent requests that already read the old
+    //      cookie value can still hydrate their session without a re-rotate.
+    if (!isset($_SESSION['user']) && !empty($_COOKIE['session_token'])) {
+        $token = $_COOKIE['session_token'];
 
-        instrumenta_debug_log('SESSION_TOKEN_CHECK', [
-            'cookie_token'    => $token,
-            'token_file_path' => $tokenFile,
-            'file_exists'     => file_exists($tokenFile)
-        ]);
+        // Security: validate format before using as a filename (path traversal guard)
+        if (preg_match('/^[a-f0-9]{64}$/', $token)) {
+            $tokenFile = INSTRUMENTA_TOKEN_DIR . $token;
+            $lockFile  = $tokenFile . '.lock';
 
-        if (file_exists($tokenFile)) {
-            $tokenData = json_decode(file_get_contents($tokenFile), true);
+            if (file_exists($tokenFile)) {
+                // Acquire an exclusive lock so only one concurrent request rotates.
+                // Other requests block here briefly, then see rotated_at is set.
+                $lockFd = @fopen($lockFile, 'c');
+                $locked = $lockFd && flock($lockFd, LOCK_EX);
 
-            instrumenta_debug_log('TOKEN_DATA', $tokenData);
+                // Re-read inside the lock (another request may have rotated by now)
+                $tokenData = $tokenFile && file_exists($tokenFile)
+                    ? @json_decode(@file_get_contents($tokenFile), true)
+                    : null;
 
-            if ($tokenData['expires'] > time()) {
-                $users    = instrumenta_get_users();
-                $username = $tokenData['username'];
+                if ($tokenData && isset($tokenData['username'])) {
+                    $users    = instrumenta_get_users();
+                    $username = $tokenData['username'];
+                    $isValid  = isset($users[$username]);
 
-                if (isset($users[$username])) {
-                    session_regenerate_id(true);
-                    $_SESSION['user']     = $username;
-                    $_SESSION['is_admin'] = $users[$username]['is_admin'];
+                    if (!$isValid) {
+                        // User no longer exists — clear everything
+                        @unlink($tokenFile);
+                        _clear_session_token_cookie();
+                        log_auth_attempt($username, 'failed', 'token', ['reason' => 'user_not_found']);
 
-                    // Token rotation — issue a fresh token, invalidate the old one
-                    $newToken    = bin2hex(random_bytes(32));
-                    $newExpires  = time() + 60 * 60 * 24 * 30;
-                    $newTokenData = [
-                        'username' => $username,
-                        'expires'  => $newExpires,
-                    ];
+                    } elseif (isset($tokenData['rotated_at'])) {
+                        // This token was already rotated by a concurrent request.
+                        // Honour it during the grace window so the concurrent request
+                        // does not get logged out.
+                        if ((time() - $tokenData['rotated_at']) < 30) {
+                            session_regenerate_id(true);
+                            $_SESSION['user']     = $username;
+                            $_SESSION['is_admin'] = !empty($users[$username]['is_admin']);
+                            log_auth_attempt($username, 'success', 'token', ['token_grace' => true]);
+                        } else {
+                            // Grace period expired — clean up
+                            @unlink($tokenFile);
+                            _clear_session_token_cookie();
+                        }
 
-                    $newTokenFile = INSTRUMENTA_ROOT . 'data/session_tokens/' . $newToken;
-                    file_put_contents($newTokenFile, json_encode($newTokenData));
+                    } elseif ($tokenData['expires'] <= time()) {
+                        // Token genuinely expired
+                        @unlink($tokenFile);
+                        _clear_session_token_cookie();
+                        log_auth_attempt($username, 'failed', 'token', ['reason' => 'token_expired']);
 
-                    // SameSite=Lax allows the cookie to work in standalone PWA mode
-                    setcookie('session_token', $newToken, [
-                        'expires'  => $newExpires,
-                        'path'     => '/',
-                        'secure'   => true,
-                        'httponly' => true,
-                        'samesite' => 'Lax',
-                    ]);
-                    unlink($tokenFile);
+                    } else {
+                        // Valid, unrotated token — rotate it
+                        $newToken    = bin2hex(random_bytes(32));
+                        $newExpires  = time() + SESSION_TOKEN_LIFETIME;
 
-                    log_auth_attempt($username, 'success', 'token', [
-                        'token_rotated' => true
-                    ]);
+                        // Write new token first (so it's ready before clients need it)
+                        file_put_contents(
+                            INSTRUMENTA_TOKEN_DIR . $newToken,
+                            json_encode(['username' => $username, 'expires' => $newExpires])
+                        );
+
+                        // Set new cookie
+                        _set_session_token_cookie($newToken, $newExpires);
+
+                        // Mark old token as rotated with a short grace window for
+                        // in-flight concurrent requests that carry the old cookie value.
+                        file_put_contents($tokenFile, json_encode([
+                            'username'   => $username,
+                            'expires'    => time() + 30,   // keeps file_exists true briefly
+                            'rotated_at' => time(),
+                        ]));
+
+                        // Hydrate this request's session
+                        session_regenerate_id(true);
+                        $_SESSION['user']     = $username;
+                        $_SESSION['is_admin'] = !empty($users[$username]['is_admin']);
+
+                        log_auth_attempt($username, 'success', 'token', ['token_rotated' => true]);
+                    }
                 } else {
-                    unlink($tokenFile);
-                    setcookie('session_token', '', ['expires' => 1, 'path' => '/']);
-                    log_auth_attempt($username, 'failed', 'token', [
-                        'reason' => 'user_not_found'
-                    ]);
+                    // Corrupt or missing file — clear cookie
+                    @unlink($tokenFile);
+                    _clear_session_token_cookie();
+                    log_auth_attempt('unknown', 'failed', 'token', ['reason' => 'invalid_token']);
                 }
+
+                if ($locked) {
+                    flock($lockFd, LOCK_UN);
+                }
+                if ($lockFd) {
+                    fclose($lockFd);
+                }
+                @unlink($lockFile);
+
             } else {
-                unlink($tokenFile);
-                setcookie('session_token', '', ['expires' => 1, 'path' => '/']);
-                log_auth_attempt($tokenData['username'] ?? 'unknown', 'failed', 'token', [
-                    'reason' => 'token_expired'
-                ]);
+                // Token file doesn't exist — stale cookie
+                _clear_session_token_cookie();
+                log_auth_attempt('unknown', 'failed', 'token', ['reason' => 'invalid_token']);
             }
         } else {
-            setcookie('session_token', '', ['expires' => 1, 'path' => '/']);
-            log_auth_attempt('unknown', 'failed', 'token', [
-                'reason' => 'invalid_token'
-            ]);
+            // Malformed token value — clear it
+            _clear_session_token_cookie();
         }
     }
 

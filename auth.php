@@ -1,6 +1,6 @@
 <?php
 require_once 'iauth.php';
-define('INSTRUMENTA_TOKEN_DIR', INSTRUMENTA_ROOT . 'data/session_tokens/');
+// INSTRUMENTA_TOKEN_DIR and SESSION_TOKEN_LIFETIME are defined in iauth.php
 
 // API endpoints
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -63,12 +63,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['is_admin'] = $users[$username]['is_admin'];
 
                     if (true) {
-                        $token = bin2hex(random_bytes(32));
-                        $expires = time() + 60 * 60 * 24 * 180;
+                        $token   = bin2hex(random_bytes(32));
+                        $expires = time() + SESSION_TOKEN_LIFETIME;
 
                         $tokenData = [
                             'username' => $username,
-                            'expires' => $expires
+                            'expires'  => $expires,
                         ];
 
                         $tokenFilePath = INSTRUMENTA_TOKEN_DIR . $token;
@@ -76,7 +76,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         file_put_contents($tokenFilePath, json_encode($tokenData));
                         instrumenta_debug_log('TOKEN_WRITTEN', file_exists($tokenFilePath));
-                        setcookie('session_token', $token, $expires, '/', '', true, true);
+                        _set_session_token_cookie($token, $expires);
                     }
 
                     log_auth_attempt($username, 'success', 'password', [
@@ -107,12 +107,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         unlink($tokenFile);
                     }
 
-                    setcookie('session_token', '', 1, '/');
+                    _clear_session_token_cookie();
                 }
 
+                $logged_out_user = $_SESSION['user'] ?? 'unknown';
                 session_destroy();
-                log_auth_attempt($username, 'success', 'password', [
-                    'logout' => true
+                log_auth_attempt($logged_out_user, 'success', 'logout', [
+                    'logout' => true,
                 ]);
                 echo json_encode(['success' => true]);
                 exit;

@@ -7,6 +7,7 @@
         isRowSelected,
         onRowHeaderMouseDown,
         onStartRowResize,
+        onStartFreezeRowDrag,
     } = $props();
 
     let frozenRows = $derived(virtualizer?.frozenRows ?? 0);
@@ -59,6 +60,18 @@
                 </div>
             {/each}
         </div>
+    {/if}
+
+    <!-- Freeze handle: draggable line at the frozen/non-frozen row boundary -->
+    {#if frozenRows > 0}
+        <div
+            class="freeze-handle"
+            style="top:{frozenHeight}px;"
+            onmousedown={(e) => onStartFreezeRowDrag?.(e)}
+            role="separator"
+            aria-orientation="horizontal"
+            title="Drag to adjust frozen rows"
+        ></div>
     {/if}
 
     <div class="scrollable-rows" style="top:{frozenHeight}px;">
@@ -163,5 +176,24 @@
         width: 100%;
         height: 4px;
         cursor: row-resize;
+    }
+
+    /* ── Freeze handle ── */
+    .freeze-handle {
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 6px;
+        transform: translateY(-3px);
+        cursor: row-resize;
+        z-index: 40;
+        pointer-events: auto;
+        background: transparent;
+        border-top: 2px solid rgba(100, 116, 139, 0.5);
+    }
+    .freeze-handle:hover,
+    .freeze-handle:active {
+        border-top-color: var(--color-primary, #3b82f6);
+        background: rgba(59, 130, 246, 0.08);
     }
 </style>

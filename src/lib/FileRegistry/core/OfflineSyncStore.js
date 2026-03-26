@@ -1,12 +1,19 @@
 /**
- * OfflineSyncStore - Shared cross-app IndexedDB store for tracking pending Yjs syncs.
+ * OfflineSyncStore - Shared cross-app IndexedDB store for all offline coordination.
  *
  * Keyed on the username so all apps for the same user share one database.
  * DB name: fileregistry_pending_{username}
  *
- * Stores:
- *   'pending'    - Yjs rooms that need WebSocket sync after being edited offline.
- *   'touchQueue' - Files whose server updatedAt needs to be bumped when online.
+ * Stores (v1):
+ *   'pending'       - Yjs rooms needing WebSocket sync after being edited offline.
+ *   'touchQueue'    - Files whose server updatedAt needs bumped when online.
+ *
+ * Stores (v2 additions):
+ *   'mutations'     - Offline metadata mutations (create/rename/delete/move/etc.)
+ *   'recents'       - Cross-app recently opened files (fileId → {appName, openedAt})
+ *   'drive_files'   - Shared drive FileDescriptor cache (across all apps for this user)
+ *   'drive_folders' - Shared drive Folder cache
+ *   'drive_meta'    - Drive sync metadata (lastSync timestamp, etc.)
  */
 export class OfflineSyncStore {
     /** @param {string} username */
@@ -19,16 +26,32 @@ export class OfflineSyncStore {
     async open() {
         if (this._db) return;
         this._db = await new Promise((resolve, reject) => {
-            const req = indexedDB.open(this.dbName, 1);
+            const req = indexedDB.open(this.dbName, 2);
             req.onerror = () => reject(req.error);
             req.onsuccess = () => resolve(req.result);
-            req.onupgradeneeded = () => {
+            req.onupgradeneeded = (e) => {
                 const db = req.result;
+                // V1 stores
                 if (!db.objectStoreNames.contains('pending')) {
                     db.createObjectStore('pending', { keyPath: 'fileId' });
                 }
                 if (!db.objectStoreNames.contains('touchQueue')) {
                     db.createObjectStore('touchQueue', { keyPath: 'fileId' });
+                }
+                // V2 additions
+                if (e.oldVersion < 2) {
+                    const ms = db.createObjectStore('mutations', { keyPath: 'id' });
+                    ms.createIndex('by_created', 'createdAt');
+
+                    db.createObjectStore('recents', { keyPath: 'fileId' });
+
+                    db.createObjectStore('drive_files', { keyPath: 'id' });
+                    db.createObjectStore('drive_folders', { keyPath: 'id' });
+                    db.createObjectStore('drive_meta');
+
+                    // Pending offline blobs awaiting upload when connection is restored.
+                    // Keyed by the client-generated file ID.
+                    db.createObjectStore('pending_blobs', { keyPath: 'id' });
                 }
             };
         });
@@ -77,6 +100,151 @@ export class OfflineSyncStore {
     }
 
     // -------------------------------------------------------
+    // Offline mutation queue
+    // -------------------------------------------------------
+
+    /**
+     * Persist a metadata mutation for later replay.
+     * @param {{ id: string, type: string, payload: object, createdAt: string, attempts: number, lastError: string|null }} mutation
+     */
+    async addMutation(mutation) {
+        return this._put('mutations', mutation);
+    }
+
+    async removeMutation(id) {
+        return this._delete('mutations', id);
+    }
+
+    /**
+     * Returns all pending mutations sorted by createdAt ascending.
+     * @returns {Promise<object[]>}
+     */
+    async getAllMutations() {
+        const all = await this._getAll('mutations');
+        all.sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+        return all;
+    }
+
+    // -------------------------------------------------------
+    // Cross-app recents
+    // -------------------------------------------------------
+
+    /**
+     * Record a file as recently opened for the given app.
+     * Keyed by fileId — overwrites previous entry so each file appears once.
+     * @param {string} fileId
+     * @param {string} appName
+     */
+    async recordRecent(fileId, appName) {
+        return this._put('recents', { fileId, appName, openedAt: new Date().toISOString() });
+    }
+
+    /**
+     * Returns recents sorted by openedAt descending.
+     * @param {number} [limit=100]
+     * @returns {Promise<{fileId: string, appName: string, openedAt: string}[]>}
+     */
+    async getRecents(limit = 100) {
+        const all = await this._getAll('recents');
+        all.sort((a, b) => b.openedAt < a.openedAt ? -1 : b.openedAt > a.openedAt ? 1 : 0);
+        return all.slice(0, limit);
+    }
+
+    /**
+     * Merge recents from server. For each entry, only update if server's openedAt is newer.
+     * @param {{ fileId: string, appName: string|null, opened_at: string }[]} serverRecents
+     */
+    async mergeRecents(serverRecents) {
+        for (const r of serverRecents) {
+            const fileId = r.fileId ?? r.file_id;
+            if (!fileId) continue;
+            const openedAt = r.openedAt ?? r.opened_at;
+            const appName = r.appName ?? r.app_name ?? null;
+            const existing = await this._get('recents', fileId);
+            if (!existing || openedAt > existing.openedAt) {
+                await this._put('recents', { fileId, appName, openedAt });
+            }
+        }
+    }
+
+    // -------------------------------------------------------
+    // Pending offline blobs (awaiting upload)
+    // -------------------------------------------------------
+
+    /**
+     * Store a blob that was created offline. The blob content is preserved in IDB
+     * until the network mutation is flushed and the upload completes.
+     * @param {string} id - client-generated file ID (same as FileDescriptor.id)
+     * @param {Blob} blob - the raw file content
+     * @param {object} metadata - create options needed to replay the server-side create
+     */
+    async storePendingBlob(id, blob, metadata) {
+        return this._put('pending_blobs', { id, blob, metadata });
+    }
+
+    /**
+     * Retrieve a pending offline blob by file ID.
+     * Returns null if the blob has already been uploaded or doesn't exist.
+     * @param {string} id @returns {Promise<{id: string, blob: Blob, metadata: object}|null>}
+     */
+    async getPendingBlob(id) {
+        return this._get('pending_blobs', id);
+    }
+
+    async removePendingBlob(id) {
+        return this._delete('pending_blobs', id);
+    }
+
+    /** @returns {Promise<{id, blob, metadata}[]>} */
+    async getAllPendingBlobs() {
+        return this._getAll('pending_blobs');
+    }
+
+    // -------------------------------------------------------
+    // Shared drive cache
+    // -------------------------------------------------------
+
+    /**
+     * Atomically replace the entire drive cache (files + folders) in one transaction.
+     * @param {object[]} files
+     * @param {object[]} folders
+     */
+    async replaceDrive(files, folders) {
+        const db = this._db;
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(['drive_files', 'drive_folders', 'drive_meta'], 'readwrite');
+            tx.objectStore('drive_files').clear();
+            tx.objectStore('drive_folders').clear();
+            for (const f of files)   tx.objectStore('drive_files').put(f);
+            for (const f of folders) tx.objectStore('drive_folders').put(f);
+            tx.objectStore('drive_meta').put(new Date().toISOString(), 'lastSync');
+            tx.oncomplete = () => resolve();
+            tx.onerror    = () => reject(tx.error);
+        });
+    }
+
+    /** @returns {Promise<object[]>} */
+    async getDriveFiles() { return this._getAll('drive_files'); }
+
+    /** @returns {Promise<object[]>} */
+    async getDriveFolders() { return this._getAll('drive_folders'); }
+
+    /** @returns {Promise<{ lastSync: string|null }>} */
+    async getDriveMeta() {
+        const val = await this._get('drive_meta', 'lastSync');
+        return { lastSync: val ?? null };
+    }
+
+    /** Optimistic single-file update in the shared drive cache. */
+    async putDriveFile(file) { return this._put('drive_files', file); }
+
+    /** Optimistic single-folder update in the shared drive cache. */
+    async putDriveFolder(folder) { return this._put('drive_folders', folder); }
+
+    async removeDriveFile(id) { return this._delete('drive_files', id); }
+    async removeDriveFolder(id) { return this._delete('drive_folders', id); }
+
+    // -------------------------------------------------------
     // Internal
     // -------------------------------------------------------
 
@@ -85,6 +253,15 @@ export class OfflineSyncStore {
         return new Promise((resolve, reject) => {
             const req = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
             req.onsuccess = () => resolve(req.result);
+            req.onerror   = () => reject(req.error);
+        });
+    }
+
+    async _get(storeName, key) {
+        const db = this._db;
+        return new Promise((resolve, reject) => {
+            const req = db.transaction(storeName, 'readonly').objectStore(storeName).get(key);
+            req.onsuccess = () => resolve(req.result ?? null);
             req.onerror   = () => reject(req.error);
         });
     }

@@ -98,7 +98,7 @@ export class GridVirtualizer {
         _rowVersion;
 
         return this.#rowMetrics.rangeForViewport({
-            scrollPx: this.scrollTop,
+            scrollPx: this.scrollTop + this.frozenHeight,
             viewportPx: this.bodyViewportHeight,
             overscanPx: this.overscanRowsPx,
             frozenCount: this.frozenRows,
@@ -111,7 +111,7 @@ export class GridVirtualizer {
         _colVersion;
 
         return this.#colMetrics.rangeForViewport({
-            scrollPx: this.scrollLeft,
+            scrollPx: this.scrollLeft + this.frozenWidth,
             viewportPx: this.bodyViewportWidth,
             overscanPx: this.overscanColsPx,
             frozenCount: this.frozenCols,
@@ -570,26 +570,25 @@ export class GridVirtualizer {
 
         // Scroll vertically if needed (only for non-frozen rows)
         if (row >= this.frozenRows) {
-            // Adjust for frozen area
-            const visibleTop = newScrollTop;
-            const visibleBottom = newScrollTop + bodyViewportHeight;
+            const visibleTop = newScrollTop + frozenHeight;
+            const visibleBottom = newScrollTop + frozenHeight + bodyViewportHeight;
 
             if (cellTop < visibleTop) {
-                newScrollTop = cellTop;
+                newScrollTop = cellTop - frozenHeight;
             } else if (cellTop + cellHeight > visibleBottom) {
-                newScrollTop = cellTop + cellHeight - bodyViewportHeight;
+                newScrollTop = cellTop + cellHeight - frozenHeight - bodyViewportHeight;
             }
         }
 
         // Scroll horizontally if needed (only for non-frozen columns)
         if (col >= this.frozenCols) {
-            const visibleLeft = newScrollLeft;
-            const visibleRight = newScrollLeft + bodyViewportWidth;
+            const visibleLeft = newScrollLeft + frozenWidth;
+            const visibleRight = newScrollLeft + frozenWidth + bodyViewportWidth;
 
             if (cellLeft < visibleLeft) {
-                newScrollLeft = cellLeft;
+                newScrollLeft = cellLeft - frozenWidth;
             } else if (cellLeft + cellWidth > visibleRight) {
-                newScrollLeft = cellLeft + cellWidth - bodyViewportWidth;
+                newScrollLeft = cellLeft + cellWidth - frozenWidth - bodyViewportWidth;
             }
         }
 
@@ -634,9 +633,8 @@ export class GridVirtualizer {
             // In frozen rows area
             row = this.#rowMetrics.indexAtOffset(contentY);
         } else {
-            // In scrollable rows area
-            row = this.#rowMetrics.indexAtOffset(contentY - frozenHeight + this.scrollTop);
-            // Account for frozen rows offset
+            // In scrollable rows area: canvas y = rowOffset - scrollTop, so rowOffset = contentY + scrollTop
+            row = this.#rowMetrics.indexAtOffset(contentY + this.scrollTop);
             if (row < this.frozenRows) row = this.frozenRows;
         }
 
@@ -644,9 +642,8 @@ export class GridVirtualizer {
             // In frozen cols area
             col = this.#colMetrics.indexAtOffset(contentX);
         } else {
-            // In scrollable cols area
-            col = this.#colMetrics.indexAtOffset(contentX - frozenWidth + this.scrollLeft);
-            // Account for frozen cols offset
+            // In scrollable cols area: canvas x = colOffset - scrollLeft, so colOffset = contentX + scrollLeft
+            col = this.#colMetrics.indexAtOffset(contentX + this.scrollLeft);
             if (col < this.frozenCols) col = this.frozenCols;
         }
 

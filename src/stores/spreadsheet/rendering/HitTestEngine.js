@@ -115,14 +115,14 @@ export class HitTestEngine {
      * Resolve column index from content-area X (relative to left edge of cell area).
      */
     #resolveCol(contentX, frozenW, v) {
-        const rowMetrics = v.colMetrics;
+        const colMetrics = v.colMetrics;
         if (frozenW > 0 && contentX < frozenW) {
-            // In frozen columns
-            return rowMetrics.indexAtOffset(contentX);
+            // In frozen columns: contentX is the absolute column offset
+            return colMetrics.indexAtOffset(contentX);
         }
-        // In scrollable columns — adjust for frozen width and scroll
-        const scrollableX = contentX - frozenW + v.scrollLeft;
-        let col = rowMetrics.indexAtOffset(Math.max(0, scrollableX));
+        // In scrollable columns: canvas x = colOffset - scrollLeft, so colOffset = contentX + scrollLeft
+        const colOffset = contentX + v.scrollLeft;
+        let col = colMetrics.indexAtOffset(Math.max(0, colOffset));
         if (col < v.frozenCols) col = v.frozenCols;
         return Math.min(col, v.colCount - 1);
     }
@@ -133,12 +133,12 @@ export class HitTestEngine {
     #resolveRow(contentY, frozenH, v) {
         const rowMetrics = v.rowMetrics;
         if (frozenH > 0 && contentY < frozenH) {
-            // In frozen rows
+            // In frozen rows: contentY is the absolute row offset
             return rowMetrics.indexAtOffset(contentY);
         }
-        // In scrollable rows — adjust for frozen height and scroll
-        const scrollableY = contentY - frozenH + v.scrollTop;
-        let row = rowMetrics.indexAtOffset(Math.max(0, scrollableY));
+        // In scrollable rows: canvas y = rowOffset - scrollTop, so rowOffset = contentY + scrollTop
+        const rowOffset = contentY + v.scrollTop;
+        let row = rowMetrics.indexAtOffset(Math.max(0, rowOffset));
         if (row < v.frozenRows) row = v.frozenRows;
         return Math.min(row, v.rowCount - 1);
     }
@@ -153,13 +153,13 @@ export class HitTestEngine {
         const col = this.#resolveCol(contentX, frozenW, v);
         if (col < 0) return null;
 
-        // Screen X of this column's right edge
+        // Canvas X of this column's right edge
         const colRightOffset = v.colMetrics.offsetOf(col + 1);
         let screenRightX;
         if (col < v.frozenCols) {
             screenRightX = colRightOffset; // frozen — no scroll adjustment
         } else {
-            screenRightX = frozenW + colRightOffset - v.scrollLeft;
+            screenRightX = colRightOffset - v.scrollLeft;
         }
 
         if (Math.abs(contentX - screenRightX) <= RESIZE_ZONE_PX) {
@@ -174,7 +174,7 @@ export class HitTestEngine {
             if (prevCol < v.frozenCols) {
                 prevScreenX = prevRightOffset;
             } else {
-                prevScreenX = frozenW + prevRightOffset - v.scrollLeft;
+                prevScreenX = prevRightOffset - v.scrollLeft;
             }
             if (Math.abs(contentX - prevScreenX) <= RESIZE_ZONE_PX) {
                 return prevCol;
@@ -198,7 +198,7 @@ export class HitTestEngine {
         if (row < v.frozenRows) {
             screenBottomY = rowBottomOffset;
         } else {
-            screenBottomY = frozenH + rowBottomOffset - v.scrollTop;
+            screenBottomY = rowBottomOffset - v.scrollTop;
         }
 
         if (Math.abs(contentY - screenBottomY) <= RESIZE_ZONE_PX) {
@@ -212,7 +212,7 @@ export class HitTestEngine {
             if (prevRow < v.frozenRows) {
                 prevScreenY = prevBottomOffset;
             } else {
-                prevScreenY = frozenH + prevBottomOffset - v.scrollTop;
+                prevScreenY = prevBottomOffset - v.scrollTop;
             }
             if (Math.abs(contentY - prevScreenY) <= RESIZE_ZONE_PX) {
                 return prevRow;

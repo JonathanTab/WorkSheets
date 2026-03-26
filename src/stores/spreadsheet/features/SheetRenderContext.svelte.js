@@ -406,6 +406,76 @@ export class SheetRenderContext {
         return this.#sheetStore.colCount;
     }
 
+    // ─── Sticky table headers ────────────────────────────────────────────────
+
+    /**
+     * Returns data for table header/entry rows that should be rendered as
+     * sticky overlays at the top of the scrollable area when they've been
+     * scrolled past. Semantics are like CSS position:sticky — rows stick to
+     * the top while any part of their table is still visible, and disappear
+     * when the table has fully scrolled out of view.
+     *
+     * @param {number} scrollTop
+     * @param {number} frozenHeight - height of the frozen-rows band
+     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} rowMetrics
+     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
+     * @returns {Array<{table, leftPx, widthPx, headerHeightPx, entryHeightPx, showEntry, colWidths}>}
+     */
+    getStickyTableHeaders(scrollTop, frozenHeight, rowMetrics, colMetrics) {
+        if (!this.tableManager) return [];
+
+        const result = [];
+
+        for (const table of this.tableManager.stores.values()) {
+            if (table.mode !== 'inline') continue;
+
+            const headerRow = table.startRow;
+            const entryRow  = table.startRow + 1;
+            const dataStart = table.startRow + 2;
+            const dataCount = table.sortedFilteredRows.length;
+
+            const headerTop  = rowMetrics.offsetOf(headerRow);
+            const entryTop   = rowMetrics.offsetOf(entryRow);
+            const tableEndTop = rowMetrics.offsetOf(dataStart + dataCount);
+
+            // Effective viewport top accounts for frozen rows band
+            const viewportTop = scrollTop + frozenHeight;
+
+            // Header not yet scrolled past — table renders normally
+            if (headerTop >= viewportTop) continue;
+
+            // Entire table scrolled above viewport — nothing to stick
+            if (tableEndTop <= viewportTop) continue;
+
+            const headerHeight = rowMetrics.sizeOf(headerRow);
+            const entryHeight  = rowMetrics.sizeOf(entryRow);
+
+            // Show entry row sticky only if it has also scrolled past
+            const showEntry = entryTop < viewportTop;
+
+            const leftPx = colMetrics.offsetOf(table.startCol);
+            let widthPx = 0;
+            const colWidths = [];
+            for (let c = table.startCol; c <= table.endCol; c++) {
+                const w = colMetrics.sizeOf(c);
+                widthPx += w;
+                colWidths.push(w);
+            }
+
+            result.push({
+                table,
+                leftPx,
+                widthPx,
+                headerHeightPx: headerHeight,
+                entryHeightPx:  entryHeight,
+                showEntry,
+                colWidths,
+            });
+        }
+
+        return result;
+    }
+
     // ─── Sheetstore passthrough (for components that need raw cell data) ──────
 
     /** @returns {import('../SheetStore.svelte.js').SheetStore} */

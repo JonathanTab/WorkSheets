@@ -5,4 +5,5 @@ export { LocalStore }           from './core/LocalStore.js';
 export { YjsRuntime }           from './core/YjsRuntime.js';
 export { BlobCache }            from './core/BlobCache.js';
 export { OfflineSyncStore }     from './core/OfflineSyncStore.js';
+export { OfflineMutationQueue } from './core/OfflineMutationQueue.js';
 export { YjsSyncCoordinator }   from './core/YjsSyncCoordinator.js';

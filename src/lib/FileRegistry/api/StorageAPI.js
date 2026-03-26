@@ -128,12 +128,17 @@ export class StorageAPI {
     // Sync
     // -------------------------------------------------------
 
-    /** @returns {Promise<{files: FileDescriptor[], folders: Folder[]}>} */
+    /** @returns {Promise<{files: FileDescriptor[], folders: Folder[], recents: RecentEntry[]}>} */
     async fullSync() {
         const data = await this._get({ action: 'full_sync' });
         return {
             files:   (data.files   ?? []).map(f => this._normalizeFile(f)),
             folders: (data.folders ?? []).map(f => this._normalizeFolder(f)),
+            recents: (data.recents ?? []).map(r => ({
+                fileId:   r.file_id ?? r.fileId,
+                appName:  r.app_name ?? r.appName ?? null,
+                openedAt: r.opened_at ?? r.openedAt,
+            })),
         };
     }
 
@@ -146,6 +151,7 @@ export class StorageAPI {
         const data = await this._post({
             action:       'create',
             id:           opts.id           ?? null,
+            room_id:      opts.roomId       ?? null,   // client-provided for offline creates
             title:        opts.title        ?? 'Untitled',
             type:         opts.type         ?? 'yjs',
             scope:        opts.scope        ?? 'drive',
@@ -214,6 +220,7 @@ export class StorageAPI {
     async createFolder(opts) {
         return this._normalizeFolder(await this._post({
             action:       'create_folder',
+            id:           opts.id          ?? null,   // client-provided for offline creates
             name:         opts.name,
             parent_id:    opts.parentId    ?? null,
             public_read:  opts.publicRead  ? 1 : 0,
@@ -374,6 +381,17 @@ export class StorageAPI {
     }
 
     /**
+     * Record that the current user opened a file (cross-device recently-opened tracking).
+     * Fire-and-forget: errors are intentionally ignored by callers.
+     * @param {string} fileId
+     * @param {string} appName
+     * @returns {Promise<void>}
+     */
+    async recordOpen(fileId, appName) {
+        await this._post({ action: 'record_open', file_id: fileId, app_name: appName ?? '' });
+    }
+
+    /**
      * Update a Yjs file's updatedAt timestamp on the server.
      * Called after offline edits are synced back to the server.
      * @param {string} id
@@ -460,6 +478,13 @@ export class StorageAPI {
         return (data.files ?? []).map(f => this._normalizeFile(f));
     }
 }
+
+/**
+ * @typedef {object} RecentEntry
+ * @property {string}      fileId
+ * @property {string|null} appName
+ * @property {string}      openedAt  ISO datetime string
+ */
 
 /**
  * @typedef {object} SnapshotMeta

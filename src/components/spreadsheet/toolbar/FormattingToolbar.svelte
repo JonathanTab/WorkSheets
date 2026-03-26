@@ -384,19 +384,18 @@
 
     // Page setup / Print handler
     let showPageSetupPanel = $state(false);
-    let showPageBreaksOnGrid = $state(false);
 
     function handlePrint() {
         showPageSetupPanel = true;
     }
 
-    function togglePageBreaksFromToolbar() {
-        showPageBreaksOnGrid = !showPageBreaksOnGrid;
+    // Show page break overlay while Page Setup panel is open
+    $effect(() => {
         const settings = spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {};
         document.dispatchEvent(new CustomEvent('togglePageBreaks', {
-            detail: { show: showPageBreaksOnGrid, settings }
+            detail: { show: showPageSetupPanel, settings }
         }));
-    }
+    });
 
     // Conditional formatting / Data validation panels
     let showCFPanel = $state(false);
@@ -685,7 +684,7 @@
             class="toolbar-btn"
             class:active={showCFPanel}
             onclick={() => { showCFPanel = !showCFPanel; showDVPanel = false; }}
-            title="Conditional Formatting"
+            title="Conditional Formatting (highlight cells based on rules)"
         >
             <span style="font-size:11px;line-height:1">CF</span>
         </button>
@@ -702,7 +701,7 @@
             class="toolbar-btn"
             class:active={showDVPanel}
             onclick={() => { showDVPanel = !showDVPanel; showCFPanel = false; }}
-            title="Data Validation"
+            title="Data Validation (restrict cell input)"
         >
             <span style="font-size:11px;line-height:1">DV</span>
         </button>
@@ -716,15 +715,8 @@
     <!-- Spacer -->
     <div class="spacer"></div>
 
-    <!-- Page Breaks Toggle + Print / Page Setup -->
+    <!-- Print / Page Setup -->
     <div class="toolbar-group">
-        <button
-            class="toolbar-btn"
-            class:active={showPageBreaksOnGrid}
-            onclick={togglePageBreaksFromToolbar}
-            title={showPageBreaksOnGrid ? "Hide Page Breaks" : "Show Page Breaks"}
-            style="font-size:11px; letter-spacing:-0.5px;"
-        >PB</button>
         <button
             class="toolbar-btn"
             class:active={showPageSetupPanel}

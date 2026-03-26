@@ -12,7 +12,7 @@
  * positioned at (HEADER_WIDTH, HEADER_HEIGHT) within the grid container.
  *
  * For frozen columns (col < frozenCols):  canvasX = colMetrics.offsetOf(col)
- * For scrollable columns:                 canvasX = colMetrics.offsetOf(col) - scrollLeft + frozenWidth
+ * For scrollable columns:                 canvasX = colMetrics.offsetOf(col) - scrollLeft
  *
  * Same pattern applies for rows.
  */
@@ -140,8 +140,6 @@ export function buildPaneData(params) {
         session,
         frozenRows,
         frozenCols,
-        frozenHeight,
-        frozenWidth,
         scrollLeft,
         scrollTop,
     } = params;
@@ -188,7 +186,7 @@ export function buildPaneData(params) {
         const isFrozenRow = r < frozenRows;
         const y = isFrozenRow
             ? rowMetrics.offsetOf(r)
-            : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
+            : rowMetrics.offsetOf(r) - scrollTop;
         const height = rowMetrics.sizeOf(r);
 
         // Track the rightmost overflow edge seen so far in this row.
@@ -230,7 +228,7 @@ export function buildPaneData(params) {
             const isFrozenCol = c < frozenCols;
             const x = isFrozenCol
                 ? colMetrics.offsetOf(c)
-                : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
+                : colMetrics.offsetOf(c) - scrollLeft;
             let width = colMetrics.sizeOf(c);
 
             // Check for overflow-shadowed cells: left edge is within a prior cell's overflow
@@ -637,11 +635,11 @@ export function buildPaneData(params) {
         const isFrozenRow = pr < frozenRows;
         const ry = isFrozenRow
             ? rowMetrics.offsetOf(pr)
-            : rowMetrics.offsetOf(pr) - scrollTop + frozenHeight;
+            : rowMetrics.offsetOf(pr) - scrollTop;
         const isFrozenCol = pc < frozenCols;
         const rx = isFrozenCol
             ? colMetrics.offsetOf(pc)
-            : colMetrics.offsetOf(pc) - scrollLeft + frozenWidth;
+            : colMetrics.offsetOf(pc) - scrollLeft;
 
         // Full merged span dimensions
         const rw = colMetrics.offsetOf(merge.endCol + 1) - colMetrics.offsetOf(pc);

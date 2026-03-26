@@ -170,6 +170,10 @@
     let resizing = $state(null);
     let currentCursor = $state("cell");
 
+    // ─── Freeze-handle drag state ─────────────────────────────────────────────
+    // null | { axis: 'row'|'col', startPx: number, currentCount: number }
+    let freezeDrag = $state(null);
+
     // ─── Overlay state ────────────────────────────────────────────────────────
     /** @type {{ table:any, colId:string|null, left:number, top:number }|null} */
     let activeFilterPopover = $state(null);
@@ -744,17 +748,10 @@
                 virtualizer.colMetrics,
             );
             if (stickyHeaders?.length > 0) {
-                const headersWithWidths = stickyHeaders.map((h) => ({
-                    ...h,
-                    colWidths: h.table.columns.map((_, i) =>
-                        virtualizer.getColWidth(h.table.startCol + i),
-                    ),
-                }));
-                canvasRenderer.paintStickyHeaders(headersWithWidths, {
+                canvasRenderer.paintStickyHeaders(stickyHeaders, {
                     frozenWidth,
                     frozenHeight,
                     scrollLeft,
-                    headerHeight: HEADER_HEIGHT,
                 });
             }
         }
@@ -795,6 +792,16 @@
             frozenHeight,
             frozenWidth,
         };
+
+        // Pre-compute sticky headers so we can extend the upward-scroll strip to erase ghosts.
+        // When scrolling up, blitScroll shifts the sticky-header pixels down into the body,
+        // leaving a ghost copy. Extending the strip repaint to cover that ghost zone erases it.
+        const stickyHeaders = renderContext?.getStickyTableHeaders?.(
+            scrollTop, frozenHeight, rowMetrics, colMetrics,
+        ) ?? [];
+        const stickyOverlayH = stickyHeaders.reduce(
+            (m, h) => Math.max(m, h.headerHeightPx + (h.showEntry ? h.entryHeightPx : 0)), 0,
+        );
 
         // Helper: build a strip row range from pixel offsets (visible-viewport based)
         function rowStripRange(fromOffset, toOffset) {
@@ -839,16 +846,17 @@
                 if (dy > 0) {
                     // Scrolling down → bottom strip
                     stripRows = rowStripRange(
-                        prevST + bodyH,
-                        scrollTop + bodyH,
+                        frozenHeight + prevST + bodyH,
+                        frozenHeight + scrollTop + bodyH,
                     );
                     clipY = frozenHeight + bodyH - dy;
                     clipH = dy;
                 } else {
-                    // Scrolling up → top strip
-                    stripRows = rowStripRange(scrollTop, prevST);
+                    // Scrolling up → top strip, extended by stickyOverlayH to repaint the ghost
+                    // zone where blitScroll shifted the sticky header pixels downward.
+                    stripRows = rowStripRange(frozenHeight + scrollTop, frozenHeight + prevST + stickyOverlayH);
                     clipY = frozenHeight;
-                    clipH = -dy;
+                    clipH = Math.min(-dy + stickyOverlayH, bodyH);
                 }
                 if (stripRows) {
                     canvasRenderer.paintPane(
@@ -869,13 +877,13 @@
                 let stripCols, clipX, clipW;
                 if (dx > 0) {
                     stripCols = colStripRange(
-                        prevSL + bodyW,
-                        scrollLeft + bodyW,
+                        frozenWidth + prevSL + bodyW,
+                        frozenWidth + scrollLeft + bodyW,
                     );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
-                    stripCols = colStripRange(scrollLeft, prevSL);
+                    stripCols = colStripRange(frozenWidth + scrollLeft, frozenWidth + prevSL);
                     clipX = frozenWidth;
                     clipW = -dx;
                 }
@@ -909,13 +917,13 @@
                 let stripCols, clipX, clipW;
                 if (dx > 0) {
                     stripCols = colStripRange(
-                        prevSL + bodyW,
-                        scrollLeft + bodyW,
+                        frozenWidth + prevSL + bodyW,
+                        frozenWidth + scrollLeft + bodyW,
                     );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
-                    stripCols = colStripRange(scrollLeft, prevSL);
+                    stripCols = colStripRange(frozenWidth + scrollLeft, frozenWidth + prevSL);
                     clipX = frozenWidth;
                     clipW = -dx;
                 }
@@ -931,27 +939,6 @@
                         { clipX, clipY: 0, clipW, clipH: frozenHeight },
                     );
                 }
-            }
-            // Sticky table headers scroll horizontally
-            const stickyHeaders = renderContext?.getStickyTableHeaders?.(
-                scrollTop,
-                frozenHeight,
-                rowMetrics,
-                colMetrics,
-            );
-            if (stickyHeaders?.length > 0) {
-                const headersWithWidths = stickyHeaders.map((h) => ({
-                    ...h,
-                    colWidths: h.table.columns.map((_, i) =>
-                        virtualizer.getColWidth(h.table.startCol + i),
-                    ),
-                }));
-                canvasRenderer.paintStickyHeaders(headersWithWidths, {
-                    frozenWidth,
-                    frozenHeight,
-                    scrollLeft,
-                    headerHeight: HEADER_HEIGHT,
-                });
             }
         }
 
@@ -970,13 +957,13 @@
                 let stripRows, clipY, clipH;
                 if (dy > 0) {
                     stripRows = rowStripRange(
-                        prevST + bodyH,
-                        scrollTop + bodyH,
+                        frozenHeight + prevST + bodyH,
+                        frozenHeight + scrollTop + bodyH,
                     );
                     clipY = frozenHeight + bodyH - dy;
                     clipH = dy;
                 } else {
-                    stripRows = rowStripRange(scrollTop, prevST);
+                    stripRows = rowStripRange(frozenHeight + scrollTop, frozenHeight + prevST);
                     clipY = frozenHeight;
                     clipH = -dy;
                 }
@@ -996,6 +983,15 @@
         }
 
         // Corner pane: never changes during scroll — skip entirely
+
+        // Sticky table headers — repaint after all blits/strips so they appear on top
+        if (stickyHeaders.length > 0) {
+            canvasRenderer.paintStickyHeaders(stickyHeaders, {
+                frozenWidth,
+                frozenHeight,
+                scrollLeft,
+            });
+        }
     }
 
     // ─── Selection canvas paint (called by selectionScheduler on RAF) ─────────
@@ -1105,7 +1101,6 @@
         }
         return (
             HEADER_WIDTH +
-            renderPlan.frozenWidth +
             virtualizer.colMetrics.offsetOf(col) -
             virtualizer.scrollLeft
         );
@@ -1118,7 +1113,6 @@
         }
         return (
             HEADER_HEIGHT +
-            renderPlan.frozenHeight +
             virtualizer.rowMetrics.offsetOf(row) -
             virtualizer.scrollTop
         );
@@ -1140,7 +1134,7 @@
         const bottom =
             cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
 
-        return `left:${left}px; top:${top}px; width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
+        return `transform:translate(${left}px,${top}px); width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
     });
 
     let anchorBorderStyle = $derived.by(() => {
@@ -1159,7 +1153,7 @@
                 let height = 0;
                 for (let r = merge.startRow; r <= merge.endRow; r++)
                     height += virtualizer.getRowHeight(r);
-                return `left:${left}px; top:${top}px; width:${width}px; height:${height}px;`;
+                return `transform:translate(${left}px,${top}px); width:${width}px; height:${height}px;`;
             }
         }
 
@@ -1167,7 +1161,7 @@
         const top = cellContainerTop(anchor.row);
         const width = virtualizer.getColWidth(anchor.col);
         const height = virtualizer.getRowHeight(anchor.row);
-        return `left:${left}px; top:${top}px; width:${width}px; height:${height}px;`;
+        return `transform:translate(${left}px,${top}px); width:${width}px; height:${height}px;`;
     });
 
     let editorBoundsForOverlay = $derived.by(() => {
@@ -2827,6 +2821,118 @@
         resizing = null;
     }
 
+    // ─── Freeze-handle drag ───────────────────────────────────────────────────
+
+    /**
+     * Snap a pixel offset to the nearest column boundary count.
+     * Returns the number of columns to freeze (0 = unfreeze all).
+     */
+    function snapToColFreezeCount(contentX) {
+        if (!virtualizer) return 0;
+        if (contentX <= 0) return 0;
+        const metrics = virtualizer.colMetrics;
+        const total = virtualizer.colCount;
+        let best = 0;
+        let bestDist = contentX; // distance to boundary at offset 0
+        for (let c = 1; c <= total; c++) {
+            const offset = metrics.offsetOf(c);
+            const dist = Math.abs(contentX - offset);
+            if (dist < bestDist) { bestDist = dist; best = c; }
+            if (offset > contentX + 80) break;
+        }
+        return best;
+    }
+
+    /**
+     * Snap a pixel offset to the nearest row boundary count.
+     */
+    function snapToRowFreezeCount(contentY) {
+        if (!virtualizer) return 0;
+        if (contentY <= 0) return 0;
+        const metrics = virtualizer.rowMetrics;
+        const total = virtualizer.rowCount;
+        let best = 0;
+        let bestDist = contentY;
+        for (let r = 1; r <= total; r++) {
+            const offset = metrics.offsetOf(r);
+            const dist = Math.abs(contentY - offset);
+            if (dist < bestDist) { bestDist = dist; best = r; }
+            if (offset > contentY + 80) break;
+        }
+        return best;
+    }
+
+    function startFreezeColDrag(e) {
+        if (!virtualizer || !sheetStore || !containerEl) return;
+        e.preventDefault();
+        e.stopPropagation();
+        freezeDrag = { axis: 'col', startClientX: e.clientX, startFrozenCount: virtualizer.frozenCols };
+
+        function onMove(e) {
+            if (!freezeDrag || !virtualizer || !containerEl) return;
+            const rect = containerEl.getBoundingClientRect();
+            const contentX = e.clientX - rect.left - HEADER_WIDTH;
+            const newCount = snapToColFreezeCount(contentX);
+            if (freezeDrag.currentCount !== newCount) {
+                freezeDrag = { ...freezeDrag, currentCount: newCount };
+                // Live preview via virtualizer (no Yjs write yet)
+                virtualizer.setFrozenDimensions(virtualizer.frozenRows, newCount);
+                renderScheduler?.invalidateAll();
+            }
+        }
+
+        function onUp(e) {
+            if (!sheetStore) return;
+            const rect = containerEl?.getBoundingClientRect();
+            if (rect) {
+                const contentX = e.clientX - rect.left - HEADER_WIDTH;
+                const newCount = snapToColFreezeCount(contentX);
+                sheetStore.setFrozenColumns(newCount);
+            }
+            freezeDrag = null;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
+    function startFreezeRowDrag(e) {
+        if (!virtualizer || !sheetStore || !containerEl) return;
+        e.preventDefault();
+        e.stopPropagation();
+        freezeDrag = { axis: 'row', startClientY: e.clientY, startFrozenCount: virtualizer.frozenRows };
+
+        function onMove(e) {
+            if (!freezeDrag || !virtualizer || !containerEl) return;
+            const rect = containerEl.getBoundingClientRect();
+            const contentY = e.clientY - rect.top - HEADER_HEIGHT;
+            const newCount = snapToRowFreezeCount(contentY);
+            if (freezeDrag.currentCount !== newCount) {
+                freezeDrag = { ...freezeDrag, currentCount: newCount };
+                virtualizer.setFrozenDimensions(newCount, virtualizer.frozenCols);
+                renderScheduler?.invalidateAll();
+            }
+        }
+
+        function onUp(e) {
+            if (!sheetStore) return;
+            const rect = containerEl?.getBoundingClientRect();
+            if (rect) {
+                const contentY = e.clientY - rect.top - HEADER_HEIGHT;
+                const newCount = snapToRowFreezeCount(contentY);
+                sheetStore.setFrozenRows(newCount);
+            }
+            freezeDrag = null;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
     // ─── Scrolling ────────────────────────────────────────────────────────────
     let scrollPending = false;
     let pendingScrollTop = 0;
@@ -3569,6 +3675,17 @@
         selectionType === "row" || selectionType === "column",
     );
 
+    function clearContents() {
+        if (!sheetStore || !selection) return;
+        spreadsheetSession.ydoc?.transact(() => {
+            for (let r = selection.startRow; r <= selection.endRow; r++) {
+                for (let c = selection.startCol; c <= selection.endCol; c++) {
+                    sheetStore.clearCell(r, c);
+                }
+            }
+        });
+    }
+
     let contextMenuItems = $derived([
         {
             label: "Cut",
@@ -3623,6 +3740,12 @@
                   },
               ]
             : []),
+        {
+            label: "Clear Contents",
+            shortcut: "Del",
+            action: clearContents,
+            disabled: !hasAnySelection,
+        },
         { divider: true },
         ...(!isHeaderSelection
             ? [
@@ -3644,7 +3767,7 @@
                               });
                           }
                       },
-                      disabled: !anchor,
+                      disabled: selectionType !== "cell",
                   },
                   {
                       label: "Attach File to Cell",
@@ -3663,7 +3786,7 @@
                               });
                           }
                       },
-                      disabled: !anchor,
+                      disabled: selectionType !== "cell",
                   },
                   {
                       label: "Insert Floating Image…",
@@ -3750,52 +3873,56 @@
                 ]
               : [
                     {
-                        label: "Insert Row Above",
-                        icon: arrowUp,
-                        isSvgIcon: true,
-                        action: insertRowAbove,
+                        label: "Insert...",
+                        submenu: [
+                            {
+                                label: "Row Above",
+                                icon: arrowUp,
+                                isSvgIcon: true,
+                                action: insertRowAbove,
+                            },
+                            {
+                                label: "Row Below",
+                                icon: arrowDown,
+                                isSvgIcon: true,
+                                action: insertRowBelow,
+                            },
+                            { divider: true },
+                            {
+                                label: "Column Left",
+                                icon: arrowLeft,
+                                isSvgIcon: true,
+                                action: insertColumnLeft,
+                            },
+                            {
+                                label: "Column Right",
+                                icon: arrowRight,
+                                isSvgIcon: true,
+                                action: insertColumnRight,
+                            },
+                        ],
                         disabled: !hasAnySelection,
                     },
                     {
-                        label: "Insert Row Below",
-                        icon: arrowDown,
-                        isSvgIcon: true,
-                        action: insertRowBelow,
-                        disabled: !hasAnySelection,
-                    },
-                    {
-                        label: "Insert Column Left",
-                        icon: arrowLeft,
-                        isSvgIcon: true,
-                        action: insertColumnLeft,
-                        disabled: !hasAnySelection,
-                    },
-                    {
-                        label: "Insert Column Right",
-                        icon: arrowRight,
-                        isSvgIcon: true,
-                        action: insertColumnRight,
-                        disabled: !hasAnySelection,
-                    },
-                    { divider: true },
-                    {
-                        label:
-                            selectionType === "all"
-                                ? `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
-                                : "Delete Row",
-                        icon: trashIcon,
-                        isSvgIcon: true,
-                        action: deleteSelectedRows,
-                        disabled: !hasAnySelection,
-                    },
-                    {
-                        label:
-                            selectionType === "all"
-                                ? `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
-                                : "Delete Column",
-                        icon: trashIcon,
-                        isSvgIcon: true,
-                        action: deleteSelectedColumns,
+                        label: "Delete...",
+                        submenu: [
+                            {
+                                label: selectionType === "all"
+                                    ? `${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
+                                    : "Row",
+                                icon: trashIcon,
+                                isSvgIcon: true,
+                                action: deleteSelectedRows,
+                            },
+                            {
+                                label: selectionType === "all"
+                                    ? `${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
+                                    : "Column",
+                                icon: trashIcon,
+                                isSvgIcon: true,
+                                action: deleteSelectedColumns,
+                            },
+                        ],
                         disabled: !hasAnySelection,
                     },
                 ]),
@@ -4197,6 +4324,7 @@
                     {colHeader}
                     onColHeaderMouseDown={handleColHeaderMouseDown}
                     onStartColResize={startColResize}
+                    onStartFreezeColDrag={startFreezeColDrag}
                 />
             </div>
 
@@ -4211,6 +4339,7 @@
                     {isRowSelected}
                     onRowHeaderMouseDown={handleRowHeaderMouseDown}
                     onStartRowResize={startRowResize}
+                    onStartFreezeRowDrag={startFreezeRowDrag}
                 />
             </div>
 
@@ -4225,6 +4354,22 @@
             <!-- Anchor border -->
             {#if anchorBorderStyle}
                 <div class="anchor-border" style={anchorBorderStyle}></div>
+            {/if}
+
+            <!-- Frozen-row divider line -->
+            {#if virtualizer?.frozenRows > 0}
+                <div
+                    class="frozen-divider frozen-divider--row"
+                    style="top:{HEADER_HEIGHT + renderPlan.frozenHeight}px; left:{HEADER_WIDTH}px;"
+                ></div>
+            {/if}
+
+            <!-- Frozen-col divider line -->
+            {#if virtualizer?.frozenCols > 0}
+                <div
+                    class="frozen-divider frozen-divider--col"
+                    style="left:{HEADER_WIDTH + renderPlan.frozenWidth}px; top:{HEADER_HEIGHT}px;"
+                ></div>
             {/if}
 
             <!-- Remote user cursors -->
@@ -4279,7 +4424,7 @@
                     class="range-outline range-outline--repeater"
                     class:range-outline--active={repeaterContext?.repeater ===
                         rep}
-                    style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
+                    style="transform:translate({rect.left}px,{rect.top}px); width:{rect.width}px; height:{rect.height}px;"
                 ></div>
                 <!-- Settings button anchored to top-right of repeater range -->
                 {@const btnLeft = rect.left + rect.width}
@@ -4642,6 +4787,7 @@
         overflow: hidden;
         user-select: none;
         background: var(--grid-bg, #fff);
+        contain: layout style;
     }
 
     /* ── Data canvas (z:2 — below selection and DOM overlays) ── */
@@ -4662,6 +4808,7 @@
         z-index: 5;
         pointer-events: none; /* children opt in via pointer-events:auto */
         overflow: hidden;
+        contain: layout style;
     }
 
     /* ── Event layer (z:4) — native scroll container ── */
@@ -4729,24 +4876,50 @@
         overflow: hidden;
         z-index: 30;
         pointer-events: auto;
+        contain: layout style;
     }
 
     /* ── Selection border (outline only — fill is on canvas) ── */
     .selection-border {
         position: absolute;
+        left: 0;
+        top: 0;
         border: 2px solid var(--selection-border, #3b82f6);
         pointer-events: none;
         z-index: 10;
         box-sizing: border-box;
+        will-change: transform;
     }
 
     /* ── Anchor border ── */
     .anchor-border {
         position: absolute;
+        left: 0;
+        top: 0;
         border: 2px solid var(--anchor-border, #3b82f6);
         pointer-events: none;
         z-index: 11;
         box-sizing: border-box;
+        will-change: transform;
+    }
+
+    /* ── Frozen-pane divider lines ── */
+    .frozen-divider {
+        position: absolute;
+        pointer-events: none;
+        z-index: 20;
+    }
+    .frozen-divider--row {
+        right: 0;
+        height: 0;
+        border-top: 2px solid rgba(100, 116, 139, 0.45);
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.10);
+    }
+    .frozen-divider--col {
+        bottom: 0;
+        width: 0;
+        border-left: 2px solid rgba(100, 116, 139, 0.45);
+        box-shadow: 2px 0 5px rgba(0, 0, 0, 0.10);
     }
 
     /* ── Entry cell overlay ── */
@@ -4763,6 +4936,8 @@
     /* ── Range outlines (repeater / table, always visible) ── */
     .range-outline {
         position: absolute;
+        left: 0;
+        top: 0;
         box-sizing: border-box;
         pointer-events: none;
         border-radius: 2px;

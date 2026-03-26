@@ -132,7 +132,7 @@ export class SelectionRenderer {
                 const isFrozenRow = r < frozenRows;
                 const y = isFrozenRow
                     ? rowMetrics.offsetOf(r)
-                    : rowMetrics.offsetOf(r) - scrollTop + frozenHeight;
+                    : rowMetrics.offsetOf(r) - scrollTop;
                 const h = rowMetrics.sizeOf(r);
 
                 for (let c = colRange.start; c <= colRange.end; c++) {
@@ -145,7 +145,7 @@ export class SelectionRenderer {
                     const isFrozenCol = c < frozenCols;
                     const x = isFrozenCol
                         ? colMetrics.offsetOf(c)
-                        : colMetrics.offsetOf(c) - scrollLeft + frozenWidth;
+                        : colMetrics.offsetOf(c) - scrollLeft;
                     const w = colMetrics.sizeOf(c);
 
                     if (selected) {

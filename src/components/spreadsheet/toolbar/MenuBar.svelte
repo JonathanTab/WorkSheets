@@ -13,9 +13,7 @@
         download,
         printer,
         filter,
-        share,
         info,
-        grid,
         imageIcon,
         link,
         functionIcon,
@@ -140,13 +138,6 @@
         },
         { divider: true },
         {
-            label: "Share",
-            icon: share,
-            isSvgIcon: true,
-            action: () => showAlert("Share", "Share document - coming soon"),
-        },
-        { divider: true },
-        {
             label: "Download",
             submenu: [
                 {
@@ -240,12 +231,6 @@
             action: () => handleSelectAll(),
             shortcut: "Ctrl+A",
         },
-        { divider: true },
-        {
-            label: "Find and Replace",
-            action: () => showAlert("Find", "Find and replace - coming soon"),
-            shortcut: "Ctrl+H",
-        },
     ];
 
     // ─── VIEW MENU ────────────────────────────────────────────────────────────
@@ -288,12 +273,11 @@
                     action: () => setFreezeRows(0),
                 },
                 {
-                    label: "1 Row",
-                    action: () => setFreezeRows(1),
-                },
-                {
-                    label: "2 Rows",
-                    action: () => setFreezeRows(2),
+                    label: "Freeze to Current Row",
+                    action: () => {
+                        const anchor = selectionState.anchor;
+                        if (anchor) setFreezeRows(anchor.row + 1);
+                    },
                 },
                 { divider: true },
                 {
@@ -301,21 +285,12 @@
                     action: () => setFreezeCols(0),
                 },
                 {
-                    label: "1 Column",
-                    action: () => setFreezeCols(1),
+                    label: "Freeze to Current Column",
+                    action: () => {
+                        const anchor = selectionState.anchor;
+                        if (anchor) setFreezeCols(anchor.col + 1);
+                    },
                 },
-            ],
-        },
-        { divider: true },
-        {
-            label: "Zoom",
-            submenu: [
-                { label: "50%", action: () => setZoom(0.5) },
-                { label: "75%", action: () => setZoom(0.75) },
-                { label: "100%", action: () => setZoom(1) },
-                { label: "125%", action: () => setZoom(1.25) },
-                { label: "150%", action: () => setZoom(1.5) },
-                { label: "200%", action: () => setZoom(2) },
             ],
         },
     ];
@@ -332,11 +307,6 @@
         if (sheetStore) {
             sheetStore.setFrozenColumns?.(count);
         }
-    }
-
-    function setZoom(level) {
-        // Zoom functionality placeholder
-        showAlert("Zoom", `Zoom to ${Math.round(level * 100)}% - coming soon`);
     }
 
     // ─── INSERT MENU ──────────────────────────────────────────────────────────
@@ -379,24 +349,12 @@
             action: () => insertImageInCell(),
         },
         {
-            label: "Floating Image",
-            icon: imageIcon,
-            isSvgIcon: true,
-            action: () => insertFloatingImage(),
-        },
-        {
             label: "Link",
             icon: link,
             isSvgIcon: true,
             action: () => insertLink(),
         },
         { divider: true },
-        {
-            label: "Chart",
-            icon: grid,
-            isSvgIcon: true,
-            action: () => showAlert("Chart", "Insert chart - coming soon"),
-        },
         {
             label: "New Sheet",
             action: () => spreadsheetSession.addSheet("Sheet"),
@@ -503,31 +461,6 @@
     // ─── DATA MENU ────────────────────────────────────────────────────────────
     const dataItems = [
         {
-            label: "Sort Range",
-            submenu: [
-                {
-                    label: "Sort A → Z (ascending)",
-                    action: () => sortRange("asc"),
-                },
-                {
-                    label: "Sort Z → A (descending)",
-                    action: () => sortRange("desc"),
-                },
-            ],
-        },
-        { divider: true },
-        {
-            label: "Filter Views",
-            submenu: [
-                {
-                    label: "Create New Filter View",
-                    action: () =>
-                        showAlert("Filter", "Filter views - coming soon"),
-                },
-            ],
-        },
-        { divider: true },
-        {
             label: "Data Validation",
             icon: functionIcon,
             isSvgIcon: true,
@@ -536,17 +469,6 @@
         {
             label: "Conditional Formatting",
             action: () => (showCFPanel = !showCFPanel),
-        },
-        { divider: true },
-        {
-            label: "Split Text to Columns",
-            action: () =>
-                showAlert("Split", "Split text to columns - coming soon"),
-        },
-        {
-            label: "Remove Duplicates",
-            action: () =>
-                showAlert("Duplicates", "Remove duplicates - coming soon"),
         },
     ];
 
@@ -563,11 +485,6 @@
             icon: info,
             isSvgIcon: true,
             action: () => showAlert("Help", "Visit our documentation for help"),
-        },
-        {
-            label: "Report a Problem",
-            action: () =>
-                showAlert("Feedback", "Report a problem - coming soon"),
         },
     ];
 
@@ -725,17 +642,6 @@
         sheetStore.unmergeCells(anchor.row, anchor.col);
     }
 
-    function sortRange(direction) {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        const range = selectionState.range;
-        if (!sheetStore || !range) return;
-        // Sort functionality would need to be implemented in SheetStore
-        showAlert(
-            "Sort",
-            `Sort ${direction === "asc" ? "ascending" : "descending"} - coming soon`,
-        );
-    }
-
     function insertImageInCell() {
         const anchor = selectionState.anchor;
         const sheetStore = spreadsheetSession.activeSheetStore;
@@ -745,13 +651,6 @@
             fit: "contain",
         });
         showAlert("Insert Image", "Click the cell and use the image picker");
-    }
-
-    function insertFloatingImage() {
-        showAlert(
-            "Floating Image",
-            "Use the context menu (right-click) to insert floating images",
-        );
     }
 
     function insertLink() {

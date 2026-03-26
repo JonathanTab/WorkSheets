@@ -69,7 +69,10 @@ export class CanvasRenderer {
     constructor(canvas) {
         this.#canvas = canvas;
         if (canvas) {
-            this.#ctx = canvas.getContext('2d');
+            // alpha:false allows sub-pixel antialiasing for sharper text and
+            // avoids RGBA compositing overhead on each frame.
+            // The print engine passes OffscreenCanvas which also supports alpha:false.
+            this.#ctx = canvas.getContext('2d', { alpha: false });
         }
     }
 
@@ -105,10 +108,13 @@ export class CanvasRenderer {
 
     /**
      * Clear the entire canvas (physical pixels, no transform applied).
+     * Uses fillRect with the background colour rather than clearRect so that
+     * the alpha:false canvas never shows black pixels between paints.
      */
     clear() {
         if (!this.#ctx || !this.#canvas) return;
-        this.#ctx.clearRect(0, 0, this.#canvas.width, this.#canvas.height);
+        this.#ctx.fillStyle = this.#theme.cellBg;
+        this.#ctx.fillRect(0, 0, this.#canvas.width, this.#canvas.height);
     }
 
     /**
@@ -123,7 +129,8 @@ export class CanvasRenderer {
     clearPane(clipX, clipY, clipW, clipH) {
         if (!this.#ctx || !this.#canvas) return;
         const dpr = this.#dpr;
-        this.#ctx.clearRect(
+        this.#ctx.fillStyle = this.#theme.cellBg;
+        this.#ctx.fillRect(
             Math.round(clipX * dpr),
             Math.round(clipY * dpr),
             Math.round(clipW * dpr),
@@ -273,18 +280,22 @@ export class CanvasRenderer {
     }
 
     /**
-     * Paint sticky table headers at the top of the frozen-row band.
-     * Call after all pane paints.
+     * Paint sticky table header (and entry) rows at the top of the scrollable
+     * area when they've been scrolled past. Call after all pane paints.
      *
-     * @param {Array<{table:any, leftPx:number, widthPx:number, heightPx:number}>} headers
-     * @param {{frozenWidth:number, frozenHeight:number, scrollLeft:number, headerHeight:number}} options
+     * Each entry in `headers` comes from SheetRenderContext.getStickyTableHeaders()
+     * and includes:
+     *   leftPx, widthPx, headerHeightPx, entryHeightPx, showEntry, colWidths
+     *
+     * @param {Array<{table:any, leftPx:number, widthPx:number, headerHeightPx:number, entryHeightPx:number, showEntry:boolean, colWidths:number[]}>} headers
+     * @param {{frozenWidth:number, frozenHeight:number, scrollLeft:number}} options
      */
     paintStickyHeaders(headers, options) {
         if (!headers?.length) return;
         const ctx = this.#ctx;
         if (!ctx) return;
 
-        const { frozenWidth, frozenHeight, scrollLeft, headerHeight } = options;
+        const { frozenWidth, frozenHeight, scrollLeft } = options;
         const dpr = this.#dpr;
 
         this.#lastFont = '';
@@ -293,34 +304,127 @@ export class CanvasRenderer {
 
         try {
             for (const header of headers) {
-                const canvasX = frozenWidth + header.leftPx - scrollLeft;
-                const canvasY = frozenHeight; // just below frozen rows / at top of body area
+                const rawX  = header.leftPx - scrollLeft;
+                const canvasY = frozenHeight;
 
-                // Clip to entire header strip width
+                const totalStickyH = header.headerHeightPx +
+                    (header.showEntry ? header.entryHeightPx : 0);
+
+                // Clip to the visible body area (don't overdraw frozen columns)
+                const clipLeft = Math.max(rawX, frozenWidth);
+                const clipRight = rawX + header.widthPx;
+                const clipW = Math.max(0, clipRight - clipLeft);
+                if (clipW <= 0) continue;
+
                 ctx.save();
                 ctx.beginPath();
-                ctx.rect(canvasX, canvasY, header.widthPx, header.heightPx);
+                ctx.rect(clipLeft, canvasY, clipW, totalStickyH);
                 ctx.clip();
 
-                let xCursor = canvasX;
+                // 1. Paint header row
+                let xCursor = rawX;
                 for (let i = 0; i < header.table.columns.length; i++) {
-                    const col = header.table.columns[i];
+                    const col  = header.table.columns[i];
                     const colW = header.colWidths?.[i] ?? 100;
                     this.#paintTableHeaderCell(ctx, {
-                        colName: col?.name ?? '',
-                        filterActive: !!(col?.id && header.table.filters?.get?.(col.id)),
+                        colName:      col?.name ?? '',
+                        filterActive: !!(col?.id && header.table.filters?.[col.id]),
                         x: xCursor,
                         y: canvasY,
-                        width: colW,
-                        height: header.heightPx,
+                        width:  colW,
+                        height: header.headerHeightPx,
                     });
                     xCursor += colW;
                 }
+
+                // 2. Paint entry row (if also scrolled past)
+                if (header.showEntry) {
+                    const entryY = canvasY + header.headerHeightPx;
+                    xCursor = rawX;
+                    for (let i = 0; i < header.table.columns.length; i++) {
+                        const col  = header.table.columns[i];
+                        const colW = header.colWidths?.[i] ?? 100;
+                        this.#paintStickyEntryCell(ctx, {
+                            col,
+                            x: xCursor,
+                            y: entryY,
+                            width:  colW,
+                            height: header.entryHeightPx,
+                            entryBuffer: header.table.entryBuffer,
+                        });
+                        xCursor += colW;
+                    }
+                }
+
+                // 3. Bottom shadow to indicate stickiness
+                const shadowY = canvasY + totalStickyH;
+                const shadowH = 5;
+                const grad = ctx.createLinearGradient(0, shadowY, 0, shadowY + shadowH);
+                grad.addColorStop(0, 'rgba(0,0,0,0.10)');
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(clipLeft, shadowY, clipW, shadowH);
 
                 ctx.restore();
             }
         } finally {
             ctx.restore();
+        }
+    }
+
+    /**
+     * Paint a single entry-row cell for a sticky table header overlay.
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {{col:any, x:number, y:number, width:number, height:number, entryBuffer:object}} opts
+     */
+    #paintStickyEntryCell(ctx, opts) {
+        const { col, x, y, width, height, entryBuffer } = opts;
+
+        // Cell background
+        ctx.fillStyle = this.#theme.cellBg;
+        ctx.fillRect(x, y, width, height);
+
+        // Gridlines (bottom + right)
+        ctx.strokeStyle = this.#theme.gridline;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x,           y + height - 0.5);
+        ctx.lineTo(x + width,   y + height - 0.5);
+        ctx.moveTo(x + width - 0.5, y);
+        ctx.lineTo(x + width - 0.5, y + height);
+        ctx.stroke();
+
+        const textY = Math.round(y + height / 2);
+
+        if (col?.isNonEntry) {
+            // Formula column — show 'fx' hint
+            const fxFont = `600 ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+            if (fxFont !== this.#lastFont) { ctx.font = fxFont; this.#lastFont = fxFont; }
+            ctx.fillStyle = 'rgba(100,116,139,0.35)';
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            ctx.fillText('fx', Math.round(x + width / 2), textY);
+            return;
+        }
+
+        const colId = col?.id;
+        const value = colId != null ? (entryBuffer?.[colId] ?? null) : null;
+
+        if (value != null && value !== '') {
+            const font = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+            if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
+            ctx.fillStyle = this.#theme.defaultText;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'left';
+            ctx.fillText(String(value), Math.round(x + 4), textY, width - 8);
+        } else {
+            // Column-name placeholder (italic + muted)
+            const placeholderFont = `italic 12px ${this.#theme.defaultFontFamily}`;
+            if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
+            ctx.fillStyle = this.#theme.entryPlaceholderText;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'left';
+            ctx.fillText(col?.name ?? '', Math.round(x + 4), textY);
         }
     }
 

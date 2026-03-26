@@ -37,14 +37,24 @@
         sortDesc,
         menu,
         close,
+        externalLink,
     } from "../lib/icons/index.js";
+
+    // ---- Props (for standalone / embeddable use) ----
+    let {
+        registry = storage,
+        appTitle = "WorkSheets",
+        appSubtitle = "Collaborative Spreadsheets",
+        newItemLabel = "New Spreadsheet",
+        onOpen = undefined,
+    } = $props();
 
     // ---- State ----
     let tab = $state("recent"); // "drive" | "shared" | "recent" - default to recent
     let sidebarOpen = $state(false); // Mobile sidebar toggle
     let currentFolderId = $state(null); // null = root
-    let driveFiles = $state(storage.drive.listFiles());
-    let driveFolders = $state(storage.drive.listFolders());
+    let driveFiles = $state(registry.drive.listFiles());
+    let driveFolders = $state(registry.drive.listFolders());
     let searchQuery = $state("");
     let contentSearchResults = $state(/** @type {any[]} */ ([]));
     let isContentSearching = $state(false);
@@ -57,18 +67,55 @@
     let sortDirection = $state("desc"); // "asc" | "desc" - default desc for modified (most recent first)
     let lastSelectedIndex = $state(-1);
     let expandedFolders = $state(new Set()); // For folder tree expansion
+    let recentFiles = $state(/** @type {any[]} */ ([]));
+    let syncState = $state({ isSyncing: false, lastSync: null, error: null });
+    let isMobile = $state(typeof window !== "undefined" && window.innerWidth <= 768);
+    /** @type {HTMLInputElement | null} */
+    let searchInput = $state(null);
 
-    // Keep in sync with storage updates
+    // Keep in sync with registry updates
     $effect(() => {
         const unsubs = [
-            storage.drive.files.subscribe((f) => {
+            registry.drive.files.subscribe((f) => {
                 driveFiles = f;
             }),
-            storage.drive.folders.subscribe((f) => {
+            registry.drive.folders.subscribe((f) => {
                 driveFolders = f;
             }),
         ];
         return () => unsubs.forEach((u) => u());
+    });
+
+    // Sync state — subscribe if available
+    $effect(() => {
+        if (!registry.syncState) return;
+        const unsub = registry.syncState.subscribe((s) => {
+            syncState = s;
+        });
+        return unsub;
+    });
+
+    // Recent files — update on every registry change/sync
+    $effect(() => {
+        function updateRecents() {
+            recentFiles = registry.drive.recentlyOpened(50);
+        }
+        updateRecents();
+        registry.on?.("change", updateRecents);
+        registry.on?.("sync", updateRecents);
+        return () => {
+            registry.off?.("change", updateRecents);
+            registry.off?.("sync", updateRecents);
+        };
+    });
+
+    // Mobile breakpoint — reactive to window resize
+    $effect(() => {
+        function onResize() {
+            isMobile = window.innerWidth <= 768;
+        }
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
     });
 
     // ---- Content search (server-side, debounced) ----
@@ -84,7 +131,7 @@
         _searchTimer = setTimeout(async () => {
             isContentSearching = true;
             try {
-                contentSearchResults = await storage.drive.search(q);
+                contentSearchResults = await registry.drive.search(q);
             } catch {
                 contentSearchResults = [];
             } finally {
@@ -120,7 +167,7 @@
 
     // ---- Current folder contents ----
     let folderContents = $derived.by(() => {
-        const username = storage._options?.getUsername?.() ?? "";
+        const username = registry._options?.getUsername?.() ?? "";
         if (tab === "shared") {
             return {
                 folders: driveFolders.filter(
@@ -137,7 +184,7 @@
             };
         }
         if (tab === "recent") {
-            return { folders: [], files: storage.drive.recentlyOpened(50) };
+            return { folders: [], files: recentFiles };
         }
         // drive tab
         return {
@@ -298,14 +345,19 @@
 
     // ---- File actions ----
     function openDocument(docId) {
-        window.location.hash = docId;
+        if (onOpen) {
+            const file = driveFiles.find((f) => f.id === docId);
+            onOpen(file ?? { id: docId });
+        } else {
+            window.location.hash = docId;
+        }
     }
 
     function handleCreateDocument() {
         openModal(CreateDocumentModal, {
             onConfirm: async (title) => {
                 try {
-                    const doc = await storage.drive.createFile({
+                    const doc = await registry.drive.createFile({
                         title,
                         folderId: tab === "drive" ? currentFolderId : null,
                     });
@@ -326,7 +378,7 @@
             confirmText: "Create",
             onConfirm: async (name) => {
                 try {
-                    await storage.drive.createFolder({
+                    await registry.drive.createFolder({
                         name,
                         parentId: tab === "drive" ? currentFolderId : null,
                     });
@@ -345,7 +397,7 @@
             currentTitle: file.title,
             onConfirm: async (newTitle) => {
                 try {
-                    await storage.drive.renameFile(file.id, newTitle);
+                    await registry.drive.renameFile(file.id, newTitle);
                     closeTopModal();
                 } catch (err) {
                     console.error("Failed to rename:", err);
@@ -361,7 +413,7 @@
             documentTitle: file.title || "this document",
             onConfirm: async () => {
                 try {
-                    await storage.drive.deleteFile(file.id);
+                    await registry.drive.deleteFile(file.id);
                     closeTopModal();
                 } catch (err) {
                     console.error("Failed to delete:", err);
@@ -377,7 +429,7 @@
             file,
             onConfirm: async (targetFolderId) => {
                 try {
-                    await storage.drive.moveFile(file.id, targetFolderId);
+                    await registry.drive.moveFile(file.id, targetFolderId);
                     closeTopModal();
                 } catch (err) {
                     console.error("Failed to move:", err);
@@ -402,7 +454,7 @@
             variant: "danger",
             onConfirm: async () => {
                 try {
-                    await storage.drive.deleteFolder(folder.id);
+                    await registry.drive.deleteFolder(folder.id);
                     if (currentFolderId === folder.id)
                         currentFolderId = folder.parentId ?? null;
                     closeTopModal();
@@ -424,17 +476,26 @@
         const trimmed = renameFolderValue.trim();
         renamingFolderId = null;
         if (trimmed && trimmed !== folder.name) {
-            await storage.drive
+            await registry.drive
                 .renameFolder(folder.id, trimmed)
                 .catch(console.error);
         }
     }
 
     // ---- Context menu ----
+    // Approximate context menu dimensions for viewport clamping
+    const CTX_W = 185, CTX_H = 230;
+
     function showContextMenu(e, item, type) {
         e.preventDefault();
         e.stopPropagation();
-        contextMenu = { x: e.clientX, y: e.clientY, item, type };
+        let x = e.clientX;
+        let y = e.clientY;
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
+        x = Math.max(8, x);
+        y = Math.max(8, y);
+        contextMenu = { x, y, item, type };
     }
 
     function closeContextMenu() {
@@ -446,6 +507,8 @@
     }
 
     function handleKeydown(e) {
+        const inInput = e.target?.matches?.("input, textarea, [contenteditable]");
+
         if (e.key === "Escape") {
             if (sidebarOpen) {
                 sidebarOpen = false;
@@ -454,10 +517,62 @@
             } else if (selectedItems.size > 0) {
                 clearSelection();
             }
+            return;
         }
+
+        if (inInput) return;
+
         if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             selectAll();
+            return;
+        }
+
+        // Focus search: '/' or Ctrl/Cmd+F
+        if (e.key === "/" || (e.key === "f" && (e.ctrlKey || e.metaKey))) {
+            e.preventDefault();
+            searchInput?.focus();
+            searchInput?.select();
+            return;
+        }
+
+        // New document: Ctrl/Cmd+N
+        if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            handleCreateDocument();
+            return;
+        }
+
+        // Delete selected single file
+        if (e.key === "Delete" && selectedItems.size === 1) {
+            const selected = displayItems.find((item) => isSelected(item));
+            if (selected?.itemType === "file") {
+                handleDeleteFile(selected, null);
+            }
+            return;
+        }
+
+        // Open selected: Enter
+        if (e.key === "Enter" && selectedItems.size === 1) {
+            const selected = displayItems.find((item) => isSelected(item));
+            if (selected) {
+                if (selected.itemType === "folder") navigateFolder(selected.id);
+                else openDocument(selected.id);
+            }
+            return;
+        }
+
+        // Arrow key navigation through the list
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            if (displayItems.length === 0) return;
+            const cur = lastSelectedIndex >= 0 ? lastSelectedIndex : -1;
+            const next =
+                e.key === "ArrowDown"
+                    ? cur < displayItems.length - 1 ? cur + 1 : 0
+                    : cur > 0 ? cur - 1 : displayItems.length - 1;
+            selectedItems = new Set([itemKey(displayItems[next])]);
+            lastSelectedIndex = next;
         }
     }
 
@@ -494,7 +609,7 @@
     }
 
     function isOwned(item) {
-        const username = storage._options?.getUsername?.() ?? "";
+        const username = registry._options?.getUsername?.() ?? "";
         return item.owner === username;
     }
 
@@ -509,6 +624,14 @@
             sortColumn = column;
             sortDirection = "asc";
         }
+    }
+
+    function formatLastSync(date) {
+        if (!date) return null;
+        const diff = Date.now() - new Date(date).getTime();
+        if (diff < 60000) return "just now";
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+        return `${Math.floor(diff / 3600000)}h ago`;
     }
 </script>
 
@@ -541,7 +664,7 @@
                 iconPosition="left"
                 className="new-btn"
             >
-                New Spreadsheet
+                {newItemLabel}
             </Button>
         </div>
 
@@ -637,11 +760,27 @@
             </button>
         </nav>
 
-        <!-- Sync button -->
+        <!-- Sync / status footer -->
         <div class="sidebar-footer">
-            <button class="sync-btn" onclick={() => storage.sync()}>
-                {@html refresh}
-                <span>Sync</span>
+            <button
+                class="sync-btn"
+                class:syncing={syncState.isSyncing}
+                class:error={syncState.error}
+                onclick={() => registry.sync?.()}
+                title={syncState.error ? `Sync error: ${syncState.error}` : "Sync now"}
+            >
+                <span class="sync-icon" class:spin={syncState.isSyncing}>{@html refresh}</span>
+                <span class="sync-label">
+                    {#if syncState.isSyncing}
+                        Syncing…
+                    {:else if syncState.error}
+                        Sync error
+                    {:else if syncState.lastSync}
+                        Synced {formatLastSync(syncState.lastSync)}
+                    {:else}
+                        Sync
+                    {/if}
+                </span>
             </button>
         </div>
     </aside>
@@ -660,8 +799,8 @@
                 <div class="app-title desktop-only">
                     <span class="app-icon">{@html spreadsheet}</span>
                     <div>
-                        <h1>WorkSheets</h1>
-                        <p>Collaborative Spreadsheets</p>
+                        <h1>{appTitle}</h1>
+                        <p>{appSubtitle}</p>
                     </div>
                 </div>
                 <!-- Current location for mobile -->
@@ -731,8 +870,9 @@
                     <span class="search-icon">{@html search}</span>
                     <input
                         type="search"
-                        placeholder="Search..."
+                        placeholder="Search…"
                         bind:value={searchQuery}
+                        bind:this={searchInput}
                     />
                 </div>
 
@@ -792,7 +932,7 @@
                                 icon={plus}
                                 iconPosition="left"
                             >
-                                New Spreadsheet
+                                {newItemLabel}
                             </Button>
                         </div>
                     {:else}
@@ -804,7 +944,7 @@
                                 icon={plus}
                                 iconPosition="left"
                             >
-                                New Spreadsheet
+                                {newItemLabel}
                             </Button>
                             <Button
                                 onclick={handleCreateFolder}
@@ -1034,7 +1174,7 @@
                                 {:else if item.thumbnailKey}
                                     <img
                                         class="grid-item-thumbnail"
-                                        src={storage.drive.getThumbnailUrl(
+                                        src={registry.drive.getThumbnailUrl(
                                             item.id,
                                         )}
                                         alt=""
@@ -1095,7 +1235,7 @@
 {#if contextMenu}
     <div
         class="context-menu"
-        class:mobile={typeof window !== "undefined" && window.innerWidth <= 768}
+        class:mobile={isMobile}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
         onclick={(e) => e.stopPropagation()}
     >
@@ -1108,6 +1248,15 @@
                 }}
             >
                 {@html arrowRight} Open
+            </button>
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    window.open(window.location.pathname + window.location.search + "#" + contextMenu.item.id, "_blank");
+                    closeContextMenu();
+                }}
+            >
+                {@html externalLink} Open in new tab
             </button>
             <button
                 class="ctx-item"
@@ -1482,6 +1631,33 @@
     .sync-btn :global(svg) {
         width: 16px;
         height: 16px;
+    }
+
+    .sync-icon {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+    }
+
+    .sync-label {
+        flex: 1;
+        text-align: left;
+    }
+
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .sync-icon.spin :global(svg) {
+        animation: spin 1s linear infinite;
+    }
+
+    .sync-btn.syncing {
+        color: var(--color-primary);
+    }
+
+    .sync-btn.error {
+        color: var(--color-error, #ef4444);
     }
 
     /* Main Content */

@@ -8,6 +8,7 @@
         colHeader,
         onColHeaderMouseDown,
         onStartColResize,
+        onStartFreezeColDrag,
     } = $props();
 
     let frozenCols = $derived(virtualizer?.frozenCols ?? 0);
@@ -52,6 +53,18 @@
                 </div>
             {/each}
         </div>
+    {/if}
+
+    <!-- Freeze handle: draggable line at the frozen/non-frozen column boundary -->
+    {#if frozenCols > 0}
+        <div
+            class="freeze-handle"
+            style="left:{frozenWidth}px;"
+            onmousedown={(e) => onStartFreezeColDrag?.(e)}
+            role="separator"
+            aria-orientation="vertical"
+            title="Drag to adjust frozen columns"
+        ></div>
     {/if}
 
     <div class="scrollable-cols" style="left:{frozenWidth}px;">
@@ -158,5 +171,24 @@
         width: 4px;
         height: 100%;
         cursor: col-resize;
+    }
+
+    /* ── Freeze handle ── */
+    .freeze-handle {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 6px;
+        transform: translateX(-3px);
+        cursor: col-resize;
+        z-index: 40;
+        pointer-events: auto;
+        background: transparent;
+        border-left: 2px solid rgba(100, 116, 139, 0.5);
+    }
+    .freeze-handle:hover,
+    .freeze-handle:active {
+        border-left-color: var(--color-primary, #3b82f6);
+        background: rgba(59, 130, 246, 0.08);
     }
 </style>
