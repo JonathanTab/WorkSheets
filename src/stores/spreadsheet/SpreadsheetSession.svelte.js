@@ -367,7 +367,7 @@ export class SpreadsheetSession {
         const sheetsMap = this.root.get('sheets');
 
         sheetOrder?.observe(structureObserver);
-        sheetsMap?.observe(structureObserver);
+        sheetsMap?.observeDeep(structureObserver);
 
         // Observe metadata map
         const metadataMap = this.root.get('metadata');
@@ -379,7 +379,7 @@ export class SpreadsheetSession {
 
         this.#cleanupObserver = () => {
             sheetOrder?.unobserve(structureObserver);
-            sheetsMap?.unobserve(structureObserver);
+            sheetsMap?.unobserveDeep(structureObserver);
             metadataMap?.unobserve(metadataObserver);
         };
     }
@@ -639,6 +639,11 @@ export class SpreadsheetSession {
         }
 
         this.activeSheetId = sheetId;
+
+        // Refresh remote selections immediately — the awareness observer only
+        // fires on awareness changes, not on local sheet switches, so stale
+        // highlights from the previous sheet would linger otherwise.
+        this.remoteSelections = this.getRemoteSelections();
 
         // Update SheetStore and undo manager for new sheet
         const sheet = sheets.get(sheetId);
@@ -978,13 +983,15 @@ export class SpreadsheetSession {
      * @param {string} name
      */
     renameSheet(sheetId, name) {
-        if (!this.root) return;
+        if (!this.root || !this.ydoc) return;
 
         const sheets = this.root.get('sheets');
         const sheet = sheets?.get(sheetId);
 
         if (sheet) {
-            sheet.set('name', name);
+            this.ydoc.transact(() => {
+                sheet.set('name', name);
+            });
         }
     }
 
@@ -1071,11 +1078,16 @@ export class SpreadsheetSession {
 
         this.awareness.on('change', observer);
 
+        // Periodically evict stale entries (e.g. crashed tabs that never sent
+        // a clean disconnect and whose awareness state is past the expiry window).
+        const staleSweepInterval = setInterval(observer, 10_000);
+
         // Initial sync
         observer();
 
         this.#cleanupAwarenessObserver = () => {
             this.awareness?.off('change', observer);
+            clearInterval(staleSweepInterval);
         };
     }
 
@@ -1142,25 +1154,38 @@ export class SpreadsheetSession {
         this.awareness.setLocalStateField('selection', {
             ...selection,
             user: get(authStore).user?.username || 'anonymous',
-            sheetId: this.activeSheetId
+            sheetId: this.activeSheetId,
+            ts: Date.now(),
         });
     }
 
     /**
-     * Get remote users' selections
+     * Get remote users' selections, filtered to the active sheet.
+     * Entries older than AWARENESS_EXPIRY_MS are treated as stale and dropped,
+     * so crashed tabs eventually disappear even without a clean disconnect.
      * @returns {Array}
      */
     getRemoteSelections() {
         if (!this.awareness) return [];
 
+        const EXPIRY_MS = 30_000;
+        const now = Date.now();
         const localClientId = this.awareness.clientID;
         const states = Array.from(this.awareness.getStates().entries());
 
         return states
-            .filter(([clientId]) => clientId !== localClientId)
+            .filter(([clientId, state]) => {
+                if (clientId === localClientId) return false;
+                const sel = state?.selection;
+                if (!sel?.sheetId) return false;
+                // Drop entries with no timestamp or that are too old
+                if (sel.ts != null && now - sel.ts > EXPIRY_MS) return false;
+                return true;
+            })
             .map(([clientId, state]) => ({
                 clientId,
-                ...state.selection
+                color: state.user?.color,
+                ...state.selection,
             }))
             .filter(s => s.sheetId === this.activeSheetId);
     }

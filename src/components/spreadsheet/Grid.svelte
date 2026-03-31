@@ -3602,12 +3602,31 @@
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
-        // Iterate only cells that actually exist (sparse map)
+
+        // Handle table cells in the range (sparse map misses these)
+        let tableCleared = false;
+        for (let r = eff.startRow; r <= eff.endRow; r++) {
+            for (let c = eff.startCol; c <= eff.endCol; c++) {
+                const ct = renderContext?.getCellType(r, c);
+                if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
+                const info = renderContext?.tableManager?.getCellInfo(r, c);
+                if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
+                if (ct === CELL_TYPE.TABLE_ENTRY) {
+                    info.table.setEntryValue(info.colDef.id, null);
+                } else {
+                    info.table.updateCell(info.dataIndex, info.colDef.id, null);
+                }
+                tableCleared = true;
+            }
+        }
+        if (tableCleared) untrack(() => renderScheduler?.invalidateAll());
+
+        // Iterate only regular cells that actually exist (sparse map)
         sheetStore.cells.forEach((_cell, key) => {
             const [r, c] = key.split(",").map(Number);
             if (r < eff.startRow || r > eff.endRow) return;
             if (c < eff.startCol || c > eff.endCol) return;
-            // Skip table/repeater/viewport cells
+            // Skip table/repeater/viewport cells (handled above)
             const ct = renderContext?.getCellType(r, c);
             if (
                 ct === CELL_TYPE.TABLE_HEADER ||
@@ -4751,6 +4770,18 @@
                                     }
                                     focusedDropdownCell = null;
                                 }
+                            } else if (e.key === "Tab") {
+                                e.preventDefault();
+                                if (filteredOpts.length > 0) {
+                                    if (focusedDropdownCell.onCommit) {
+                                        focusedDropdownCell.onCommit(filteredOpts[0]);
+                                    } else {
+                                        sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                    }
+                                }
+                                focusedDropdownCell = null;
+                                moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
+                                scrollToAnchor();
                             } else if (e.key === "Escape") {
                                 focusedDropdownCell = null;
                             }

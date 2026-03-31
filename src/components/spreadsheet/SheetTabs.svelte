@@ -1,6 +1,5 @@
 <script>
     import { openModal, closeModal } from "../../lib/ui/modalStore.svelte.js";
-    import RenameSheetModal from "../modals/RenameSheetModal.svelte";
     import DeleteSheetModal from "../modals/DeleteSheetModal.svelte";
     import SelectionStats from "./SelectionStats.svelte";
 
@@ -13,6 +12,9 @@
         onRenameSheet,
     } = $props();
 
+    let renamingSheetId = $state(null);
+    let renameValue = $state("");
+
     function handleAddSheet() {
         const name = `Sheet ${sheets.length + 1}`;
         onAddSheet(name);
@@ -24,17 +26,30 @@
         }
     }
 
-    function handleTabDoubleClick(sheetId) {
+    function startRenaming(sheetId) {
         const sheet = sheets.find((s) => s.id === sheetId);
         if (sheet) {
-            openModal(RenameSheetModal, {
-                currentName: sheet.name,
-                onConfirm: (newName) => {
-                    onRenameSheet(sheetId, newName);
-                    closeModal();
-                },
-            });
+            renamingSheetId = sheetId;
+            renameValue = sheet.name;
         }
+    }
+
+    function finishRenaming(sheetId) {
+        const trimmed = renameValue.trim();
+        if (trimmed && trimmed !== sheets.find((s) => s.id === sheetId)?.name) {
+            onRenameSheet(sheetId, trimmed);
+        }
+        renamingSheetId = null;
+        renameValue = "";
+    }
+
+    function cancelRenaming() {
+        renamingSheetId = null;
+        renameValue = "";
+    }
+
+    function handleTabDoubleClick(sheetId) {
+        startRenaming(sheetId);
     }
 
     function handleDeleteClick(sheetId) {
@@ -61,18 +76,36 @@
                 onclick={() => handleTabClick(sheet.id)}
                 ondblclick={() => handleTabDoubleClick(sheet.id)}
             >
-                <span class="tab-name">{sheet.name}</span>
-                {#if sheets.length > 1}
-                    <button
-                        class="tab-delete"
-                        onclick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteClick(sheet.id);
+                {#if renamingSheetId === sheet.id}
+                    <input
+                        class="tab-rename-input"
+                        type="text"
+                        bind:value={renameValue}
+                        onclick={(e) => e.stopPropagation()}
+                        onblur={() => finishRenaming(sheet.id)}
+                        onkeydown={(e) => {
+                            if (e.key === "Enter") {
+                                finishRenaming(sheet.id);
+                            } else if (e.key === "Escape") {
+                                cancelRenaming();
+                            }
                         }}
-                        title="Delete sheet"
-                    >
-                        ×
-                    </button>
+                        autofocus
+                    />
+                {:else}
+                    <span class="tab-name">{sheet.name}</span>
+                    {#if sheets.length > 1}
+                        <button
+                            class="tab-delete"
+                            onclick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteClick(sheet.id);
+                            }}
+                            title="Delete sheet"
+                        >
+                            ×
+                        </button>
+                    {/if}
                 {/if}
             </button>
         {/each}
@@ -105,7 +138,8 @@
         display: flex;
         align-items: center;
         gap: 0.25rem;
-        padding: 0.375rem 0.75rem;
+        padding: 0 0.75rem;
+        height: 28px;
         background: transparent;
         border: none;
         border-bottom: 2px solid transparent;
@@ -114,6 +148,7 @@
         color: var(--text-muted, #64748b);
         white-space: nowrap;
         transition: all 0.15s;
+        box-sizing: border-box;
     }
 
     .tab:hover {
@@ -130,6 +165,25 @@
         max-width: 120px;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+
+    .tab-rename-input {
+        width: 100px;
+        min-width: 60px;
+        height: 20px;
+        padding: 0 4px;
+        border: 1px solid var(--active-color, #3b82f6);
+        border-radius: 3px;
+        font-size: 0.8125rem;
+        background: white;
+        color: var(--text-color, #1e293b);
+        font-family: inherit;
+        box-sizing: border-box;
+    }
+
+    .tab-rename-input:focus {
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
     }
 
     .tab-delete {
@@ -182,7 +236,8 @@
             min-height: 44px;
         }
         .tab {
-            padding: 0.5rem 1rem;
+            padding: 0 1rem;
+            height: 36px;
             font-size: 0.875rem;
         }
         .add-sheet-btn {
