@@ -571,6 +571,7 @@
         const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
         const _fr = virtualizer?.frozenRows;
         const _fc = virtualizer?.frozenCols;
+        const _formulaVer = spreadsheetSession?.formulaEngine?.computedVersion;
 
         untrack(() => {
             if (!renderScheduler || !renderPlan || !virtualizer) return;

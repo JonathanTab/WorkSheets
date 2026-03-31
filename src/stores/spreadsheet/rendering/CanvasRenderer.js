@@ -498,6 +498,10 @@ export class CanvasRenderer {
             ctx.clip();
             this.#paintCellContent(ctx, cell);
             ctx.restore();
+            // ctx.restore() reverts ctx.font to the pre-save value, but #lastFont
+            // still holds the last font set inside the save/restore block. Reset it
+            // so the next cell doesn't skip a needed ctx.font assignment.
+            this.#lastFont = '';
         } else {
             this.#paintCellContent(ctx, cell);
         }
@@ -695,7 +699,7 @@ export class CanvasRenderer {
             if (run.ff) wrapCacheKey += '\x01' + run.ff;
             wrapCacheKey += '\x02';
         }
-        wrapCacheKey += '\x03' + maxWidth;
+        wrapCacheKey += '\x03' + maxWidth + '\x04' + defaultFontSize + '\x04' + defaultFamily + '\x04' + (defaultBold ? 1 : 0) + '\x04' + (defaultItalic ? 1 : 0);
 
         let allLines = this.#wrapCache.get(wrapCacheKey);
         if (!allLines) {
@@ -787,6 +791,7 @@ export class CanvasRenderer {
         }
 
         ctx.restore();
+        this.#lastFont = '';
     }
 
     /**

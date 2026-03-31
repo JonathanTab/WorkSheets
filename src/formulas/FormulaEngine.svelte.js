@@ -63,6 +63,10 @@ export class FormulaEngine {
     // Includes both formula anchor values and spill cell values.
     computedValues = $state({});
 
+    // Incremented after every recalculateDirty() run so that canvas effects
+    // can track formula output changes (e.g. IMPORTRANGE finishing its load).
+    computedVersion = $state(0);
+
     constructor() {
         this.#graph = new DependencyGraph();
     }
@@ -410,6 +414,8 @@ export class FormulaEngine {
         } finally {
             this.#isRecalculating = false;
         }
+
+        if (updated.length > 0) this.computedVersion++;
 
         return updated;
     }

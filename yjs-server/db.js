@@ -29,20 +29,26 @@ export function initDb(levelDbPath, sqlitePath) {
 
     sqliteDb.exec(`
         CREATE TABLE IF NOT EXISTS snapshots (
-            id          TEXT PRIMARY KEY,
-            file_id     TEXT NOT NULL,
-            room_id     TEXT NOT NULL,
-            state       BLOB NOT NULL,
-            created_at  INTEGER NOT NULL,
-            trigger     TEXT NOT NULL DEFAULT 'auto',
-            created_by  TEXT,
-            description TEXT
+            id           TEXT PRIMARY KEY,
+            file_id      TEXT NOT NULL,
+            room_id      TEXT NOT NULL,
+            state        BLOB NOT NULL,
+            created_at   INTEGER NOT NULL,
+            trigger      TEXT NOT NULL DEFAULT 'auto',
+            created_by   TEXT,
+            description  TEXT,
+            change_count INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_snap_file ON snapshots(file_id);
         CREATE INDEX IF NOT EXISTS idx_snap_room  ON snapshots(room_id);
         CREATE INDEX IF NOT EXISTS idx_snap_time  ON snapshots(created_at);
     `);
+
+    // Migrate existing databases that don't have change_count yet
+    try {
+        sqliteDb.exec(`ALTER TABLE snapshots ADD COLUMN change_count INTEGER`);
+    } catch { /* column already exists — safe to ignore */ }
 
     return { levelPersistence, sqliteDb };
 }
@@ -108,31 +114,32 @@ export async function writeDocState(roomId, ydoc) {
  * @param {string|null} fileId
  * @param {Y.Doc} ydoc
  * @param {'auto'|'manual'|'room_empty'} trigger
- * @param {string|null} createdBy
- * @param {string|null} description
+ * @param {string|null} createdBy - comma-separated usernames
+ * @param {number} changeCount - number of state-vector advances since last snapshot
+ * @param {string|null} [description] - optional user-provided label
  * @returns {string} snapshot id
  */
-export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, description) {
+export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, description = null) {
     const id = `snap_${randomBytes(8).toString('hex')}`;
     const state = Y.encodeStateAsUpdate(ydoc);
     sqliteDb.prepare(
-        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, fileId ?? roomId, roomId, Buffer.from(state), Date.now(), trigger, createdBy ?? null, description ?? null);
-    console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger}`);
+        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, fileId ?? roomId, roomId, Buffer.from(state), Date.now(), trigger, createdBy ?? null, changeCount ?? null, description ?? null);
+    console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger} changes=${changeCount ?? '?'}`);
     return id;
 }
 
 /** @returns {object[]} snapshot metadata (no binary state) */
 export function listSnapshotsByRoom(roomId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, description FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100'
+        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100'
     ).all(roomId);
 }
 
 /** @returns {object[]} */
 export function listSnapshotsByFile(fileId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, description FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100'
+        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100'
     ).all(fileId);
 }
 
@@ -145,7 +152,7 @@ export function getSnapshotData(snapshotId) {
 /** @returns {object|null} metadata without binary */
 export function getSnapshotMeta(snapshotId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, description FROM snapshots WHERE id = ?'
+        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE id = ?'
     ).get(snapshotId) ?? null;
 }
 

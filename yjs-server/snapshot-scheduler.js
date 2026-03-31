@@ -48,7 +48,7 @@ const SIX_MONTHS_MS = 180 * 86_400_000;
 
 export class SnapshotScheduler {
     /**
-     * @param {function(roomId: string, fileId: string, ydoc: Y.Doc, trigger: string, createdBy: string|null, desc: string|null): string} saveFn
+     * @param {function(roomId: string, fileId: string, ydoc: Y.Doc, trigger: string, createdBy: string|null, changeCount: number): string} saveFn
      * @param {object} [sqliteDb] - SQLite database for retention cleanup
      */
     constructor(saveFn, sqliteDb = null) {
@@ -131,19 +131,24 @@ export class SnapshotScheduler {
             entry.burstCapTimer = null;
         }
 
-        if (!entry?.dirty) {
-            // Double-check state vector in case we're tracking from a fresh connection
-            if (!this._hasRealChanges(ydoc, entry?.lastSnapshotSV ?? null)) {
-                console.log(`[snapshot-scheduler] Skipping room_empty for ${roomId} — no changes`);
+        // If we never tracked this room in this server session, there are no new
+        // changes to snapshot — the doc is already persisted in LevelDB as-is.
+        if (!entry) {
+            console.log(`[snapshot-scheduler] Skipping room_empty for ${roomId} — no tracking entry (no edits this session)`);
+            return;
+        }
+
+        if (!entry.dirty) {
+            // State vector hasn't advanced since the last snapshot this session
+            if (!this._hasRealChanges(ydoc, entry.lastSnapshotSV)) {
+                console.log(`[snapshot-scheduler] Skipping room_empty for ${roomId} — no changes since last snapshot`);
                 return;
             }
         }
 
         const createdBy = activeUsernames.length > 0 ? activeUsernames.join(',') : null;
-        const changes = entry?.sessionChanges ?? 0;
-        const desc = changes > 0 ? `${changes} change${changes !== 1 ? 's' : ''}` : null;
 
-        this._commitSnapshot(roomId, fileId ?? entry?.fileId, ydoc, 'room_empty', createdBy, desc, entry);
+        this._commitSnapshot(roomId, fileId ?? entry.fileId, ydoc, 'room_empty', createdBy, entry.sessionChanges, entry);
     }
 
     /** Remove tracking for a room after it's been destroyed. */
@@ -264,17 +269,13 @@ export class SnapshotScheduler {
             return;
         }
 
-        const desc = entry.sessionChanges > 0
-            ? `${entry.sessionChanges} change${entry.sessionChanges !== 1 ? 's' : ''}`
-            : null;
-
-        this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, null, desc, entry);
+        this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, null, entry.sessionChanges, entry);
     }
 
     /** Persist the snapshot and update entry bookkeeping. */
-    _commitSnapshot(roomId, fileId, ydoc, trigger, createdBy, desc, entry) {
+    _commitSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, entry) {
         try {
-            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, desc ?? null);
+            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, changeCount ?? 0);
         } catch (err) {
             console.error(`[snapshot-scheduler] Failed to save snapshot for ${roomId}:`, err);
             return;

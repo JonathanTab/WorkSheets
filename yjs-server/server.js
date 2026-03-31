@@ -381,7 +381,7 @@ async function handleHttp(req, res, url) {
         if (!roomId) return _json(res, 400, { error: 'roomId required' });
         const doc = docs.get(roomId);
         if (!doc) return _json(res, 404, { error: 'Room not active (no connected clients)' });
-        const id = saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, description ?? null);
+        const id = saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null);
         return _json(res, 200, { id });
     }
 

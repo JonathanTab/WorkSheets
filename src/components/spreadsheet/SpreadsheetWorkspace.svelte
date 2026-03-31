@@ -5,6 +5,7 @@
     import SheetTabs from "./SheetTabs.svelte";
     import Toolbar from "./Toolbar.svelte";
     import HistoryPanel from "../HistoryPanel.svelte";
+    import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import {
         spreadsheetSession,
         selectionState,
@@ -254,6 +255,7 @@
                     {registry}
                     fileId={docId}
                     currentDoc={spreadsheetSession.ydoc ?? null}
+                    diffFn={computeSpreadsheetDiff}
                     onClose={() => {
                         showHistory = false;
                     }}
