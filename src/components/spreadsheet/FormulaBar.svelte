@@ -15,12 +15,15 @@
     /** Get the raw editable value for a cell, including table cells. */
     function getTableAwareEditValue(row, col) {
         const renderContext = spreadsheetSession.renderContext;
-        if (!renderContext) return spreadsheetSession.getCellEditValue(row, col);
+        if (!renderContext)
+            return spreadsheetSession.getCellEditValue(row, col);
         const cellType = renderContext.getCellType(row, col);
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                return info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+                return (
+                    info.table.getValue(info.dataIndex, info.colDef.id) ?? ""
+                );
             }
         }
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
@@ -51,12 +54,13 @@
             const activeSheetId = spreadsheetSession.activeSheetId;
             if (editingSheetId && editingSheetId !== activeSheetId) {
                 // Cross-sheet: show full qualified ref
-                const sheetName = spreadsheetSession.getSheetName(editingSheetId);
+                const sheetName =
+                    spreadsheetSession.getSheetName(editingSheetId);
                 return `${sheetName}!${ref}`;
             }
             return ref;
         }
-        if (!selectedCell) return '';
+        if (!selectedCell) return "";
         return toCellRef(selectedCell.row, selectedCell.col);
     });
 
@@ -70,8 +74,7 @@
         if (!selectedCell) return "";
         const raw = getTableAwareEditValue(selectedCell.row, selectedCell.col);
         // Convert rich text to plain text for display in the formula bar
-        if (isRichText(raw))
-            return richTextToPlain(raw);
+        if (isRichText(raw)) return richTextToPlain(raw);
         return raw ?? "";
     });
 
@@ -110,8 +113,7 @@
         // Rich text cells must be edited in the cell editor, not the formula bar.
         // Check both the active session state AND the raw cell value (when not yet editing).
         const rawVal = editStartValue();
-        if (hasRichText || isRichText(rawVal))
-            return;
+        if (hasRichText || isRichText(rawVal)) return;
 
         // If already editing this cell (on grid), switch surface to formula bar
         if (
@@ -143,7 +145,10 @@
         if (!payload) return;
         onEdit?.(payload.value, payload.row, payload.col, editingSheetId);
         // Return to origin sheet if we navigated away for cross-sheet ref picking
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
     }
@@ -151,7 +156,10 @@
     function cancelEdit() {
         const editingSheetId = editSessionState.editingSheetId;
         editSessionState.cancel();
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
     }
@@ -216,98 +224,117 @@
 </script>
 
 <div class="formula-bar">
-    <div class="cell-reference">
-        {cellRef || "-"}
-    </div>
-    <div class="divider"></div>
-    <div class="edit-buttons">
-        <button
-            class="btn-cancel"
-            onclick={cancelEdit}
-            onmousedown={(e) => e.preventDefault()}
-            disabled={!isEditing || hasRichText}
-            title="Cancel (Escape)"
-            aria-label="Cancel edit"
-        >
-            <span class="icon">{@html close}</span>
-        </button>
-        <button
-            class="btn-accept"
-            onclick={commitEdit}
-            onmousedown={(e) => e.preventDefault()}
-            disabled={!isEditing || hasRichText}
-            title="Accept (Enter)"
-            aria-label="Accept edit"
-        >
-            <span class="icon">{@html check}</span>
-        </button>
-    </div>
-    <div class="divider"></div>
-    <div class="formula-input">
-        {#if selectedCellHasRichText()}
-            <!-- Show rich text notice when rich text cell is selected (regardless of editing) -->
-            <div class="edit-container rich-text-notice">
-                <span class="notice-text">
-                    Edit rich text formatting in the cell ⬇️
-                </span>
-            </div>
-        {:else if isEditing}
-            <div class="edit-container" class:has-formula={isFormulaMode}>
-                <input
-                    type="text"
-                    bind:this={editInputEl}
-                    value={editValue}
-                    onmousedown={(e) => {
-                        e.stopPropagation();
-                        // Switch to formula bar surface BEFORE blur fires on grid cell
-                        // This prevents the grid cell's blur handler from committing
-                        if (editSessionState.isEditing) {
-                            editSessionState.switchSurface("formulaBar", {
-                                focus: false,
-                            });
-                        }
-                    }}
-                    onkeydown={handleKeydown}
-                    oninput={handleInput}
-                    onselect={handleSelect}
-                    class="edit-input"
-                />
-                {#if isFormulaMode}
-                    <!-- Color overlay for references -->
-                    <div class="formula-overlay" aria-hidden="true"><span class="formula-overlay-text">{#each formulaSegments as segment}{#if segment.color}<span style="color: {segment.color}; font-weight: 600;">{segment.text}</span>{:else if segment.type === "FUNCTION"}<span class="formula-function">{segment.text}</span>{:else}<span>{segment.text}</span>{/if}{/each}</span></div>
-                    <!-- Real-time computed value popup -->
-                    <FormulaValuePopup formula={editValue} visible={true} />
-                {/if}
-            </div>
-        {:else}
-            <div
-                class="display-value"
-                onclick={(e) => {
-                    e.stopPropagation();
-                    startEdit();
-                }}
-                role="button"
-                tabindex="0"
-                onkeydown={(e) => {
-                    if (e.key === "Enter") {
+    <div class="formula-bar-row">
+        <div class="cell-reference">
+            {cellRef || "-"}
+        </div>
+        <div class="divider"></div>
+        <div class="edit-buttons">
+            <button
+                class="btn-cancel"
+                onclick={cancelEdit}
+                onmousedown={(e) => e.preventDefault()}
+                disabled={!isEditing || hasRichText}
+                title="Cancel (Escape)"
+                aria-label="Cancel edit"
+            >
+                <span class="icon">{@html close}</span>
+            </button>
+            <button
+                class="btn-accept"
+                onclick={commitEdit}
+                onmousedown={(e) => e.preventDefault()}
+                disabled={!isEditing || hasRichText}
+                title="Accept (Enter)"
+                aria-label="Accept edit"
+            >
+                <span class="icon">{@html check}</span>
+            </button>
+        </div>
+        <div class="divider"></div>
+        <div class="formula-input">
+            {#if selectedCellHasRichText()}
+                <!-- Show rich text notice when rich text cell is selected (regardless of editing) -->
+                <div class="edit-container rich-text-notice">
+                    <span class="notice-text">
+                        Edit rich text formatting in the cell ⬇️
+                    </span>
+                </div>
+            {:else if isEditing}
+                <div class="edit-container" class:has-formula={isFormulaMode}>
+                    <input
+                        type="text"
+                        bind:this={editInputEl}
+                        value={editValue}
+                        onmousedown={(e) => {
+                            e.stopPropagation();
+                            // Switch to formula bar surface BEFORE blur fires on grid cell
+                            // This prevents the grid cell's blur handler from committing
+                            if (editSessionState.isEditing) {
+                                editSessionState.switchSurface("formulaBar", {
+                                    focus: false,
+                                });
+                            }
+                        }}
+                        onkeydown={handleKeydown}
+                        oninput={handleInput}
+                        onselect={handleSelect}
+                        class="edit-input"
+                    />
+                    {#if isFormulaMode}
+                        <!-- Color overlay for references -->
+                        <div class="formula-overlay" aria-hidden="true">
+                            <span class="formula-overlay-text"
+                                >{#each formulaSegments as segment}{#if segment.color}<span
+                                            style="color: {segment.color}; font-weight: 600;"
+                                            >{segment.text}</span
+                                        >{:else if segment.type === "FUNCTION"}<span
+                                            class="formula-function"
+                                            >{segment.text}</span
+                                        >{:else}<span>{segment.text}</span
+                                        >{/if}{/each}</span
+                            >
+                        </div>
+                        <!-- Real-time computed value popup -->
+                        <FormulaValuePopup formula={editValue} visible={true} />
+                    {/if}
+                </div>
+            {:else}
+                <div
+                    class="display-value"
+                    onclick={(e) => {
                         e.stopPropagation();
                         startEdit();
-                    }
-                }}
-            >
-                {displayValue()}
-            </div>
-        {/if}
+                    }}
+                    role="button"
+                    tabindex="0"
+                    onkeydown={(e) => {
+                        if (e.key === "Enter") {
+                            e.stopPropagation();
+                            startEdit();
+                        }
+                    }}
+                >
+                    {displayValue()}
+                </div>
+            {/if}
+        </div>
     </div>
+    <!-- end .formula-bar-row -->
 </div>
 
 <style>
     .formula-bar {
         display: flex;
-        align-items: center;
-        padding: 0.25rem 0.5rem;
+        flex-direction: column;
         background: var(--formula-bar-bg, #ffffff);
         border-bottom: 1px solid var(--border-color, #e2e8f0);
+    }
+
+    .formula-bar-row {
+        display: flex;
+        align-items: center;
+        padding: 0.25rem 0.5rem;
         min-height: 36px;
     }
 
@@ -487,7 +514,7 @@
 
     /* ── Mobile: taller touch targets ── */
     @media (pointer: coarse), (max-width: 768px) {
-        .formula-bar {
+        .formula-bar-row {
             min-height: 44px;
             padding: 0.25rem 0.5rem;
         }

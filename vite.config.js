@@ -5,7 +5,10 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-    base: '/worksheets/',
+    base: '/scriptorium/',
+    define: {
+        __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+    },
     plugins: [svelte(), tailwindcss(), VitePWA({
         registerType: 'autoUpdate',
         injectRegister: 'inline',
@@ -16,8 +19,8 @@ export default defineConfig({
             description: 'A simple spreadsheet app',
             theme_color: '#000C3F',
             background_color: '#000C3F',
-            start_url: '/worksheets/',
-            scope: '/worksheets/',
+            start_url: '/scriptorium/',
+            scope: '/scriptorium/',
             icons: [
                 {
                     src: '/pwa-64x64.png',
@@ -111,7 +114,10 @@ export default defineConfig({
                     }
                 }
             ],
-            offlineGoogleAnalytics: true
+            // SPA fallback: serve index.html for all /worksheets/* navigations
+            // so /worksheets/sheets/<id> and /worksheets/docs/<id> reload correctly.
+            navigateFallback: '/worksheets/index.html',
+            navigateFallbackDenylist: [/^\/api\//, /^\/congruum\//, /\.(?:js|css|png|svg|ico|json|woff2?)$/],
         },
 
         devOptions: {

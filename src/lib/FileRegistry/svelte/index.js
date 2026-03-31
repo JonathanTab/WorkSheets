@@ -50,11 +50,13 @@ export function createSvelteRegistry(options) {
     // Drive stores
     // -------------------------------------------------------
 
-    const _driveFiles   = writable(/** @type {import('../FileRegistry').FileDescriptor[]} */ ([]));
-    const _driveFolders = writable(/** @type {import('../FileRegistry').Folder[]} */ ([]));
+    const _driveFiles        = writable(/** @type {import('../FileRegistry').FileDescriptor[]} */ ([]));
+    const _driveFolders      = writable(/** @type {import('../FileRegistry').Folder[]} */ ([]));
+    const _driveDeletedFiles = writable(/** @type {import('../FileRegistry').FileDescriptor[]} */ ([]));
 
-    registry.drive.files   = { subscribe: _driveFiles.subscribe };
-    registry.drive.folders = { subscribe: _driveFolders.subscribe };
+    registry.drive.files        = { subscribe: _driveFiles.subscribe };
+    registry.drive.folders      = { subscribe: _driveFolders.subscribe };
+    registry.drive.deletedFiles = { subscribe: _driveDeletedFiles.subscribe };
 
     // Derived store: contents of the drive root (folderId = null)
     registry.drive.root = derived(
@@ -92,6 +94,7 @@ export function createSvelteRegistry(options) {
         _appFiles.set(registry.app.list());
         _driveFiles.set(registry.drive.listFiles());
         _driveFolders.set(registry.drive.listFolders());
+        _driveDeletedFiles.set(registry.drive.listDeletedFiles());
         _syncState.set(registry.getSyncState());
     }
 

@@ -55,7 +55,8 @@
     import GridOverlays from "./grid/GridOverlays.svelte";
     import ColHeaders from "./grid/ColHeaders.svelte";
     import RowHeaders from "./grid/RowHeaders.svelte";
-    import ContextMenu from "./ContextMenu.svelte";
+    import ContextMenu from "../ui/ContextMenu.svelte";
+    import FileViewer from "./cellTypes/FileViewer.svelte";
     import TableFilterPopover from "./features/TableFilterPopover.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "./features/RepeaterCreateDialog.svelte";
@@ -347,6 +348,13 @@
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
     let contextMenuPosition = $state({ x: 0, y: 0 });
+
+    // ─── File viewer (portalled outside grid-root to escape contain:layout) ───
+    let fileViewerProps = $state(null);
+
+    function handleShowFileViewer(e) {
+        fileViewerProps = e.detail ?? null;
+    }
 
     // ─── Touch interaction state ───────────────────────────────────────────────
     let touchStartPos = null; // { x, y } of first touch
@@ -796,10 +804,16 @@
         // Pre-compute sticky headers so we can extend the upward-scroll strip to erase ghosts.
         // When scrolling up, blitScroll shifts the sticky-header pixels down into the body,
         // leaving a ghost copy. Extending the strip repaint to cover that ghost zone erases it.
+        // IMPORTANT: use prevST (the scroll position before this frame) to find what was
+        // sticky on the canvas before the blit — not scrollTop, which may have crossed the
+        // un-sticky threshold so it returns nothing and leaves the ghost un-erased.
         const stickyHeaders = renderContext?.getStickyTableHeaders?.(
             scrollTop, frozenHeight, rowMetrics, colMetrics,
         ) ?? [];
-        const stickyOverlayH = stickyHeaders.reduce(
+        const prevStickyHeaders = dy < 0
+            ? (renderContext?.getStickyTableHeaders?.(prevST, frozenHeight, rowMetrics, colMetrics) ?? [])
+            : stickyHeaders;
+        const stickyOverlayH = prevStickyHeaders.reduce(
             (m, h) => Math.max(m, h.headerHeightPx + (h.showEntry ? h.entryHeightPx : 0)), 0,
         );
 
@@ -1120,21 +1134,43 @@
 
     // ─── DOM overlay position deriveds ────────────────────────────────────────
     let selectionBorderStyle = $derived.by(() => {
-        // Use the merge-expanded range for the selection border
-        const eff = expandedRange;
-        if (!eff || !virtualizer || !renderPlan) return null;
-        const isSingle =
-            eff.startRow === eff.endRow && eff.startCol === eff.endCol;
-        if (isSingle) return null; // anchor border covers single-cell case
+        const mode = selectionState.selectionMode;
+        if (!virtualizer || !renderPlan) return null;
 
-        const left = cellContainerLeft(eff.startCol);
-        const top = cellContainerTop(eff.startRow);
-        const right =
-            cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
-        const bottom =
-            cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
+        if (mode === 'range') {
+            // Use the merge-expanded range for the selection border
+            const eff = expandedRange;
+            if (!eff) return null;
+            const isSingle = eff.startRow === eff.endRow && eff.startCol === eff.endCol;
+            if (isSingle) return null; // anchor border covers single-cell case
+            const left = cellContainerLeft(eff.startCol);
+            const top = cellContainerTop(eff.startRow);
+            const right = cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
+            const bottom = cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
+            return `transform:translate(${left}px,${top}px); width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
+        }
 
-        return `transform:translate(${left}px,${top}px); width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
+        if (mode === 'rows') {
+            const sr = selectionState.selectedRows;
+            if (!sr) return null;
+            const top = cellContainerTop(sr.start);
+            const bottom = cellContainerTop(sr.end) + virtualizer.getRowHeight(sr.end);
+            return `transform:translate(${HEADER_WIDTH}px,${top}px); width:${renderPlan.totalWidth}px; height:${Math.max(0, bottom - top)}px;`;
+        }
+
+        if (mode === 'cols') {
+            const sc = selectionState.selectedCols;
+            if (!sc) return null;
+            const left = cellContainerLeft(sc.start);
+            const right = cellContainerLeft(sc.end) + virtualizer.getColWidth(sc.end);
+            return `transform:translate(${left}px,${HEADER_HEIGHT}px); width:${Math.max(0, right - left)}px; height:${renderPlan.totalHeight}px;`;
+        }
+
+        if (mode === 'all') {
+            return `transform:translate(${HEADER_WIDTH}px,${HEADER_HEIGHT}px); width:${renderPlan.totalWidth}px; height:${renderPlan.totalHeight}px;`;
+        }
+
+        return null;
     });
 
     let anchorBorderStyle = $derived.by(() => {
@@ -2997,6 +3033,84 @@
             scrollEl.scrollLeft = scrollLeft;
     }
 
+    function scrollToFocus() {
+        if (!scrollEl || !virtualizer) return;
+        const focus = selectionState.focus;
+        if (!focus) return;
+        const { scrollTop, scrollLeft } = virtualizer.scrollToCell(
+            focus.row,
+            focus.col,
+        );
+        if (scrollEl.scrollTop !== scrollTop) scrollEl.scrollTop = scrollTop;
+        if (scrollEl.scrollLeft !== scrollLeft)
+            scrollEl.scrollLeft = scrollLeft;
+    }
+
+    /**
+     * Jump to the edge of a data region in the given direction (Ctrl+Arrow).
+     * Mirrors Excel/Google Sheets behavior:
+     *   - Current cell non-empty AND next cell non-empty → scan to end of block
+     *   - Otherwise → skip empties and land on first non-empty, or sheet edge
+     */
+    function jumpToEdge(startRow, startCol, dRow, dCol) {
+        if (!sheetStore) return { row: startRow, col: startCol };
+        const maxRow = rowCount - 1;
+        const maxCol = colCount - 1;
+        const inBounds = (r, c) => r >= 0 && r <= maxRow && c >= 0 && c <= maxCol;
+        const hasValue = (r, c) => {
+            if (!inBounds(r, c)) return false;
+            const cell = sheetStore.getCell(r, c);
+            return cell.exists && cell.v != null && cell.v !== '';
+        };
+
+        let r = startRow;
+        let c = startCol;
+        const nr = r + dRow;
+        const nc = c + dCol;
+        if (!inBounds(nr, nc)) return { row: r, col: c }; // already at edge
+
+        if (hasValue(r, c) && hasValue(nr, nc)) {
+            // Scan forward to end of contiguous data block
+            r = nr; c = nc;
+            while (inBounds(r + dRow, c + dCol) && hasValue(r + dRow, c + dCol)) {
+                r += dRow;
+                c += dCol;
+            }
+        } else {
+            // Skip empties until we hit data or the sheet edge
+            r = nr; c = nc;
+            while (inBounds(r, c) && !hasValue(r, c)) {
+                r += dRow;
+                c += dCol;
+            }
+            // Clamp if we walked past the boundary
+            r = Math.max(0, Math.min(maxRow, r));
+            c = Math.max(0, Math.min(maxCol, c));
+        }
+        return { row: r, col: c };
+    }
+
+    /**
+     * Ctrl+Arrow helper: jump to edge from the appropriate anchor/focus cell.
+     * When extend=false moves both anchor and focus; when extend=true keeps
+     * anchor and moves only focus (shift-extend behavior).
+     */
+    function jumpToEdgeAndSelect(dRow, dCol, extend) {
+        const from = extend
+            ? (selectionState.focus || selectionState.anchor)
+            : selectionState.anchor;
+        if (!from) return;
+        const dest = jumpToEdge(from.row, from.col, dRow, dCol);
+        const snapped = snapToMergePrimary(dest.row, dest.col);
+        if (extend) {
+            selectionState.focus = snapped;
+        } else {
+            selectionState.selectionMode = 'range';
+            selectionState.anchor = snapped;
+            selectionState.focus = snapped;
+        }
+    }
+
     // ─── Keyboard ─────────────────────────────────────────────────────────────
     function handleKeydown(e) {
         const target = e.target;
@@ -3157,28 +3271,140 @@
         switch (e.key) {
             case "ArrowUp":
                 focusedDropdownCell = null;
-                moveSelectionMergeAware(-1, 0, e.shiftKey);
-                scrollToAnchor();
+                if (e.ctrlKey || e.metaKey) {
+                    jumpToEdgeAndSelect(-1, 0, e.shiftKey);
+                } else {
+                    moveSelectionMergeAware(-1, 0, e.shiftKey);
+                }
+                e.shiftKey ? scrollToFocus() : scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowDown":
                 focusedDropdownCell = null;
-                moveSelectionMergeAware(1, 0, e.shiftKey);
-                scrollToAnchor();
+                if (e.ctrlKey || e.metaKey) {
+                    jumpToEdgeAndSelect(1, 0, e.shiftKey);
+                } else {
+                    moveSelectionMergeAware(1, 0, e.shiftKey);
+                }
+                e.shiftKey ? scrollToFocus() : scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowLeft":
                 focusedDropdownCell = null;
-                moveSelectionMergeAware(0, -1, e.shiftKey);
-                scrollToAnchor();
+                if (e.ctrlKey || e.metaKey) {
+                    jumpToEdgeAndSelect(0, -1, e.shiftKey);
+                } else {
+                    moveSelectionMergeAware(0, -1, e.shiftKey);
+                }
+                e.shiftKey ? scrollToFocus() : scrollToAnchor();
                 e.preventDefault();
                 break;
             case "ArrowRight":
                 focusedDropdownCell = null;
-                moveSelectionMergeAware(0, 1, e.shiftKey);
-                scrollToAnchor();
+                if (e.ctrlKey || e.metaKey) {
+                    jumpToEdgeAndSelect(0, 1, e.shiftKey);
+                } else {
+                    moveSelectionMergeAware(0, 1, e.shiftKey);
+                }
+                e.shiftKey ? scrollToFocus() : scrollToAnchor();
                 e.preventDefault();
                 break;
+            case "Home": {
+                focusedDropdownCell = null;
+                if (e.ctrlKey || e.metaKey) {
+                    // Ctrl+Home → jump to A1
+                    if (e.shiftKey) {
+                        selectionState.focus = { row: 0, col: 0 };
+                        scrollToFocus();
+                    } else {
+                        selectionState.selectionMode = 'range';
+                        selectionState.anchor = { row: 0, col: 0 };
+                        selectionState.focus = { row: 0, col: 0 };
+                        scrollToAnchor();
+                    }
+                } else {
+                    // Home → beginning of row
+                    const homeRow = e.shiftKey
+                        ? (selectionState.focus?.row ?? selectionState.anchor?.row ?? 0)
+                        : (selectionState.anchor?.row ?? 0);
+                    if (e.shiftKey) {
+                        selectionState.focus = { row: homeRow, col: 0 };
+                        scrollToFocus();
+                    } else {
+                        selectionState.selectionMode = 'range';
+                        selectionState.anchor = { row: homeRow, col: 0 };
+                        selectionState.focus = { row: homeRow, col: 0 };
+                        scrollToAnchor();
+                    }
+                }
+                e.preventDefault();
+                break;
+            }
+            case "End": {
+                focusedDropdownCell = null;
+                if (e.ctrlKey || e.metaKey) {
+                    // Ctrl+End → last used cell (bottom-right of data)
+                    let lastRow = 0, lastCol = 0;
+                    sheetStore?.cells.forEach((_cell, key) => {
+                        const [r, c] = key.split(',').map(Number);
+                        if (r > lastRow) lastRow = r;
+                        if (c > lastCol) lastCol = c;
+                    });
+                    const endDest = { row: lastRow, col: lastCol };
+                    if (e.shiftKey) {
+                        selectionState.focus = endDest;
+                        scrollToFocus();
+                    } else {
+                        selectionState.selectionMode = 'range';
+                        selectionState.anchor = endDest;
+                        selectionState.focus = endDest;
+                        scrollToAnchor();
+                    }
+                } else {
+                    // End → last col of current row
+                    const endRow = e.shiftKey
+                        ? (selectionState.focus?.row ?? selectionState.anchor?.row ?? 0)
+                        : (selectionState.anchor?.row ?? 0);
+                    const endCol = colCount - 1;
+                    if (e.shiftKey) {
+                        selectionState.focus = { row: endRow, col: endCol };
+                        scrollToFocus();
+                    } else {
+                        selectionState.selectionMode = 'range';
+                        selectionState.anchor = { row: endRow, col: endCol };
+                        selectionState.focus = { row: endRow, col: endCol };
+                        scrollToAnchor();
+                    }
+                }
+                e.preventDefault();
+                break;
+            }
+            case "PageUp": {
+                focusedDropdownCell = null;
+                const pageRows = Math.max(1, Math.floor((virtualizer?.bodyViewportHeight ?? ROW_HEIGHT) / ROW_HEIGHT));
+                if (e.shiftKey) {
+                    selectionState.moveSelection(-pageRows, 0, true, rowCount, colCount);
+                    scrollToFocus();
+                } else {
+                    selectionState.moveSelection(-pageRows, 0, false, rowCount, colCount);
+                    scrollToAnchor();
+                }
+                e.preventDefault();
+                break;
+            }
+            case "PageDown": {
+                focusedDropdownCell = null;
+                const pageRows = Math.max(1, Math.floor((virtualizer?.bodyViewportHeight ?? ROW_HEIGHT) / ROW_HEIGHT));
+                if (e.shiftKey) {
+                    selectionState.moveSelection(pageRows, 0, true, rowCount, colCount);
+                    scrollToFocus();
+                } else {
+                    selectionState.moveSelection(pageRows, 0, false, rowCount, colCount);
+                    scrollToAnchor();
+                }
+                e.preventDefault();
+                break;
+            }
             case "Tab":
                 focusedDropdownCell = null;
                 moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
@@ -4146,6 +4372,7 @@
 
         window.addEventListener("image-fit-change", handleImageFitChange);
         window.addEventListener("file-meta-change", handleFileMetaChange);
+        window.addEventListener("show-file-viewer", handleShowFileViewer);
 
         document.addEventListener("mouseup", handleMouseUp);
 
@@ -4265,6 +4492,7 @@
         setOnLoadCallback(null);
         window.removeEventListener("image-fit-change", handleImageFitChange);
         window.removeEventListener("file-meta-change", handleFileMetaChange);
+        window.removeEventListener("show-file-viewer", handleShowFileViewer);
     });
 </script>
 
@@ -4731,6 +4959,17 @@
         y={contextMenuPosition.y}
         items={contextMenuItems}
         onClose={closeContextMenu}
+    />
+{/if}
+
+<!-- File viewer (portalled outside grid-root to escape contain:layout stacking context) -->
+{#if fileViewerProps}
+    <FileViewer
+        blobId={fileViewerProps.blobId}
+        mimeType={fileViewerProps.mimeType}
+        filename={fileViewerProps.filename}
+        size={fileViewerProps.size}
+        onClose={() => (fileViewerProps = null)}
     />
 {/if}
 

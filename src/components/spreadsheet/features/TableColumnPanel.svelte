@@ -139,17 +139,18 @@
 
     const REF_SECTIONS = [
         {
-            title: "Row values",
+            title: "Row values  (use column name or ID)",
             items: [
                 { syntax: "{colName}", desc: "Value from this row's column" },
                 { syntax: "ROW", desc: "0-based row index" },
                 { syntax: "ROW1", desc: "1-based row index" },
+                { syntax: "COUNT", desc: "Total row count" },
             ]
         },
         {
             title: "Running totals (up to this row)",
             items: [
-                { syntax: "CUMSUM(col)", desc: "Running sum of col" },
+                { syntax: "CUMSUM(colName)", desc: "Running sum" },
                 { syntax: 'RUNNINGIF(sum, filter, "op", val)', desc: "Running sum where condition met" },
                 { syntax: 'RUNNINGIFS(sum, col1,"op1",val1, ...)', desc: "Running sum, multiple conditions" },
             ]
@@ -157,10 +158,9 @@
         {
             title: "Aggregates (all rows)",
             items: [
-                { syntax: "SUM(col)", desc: "Total sum" },
-                { syntax: "AVG(col)", desc: "Average" },
+                { syntax: "SUM(colName)", desc: "Total sum" },
+                { syntax: "AVG(colName)", desc: "Average" },
                 { syntax: "MIN(col) / MAX(col)", desc: "Min or max value" },
-                { syntax: "COUNT", desc: "Total row count" },
                 { syntax: 'SUMIF(sum, filter, "op", val)', desc: "Sum where condition met" },
                 { syntax: 'SUMIFS(sum, col1,"op1",val1, ...)', desc: "Sum, multiple conditions" },
                 { syntax: 'COUNTIF(filter, "op", val)', desc: "Count where condition met" },
@@ -173,15 +173,15 @@
             title: "Logic & arithmetic",
             items: [
                 { syntax: "{price} * {qty}", desc: "Arithmetic over columns" },
-                { syntax: 'IF({col} = "x", 1, 0)', desc: "Conditional value" },
-                { syntax: 'IF({type}="income", {amt}, -{amt})', desc: "Signed amount" },
+                { syntax: 'IF({status} = "done", 1, 0)', desc: "Conditional value" },
+                { syntax: 'IF({type}="income", {amount}, -{amount})', desc: "Signed amount" },
             ]
         },
         {
             title: "Operators for op argument",
             items: [
                 { syntax: '"="  "<>"  ">"  "<"  ">="  "<="', desc: "Numeric / string compare" },
-                { syntax: '"contains"  "startswith"', desc: "Text match" },
+                { syntax: '"contains"  "startswith"  "notcontains"', desc: "Text match" },
             ]
         }
     ];
@@ -256,6 +256,11 @@
                     />
                 </div>
 
+                <!-- Formula hint (always visible) -->
+                <div class="formula-quick-hint">
+                    Use <code>{'{'}colName{'}'}</code> for row value · <code>CUMSUM(col)</code> running total · <code>IF(cond, t, f)</code>
+                </div>
+
                 <!-- Column chips -->
                 {#if inputCols.length > 0}
                     <div class="chips-label">Insert column reference:</div>
@@ -263,8 +268,8 @@
                         {#each inputCols as c}
                             <button
                                 class="col-chip"
-                                onclick={() => insertAtCursor(`{${c.id}}`)}
-                                title="Insert {'{' + c.id + '}'}"
+                                onclick={() => insertAtCursor(`{${c.name}}`)}
+                                title="Insert column '{c.name}'"
                             >{c.name}</button>
                         {/each}
                     </div>
@@ -505,6 +510,23 @@
     }
 
     .formula-input:focus { border-color: #94a3b8; }
+
+    /* ── Formula quick hint ───────────────────────────────────────── */
+    .formula-quick-hint {
+        font-size: 9px;
+        color: #94a3b8;
+        line-height: 1.5;
+        margin-bottom: 5px;
+    }
+
+    .formula-quick-hint code {
+        font-family: monospace;
+        font-size: 9px;
+        background: #f1f5f9;
+        color: #475569;
+        padding: 0 3px;
+        border-radius: 2px;
+    }
 
     /* ── Column chips ─────────────────────────────────────────────── */
     .chips-label {

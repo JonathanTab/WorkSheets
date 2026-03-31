@@ -210,16 +210,14 @@ export class YjsRuntime {
         // 3. If IndexedDB was empty (first time this client opens this doc),
         // wait for the WebSocket to deliver the server's state before returning.
         //
-        // Why: the caller runs spreadsheetSchema.initialize() right after this.
-        // On an empty doc it creates fresh Y.Map structures. When the server's
-        // data arrives moments later those client-created maps are displaced by
-        // CRDT conflict resolution, leaving the UI watching orphaned empty maps
-        // and showing a blank document until reload.
+        // Why: if the caller initializes the doc structure on an empty doc and
+        // the server's state arrives moments later, CRDT conflict resolution may
+        // displace the client-created structures, leaving the UI watching orphaned
+        // objects and showing a blank document until reload.
         //
         // If IndexedDB already had data we return immediately — normal
         // offline-first path, no waiting needed.
-        const root = ydoc.getMap('spreadsheet');
-        const hasLocalData = root.size > 0;
+        const hasLocalData = ydoc.store.clients.size > 0;
         if (!hasLocalData && navigator.onLine) {
             await new Promise((resolve) => {
                 if (provider.synced) {

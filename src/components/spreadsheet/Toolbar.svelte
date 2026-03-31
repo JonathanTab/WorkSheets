@@ -3,12 +3,14 @@
     import MenuBar from "./toolbar/MenuBar.svelte";
     import FormattingToolbar from "./toolbar/FormattingToolbar.svelte";
     import PresenceIndicator from "./PresenceIndicator.svelte";
+    import UserMenu from "../UserMenu.svelte";
 
     let {
         onClose = undefined,
         awareness = null,
-        currentUser = '',
+        currentUser = "",
         onShowHistory = undefined,
+        registry = null,
     } = $props();
 </script>
 
@@ -36,12 +38,23 @@
                     title="Document history"
                     aria-label="View document history"
                 >
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="12" cy="12" r="10"/>
-                        <polyline points="12 6 12 12 16 14"/>
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
                     </svg>
                 </button>
             {/if}
+            <UserMenu {registry} />
         </div>
     </div>
     <div class="toolbar-row row2">

@@ -8,16 +8,17 @@
  *   import { SpreadsheetClient } from './src/cli/SpreadsheetClient.js';
  *
  *   const client = new SpreadsheetClient({ apiKey: process.env.PLAINTAB_API_KEY });
- *   await client.init();                            // sync file list
+ *   await client.init();
  *
- *   const files = client.listFiles();               // all worksheet files
- *   const ydoc  = await client.openDoc(fileId);     // load + sync Yjs doc
+ *   const files  = client.listFiles();
+ *   const file   = client.findFile('My Sheet');
+ *   const ydoc   = await client.openDoc(file.id);
  *
  *   const sheets = client.listSheets(ydoc);
  *   client.setCell(ydoc, sheetId, 0, 0, 'Hello');
- *   await client.insertTableRow(ydoc, sheetId, tableId, { name: 'Alice', score: 42 });
+ *   client.insertTableRow(ydoc, sheetId, tableId, { name: 'Alice', score: 42 });
  *
- *   await client.flush();   // wait for WS to push outgoing changes
+ *   await client.flush();
  *   await client.close();
  */
 
@@ -34,7 +35,7 @@ const DEFAULTS = {
 export class SpreadsheetClient {
     /**
      * @param {object} opts
-     * @param {string}  opts.apiKey   Bearer token for authentication
+     * @param {string}  opts.apiKey   Bearer token (API key or PHP session token)
      * @param {string} [opts.baseUrl] Override storage API URL
      * @param {string} [opts.blobUrl] Override blob storage URL
      * @param {string} [opts.wsUrl]   Override WebSocket URL
@@ -43,10 +44,12 @@ export class SpreadsheetClient {
         const { apiKey, baseUrl, blobUrl, wsUrl } = { ...DEFAULTS, ...opts };
         if (!apiKey) throw new Error('SpreadsheetClient: apiKey is required');
 
+        this._apiKey  = apiKey;
         this._api     = new StorageAPI(baseUrl, blobUrl, () => apiKey);
-        this._runtime = new NodeYjsRuntime(wsUrl);
-        /** @type {Map<string, import('yjs').Doc>} docId → ydoc */
-        this._docs = new Map();
+        this._runtime = new NodeYjsRuntime(wsUrl, apiKey);
+
+        /** @type {Map<string, import('yjs').Doc>} fileId → ydoc */
+        this._docs  = new Map();
         /** @type {Map<string, object>} id → FileDescriptor */
         this._files = new Map();
     }
@@ -65,9 +68,9 @@ export class SpreadsheetClient {
 
     /**
      * Flush outgoing Yjs updates over WebSocket, then tear down all connections.
-     * @param {number} [flushMs=800]
+     * @param {number} [flushMs=1000]
      */
-    async close(flushMs = 800) {
+    async close(flushMs = 1000) {
         await this._runtime.flush(flushMs);
         this._runtime.shutdown();
         this._docs.clear();
@@ -75,9 +78,9 @@ export class SpreadsheetClient {
 
     /**
      * Wait for outgoing Yjs updates to be pushed without closing.
-     * @param {number} [ms=800]
+     * @param {number} [ms=1000]
      */
-    flush(ms = 800) {
+    flush(ms = 1000) {
         return this._runtime.flush(ms);
     }
 
@@ -86,7 +89,7 @@ export class SpreadsheetClient {
     /**
      * All worksheet files (scope=app, app=worksheets).
      * Requires init() to have been called first.
-     * @returns {import('../lib/FileRegistry/FileRegistry.js').FileDescriptor[]}
+     * @returns {object[]}
      */
     listFiles() {
         return [...this._files.values()].filter(
@@ -95,13 +98,26 @@ export class SpreadsheetClient {
     }
 
     /**
-     * Find a worksheet file by exact title.
-     * @param {string} title
-     * @returns {import('../lib/FileRegistry/FileRegistry.js').FileDescriptor|null}
+     * All non-deleted files across all apps and scopes.
+     * @returns {object[]}
      */
-    findFile(title) {
+    listAllFiles() {
+        return [...this._files.values()].filter(f => !f.deleted);
+    }
+
+    /**
+     * Find a file by exact title (case-sensitive). Returns the first match or null.
+     * Searches all non-deleted files unless opts.app or opts.scope is specified.
+     * @param {string} title
+     * @param {{ app?: string, scope?: string }} [opts]
+     * @returns {object|null}
+     */
+    findFile(title, opts = {}) {
         for (const f of this._files.values()) {
-            if (!f.deleted && f.title === title) return f;
+            if (f.deleted) continue;
+            if (opts.app   && f.app   !== opts.app)   continue;
+            if (opts.scope && f.scope !== opts.scope) continue;
+            if (f.title === title) return f;
         }
         return null;
     }
@@ -109,6 +125,7 @@ export class SpreadsheetClient {
     /**
      * Get a file descriptor by ID.
      * @param {string} id
+     * @returns {object|null}
      */
     getFile(id) {
         return this._files.get(id) ?? null;
@@ -135,65 +152,30 @@ export class SpreadsheetClient {
 
     // ─── Sheets ─────────────────────────────────────────────────────────────
 
-    /** @param {import('yjs').Doc} ydoc */
-    listSheets(ydoc) { return ops.listSheets(ydoc); }
+    listSheets(ydoc)                    { return ops.listSheets(ydoc); }
+    getSheetMeta(ydoc, sheetId)         { return ops.getSheetMeta(ydoc, sheetId); }
+    createSheet(ydoc, name, opts)       { return ops.createSheet(ydoc, name, opts); }
+    renameSheet(ydoc, sheetId, name)    { return ops.renameSheet(ydoc, sheetId, name); }
+    deleteSheet(ydoc, sheetId)          { return ops.deleteSheet(ydoc, sheetId); }
 
     // ─── Cells ──────────────────────────────────────────────────────────────
 
-    /**
-     * @param {import('yjs').Doc} ydoc
-     * @param {string} sheetId
-     * @param {number} row  0-based
-     * @param {number} col  0-based
-     */
-    getCell(ydoc, sheetId, row, col) { return ops.getCell(ydoc, sheetId, row, col); }
-
-    /**
-     * @param {import('yjs').Doc} ydoc
-     * @param {string} sheetId
-     * @param {number} row
-     * @param {number} col
-     * @param {any} value  Plain value or "=formula"
-     * @param {object} [props]
-     */
-    setCell(ydoc, sheetId, row, col, value, props) {
-        return ops.setCell(ydoc, sheetId, row, col, value, props);
-    }
-
-    /** @param {import('yjs').Doc} ydoc */
-    clearCell(ydoc, sheetId, row, col) { return ops.clearCell(ydoc, sheetId, row, col); }
-
-    /** @param {import('yjs').Doc} ydoc */
-    getRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
-        return ops.getRange(ydoc, sheetId, startRow, startCol, endRow, endCol);
-    }
+    getCell(ydoc, sheetId, row, col)              { return ops.getCell(ydoc, sheetId, row, col); }
+    setCell(ydoc, sheetId, row, col, value, props){ return ops.setCell(ydoc, sheetId, row, col, value, props); }
+    clearCell(ydoc, sheetId, row, col)            { return ops.clearCell(ydoc, sheetId, row, col); }
+    getRange(ydoc, sheetId, r1, c1, r2, c2)       { return ops.getRange(ydoc, sheetId, r1, c1, r2, c2); }
+    setRange(ydoc, sheetId, r, c, values, props)  { return ops.setRange(ydoc, sheetId, r, c, values, props); }
+    clearRange(ydoc, sheetId, r1, c1, r2, c2)     { return ops.clearRange(ydoc, sheetId, r1, c1, r2, c2); }
 
     // ─── Tables ─────────────────────────────────────────────────────────────
 
-    /** @param {import('yjs').Doc} ydoc */
-    listTables(ydoc, sheetId) { return ops.listTables(ydoc, sheetId); }
-
-    /** @param {import('yjs').Doc} ydoc */
-    getTableRows(ydoc, sheetId, tableId) { return ops.getTableRows(ydoc, sheetId, tableId); }
-
-    /**
-     * Add a row to a table.
-     * @param {import('yjs').Doc} ydoc
-     * @param {string} sheetId
-     * @param {string} tableId
-     * @param {object} rowData  { columnId: value, ... }
-     */
-    insertTableRow(ydoc, sheetId, tableId, rowData) {
-        return ops.insertTableRow(ydoc, sheetId, tableId, rowData);
-    }
-
-    /** @param {import('yjs').Doc} ydoc */
-    updateTableRow(ydoc, sheetId, tableId, rowIndex, updates) {
-        return ops.updateTableRow(ydoc, sheetId, tableId, rowIndex, updates);
-    }
-
-    /** @param {import('yjs').Doc} ydoc */
-    deleteTableRow(ydoc, sheetId, tableId, rowIndex) {
-        return ops.deleteTableRow(ydoc, sheetId, tableId, rowIndex);
-    }
+    listTables(ydoc, sheetId)                          { return ops.listTables(ydoc, sheetId); }
+    findTableByName(ydoc, sheetId, name)               { return ops.findTableByName(ydoc, sheetId, name); }
+    resolveColumnNames(ydoc, sheetId, tableId, data)   { return ops.resolveColumnNames(ydoc, sheetId, tableId, data); }
+    getTableRows(ydoc, sheetId, tableId)               { return ops.getTableRows(ydoc, sheetId, tableId); }
+    findTableRows(ydoc, sheetId, tableId, where)       { return ops.findTableRows(ydoc, sheetId, tableId, where); }
+    insertTableRow(ydoc, sheetId, tableId, rowData)    { return ops.insertTableRow(ydoc, sheetId, tableId, rowData); }
+    updateTableRow(ydoc, sheetId, tableId, idx, data)  { return ops.updateTableRow(ydoc, sheetId, tableId, idx, data); }
+    upsertTableRow(ydoc, sheetId, tableId, where, data){ return ops.upsertTableRow(ydoc, sheetId, tableId, where, data); }
+    deleteTableRow(ydoc, sheetId, tableId, rowIndex)   { return ops.deleteTableRow(ydoc, sheetId, tableId, rowIndex); }
 }

@@ -35,8 +35,10 @@
             return null;
         }
 
-        // Read cellsVersion to establish dependency on cell changes
+        // Read cellsVersion to establish dependency on cell changes (regular cells)
         sheetStore.cellsVersion;
+        // Read tableVersion to establish dependency on table data changes
+        spreadsheetSession.tableManager?.tableVersion;
 
         const { startRow, endRow, startCol, endCol } = selection;
         const numbers = [];
@@ -48,15 +50,7 @@
                     row,
                     col,
                 );
-                // Handle both numbers and numeric strings
-                let numValue;
-                if (typeof value === "number") {
-                    numValue = value;
-                } else if (typeof value === "string" && value.trim() !== "") {
-                    numValue = parseFloat(value);
-                } else {
-                    numValue = NaN;
-                }
+                const numValue = parseDisplayValue(value);
                 if (!isNaN(numValue)) {
                     numbers.push(numValue);
                 }
@@ -85,6 +79,67 @@
 
     // Has active selection
     let hasSelection = $derived(selection !== null);
+
+    /**
+     * Parse a display value (possibly formatted string) into a number.
+     * Handles: plain numbers, currency symbols, thousands separators (comma/dot/space),
+     * EU decimal comma, percent suffix, parenthesized negatives, scientific notation.
+     */
+    /** @param {any} value */
+    function parseDisplayValue(value) {
+        if (typeof value === "number") return isFinite(value) ? value : NaN;
+        if (value == null) return NaN;
+
+        let s = String(value).trim();
+        if (s === "") return NaN;
+
+        // Quick path: already a plain number
+        const quick = Number(s);
+        if (!isNaN(quick)) return quick;
+
+        // Parenthesized negative: (1,234.56) or ($ 1,234.56)
+        let negative = false;
+        const parenMatch = s.match(/^\((.+?)\)\s*$/);
+        if (parenMatch) {
+            negative = true;
+            s = parenMatch[1].trim();
+        } else if (s.startsWith("-")) {
+            negative = true;
+            s = s.slice(1).trim();
+        }
+
+        // Strip percent suffix
+        if (s.endsWith("%")) s = s.slice(0, -1).trim();
+
+        // Strip everything except digits, . , E e + - (removes currency symbols, spaces, etc.)
+        s = s.replace(/[^\d.,Ee\-+]/g, "");
+        if (s === "") return NaN;
+
+        // Normalize decimal vs thousands separators
+        const lastDot = s.lastIndexOf(".");
+        const lastComma = s.lastIndexOf(",");
+        let normalized;
+        if (lastDot >= 0 && lastComma >= 0) {
+            // Both present: whichever comes last is the decimal separator
+            if (lastDot > lastComma) {
+                normalized = s.replace(/,/g, "");
+            } else {
+                normalized = s.replace(/\./g, "").replace(",", ".");
+            }
+        } else if (lastComma >= 0) {
+            // Only commas: if exactly 3 digits follow the last comma it's a thousands sep
+            const afterComma = s.slice(lastComma + 1);
+            normalized = /^\d{3}$/.test(afterComma)
+                ? s.replace(/,/g, "")
+                : s.replace(",", ".");
+        } else {
+            normalized = s;
+        }
+
+        const num = parseFloat(normalized);
+        if (isNaN(num)) return NaN;
+        return negative ? -num : num;
+    }
 
     // Format number for display
     function formatNumber(num) {

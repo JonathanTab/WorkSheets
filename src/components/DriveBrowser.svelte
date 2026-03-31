@@ -2,6 +2,7 @@
     import { storage } from "../stores/storage.js";
     import { openModal, closeTopModal } from "../lib/ui/modalStore.svelte.js";
     import Button from "../lib/ui/Button.svelte";
+    import UserMenu from "./UserMenu.svelte";
     import CreateDocumentModal from "./modals/CreateDocumentModal.svelte";
     import DeleteConfirmModal from "./modals/DeleteConfirmModal.svelte";
     import RenameDocumentModal from "./modals/RenameDocumentModal.svelte";
@@ -9,9 +10,13 @@
     import ShareFileModal from "./modals/ShareFileModal.svelte";
     import PromptModal from "./modals/PromptModal.svelte";
     import ConfirmModal from "./modals/ConfirmModal.svelte";
+    import UploadFileModal from "./modals/UploadFileModal.svelte";
     import FolderTree from "./FolderTree.svelte";
+    import FileViewer from "./files/FileViewer.svelte";
     import {
         spreadsheet,
+        fileText,
+        penTool,
         plus,
         trash,
         edit,
@@ -38,21 +43,54 @@
         menu,
         close,
         externalLink,
+        upload,
+        copy,
+        cut,
+        fileImage,
+        fileVideo,
+        fileAudio,
+        filePdf,
+        fileArchive,
+        fileCode,
+        file,
+        icons,
     } from "../lib/icons/index.js";
+    import { router } from "../lib/router.svelte.js";
+    import {
+        APP_SHEETS,
+        APP_DOCS,
+        APP_SVG,
+        APP_FILE,
+        getAppType,
+        getAppIcon,
+        getFileRoute,
+        getFileCategory,
+        getFileIcon,
+        isBlobFile,
+        isPreviewable,
+        DEFAULT_APP,
+    } from "../lib/appTypes.js";
 
     // ---- Props (for standalone / embeddable use) ----
     let {
         registry = storage,
         appTitle = "WorkSheets",
         appSubtitle = "Collaborative Spreadsheets",
-        newItemLabel = "New Spreadsheet",
-        onOpen = undefined,
     } = $props();
 
     // ---- State ----
-    let tab = $state("recent"); // "drive" | "shared" | "recent" - default to recent
+    // Seed tab and folderId from the current route so back/forward works on first load
+    let tab = $state(
+        router.route.view === "browser"
+            ? (router.route.tab ?? "recent")
+            : "recent",
+    );
     let sidebarOpen = $state(false); // Mobile sidebar toggle
-    let currentFolderId = $state(null); // null = root
+    let currentFolderId = $state(
+        router.route.view === "browser"
+            ? (router.route.folderId ?? null)
+            : null,
+    );
     let driveFiles = $state(registry.drive.listFiles());
     let driveFolders = $state(registry.drive.listFolders());
     let searchQuery = $state("");
@@ -65,13 +103,42 @@
     let selectedItems = $state(new Set()); // Set of {type, id}
     let sortColumn = $state("modified"); // "name" | "owner" | "modified" | "size"
     let sortDirection = $state("desc"); // "asc" | "desc" - default desc for modified (most recent first)
-    let lastSelectedIndex = $state(-1);
+    let lastSelectedKey = $state(/** @type {string|null} */ (null)); // key of last clicked item
     let expandedFolders = $state(new Set()); // For folder tree expansion
     let recentFiles = $state(/** @type {any[]} */ ([]));
+    let deletedFiles = $state(registry.drive.listDeletedFiles?.() ?? []);
     let syncState = $state({ isSyncing: false, lastSync: null, error: null });
-    let isMobile = $state(typeof window !== "undefined" && window.innerWidth <= 768);
+    let isMobile = $state(
+        typeof window !== "undefined" && window.innerWidth <= 768,
+    );
     /** @type {HTMLInputElement | null} */
     let searchInput = $state(null);
+
+    // File viewer state for blob files
+    let viewingFile = $state(null); // File being viewed
+    let viewingBlobUrl = $state(null); // Blob URL for the file
+
+    // Drag-and-drop upload state (external files)
+    let isDraggingOver = $state(false);
+    let dragCounter = $state(0); // Track drag enter/leave events
+
+    // Drag-and-drop move state (internal items)
+    const DRAG_MIME = "application/x-drive-item";
+    const ROOT_FOLDER_ID = "__root__"; // sentinel for root drop target
+    let draggingItem = $state(null); // { id, itemType } being dragged
+    let dropTargetId = $state(null); // folder id (or ROOT_FOLDER_ID) being hovered over
+    let isInternalDragging = $state(false); // true while dragging an internal item (not external files)
+
+    // Undo / redo stacks for file operations
+    let undoStack = $state(
+        /** @type {{ description: string, undo: () => Promise<void>, redo: () => Promise<void> }[]} */ ([]),
+    );
+    let redoStack = $state(
+        /** @type {{ description: string, undo: () => Promise<void>, redo: () => Promise<void> }[]} */ ([]),
+    );
+
+    // Clipboard for copy/cut/paste
+    let clipboard = $state(null); // { items: [{id, itemType}], op: 'copy'|'cut' }
 
     // Keep in sync with registry updates
     $effect(() => {
@@ -83,7 +150,28 @@
                 driveFolders = f;
             }),
         ];
+        if (registry.drive.deletedFiles) {
+            unsubs.push(
+                registry.drive.deletedFiles.subscribe((f) => {
+                    deletedFiles = f;
+                }),
+            );
+        }
         return () => unsubs.forEach((u) => u());
+    });
+
+    // Sync tab/folder from route on back/forward navigation
+    $effect(() => {
+        const r = router.route;
+        if (r.view !== "browser") return;
+        const newTab = r.tab ?? "recent";
+        const newFolderId = r.folderId ?? null;
+        if (newTab !== tab || newFolderId !== currentFolderId) {
+            tab = newTab;
+            currentFolderId = newFolderId;
+            searchQuery = "";
+            clearSelection();
+        }
     });
 
     // Sync state — subscribe if available
@@ -186,6 +274,9 @@
         if (tab === "recent") {
             return { folders: [], files: recentFiles };
         }
+        if (tab === "trash") {
+            return { folders: [], files: deletedFiles };
+        }
         // drive tab
         return {
             folders: driveFolders.filter((f) => f.parentId === currentFolderId),
@@ -234,10 +325,14 @@
         } else if (sortColumn === "modified") {
             combined.sort((a, b) => {
                 const aTime = new Date(
-                    a.updatedAt || a.createdAt || 0,
+                    tab === "recent" && a._activityAt
+                        ? a._activityAt
+                        : a.mtime || a.ctime || a.birthtime || 0,
                 ).getTime();
                 const bTime = new Date(
-                    b.updatedAt || b.createdAt || 0,
+                    tab === "recent" && b._activityAt
+                        ? b._activityAt
+                        : b.mtime || b.ctime || b.birthtime || 0,
                 ).getTime();
                 return sortDirection === "asc" ? aTime - bTime : bTime - aTime;
             });
@@ -289,19 +384,28 @@
 
     function clearSelection() {
         selectedItems = new Set();
+        lastSelectedKey = null;
     }
 
     function toggleItem(item, event) {
         const key = itemKey(item);
         const newSelection = new Set(selectedItems);
 
-        if (event?.shiftKey && lastSelectedIndex >= 0) {
-            // Range select
+        if (event?.shiftKey && lastSelectedKey !== null) {
+            // Range select — resolve anchor by key so stale indices don't bite us
+            const anchorIndex = displayItems.findIndex(
+                (i) => itemKey(i) === lastSelectedKey,
+            );
             const currentIndex = displayItems.indexOf(item);
-            const start = Math.min(lastSelectedIndex, currentIndex);
-            const end = Math.max(lastSelectedIndex, currentIndex);
-            for (let i = start; i <= end; i++) {
-                newSelection.add(itemKey(displayItems[i]));
+            if (anchorIndex !== -1) {
+                const start = Math.min(anchorIndex, currentIndex);
+                const end = Math.max(anchorIndex, currentIndex);
+                for (let i = start; i <= end; i++) {
+                    newSelection.add(itemKey(displayItems[i]));
+                }
+            } else {
+                newSelection.add(key);
+                lastSelectedKey = key;
             }
         } else if (event?.ctrlKey || event?.metaKey) {
             // Toggle individual
@@ -310,12 +414,12 @@
             } else {
                 newSelection.add(key);
             }
-            lastSelectedIndex = displayItems.indexOf(item);
+            lastSelectedKey = key;
         } else {
             // Single select
             newSelection.clear();
             newSelection.add(key);
-            lastSelectedIndex = displayItems.indexOf(item);
+            lastSelectedKey = key;
         }
 
         selectedItems = newSelection;
@@ -329,45 +433,157 @@
 
     // ---- Navigation ----
     function navigateFolder(id) {
-        currentFolderId = id;
         searchQuery = "";
-        clearSelection();
-        sidebarOpen = false; // Close mobile sidebar
+        sidebarOpen = false;
+        router.navigateBrowser("drive", id);
+        // tab/currentFolderId are updated by the route-sync $effect
     }
 
     function switchTab(newTab) {
-        tab = newTab;
-        currentFolderId = null;
         searchQuery = "";
-        clearSelection();
-        sidebarOpen = false; // Close mobile sidebar
+        sidebarOpen = false;
+        router.navigateBrowser(newTab, null);
+        // tab/currentFolderId are updated by the route-sync $effect
     }
 
     // ---- File actions ----
-    function openDocument(docId) {
-        if (onOpen) {
-            const file = driveFiles.find((f) => f.id === docId);
-            onOpen(file ?? { id: docId });
+    // Accepts a full file/item object (which has .app) or falls back to a plain id lookup.
+    function openDocument(itemOrId) {
+        const item =
+            itemOrId && typeof itemOrId === "object"
+                ? itemOrId
+                : driveFiles.find((f) => f.id === itemOrId);
+
+        if (!item) return;
+
+        // SVG files (native drawings or uploaded SVG files) open in the SVG editor
+        if (
+            item.app === APP_SVG ||
+            (isBlobFile(item) &&
+                (item.mimeType === "image/svg+xml" ||
+                    item.name?.toLowerCase().endsWith(".svg")))
+        ) {
+            router.openSvg(item.id);
+            // Other blob files open in the file viewer
+        } else if (isBlobFile(item)) {
+            openBlobFile(item);
         } else {
-            window.location.hash = docId;
+            router.openFile(item);
         }
     }
 
-    function handleCreateDocument() {
+    // Build the correct URL for a file (for "open in new tab")
+    function fileUrl(item) {
+        const app = item?.app ?? "sheets";
+        if (app === "docs") return `/scriptorium/docs/${item.id}`;
+        return `/scriptorium/sheets/${item.id}`;
+    }
+
+    function handleCreateSheet() {
         openModal(CreateDocumentModal, {
+            appType: APP_SHEETS,
             onConfirm: async (title) => {
                 try {
                     const doc = await registry.drive.createFile({
                         title,
+                        app: APP_SHEETS,
                         folderId: tab === "drive" ? currentFolderId : null,
                     });
                     closeTopModal();
-                    openDocument(doc.id);
+                    router.openSheet(doc.id);
+                } catch (e) {
+                    console.error("Failed to create spreadsheet:", e);
+                }
+            },
+        });
+    }
+
+    function handleCreateDoc() {
+        openModal(CreateDocumentModal, {
+            appType: APP_DOCS,
+            onConfirm: async (title) => {
+                try {
+                    const doc = await registry.drive.createFile({
+                        title,
+                        app: APP_DOCS,
+                        folderId: tab === "drive" ? currentFolderId : null,
+                    });
+                    closeTopModal();
+                    router.openDoc(doc.id);
                 } catch (e) {
                     console.error("Failed to create document:", e);
                 }
             },
         });
+    }
+
+    function handleCreateSvg() {
+        openModal(CreateDocumentModal, {
+            appType: APP_SVG,
+            onConfirm: async (title) => {
+                try {
+                    const EMPTY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="640" height="480" viewBox="0 0 640 480"><title>${title}</title></svg>`;
+                    const svgBlob = new Blob([EMPTY_SVG], {
+                        type: "image/svg+xml",
+                    });
+                    const doc = await registry.drive.createBlob({
+                        title,
+                        file: svgBlob,
+                        filename: "drawing.svg",
+                        app: APP_SVG,
+                        folderId: tab === "drive" ? currentFolderId : null,
+                    });
+                    closeTopModal();
+                    router.openSvg(doc.id);
+                } catch (e) {
+                    console.error("Failed to create drawing:", e);
+                }
+            },
+        });
+    }
+
+    // Legacy alias
+    function handleCreateDocument() {
+        handleCreateSheet();
+    }
+
+    function handleUploadFiles() {
+        openModal(UploadFileModal, {
+            folderId: tab === "drive" ? currentFolderId : null,
+            onConfirm: async (files, folderId) => {
+                for (const f of files) {
+                    try {
+                        await registry.drive.createBlob({
+                            title: f.name,
+                            file: f.file,
+                            folderId,
+                        });
+                    } catch (err) {
+                        console.error("Failed to upload file:", f.name, err);
+                    }
+                }
+                closeTopModal();
+            },
+        });
+    }
+
+    async function openBlobFile(file) {
+        try {
+            const blobUrl = await registry.drive.getBlobUrl(file.id);
+            registry.drive.recordOpen(file.id);
+            viewingFile = file;
+            viewingBlobUrl = blobUrl;
+        } catch (err) {
+            console.error("Failed to load blob file:", err);
+        }
+    }
+
+    function closeFileViewer() {
+        if (viewingBlobUrl) {
+            URL.revokeObjectURL(viewingBlobUrl);
+        }
+        viewingFile = null;
+        viewingBlobUrl = null;
     }
 
     async function handleCreateFolder() {
@@ -396,8 +612,16 @@
         openModal(RenameDocumentModal, {
             currentTitle: file.title,
             onConfirm: async (newTitle) => {
+                const oldTitle = file.title;
                 try {
                     await registry.drive.renameFile(file.id, newTitle);
+                    pushUndo({
+                        description: `Rename "${oldTitle}" → "${newTitle}"`,
+                        undo: async () =>
+                            registry.drive.renameFile(file.id, oldTitle),
+                        redo: async () =>
+                            registry.drive.renameFile(file.id, newTitle),
+                    });
                     closeTopModal();
                 } catch (err) {
                     console.error("Failed to rename:", err);
@@ -414,6 +638,11 @@
             onConfirm: async () => {
                 try {
                     await registry.drive.deleteFile(file.id);
+                    pushUndo({
+                        description: `Delete "${file.title}"`,
+                        undo: async () => registry.drive.restoreFile(file.id),
+                        redo: async () => registry.drive.deleteFile(file.id),
+                    });
                     closeTopModal();
                 } catch (err) {
                     console.error("Failed to delete:", err);
@@ -484,7 +713,12 @@
 
     // ---- Context menu ----
     // Approximate context menu dimensions for viewport clamping
-    const CTX_W = 185, CTX_H = 230;
+    const CTX_W = 185,
+        CTX_H = 270;
+
+    // Context menu state extended for different areas
+    // contextMenu can be: { x, y, item, type: 'file'|'folder', area: 'item'|'content'|'sidebar'|'breadcrumb' }
+    // Or for no menu in certain areas, we just prevent default
 
     function showContextMenu(e, item, type) {
         e.preventDefault();
@@ -495,7 +729,67 @@
         if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
         x = Math.max(8, x);
         y = Math.max(8, y);
-        contextMenu = { x, y, item, type };
+        contextMenu = { x, y, item, type, area: "item" };
+    }
+
+    // Context menu for empty content area
+    function showContentContextMenu(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Only show in drive tab
+        if (tab !== "drive") {
+            return;
+        }
+
+        let x = e.clientX;
+        let y = e.clientY;
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
+        x = Math.max(8, x);
+        y = Math.max(8, y);
+        contextMenu = { x, y, type: "content", area: "content" };
+    }
+
+    // Context menu for sidebar navigation items
+    function showSidebarContextMenu(e, navType) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        let x = e.clientX;
+        let y = e.clientY;
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
+        x = Math.max(8, x);
+        y = Math.max(8, y);
+        contextMenu = { x, y, type: navType, area: "sidebar" };
+    }
+
+    // Context menu for folder tree items
+    function showFolderTreeContextMenu(e, folder) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        let x = e.clientX;
+        let y = e.clientY;
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
+        x = Math.max(8, x);
+        y = Math.max(8, y);
+        contextMenu = {
+            x,
+            y,
+            item: folder,
+            type: "folder",
+            area: "foldertree",
+        };
+    }
+
+    // Prevent default context menu anywhere in DriveBrowser
+    function handleContextMenu(e) {
+        // If we're not in a specific handled area, prevent default browser menu
+        // but don't show our menu either (for areas like header, toolbar, etc.)
+        e.preventDefault();
     }
 
     function closeContextMenu() {
@@ -507,7 +801,9 @@
     }
 
     function handleKeydown(e) {
-        const inInput = e.target?.matches?.("input, textarea, [contenteditable]");
+        const inInput = e.target?.matches?.(
+            "input, textarea, [contenteditable]",
+        );
 
         if (e.key === "Escape") {
             if (sidebarOpen) {
@@ -522,9 +818,44 @@
 
         if (inInput) return;
 
+        if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+            e.preventDefault();
+            undoLast();
+            return;
+        }
+
+        if (
+            (e.key === "y" && (e.ctrlKey || e.metaKey)) ||
+            (e.key === "z" && (e.ctrlKey || e.metaKey) && e.shiftKey)
+        ) {
+            e.preventDefault();
+            redoLast();
+            return;
+        }
+
         if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             selectAll();
+            return;
+        }
+
+        if (
+            e.key === "c" &&
+            (e.ctrlKey || e.metaKey) &&
+            selectedItems.size > 0
+        ) {
+            e.preventDefault();
+            copySelected("copy");
+            return;
+        }
+
+        if (
+            e.key === "x" &&
+            (e.ctrlKey || e.metaKey) &&
+            selectedItems.size > 0
+        ) {
+            e.preventDefault();
+            copySelected("cut");
             return;
         }
 
@@ -539,7 +870,7 @@
         // New document: Ctrl/Cmd+N
         if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
-            handleCreateDocument();
+            handleCreateSheet();
             return;
         }
 
@@ -557,7 +888,7 @@
             const selected = displayItems.find((item) => isSelected(item));
             if (selected) {
                 if (selected.itemType === "folder") navigateFolder(selected.id);
-                else openDocument(selected.id);
+                else openDocument(selected);
             }
             return;
         }
@@ -566,17 +897,34 @@
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
             if (displayItems.length === 0) return;
-            const cur = lastSelectedIndex >= 0 ? lastSelectedIndex : -1;
+            const cur =
+                lastSelectedKey !== null
+                    ? displayItems.findIndex(
+                          (i) => itemKey(i) === lastSelectedKey,
+                      )
+                    : -1;
             const next =
                 e.key === "ArrowDown"
-                    ? cur < displayItems.length - 1 ? cur + 1 : 0
-                    : cur > 0 ? cur - 1 : displayItems.length - 1;
-            selectedItems = new Set([itemKey(displayItems[next])]);
-            lastSelectedIndex = next;
+                    ? cur < displayItems.length - 1
+                        ? cur + 1
+                        : 0
+                    : cur > 0
+                      ? cur - 1
+                      : displayItems.length - 1;
+            const nextKey = itemKey(displayItems[next]);
+            selectedItems = new Set([nextKey]);
+            lastSelectedKey = nextKey;
         }
     }
 
     // ---- Helpers ----
+    function formatActivity(item) {
+        if (!item._activityAt)
+            return formatDate(item.mtime || item.ctime || item.birthtime);
+        const label = item._activityType === "modified" ? "Modified" : "Opened";
+        return `${label} ${formatDate(item._activityAt)}`;
+    }
+
     function formatDate(iso) {
         if (!iso) return "";
         const d = new Date(iso);
@@ -633,11 +981,378 @@
         if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
         return `${Math.floor(diff / 3600000)}h ago`;
     }
+
+    function formatBuildTime() {
+        // __BUILD_TIME__ is injected by vite config at build time
+        if (typeof __BUILD_TIME__ === "undefined") return null;
+        const d = new Date(__BUILD_TIME__);
+        return d.toLocaleString(undefined, {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+
+    // ---- Drag and Drop Upload ----
+    function handleDragEnter(e) {
+        // Only allow drop in drive tab; ignore when moving internal items
+        if (tab !== "drive" || isInternalDragging) return;
+
+        // Check if dragging external files
+        if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            dragCounter++;
+            isDraggingOver = true;
+        }
+    }
+
+    function handleDragLeave(e) {
+        if (tab !== "drive" || isInternalDragging) return;
+
+        if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter <= 0) {
+                dragCounter = 0;
+                isDraggingOver = false;
+            }
+        }
+    }
+
+    function handleDragOver(e) {
+        if (tab !== "drive") return;
+
+        if (!isInternalDragging && e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+        } else if (e.dataTransfer?.types?.includes(DRAG_MIME)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+        }
+    }
+
+    async function handleDrop(e) {
+        if (tab !== "drive") return;
+
+        // Internal item drop — move to current folder
+        const driveData = e.dataTransfer?.getData(DRAG_MIME);
+        if (driveData) {
+            e.preventDefault();
+            isDraggingOver = false;
+            isInternalDragging = false;
+            dragCounter = 0;
+            dropTargetId = null;
+            draggingItem = null;
+            const { id, itemType } = JSON.parse(driveData);
+            if (itemType === "folder") {
+                const f = driveFolders.find((x) => x.id === id);
+                if (f && f.parentId !== currentFolderId) {
+                    const prevParentId = f.parentId;
+                    const targetId = currentFolderId;
+                    await registry.drive
+                        .moveFolder(id, targetId)
+                        .catch(console.error);
+                    pushUndo({
+                        description: `Move folder "${f.name}"`,
+                        undo: async () =>
+                            registry.drive.moveFolder(id, prevParentId),
+                        redo: async () =>
+                            registry.drive.moveFolder(id, targetId),
+                    });
+                }
+            } else {
+                const f = driveFiles.find((x) => x.id === id);
+                if (f && f.folderId !== currentFolderId) {
+                    const prevFolderId = f.folderId;
+                    const targetId = currentFolderId;
+                    await registry.drive
+                        .moveFile(id, targetId)
+                        .catch(console.error);
+                    pushUndo({
+                        description: `Move "${f.title}"`,
+                        undo: async () =>
+                            registry.drive.moveFile(id, prevFolderId),
+                        redo: async () => registry.drive.moveFile(id, targetId),
+                    });
+                }
+            }
+            return;
+        }
+
+        e.preventDefault();
+        isDraggingOver = false;
+        dragCounter = 0;
+
+        const files = Array.from(e.dataTransfer?.files || []);
+        if (files.length === 0) return;
+
+        // Upload files to current folder
+        for (const file of files) {
+            try {
+                await registry.drive.createBlob({
+                    title: file.name,
+                    file: file,
+                    folderId: currentFolderId,
+                });
+            } catch (err) {
+                console.error("Failed to upload file:", file.name, err);
+            }
+        }
+    }
+
+    // ---- Item drag (moving files/folders) ----
+    function handleItemDragStart(e, item) {
+        isInternalDragging = true;
+        isDraggingOver = false;
+        dragCounter = 0;
+        draggingItem = { id: item.id, itemType: item.itemType };
+        e.dataTransfer.setData(
+            DRAG_MIME,
+            JSON.stringify({ id: item.id, itemType: item.itemType }),
+        );
+        e.dataTransfer.effectAllowed = "move";
+    }
+
+    function handleItemDragEnd() {
+        isInternalDragging = false;
+        draggingItem = null;
+        dropTargetId = null;
+    }
+
+    function handleFolderDragOver(e, folderId) {
+        if (!draggingItem) return;
+        // Can't drop a folder onto itself
+        if (draggingItem.itemType === "folder" && draggingItem.id === folderId)
+            return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        dropTargetId = folderId;
+    }
+
+    function handleFolderDragLeave(e, folderId) {
+        // Only clear if leaving the element itself (not a child)
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+            if (dropTargetId === folderId) dropTargetId = null;
+        }
+    }
+
+    async function handleDropOnFolder(e, folderId) {
+        e.preventDefault();
+        e.stopPropagation();
+        isInternalDragging = false;
+        dropTargetId = null;
+        draggingItem = null;
+
+        const raw = e.dataTransfer.getData(DRAG_MIME);
+        if (!raw) return;
+
+        const { id, itemType } = JSON.parse(raw);
+        const targetId = folderId === ROOT_FOLDER_ID ? null : folderId;
+
+        if (itemType === "folder") {
+            const f = driveFolders.find((x) => x.id === id);
+            if (!f || f.parentId === targetId) return;
+            const prevParentId = f.parentId;
+            await registry.drive.moveFolder(id, targetId).catch(console.error);
+            pushUndo({
+                description: `Move folder "${f.name}"`,
+                undo: async () => registry.drive.moveFolder(id, prevParentId),
+                redo: async () => registry.drive.moveFolder(id, targetId),
+            });
+        } else {
+            const f = driveFiles.find((x) => x.id === id);
+            if (!f || f.folderId === targetId) return;
+            const prevFolderId = f.folderId;
+            await registry.drive.moveFile(id, targetId).catch(console.error);
+            pushUndo({
+                description: `Move "${f.title}"`,
+                undo: async () => registry.drive.moveFile(id, prevFolderId),
+                redo: async () => registry.drive.moveFile(id, targetId),
+            });
+        }
+    }
+
+    // ---- Undo / Redo ----
+    function pushUndo(action) {
+        undoStack = [...undoStack.slice(-49), action]; // cap at 50 entries
+        redoStack = [];
+    }
+
+    async function undoLast() {
+        if (undoStack.length === 0) return;
+        const action = undoStack[undoStack.length - 1];
+        undoStack = undoStack.slice(0, -1);
+        try {
+            await action.undo();
+            redoStack = [...redoStack, action];
+        } catch (err) {
+            console.error("Undo failed:", err);
+        }
+    }
+
+    async function redoLast() {
+        if (redoStack.length === 0) return;
+        const action = redoStack[redoStack.length - 1];
+        redoStack = redoStack.slice(0, -1);
+        try {
+            await action.redo();
+            undoStack = [...undoStack, action];
+        } catch (err) {
+            console.error("Redo failed:", err);
+        }
+    }
+
+    // ---- Clipboard (copy/cut/paste items) ----
+    function copySelected(op) {
+        const items = displayItems
+            .filter((item) => isSelected(item))
+            .map((item) => ({ id: item.id, itemType: item.itemType }));
+        if (items.length === 0) return;
+        clipboard = { items, op };
+    }
+
+    async function executePaste() {
+        if (!clipboard || clipboard.items.length === 0) return;
+        const { items, op } = clipboard;
+
+        if (op === "cut") {
+            for (const { id, itemType } of items) {
+                if (itemType === "folder") {
+                    const f = driveFolders.find((x) => x.id === id);
+                    if (f && f.parentId !== currentFolderId)
+                        await registry.drive
+                            .moveFolder(id, currentFolderId)
+                            .catch(console.error);
+                } else {
+                    const f = driveFiles.find((x) => x.id === id);
+                    if (f && f.folderId !== currentFolderId)
+                        await registry.drive
+                            .moveFile(id, currentFolderId)
+                            .catch(console.error);
+                }
+            }
+            clipboard = null; // cut is one-shot
+        } else {
+            // copy — duplicate each item into current folder
+            for (const { id, itemType } of items) {
+                if (itemType === "file") {
+                    await registry.drive
+                        .duplicateFile(id, { folderId: currentFolderId })
+                        .catch(console.error);
+                } else {
+                    const f = driveFolders.find((x) => x.id === id);
+                    if (f)
+                        await registry.drive
+                            .createFolder({
+                                name: `Copy of ${f.name}`,
+                                parentId: currentFolderId,
+                            })
+                            .catch(console.error);
+                }
+            }
+        }
+    }
+
+    async function handleDuplicateFile(file, e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        try {
+            await registry.drive.duplicateFile(file.id, {
+                folderId: file.folderId ?? currentFolderId,
+            });
+        } catch (err) {
+            console.error("Failed to duplicate:", err);
+        }
+    }
+
+    // ---- Trash actions ----
+    async function handleRestoreFile(file, e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        try {
+            await registry.drive.restoreFile(file.id);
+        } catch (err) {
+            console.error("Failed to restore:", err);
+        }
+    }
+
+    async function handlePermanentDeleteFile(file, e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        openModal(ConfirmModal, {
+            title: "Delete Forever",
+            message: `Permanently delete "${file.title || "this file"}"? This cannot be undone.`,
+            confirmText: "Delete Forever",
+            variant: "danger",
+            onConfirm: async () => {
+                try {
+                    await registry.drive.permanentDeleteFile(file.id);
+                    closeTopModal();
+                } catch (err) {
+                    console.error("Failed to permanently delete:", err);
+                }
+            },
+        });
+    }
+
+    // ---- Paste Upload ----
+    async function handlePaste(e) {
+        // Only allow paste in drive tab
+        if (tab !== "drive") return;
+
+        // Don't interfere with paste in input fields
+        if (e.target?.matches?.("input, textarea, [contenteditable]")) return;
+
+        // Internal clipboard paste (Ctrl+C/X then Ctrl+V)
+        if (clipboard && clipboard.items.length > 0) {
+            e.preventDefault();
+            await executePaste();
+            return;
+        }
+
+        const items = Array.from(e.clipboardData?.items || []);
+        const fileItems = items.filter((item) => item.kind === "file");
+
+        if (fileItems.length === 0) return;
+
+        e.preventDefault();
+
+        for (const item of fileItems) {
+            const file = item.getAsFile();
+            if (!file) continue;
+
+            // Generate name for pasted files (e.g., "pasted-image.png")
+            const ext =
+                file.name?.split(".").pop() ||
+                file.type?.split("/").pop() ||
+                "bin";
+            const baseName = file.name || `pasted-${Date.now()}`;
+            const name = file.name || `${baseName}.${ext}`;
+
+            try {
+                await registry.drive.createBlob({
+                    title: name,
+                    file: file,
+                    folderId: currentFolderId,
+                });
+            } catch (err) {
+                console.error("Failed to upload pasted file:", err);
+            }
+        }
+    }
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
+<svelte:window
+    onclick={handleWindowClick}
+    onkeydown={handleKeydown}
+    onpaste={handlePaste}
+/>
 
-<div class="drive-browser">
+<div class="drive-browser" oncontextmenu={handleContextMenu}>
     <!-- Mobile Overlay -->
     {#if sidebarOpen}
         <div
@@ -659,12 +1374,39 @@
         <!-- New Button -->
         <div class="sidebar-section">
             <Button
-                onclick={handleCreateDocument}
+                onclick={handleCreateSheet}
                 icon={plus}
                 iconPosition="left"
                 className="new-btn"
             >
-                {newItemLabel}
+                New Spreadsheet
+            </Button>
+            <Button
+                onclick={handleCreateDoc}
+                icon={plus}
+                iconPosition="left"
+                variant="secondary"
+                className="new-btn"
+            >
+                New Document
+            </Button>
+            <Button
+                onclick={handleCreateSvg}
+                icon={plus}
+                iconPosition="left"
+                variant="secondary"
+                className="new-btn"
+            >
+                New Drawing
+            </Button>
+            <Button
+                onclick={handleUploadFiles}
+                icon={upload}
+                iconPosition="left"
+                variant="secondary"
+                className="new-btn"
+            >
+                Upload Files
             </Button>
         </div>
 
@@ -674,6 +1416,7 @@
                 class="nav-item"
                 class:active={tab === "recent"}
                 onclick={() => switchTab("recent")}
+                oncontextmenu={(e) => showSidebarContextMenu(e, "recent")}
             >
                 <span class="nav-icon">{@html clock}</span>
                 <span class="nav-label">Recent</span>
@@ -685,6 +1428,7 @@
                     class="nav-item"
                     class:active={tab === "drive" && currentFolderId === null}
                     onclick={() => switchTab("drive")}
+                    oncontextmenu={(e) => showSidebarContextMenu(e, "drive")}
                 >
                     <span class="nav-icon">{@html folder}</span>
                     <span class="nav-label">My Drive</span>
@@ -742,6 +1486,11 @@
                         onNavigate={navigateFolder}
                         onToggleExpand={toggleFolderExpand}
                         {getChildFolders}
+                        {dropTargetId}
+                        onFolderDragOver={handleFolderDragOver}
+                        onFolderDragLeave={handleFolderDragLeave}
+                        onFolderDrop={handleDropOnFolder}
+                        onContextMenu={showFolderTreeContextMenu}
                     />
                 </div>
             {:else if tab === "drive"}
@@ -758,6 +1507,15 @@
                 <span class="nav-icon">{@html share}</span>
                 <span class="nav-label">Shared</span>
             </button>
+
+            <button
+                class="nav-item"
+                class:active={tab === "trash"}
+                onclick={() => switchTab("trash")}
+            >
+                <span class="nav-icon">{@html trash}</span>
+                <span class="nav-label">Trash</span>
+            </button>
         </nav>
 
         <!-- Sync / status footer -->
@@ -767,9 +1525,13 @@
                 class:syncing={syncState.isSyncing}
                 class:error={syncState.error}
                 onclick={() => registry.sync?.()}
-                title={syncState.error ? `Sync error: ${syncState.error}` : "Sync now"}
+                title={syncState.error
+                    ? `Sync error: ${syncState.error}`
+                    : "Sync now"}
             >
-                <span class="sync-icon" class:spin={syncState.isSyncing}>{@html refresh}</span>
+                <span class="sync-icon" class:spin={syncState.isSyncing}
+                    >{@html refresh}</span
+                >
                 <span class="sync-label">
                     {#if syncState.isSyncing}
                         Syncing…
@@ -827,18 +1589,70 @@
                 >
                     New
                 </Button>
+                <UserMenu {registry} />
             </div>
         </header>
 
         <!-- Toolbar -->
         <div class="toolbar">
             <div class="toolbar-left">
+                <!-- Undo / Redo -->
+                <div class="undo-redo">
+                    <button
+                        class="undo-btn"
+                        disabled={undoStack.length === 0}
+                        onclick={undoLast}
+                        title={undoStack.length > 0
+                            ? `Undo: ${undoStack[undoStack.length - 1].description} (Ctrl+Z)`
+                            : "Nothing to undo"}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            ><path d="M9 14 4 9l5-5" /><path
+                                d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"
+                            /></svg
+                        >
+                    </button>
+                    <button
+                        class="undo-btn"
+                        disabled={redoStack.length === 0}
+                        onclick={redoLast}
+                        title={redoStack.length > 0
+                            ? `Redo: ${redoStack[redoStack.length - 1].description} (Ctrl+Y)`
+                            : "Nothing to redo"}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            ><path d="m15 14 5-5-5-5" /><path
+                                d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"
+                            /></svg
+                        >
+                    </button>
+                </div>
+
                 <!-- Breadcrumb (desktop only for drive tab) -->
                 {#if tab === "drive"}
                     <div class="breadcrumb desktop-only">
                         <button
                             class="crumb"
+                            class:drag-target={dropTargetId === ROOT_FOLDER_ID}
                             onclick={() => navigateFolder(null)}
+                            ondragover={(e) =>
+                                handleFolderDragOver(e, ROOT_FOLDER_ID)}
+                            ondragleave={(e) =>
+                                handleFolderDragLeave(e, ROOT_FOLDER_ID)}
+                            ondrop={(e) =>
+                                handleDropOnFolder(e, ROOT_FOLDER_ID)}
                         >
                             <span class="crumb-icon">{@html home}</span>
                             <span>My Drive</span>
@@ -848,7 +1662,13 @@
                             <button
                                 class="crumb"
                                 class:last={i === breadcrumb.length - 1}
+                                class:drag-target={dropTargetId === crumb.id}
                                 onclick={() => navigateFolder(crumb.id)}
+                                ondragover={(e) =>
+                                    handleFolderDragOver(e, crumb.id)}
+                                ondragleave={(e) =>
+                                    handleFolderDragLeave(e, crumb.id)}
+                                ondrop={(e) => handleDropOnFolder(e, crumb.id)}
                             >
                                 {crumb.name}
                             </button>
@@ -909,7 +1729,35 @@
         </div>
 
         <!-- Content -->
-        <div class="content-area">
+        <div
+            class="content-area"
+            class:drag-over={isDraggingOver && tab === "drive"}
+            class:is-dragging-item={!!draggingItem}
+            ondragenter={handleDragEnter}
+            ondragleave={handleDragLeave}
+            ondragover={handleDragOver}
+            ondrop={handleDrop}
+            oncontextmenu={showContentContextMenu}
+        >
+            <!-- Drop Zone Overlay -->
+            {#if isDraggingOver && tab === "drive"}
+                <div class="drop-overlay">
+                    <div class="drop-zone">
+                        <div class="drop-icon">{@html upload}</div>
+                        <div class="drop-text">Drop files to upload</div>
+                        <div class="drop-hint">
+                            Files will be uploaded to
+                            {#if currentFolderId}
+                                "{driveFolders.find(
+                                    (f) => f.id === currentFolderId,
+                                )?.name || "My Drive"}"
+                            {:else}
+                                My Drive
+                            {/if}
+                        </div>
+                    </div>
+                </div>
+            {/if}
             {#if displayItems.length === 0}
                 <div class="empty-state">
                     <div class="empty-icon">{@html spreadsheet}</div>
@@ -920,6 +1768,9 @@
                                 : "No results found"}
                         </h2>
                         <p>No files or folders match "{searchQuery}"</p>
+                    {:else if tab === "trash"}
+                        <h2>Trash is empty</h2>
+                        <p>Deleted files will appear here</p>
                     {:else if tab === "shared"}
                         <h2>No shared files</h2>
                         <p>Files shared with you will appear here</p>
@@ -928,23 +1779,58 @@
                         <p>Files you've opened recently will appear here</p>
                         <div class="empty-actions">
                             <Button
-                                onclick={handleCreateDocument}
+                                onclick={handleCreateSheet}
                                 icon={plus}
                                 iconPosition="left"
                             >
-                                {newItemLabel}
+                                New Spreadsheet
+                            </Button>
+                            <Button
+                                onclick={handleCreateDoc}
+                                icon={plus}
+                                iconPosition="left"
+                                variant="secondary"
+                            >
+                                New Document
+                            </Button>
+                            <Button
+                                onclick={handleCreateSvg}
+                                icon={plus}
+                                iconPosition="left"
+                                variant="secondary"
+                            >
+                                New Drawing
                             </Button>
                         </div>
                     {:else}
                         <h2>No files yet</h2>
-                        <p>Create a spreadsheet to get started</p>
+                        <p>
+                            Create a spreadsheet, document, or drawing to get
+                            started
+                        </p>
                         <div class="empty-actions">
                             <Button
-                                onclick={handleCreateDocument}
+                                onclick={handleCreateSheet}
                                 icon={plus}
                                 iconPosition="left"
                             >
-                                {newItemLabel}
+                                New Spreadsheet
+                            </Button>
+                            <Button
+                                onclick={handleCreateDoc}
+                                icon={plus}
+                                iconPosition="left"
+                                variant="secondary"
+                            >
+                                New Document
+                            </Button>
+                            <Button
+                                onclick={handleCreateSvg}
+                                icon={plus}
+                                iconPosition="left"
+                                variant="secondary"
+                            >
+                                New Drawing
                             </Button>
                             <Button
                                 onclick={handleCreateFolder}
@@ -1041,12 +1927,43 @@
                                     class:selected={isSelected(item)}
                                     class:folder-row={item.itemType ===
                                         "folder"}
+                                    class:drag-target={item.itemType ===
+                                        "folder" && dropTargetId === item.id}
+                                    class:dragging={draggingItem?.id ===
+                                        item.id}
+                                    draggable={tab !== "trash"}
+                                    ondragstart={(e) => {
+                                        if (tab !== "trash")
+                                            handleItemDragStart(e, item);
+                                    }}
+                                    ondragend={handleItemDragEnd}
+                                    ondragover={(e) => {
+                                        if (
+                                            tab !== "trash" &&
+                                            item.itemType === "folder"
+                                        )
+                                            handleFolderDragOver(e, item.id);
+                                    }}
+                                    ondragleave={(e) => {
+                                        if (
+                                            tab !== "trash" &&
+                                            item.itemType === "folder"
+                                        )
+                                            handleFolderDragLeave(e, item.id);
+                                    }}
+                                    ondrop={(e) => {
+                                        if (
+                                            tab !== "trash" &&
+                                            item.itemType === "folder"
+                                        )
+                                            handleDropOnFolder(e, item.id);
+                                    }}
                                     onclick={(e) => toggleItem(item, e)}
                                     ondblclick={() => {
                                         if (item.itemType === "folder") {
                                             navigateFolder(item.id);
                                         } else {
-                                            openDocument(item.id);
+                                            openDocument(item);
                                         }
                                     }}
                                     oncontextmenu={(e) =>
@@ -1066,9 +1983,18 @@
                                         <div class="col-name-content">
                                             <span
                                                 class="item-icon {item.itemType}"
+                                                style={isBlobFile(item)
+                                                    ? `color: ${getFileCategory(item.mimeType)?.color || "#6b7280"}`
+                                                    : ""}
                                             >
                                                 {#if item.itemType === "folder"}
                                                     {@html folder}
+                                                {:else if isBlobFile(item)}
+                                                    {@html icons[
+                                                        getFileIcon(item)
+                                                    ] || file}
+                                                {:else if item.app === "docs"}
+                                                    {@html fileText}
                                                 {:else}
                                                     {@html spreadsheet}
                                                 {/if}
@@ -1115,24 +2041,50 @@
                                         >{getOwnerName(item)}</td
                                     >
                                     <td class="col-modified"
-                                        >{formatDate(
-                                            item.updatedAt || item.createdAt,
-                                        )}</td
+                                        >{tab === "recent"
+                                            ? formatActivity(item)
+                                            : formatDate(
+                                                  item.mtime ||
+                                                      item.ctime ||
+                                                      item.birthtime,
+                                              )}</td
                                     >
                                     <td class="col-actions">
-                                        <button
-                                            class="action-btn"
-                                            onclick={(e) => {
-                                                e.stopPropagation();
-                                                showContextMenu(
-                                                    e,
-                                                    item,
-                                                    item.itemType,
-                                                );
-                                            }}
-                                        >
-                                            {@html moreVertical}
-                                        </button>
+                                        {#if tab === "trash"}
+                                            <button
+                                                class="action-btn"
+                                                title="Restore"
+                                                onclick={(e) =>
+                                                    handleRestoreFile(item, e)}
+                                            >
+                                                {@html refresh}
+                                            </button>
+                                            <button
+                                                class="action-btn danger"
+                                                title="Delete forever"
+                                                onclick={(e) =>
+                                                    handlePermanentDeleteFile(
+                                                        item,
+                                                        e,
+                                                    )}
+                                            >
+                                                {@html trash}
+                                            </button>
+                                        {:else}
+                                            <button
+                                                class="action-btn"
+                                                onclick={(e) => {
+                                                    e.stopPropagation();
+                                                    showContextMenu(
+                                                        e,
+                                                        item,
+                                                        item.itemType,
+                                                    );
+                                                }}
+                                            >
+                                                {@html moreVertical}
+                                            </button>
+                                        {/if}
                                     </td>
                                 </tr>
                             {/each}
@@ -1147,12 +2099,42 @@
                             class="grid-item"
                             class:selected={isSelected(item)}
                             class:folder={item.itemType === "folder"}
+                            class:drag-target={item.itemType === "folder" &&
+                                dropTargetId === item.id}
+                            class:dragging={draggingItem?.id === item.id}
+                            draggable={tab !== "trash"}
+                            ondragstart={(e) => {
+                                if (tab !== "trash")
+                                    handleItemDragStart(e, item);
+                            }}
+                            ondragend={handleItemDragEnd}
+                            ondragover={(e) => {
+                                if (
+                                    tab !== "trash" &&
+                                    item.itemType === "folder"
+                                )
+                                    handleFolderDragOver(e, item.id);
+                            }}
+                            ondragleave={(e) => {
+                                if (
+                                    tab !== "trash" &&
+                                    item.itemType === "folder"
+                                )
+                                    handleFolderDragLeave(e, item.id);
+                            }}
+                            ondrop={(e) => {
+                                if (
+                                    tab !== "trash" &&
+                                    item.itemType === "folder"
+                                )
+                                    handleDropOnFolder(e, item.id);
+                            }}
                             onclick={(e) => toggleItem(item, e)}
                             ondblclick={() => {
                                 if (item.itemType === "folder") {
                                     navigateFolder(item.id);
                                 } else {
-                                    openDocument(item.id);
+                                    openDocument(item);
                                 }
                             }}
                             oncontextmenu={(e) =>
@@ -1168,7 +2150,12 @@
                                     }}
                                 />
                             </div>
-                            <div class="grid-item-icon">
+                            <div
+                                class="grid-item-icon"
+                                style={isBlobFile(item) && !item.thumbnailKey
+                                    ? `color: ${getFileCategory(item.mimeType)?.color || "#6b7280"}`
+                                    : ""}
+                            >
                                 {#if item.itemType === "folder"}
                                     {@html folder}
                                 {:else if item.thumbnailKey}
@@ -1179,7 +2166,12 @@
                                         )}
                                         alt=""
                                         loading="lazy"
+                                        draggable="false"
                                     />
+                                {:else if isBlobFile(item)}
+                                    {@html icons[getFileIcon(item)] || file}
+                                {:else if item.app === "docs"}
+                                    {@html fileText}
                                 {:else}
                                     {@html spreadsheet}
                                 {/if}
@@ -1193,9 +2185,13 @@
                                 {/if}
                             </div>
                             <div class="grid-item-meta">
-                                {getOwnerName(item)} · {formatDate(
-                                    item.updatedAt || item.createdAt,
-                                )}
+                                {getOwnerName(item)} · {tab === "recent"
+                                    ? formatActivity(item)
+                                    : formatDate(
+                                          item.mtime ||
+                                              item.ctime ||
+                                              item.birthtime,
+                                      )}
                             </div>
                         </div>
                     {/each}
@@ -1226,6 +2222,9 @@
                         >{selectedItems.size} selected</span
                     >
                 {/if}
+                {#if formatBuildTime()}
+                    <span class="status-build">Build: {formatBuildTime()}</span>
+                {/if}
             </div>
         </footer>
     </div>
@@ -1239,11 +2238,85 @@
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
         onclick={(e) => e.stopPropagation()}
     >
-        {#if contextMenu.type === "file"}
+        {#if contextMenu.area === "content"}
+            <!-- Empty content area context menu -->
             <button
                 class="ctx-item"
                 onclick={() => {
-                    openDocument(contextMenu.item.id);
+                    closeContextMenu();
+                    handleCreateSheet();
+                }}
+            >
+                {@html spreadsheet} New Spreadsheet
+            </button>
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    closeContextMenu();
+                    handleCreateDoc();
+                }}
+            >
+                {@html fileText} New Document
+            </button>
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    closeContextMenu();
+                    handleCreateSvg();
+                }}
+            >
+                {@html penTool} New Drawing
+            </button>
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    closeContextMenu();
+                    handleCreateFolder();
+                }}
+            >
+                {@html newFolder} New Folder
+            </button>
+            <hr class="ctx-sep" />
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    closeContextMenu();
+                    handleUploadFiles();
+                }}
+            >
+                {@html upload} Upload Files
+            </button>
+            {#if clipboard && clipboard.items.length > 0}
+                <hr class="ctx-sep" />
+                <button
+                    class="ctx-item"
+                    onclick={async () => {
+                        closeContextMenu();
+                        await executePaste();
+                    }}
+                >
+                    {@html arrowRight} Paste
+                </button>
+            {/if}
+        {:else if contextMenu.type === "file" && tab === "trash"}
+            <button
+                class="ctx-item"
+                onclick={(e) => handleRestoreFile(contextMenu.item, e)}
+            >
+                {@html refresh} Restore
+            </button>
+            <hr class="ctx-sep" />
+            <button
+                class="ctx-item danger"
+                onclick={(e) => handlePermanentDeleteFile(contextMenu.item, e)}
+            >
+                {@html trash} Delete Forever
+            </button>
+        {:else if contextMenu.type === "file"}
+            <button
+                class="ctx-item"
+                onclick={() => {
+                    openDocument(contextMenu.item);
                     closeContextMenu();
                 }}
             >
@@ -1252,7 +2325,7 @@
             <button
                 class="ctx-item"
                 onclick={() => {
-                    window.open(window.location.pathname + window.location.search + "#" + contextMenu.item.id, "_blank");
+                    window.open(fileUrl(contextMenu.item), "_blank");
                     closeContextMenu();
                 }}
             >
@@ -1263,6 +2336,12 @@
                 onclick={(e) => handleRenameFile(contextMenu.item, e)}
             >
                 {@html edit} Rename
+            </button>
+            <button
+                class="ctx-item"
+                onclick={(e) => handleDuplicateFile(contextMenu.item, e)}
+            >
+                {@html copy} Duplicate
             </button>
             <button
                 class="ctx-item"
@@ -1283,7 +2362,7 @@
             >
                 {@html trash} Delete
             </button>
-        {:else}
+        {:else if contextMenu.type === "folder" || contextMenu.area === "foldertree"}
             <button
                 class="ctx-item"
                 onclick={() => {
@@ -1306,7 +2385,31 @@
             >
                 {@html trash} Delete
             </button>
+        {:else if contextMenu.area === "sidebar"}
+            <!-- Sidebar nav items - minimal menu -->
+            {#if contextMenu.type === "drive"}
+                <button
+                    class="ctx-item"
+                    onclick={() => {
+                        closeContextMenu();
+                        handleCreateFolder();
+                    }}
+                >
+                    {@html newFolder} New Folder
+                </button>
+            {/if}
         {/if}
+    </div>
+{/if}
+
+<!-- File Viewer Overlay -->
+{#if viewingFile && viewingBlobUrl}
+    <div class="file-viewer-overlay">
+        <FileViewer
+            file={viewingFile}
+            blobUrl={viewingBlobUrl}
+            onClose={closeFileViewer}
+        />
     </div>
 {/if}
 
@@ -1645,7 +2748,9 @@
     }
 
     @keyframes spin {
-        to { transform: rotate(360deg); }
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     .sync-icon.spin :global(svg) {
@@ -1777,12 +2882,14 @@
     .breadcrumb {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 0.125rem;
         font-size: 0.8125rem;
+        line-height: 1;
     }
 
     .crumb {
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 0.25rem;
         padding: 0.25rem 0.5rem;
@@ -1792,6 +2899,7 @@
         cursor: pointer;
         border-radius: 4px;
         font-size: 0.8125rem;
+        line-height: 1;
         transition: all 0.15s;
     }
 
@@ -1803,6 +2911,25 @@
     .crumb.last {
         color: var(--color-text);
         font-weight: 500;
+    }
+
+    .crumb.drag-target {
+        background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+        color: var(--color-primary);
+        outline: 2px solid var(--color-primary);
+        outline-offset: -2px;
+        box-shadow: 0 0 12px
+            color-mix(in srgb, var(--color-primary) 40%, transparent);
+    }
+
+    /* Mute non-droppable crumbs when dragging */
+    .crumb:not(.drag-target):not(.last) {
+        opacity: 1;
+        transition: opacity 0.2s;
+    }
+
+    .breadcrumb:has(.drag-target) .crumb:not(.drag-target) {
+        opacity: 0.4;
     }
 
     .crumb-icon {
@@ -1818,7 +2945,7 @@
     }
 
     .crumb-sep {
-        display: flex;
+        display: inline-flex;
         align-items: center;
         width: 14px;
         height: 14px;
@@ -1992,6 +3119,7 @@
         width: 100%;
         border-collapse: collapse;
         font-size: 0.8125rem;
+        table-layout: fixed;
     }
 
     .file-table thead {
@@ -2011,6 +3139,7 @@
         cursor: pointer;
         user-select: none;
         transition: color 0.15s;
+        vertical-align: middle;
     }
 
     .file-table th:hover {
@@ -2032,7 +3161,7 @@
     }
 
     .col-name-header {
-        display: flex;
+        display: inline-flex;
         align-items: center;
     }
 
@@ -2043,11 +3172,11 @@
     }
 
     .col-owner {
-        width: 100px;
+        width: 15%;
     }
 
     .col-modified {
-        width: 100px;
+        width: 15%;
     }
 
     .col-actions {
@@ -2086,6 +3215,29 @@
         background: var(--color-primary-soft);
     }
 
+    .file-row.drag-target {
+        background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+        outline: 2px solid var(--color-primary);
+        outline-offset: -2px;
+        box-shadow: 0 0 16px
+            color-mix(in srgb, var(--color-primary) 30%, transparent);
+    }
+
+    .file-row.dragging {
+        opacity: 0.4;
+    }
+
+    /* Mute non-folder items when dragging internal items */
+    .content-area.is-dragging-item
+        .file-row:not(.folder-row):not(.drag-target):not(.dragging) {
+        opacity: 0.4;
+        pointer-events: none;
+    }
+
+    .content-area.is-dragging-item .file-row.folder-row:not(.drag-target) {
+        opacity: 0.6;
+    }
+
     .file-row td {
         padding: 0.5rem 0.5rem;
         border-bottom: 1px solid var(--color-border);
@@ -2120,6 +3272,10 @@
 
     .item-icon.folder {
         color: #f59e0b;
+    }
+
+    .item-icon.spreadsheet {
+        color: #22c55e;
     }
 
     .item-icon.file {
@@ -2177,6 +3333,50 @@
         color: var(--color-text);
     }
 
+    .action-btn.danger:hover {
+        background: var(--color-danger-fill, #fee2e2);
+        color: var(--color-danger, #dc2626);
+    }
+
+    /* Undo / Redo */
+    .undo-redo {
+        display: flex;
+        gap: 2px;
+        margin-right: 4px;
+    }
+
+    .undo-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border: none;
+        background: transparent;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        border-radius: 5px;
+        padding: 0;
+        transition:
+            background 0.1s,
+            color 0.1s;
+    }
+
+    .undo-btn svg {
+        width: 16px;
+        height: 16px;
+    }
+
+    .undo-btn:hover:not(:disabled) {
+        background: var(--color-fill);
+        color: var(--color-text);
+    }
+
+    .undo-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+    }
+
     /* Grid View */
     .file-grid {
         display: grid;
@@ -2205,6 +3405,30 @@
     .grid-item.selected {
         border-color: var(--color-primary);
         background: var(--color-primary-soft);
+    }
+
+    .grid-item.drag-target {
+        border-color: var(--color-primary);
+        background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+        outline: 2px solid var(--color-primary);
+        outline-offset: -2px;
+        box-shadow: 0 0 20px
+            color-mix(in srgb, var(--color-primary) 25%, transparent);
+    }
+
+    .grid-item.dragging {
+        opacity: 0.4;
+    }
+
+    /* Mute non-folder grid items when dragging internal items */
+    .content-area.is-dragging-item
+        .grid-item:not(.folder):not(.drag-target):not(.dragging) {
+        opacity: 0.4;
+        pointer-events: none;
+    }
+
+    .content-area.is-dragging-item .grid-item.folder:not(.drag-target) {
+        opacity: 0.6;
     }
 
     .grid-item-check {
@@ -2238,7 +3462,11 @@
         color: #f59e0b;
     }
 
-    .grid-item:not(.folder) .grid-item-icon {
+    .grid-item.spreadsheet .grid-item-icon {
+        color: #22c55e;
+    }
+
+    .grid-item:not(.folder):not(.spreadsheet) .grid-item-icon {
         color: var(--color-primary);
     }
 
@@ -2296,6 +3524,13 @@
     .status-selected {
         color: var(--color-primary);
         font-weight: 500;
+    }
+
+    .status-build {
+        color: var(--color-text-muted);
+        font-size: 0.6875rem;
+        margin-left: auto;
+        padding-left: 1rem;
     }
 
     /* Context Menu */
@@ -2446,5 +3681,67 @@
             font-size: 0.9375rem;
             min-height: 44px;
         }
+    }
+
+    /* File Viewer Overlay */
+    .file-viewer-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 1001;
+        background: var(--color-bg);
+    }
+
+    /* Drag and Drop Styles */
+    .content-area.drag-over {
+        position: relative;
+    }
+
+    .drop-overlay {
+        position: absolute;
+        inset: 0;
+        background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        pointer-events: none;
+    }
+
+    .drop-zone {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 3rem;
+        border: 2px dashed var(--color-primary);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    }
+
+    .drop-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 3rem;
+        height: 3rem;
+        color: var(--color-primary);
+        margin-bottom: 0.75rem;
+    }
+
+    .drop-icon :global(svg) {
+        width: 2.5rem;
+        height: 2.5rem;
+    }
+
+    .drop-text {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--color-primary);
+        margin-bottom: 0.25rem;
+    }
+
+    .drop-hint {
+        font-size: 0.8125rem;
+        color: var(--color-text-secondary);
     }
 </style>

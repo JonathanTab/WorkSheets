@@ -2,7 +2,7 @@
  * BlobCache - Offline blob caching via the Cache Storage API.
  *
  * Caches full blob content keyed by file ID. Staleness is detected by
- * comparing the file's `updatedAt` timestamp against the cached value.
+ * comparing the file's `mtime` timestamp against the cached value.
  *
  * Usage:
  *   const cache = new BlobCache();
@@ -41,8 +41,8 @@ export class BlobCache {
         const cached = await cache.match(key);
 
         if (cached) {
-            const cachedUpdatedAt = cached.headers.get('x-updated-at');
-            if (cachedUpdatedAt === file.updatedAt) {
+            const cachedUpdatedAt = cached.headers.get('x-mtime');
+            if (cachedUpdatedAt === file.mtime) {
                 return cached.blob();
             }
             // Stale — evict and re-fetch
@@ -52,11 +52,11 @@ export class BlobCache {
         const response = await globalThis.fetch(url);
         if (!response.ok) throw new Error(`Blob fetch failed: ${response.status}`);
 
-        // Store with updatedAt metadata so we can detect staleness later
+        // Store with mtime metadata so we can detect staleness later
         const body    = await response.arrayBuffer();
         const headers = new Headers({
             'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
-            'x-updated-at': file.updatedAt ?? '',
+            'x-mtime': file.mtime ?? '',
         });
         await cache.put(key, new Response(body, { headers }));
         return new Blob([body], { type: headers.get('Content-Type') });
@@ -73,7 +73,7 @@ export class BlobCache {
         const cache  = await caches.open(CACHE_NAME);
         const cached = await cache.match(cacheKey(file.id));
         if (!cached) return null;
-        if (cached.headers.get('x-updated-at') !== file.updatedAt) return null;
+        if (cached.headers.get('x-mtime') !== file.mtime) return null;
         return cached.blob();
     }
 
@@ -89,7 +89,7 @@ export class BlobCache {
         const cache = await caches.open(CACHE_NAME);
         const tasks = files.map(async (file) => {
             const cached = await cache.match(cacheKey(file.id));
-            if (cached && cached.headers.get('x-updated-at') === file.updatedAt) return; // fresh
+            if (cached && cached.headers.get('x-mtime') === file.mtime) return; // fresh
             try {
                 await this.fetch(file, getUrl(file.id));
             } catch {
@@ -116,6 +116,6 @@ export class BlobCache {
     async isCached(file) {
         const cache  = await caches.open(CACHE_NAME);
         const cached = await cache.match(cacheKey(file.id));
-        return !!(cached && cached.headers.get('x-updated-at') === file.updatedAt);
+        return !!(cached && cached.headers.get('x-mtime') === file.mtime);
     }
 }

@@ -215,7 +215,7 @@ export class OfflineMutationQueue {
                 break;
 
             case 'record_open':
-                await this._api.recordOpen(p.fileId, p.appName);
+                await this._api.recordOpen(p.fileId, p.appName, p.atime);
                 break;
 
             default:

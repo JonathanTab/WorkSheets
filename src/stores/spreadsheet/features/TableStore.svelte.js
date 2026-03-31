@@ -922,6 +922,34 @@ export class TableStore {
     // ─── Formula evaluation ───────────────────────────────────────────────────
 
     /**
+     * Resolve a column reference to its internal ID.
+     * Accepts either an exact column ID or a column name (case-insensitive).
+     * This lets formulas use human-readable column names like CUMSUM(amount)
+     * instead of internal IDs like CUMSUM(col1712345678).
+     * @param {string} nameOrId
+     * @returns {string} resolved column ID
+     */
+    #resolveColId(nameOrId) {
+        if (!nameOrId) return nameOrId;
+        const s = String(nameOrId);
+        // Exact ID match — fastest path
+        if (this.columns.some(c => c.id === s)) return s;
+        // Case-insensitive name match
+        const col = this.columns.find(c => c.name.toLowerCase() === s.toLowerCase());
+        return col ? col.id : s;
+    }
+
+    /**
+     * Public wrapper for column ID resolution — used by TableManager cross-table functions.
+     * Accepts either an exact column ID or a column name (case-insensitive).
+     * @param {string} nameOrId
+     * @returns {string}
+     */
+    resolveColId(nameOrId) {
+        return this.#resolveColId(nameOrId);
+    }
+
+    /**
      * Public wrapper for formula evaluation — used for live preview in UI.
      * @param {string} formula
      * @param {number} rowIndex  display index
@@ -935,10 +963,13 @@ export class TableStore {
      * Evaluate a column formula for a specific row.
      *
      * Pipeline:
-     *   1. Substitute {colId} references with the current row's values
-     *   2. Substitute ROW / ROW1 tokens
+     *   1. Substitute ROW / ROW1 / COUNT tokens (meta-tokens first, before cell values are injected)
+     *   2. Substitute {colId} references with the current row's values
      *   3. Substitute table-specific function calls (CUMSUM, RUNNINGIF, etc.)
      *   4. Evaluate the remaining expression with the formula parser/evaluator
+     *
+     * Column references accept either the internal column ID or the human-readable
+     * column name (case-insensitive), in both {ref} syntax and function arguments.
      *
      * See the class-level docstring for the full list of supported formulas.
      *
@@ -950,15 +981,15 @@ export class TableStore {
         try {
             let expr = formula.trim();
 
-            // Fast path: standalone COUNT
-            if (/^COUNT$/i.test(expr)) return this.getRowCount();
-
-            // Step 1: substitute {colId} with current row values
-            expr = this.#substituteColRefs(expr, rowIndex);
-
-            // Step 2: substitute ROW / ROW1 tokens (as standalone tokens or function-style)
+            // Step 1: substitute meta-tokens BEFORE injecting cell string values,
+            // so cell values containing "ROW" or "COUNT" text are never misinterpreted.
             expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
             expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
+            // COUNT (but not COUNTIF) → total row count
+            expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount()));
+
+            // Step 2: substitute {colRef} with current row values (accepts name or ID)
+            expr = this.#substituteColRefs(expr, rowIndex);
 
             // Step 3: substitute table-specific function calls
             expr = this.#substituteTableFuncs(expr, rowIndex);
@@ -971,14 +1002,16 @@ export class TableStore {
     }
 
     /**
-     * Substitute {colId} references with the current row's values.
+     * Substitute {colRef} references with the current row's values.
+     * colRef may be a column ID or a human-readable column name.
      * Strings are JSON-escaped; numbers become numeric literals.
      */
     #substituteColRefs(expr, rowIndex) {
-        return expr.replace(/\{([^}]+)\}/g, (_match, rawColId) => {
-            const colId = rawColId.trim();
+        return expr.replace(/\{([^}]+)\}/g, (_match, rawRef) => {
+            const colId = this.#resolveColId(rawRef.trim());
             const val = this.sortedFilteredRows[rowIndex]?.[colId];
             if (val === null || val === undefined || val === '') return '""';
+            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
             if (typeof val === 'string') return JSON.stringify(val);
             const num = Number(val);
             return !isNaN(num) ? String(num) : JSON.stringify(String(val));
@@ -1020,70 +1053,73 @@ export class TableStore {
 
     /**
      * Dispatch to the appropriate table aggregate function.
+     * Column arguments are resolved by name or ID via #resolveColId.
      */
     #callTableFunc(fn, rawArgs, rowIndex) {
         const args = rawArgs.map(a => this.#evalArg(a.trim()));
+        // Helper: resolve first n positional column arguments
+        const col = (i) => this.#resolveColId(String(args[i] ?? ''));
         switch (fn) {
             case 'CUMSUM':
-                return this.getCumulativeSum(String(args[0] ?? ''), rowIndex);
+                return this.getCumulativeSum(col(0), rowIndex);
             case 'SUM': {
-                const col = this.getColumn(String(args[0] ?? ''));
-                return col.reduce((a, v) => a + (Number(v) || 0), 0);
+                const vals = this.getColumn(col(0));
+                return vals.reduce((a, v) => a + (Number(v) || 0), 0);
             }
             case 'AVG': {
-                const col = this.getColumn(String(args[0] ?? ''));
-                const nums = col.map(Number).filter(v => !isNaN(v));
+                const vals = this.getColumn(col(0));
+                const nums = vals.map(Number).filter(v => !isNaN(v));
                 return nums.length ? nums.reduce((a, v) => a + v, 0) / nums.length : 0;
             }
             case 'MIN': {
-                const col = this.getColumn(String(args[0] ?? ''));
-                const nums = col.map(Number).filter(v => !isNaN(v));
+                const vals = this.getColumn(col(0));
+                const nums = vals.map(Number).filter(v => !isNaN(v));
                 return nums.length ? Math.min(...nums) : 0;
             }
             case 'MAX': {
-                const col = this.getColumn(String(args[0] ?? ''));
-                const nums = col.map(Number).filter(v => !isNaN(v));
+                const vals = this.getColumn(col(0));
+                const nums = vals.map(Number).filter(v => !isNaN(v));
                 return nums.length ? Math.max(...nums) : 0;
             }
             case 'RUNNINGIF':
                 if (args.length >= 4)
-                    return this.#getRunningIf(String(args[0]), String(args[1]), String(args[2]), args[3], rowIndex);
+                    return this.#getRunningIf(col(0), col(1), String(args[2]), args[3], rowIndex);
                 return 0;
             case 'RUNNINGIFS': {
                 if (args.length < 4) return 0;
-                const [sumCol, ...rest] = args;
+                const [, ...rest] = args;
                 const conds = [];
                 for (let i = 0; i + 2 < rest.length; i += 3)
-                    conds.push({ col: String(rest[i]), op: String(rest[i + 1]), val: rest[i + 2] });
-                return this.#getRunningIfs(String(sumCol), conds, rowIndex);
+                    conds.push({ col: this.#resolveColId(String(rest[i])), op: String(rest[i + 1]), val: rest[i + 2] });
+                return this.#getRunningIfs(col(0), conds, rowIndex);
             }
             case 'SUMIF':
                 if (args.length >= 4)
-                    return this.#getSumIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                    return this.#getSumIf(col(0), col(1), String(args[2]), args[3]);
                 return 0;
             case 'SUMIFS': {
                 if (args.length < 4) return 0;
-                const [sumCol, ...rest] = args;
+                const [, ...rest] = args;
                 const conds = [];
                 for (let i = 0; i + 2 < rest.length; i += 3)
-                    conds.push({ col: String(rest[i]), op: String(rest[i + 1]), val: rest[i + 2] });
-                return this.#getSumIfs(String(sumCol), conds);
+                    conds.push({ col: this.#resolveColId(String(rest[i])), op: String(rest[i + 1]), val: rest[i + 2] });
+                return this.#getSumIfs(col(0), conds);
             }
             case 'COUNTIF':
                 if (args.length >= 3)
-                    return this.#getCountIf(String(args[0]), String(args[1]), args[2]);
+                    return this.#getCountIf(col(0), String(args[1]), args[2]);
                 return 0;
             case 'AVGIF':
                 if (args.length >= 4)
-                    return this.#getAvgIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                    return this.#getAvgIf(col(0), col(1), String(args[2]), args[3]);
                 return 0;
             case 'MINIF':
                 if (args.length >= 4)
-                    return this.#getMinIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                    return this.#getMinIf(col(0), col(1), String(args[2]), args[3]);
                 return 0;
             case 'MAXIF':
                 if (args.length >= 4)
-                    return this.#getMaxIf(String(args[0]), String(args[1]), String(args[2]), args[3]);
+                    return this.#getMaxIf(col(0), col(1), String(args[2]), args[3]);
                 return 0;
             default:
                 return 0;

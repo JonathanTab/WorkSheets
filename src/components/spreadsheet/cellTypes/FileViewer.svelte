@@ -126,6 +126,25 @@
                     sandbox="allow-same-origin allow-scripts allow-forms"
                 ></iframe>
 
+            {:else if category === 'video'}
+                <div class="fv-media-wrap">
+                    <!-- svelte-ignore a11y_media_has_caption -->
+                    <video
+                        src={blobUrl}
+                        class="fv-video"
+                        controls
+                        preload="metadata"
+                    ></video>
+                </div>
+
+            {:else if category === 'audio'}
+                <div class="fv-audio-wrap">
+                    <div class="fv-audio-icon">🎵</div>
+                    <div class="fv-audio-name">{filename || 'Audio file'}</div>
+                    <!-- svelte-ignore a11y_media_has_caption -->
+                    <audio src={blobUrl} class="fv-audio" controls preload="metadata"></audio>
+                </div>
+
             {:else if category === 'text'}
                 {#if textLoading}
                     <div class="fv-status">Loading…</div>
@@ -322,6 +341,50 @@
         flex: 1;
         width: 100%;
         border: none;
+    }
+
+    .fv-media-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0f172a;
+        padding: 16px;
+        overflow: auto;
+    }
+
+    .fv-video {
+        max-width: 100%;
+        max-height: 100%;
+        border-radius: 4px;
+    }
+
+    .fv-audio-wrap {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 32px;
+    }
+
+    .fv-audio-icon {
+        font-size: 56px;
+        opacity: 0.5;
+    }
+
+    .fv-audio-name {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #1e293b;
+        max-width: 480px;
+        text-align: center;
+        word-break: break-all;
+    }
+
+    .fv-audio {
+        width: min(480px, 100%);
     }
 
     .fv-text {

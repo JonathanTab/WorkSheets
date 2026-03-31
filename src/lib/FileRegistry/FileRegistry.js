@@ -24,14 +24,15 @@
  *   'auth-error'  - server returned 401; re-authenticate
  */
 
-import { StorageAPI }           from './api/StorageAPI.js';
-import { YjsServerAPI }         from './api/YjsServerAPI.js';
-import { LocalStore }           from './core/LocalStore.js';
-import { YjsRuntime }           from './core/YjsRuntime.js';
-import { BlobCache }            from './core/BlobCache.js';
-import { OfflineSyncStore }     from './core/OfflineSyncStore.js';
+import * as Y from 'yjs';
+import { StorageAPI } from './api/StorageAPI.js';
+import { YjsServerAPI } from './api/YjsServerAPI.js';
+import { LocalStore } from './core/LocalStore.js';
+import { YjsRuntime } from './core/YjsRuntime.js';
+import { BlobCache } from './core/BlobCache.js';
+import { OfflineSyncStore } from './core/OfflineSyncStore.js';
 import { OfflineMutationQueue } from './core/OfflineMutationQueue.js';
-import { YjsSyncCoordinator }   from './core/YjsSyncCoordinator.js';
+import { YjsSyncCoordinator } from './core/YjsSyncCoordinator.js';
 
 // Deterministic color from username so presence color is consistent
 const _PRESENCE_COLORS = [
@@ -228,6 +229,12 @@ class AppView {
         const file = this.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
         return this._r._blobCache.fetch(file, this._r._api.getBlobUrl(id));
+    }
+
+    /** Replace the blob content for an existing blob file. @param {string} id @param {File|Blob} file @returns {Promise<void>} */
+    async updateBlob(id, file) {
+        await this._r._api.uploadBlob(id, file);
+        this._r._blobCache.invalidate?.(id);
     }
 
     /** Return the blob from cache without network access. Null if not cached. @param {string} id @returns {Promise<Blob|null>} */
@@ -434,6 +441,11 @@ class DriveView {
         return [...this._r._files.values()].filter(f => f.scope === 'drive' && !f.deleted);
     }
 
+    /** All soft-deleted drive files (for Trash view). @returns {FileDescriptor[]} */
+    listDeletedFiles() {
+        return [...this._r._files.values()].filter(f => f.scope === 'drive' && f.deleted === true);
+    }
+
     /** All folders. @returns {Folder[]} */
     listFolders() {
         return [...this._r._folders.values()];
@@ -450,26 +462,31 @@ class DriveView {
      */
     async createFile(opts = {}) {
         if (!navigator.onLine) {
-            return this._r._createFileOffline({
+            const file = await this._r._createFileOffline({
                 title: opts.title ?? 'Untitled',
                 type: 'yjs',
                 scope: 'drive',
+                app: opts.app ?? null,
                 folderId: opts.folderId ?? null,
                 parentId: opts.parentId ?? null,
                 publicRead: opts.publicRead ?? false,
                 publicWrite: opts.publicWrite ?? false,
             });
+            this._r._recordOpen(file.id);
+            return file;
         }
         const file = await this._r._api.createFile({
             title: opts.title ?? 'Untitled',
             type: 'yjs',
             scope: 'drive',
+            app: opts.app ?? null,
             folderId: opts.folderId ?? null,
             parentId: opts.parentId ?? null,
             publicRead: opts.publicRead ?? false,
             publicWrite: opts.publicWrite ?? false,
         });
         this._r._upsertFile(file);
+        this._r._recordOpen(file.id);
         return file;
     }
 
@@ -477,7 +494,7 @@ class DriveView {
      * Create a new Yjs file and initialize it with the provided initializer function.
      * Works offline: initializer runs locally; doc syncs to server when connection is restored.
      *
-     * @param {{ title?: string, folderId?: string|null, parentId?: string|null, publicRead?: boolean, publicWrite?: boolean, initializer: function(import('yjs').Doc): void }} opts
+     * @param {{ title?: string, app?: string|null, folderId?: string|null, parentId?: string|null, publicRead?: boolean, publicWrite?: boolean, initializer: function(import('yjs').Doc): void }} opts
      * @returns {Promise<FileDescriptor>}
      */
     async createAndInitializeFile(opts) {
@@ -488,6 +505,7 @@ class DriveView {
                 title: fileOpts.title ?? 'Untitled',
                 type: 'yjs',
                 scope: 'drive',
+                app: fileOpts.app ?? null,
                 folderId: fileOpts.folderId ?? null,
                 parentId: fileOpts.parentId ?? null,
                 publicRead: fileOpts.publicRead ?? false,
@@ -497,6 +515,7 @@ class DriveView {
             if (initializer && file.roomId) {
                 await this._r._runtime.initialize(file.id, file.roomId, initializer);
             }
+            this._r._recordOpen(file.id);
             return file;
         }
 
@@ -504,6 +523,7 @@ class DriveView {
             title: fileOpts.title ?? 'Untitled',
             type: 'yjs',
             scope: 'drive',
+            app: fileOpts.app ?? null,
             folderId: fileOpts.folderId ?? null,
             parentId: fileOpts.parentId ?? null,
             publicRead: fileOpts.publicRead ?? false,
@@ -515,6 +535,7 @@ class DriveView {
         }
 
         this._r._upsertFile(file);
+        this._r._recordOpen(file.id);
         return file;
     }
 
@@ -583,6 +604,12 @@ class DriveView {
         return this._r._blobCache.fetch(file, this._r._api.getBlobUrl(id));
     }
 
+    /** Replace the blob content for an existing blob file. @param {string} id @param {File|Blob} file @returns {Promise<void>} */
+    async updateBlob(id, file) {
+        await this._r._api.uploadBlob(id, file);
+        this._r._blobCache.invalidate?.(id);
+    }
+
     async getCachedBlob(id) {
         const pending = await this._r._getPendingBlob(id);
         if (pending) return pending;
@@ -630,9 +657,9 @@ class DriveView {
     async permanentDeleteFile(id) {
         await this._r._api.permanentDeleteFile(id);
         this._r._files.delete(id);
-        this._r._sharedStore?.removeDriveFile(id).catch(() => {});
-        this._r._sharedStore?.removePendingBlob(id).catch(() => {});
-        this._r._blobCache.invalidate(id).catch(() => {});
+        this._r._sharedStore?.removeDriveFile(id).catch(() => { });
+        this._r._sharedStore?.removePendingBlob(id).catch(() => { });
+        this._r._blobCache.invalidate(id).catch(() => { });
         this._r.emit('change');
     }
 
@@ -661,6 +688,43 @@ class DriveView {
         return file;
     }
 
+    /**
+     * Duplicate a drive file. For Yjs files, copies the current document state.
+     * For blob files, re-uploads the blob content.
+     * @param {string} id
+     * @param {{ title?: string, folderId?: string|null }} [opts]
+     * @returns {Promise<FileDescriptor>}
+     */
+    async duplicateFile(id, opts = {}) {
+        const file = this.getFile(id);
+        if (!file) throw new Error(`File not found: ${id}`);
+
+        const title = opts.title ?? `Copy of ${file.title ?? 'Untitled'}`;
+        const folderId = opts.folderId !== undefined ? opts.folderId : file.folderId;
+
+        if (file.type === 'blob') {
+            const blob = await this._r._blobCache.fetch(file, this._r._api.getBlobUrl(id));
+            return this._r._createBlobFile({
+                title,
+                file: blob,
+                filename: file.filename,
+                mimeType: file.mimeType,
+                folderId,
+                scope: 'drive',
+                app: file.app,
+            });
+        } else {
+            const sourceDoc = await this._r._runtime.load(id, file.roomId);
+            const update = Y.encodeStateAsUpdate(sourceDoc);
+            return this.createAndInitializeFile({
+                title,
+                folderId,
+                app: file.app,
+                initializer: (doc) => Y.applyUpdate(doc, update),
+            });
+        }
+    }
+
     // -------------------------------------------------------
     // Thumbnail
     // -------------------------------------------------------
@@ -684,6 +748,19 @@ class DriveView {
 
     /** Returns the URL to display a file's thumbnail image. @param {string} id @returns {string} */
     getThumbnailUrl(id) { return this._r._api.getThumbnailUrl(id); }
+
+    // -------------------------------------------------------
+    // Access tracking
+    // -------------------------------------------------------
+
+    /**
+     * Record that the current user accessed this file.
+     * Use for opens that don't go through loadDoc (e.g. blob file preview).
+     * @param {string} fileId
+     */
+    recordOpen(fileId) {
+        this._r._recordOpen(fileId);
+    }
 
     // -------------------------------------------------------
     // Content search
@@ -815,8 +892,9 @@ export class FileRegistry extends EventEmitter {
         // Cross-app BroadcastChannel for drive cache invalidation
         this._driveChannel = null;
 
-        // In-memory recently opened list (cross-app, sourced from shared IDB)
-        /** @type {{ fileId: string, appName: string|null, openedAt: string }[]} */
+        // In-memory per-user access log (cross-app, sourced from shared IDB)
+        // mtime lives on the FileDescriptor; only atime (last access) is tracked here.
+        /** @type {{ fileId: string, appName: string|null, atime: string }[]} */
         this._recents = [];
 
         /** @type {Map<string, object>} */
@@ -904,8 +982,8 @@ export class FileRegistry extends EventEmitter {
         this._setupNetworkListeners();
         this._startSyncInterval();
         if (navigator.onLine) {
-            this._mutationQueue.flush().catch(() => {});
-            this.sync().catch(() => {});
+            this._mutationQueue.flush().catch(() => { });
+            this.sync().catch(() => { });
         }
     }
 
@@ -923,11 +1001,12 @@ export class FileRegistry extends EventEmitter {
 
     async _doSync() {
         this._syncState.isSyncing = true;
+        this.emit('change'); // Announce sync started so UI shows syncing state
         try {
             const { files, folders, recents } = await this._api.fullSync();
 
             const driveFiles = files.filter(f => f.scope === 'drive');
-            const appFiles   = files.filter(f => f.scope !== 'drive');
+            const appFiles = files.filter(f => f.scope !== 'drive');
 
             // Update shared drive cache (other apps on same domain benefit)
             await this._sharedStore.replaceDrive(driveFiles, folders);
@@ -937,13 +1016,13 @@ export class FileRegistry extends EventEmitter {
             // In-memory update
             this._files.clear();
             this._folders.clear();
-            for (const f of files)   this._files.set(f.id, f);
+            for (const f of files) this._files.set(f.id, f);
             for (const f of folders) this._folders.set(f.id, f);
 
             // Merge server recents (cross-device sync)
             if (recents?.length) {
                 // mergeRecents accepts both camelCase and snake_case field names
-                await this._sharedStore.mergeRecents(/** @type {any} */ (recents));
+                await this._sharedStore.mergeRecents(/** @type {any} */(recents));
                 this._mergeServerRecents(recents);
             }
 
@@ -952,14 +1031,15 @@ export class FileRegistry extends EventEmitter {
 
             this._syncState.lastSync = new Date();
             this._syncState.error = null;
+            this._syncState.isSyncing = false; // Set false BEFORE emit so UI sees correct state
             this.emit('change');
             this.emit('sync');
         } catch (err) {
             this._syncState.error = err;
+            this._syncState.isSyncing = false; // Set false BEFORE emit so UI sees correct state
+            this.emit('change'); // Announce sync ended so UI updates
             if (err.message === 'AUTH_EXPIRED') this.emit('auth-error', err);
             throw err;
-        } finally {
-            this._syncState.isSyncing = false;
         }
     }
 
@@ -1057,24 +1137,25 @@ export class FileRegistry extends EventEmitter {
 
         const file = {
             id,
-            owner:        this._username,
-            app:          opts.app          ?? null,
-            title:        opts.title        ?? 'Untitled',
-            type:         opts.type         ?? 'yjs',
-            scope:        opts.scope        ?? 'drive',
-            folderId:     opts.folderId     ?? null,
-            parentId:     opts.parentId     ?? null,
+            owner: this._username,
+            app: opts.app ?? null,
+            title: opts.title ?? 'Untitled',
+            type: opts.type ?? 'yjs',
+            scope: opts.scope ?? 'drive',
+            folderId: opts.folderId ?? null,
+            parentId: opts.parentId ?? null,
             roomId,
-            blobKey:      opts.type === 'blob' ? id : null,
-            mimeType:     null,
-            size:         null,
-            filename:     null,
-            publicRead:   opts.publicRead   ?? false,
-            publicWrite:  opts.publicWrite  ?? false,
-            deleted:      false,
-            createdAt:    now,
-            updatedAt:    now,
-            sharedWith:   [],
+            blobKey: opts.type === 'blob' ? id : null,
+            mimeType: null,
+            size: null,
+            filename: null,
+            publicRead: opts.publicRead ?? false,
+            publicWrite: opts.publicWrite ?? false,
+            deleted: false,
+            birthtime: now,
+            mtime: now,
+            ctime: now,
+            sharedWith: [],
             thumbnailKey: null,
         };
 
@@ -1084,14 +1165,14 @@ export class FileRegistry extends EventEmitter {
         await this._mutationQueue.enqueue('create_file', {
             id,
             roomId,
-            title:        file.title,
-            type:         file.type,
-            scope:        file.scope,
-            app:          file.app,
-            folderId:     file.folderId,
-            parentId:     file.parentId,
-            publicRead:   file.publicRead,
-            publicWrite:  file.publicWrite,
+            title: file.title,
+            type: file.type,
+            scope: file.scope,
+            app: file.app,
+            folderId: file.folderId,
+            parentId: file.parentId,
+            publicRead: file.publicRead,
+            publicWrite: file.publicWrite,
         });
         this._broadcastDriveFile(file);
         this.emit('change');
@@ -1103,23 +1184,23 @@ export class FileRegistry extends EventEmitter {
         const now = new Date().toISOString();
         const folder = {
             id,
-            owner:       this._username,
-            name:        opts.name ?? 'New Folder',
-            parentId:    opts.parentId    ?? null,
-            publicRead:  opts.publicRead  ?? false,
+            owner: this._username,
+            name: opts.name ?? 'New Folder',
+            parentId: opts.parentId ?? null,
+            publicRead: opts.publicRead ?? false,
             publicWrite: opts.publicWrite ?? false,
-            createdAt:   now,
-            updatedAt:   now,
-            sharedWith:  [],
+            birthtime: now,
+            ctime: now,
+            sharedWith: [],
         };
 
         this._folders.set(folder.id, folder);
         await this._sharedStore.putDriveFolder(folder);
         await this._mutationQueue.enqueue('create_folder', {
             id,
-            name:        folder.name,
-            parentId:    folder.parentId,
-            publicRead:  folder.publicRead,
+            name: folder.name,
+            parentId: folder.parentId,
+            publicRead: folder.publicRead,
             publicWrite: folder.publicWrite,
         });
         this._driveChannel?.postMessage({ type: 'drive_folder_updated', folder });
@@ -1130,7 +1211,7 @@ export class FileRegistry extends EventEmitter {
     async _renameFileOffline(id, title) {
         const file = this._files.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
-        const updated = { ...file, title, updatedAt: new Date().toISOString() };
+        const updated = { ...file, title, ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('rename_file', { id, title });
@@ -1142,7 +1223,7 @@ export class FileRegistry extends EventEmitter {
     async _renameFolderOffline(id, name) {
         const folder = this._folders.get(id);
         if (!folder) throw new Error(`Folder not found: ${id}`);
-        const updated = { ...folder, name, updatedAt: new Date().toISOString() };
+        const updated = { ...folder, name, ctime: new Date().toISOString() };
         this._folders.set(id, updated);
         await this._sharedStore.putDriveFolder(updated);
         await this._mutationQueue.enqueue('rename_folder', { id, name });
@@ -1154,7 +1235,7 @@ export class FileRegistry extends EventEmitter {
     async _deleteFileOffline(id) {
         const file = this._files.get(id);
         if (!file) return;
-        const updated = { ...file, deleted: true, updatedAt: new Date().toISOString() };
+        const updated = { ...file, deleted: true, ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('delete_file', { id });
@@ -1189,7 +1270,7 @@ export class FileRegistry extends EventEmitter {
         const now = new Date().toISOString();
         for (const f of this._files.values()) {
             if (f.folderId && allFolderIds.has(f.folderId) && !f.deleted) {
-                const updated = { ...f, deleted: true, updatedAt: now };
+                const updated = { ...f, deleted: true, ctime: now };
                 this._files.set(f.id, updated);
                 await this._persistFile(updated);
             }
@@ -1203,7 +1284,7 @@ export class FileRegistry extends EventEmitter {
     async _restoreFileOffline(id) {
         const file = this._files.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
-        const updated = { ...file, deleted: false, updatedAt: new Date().toISOString() };
+        const updated = { ...file, deleted: false, ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('restore_file', { id });
@@ -1215,7 +1296,7 @@ export class FileRegistry extends EventEmitter {
     async _moveFileOffline(id, targetFolderId) {
         const file = this._files.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
-        const updated = { ...file, folderId: targetFolderId, updatedAt: new Date().toISOString() };
+        const updated = { ...file, folderId: targetFolderId, ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('move_file', { id, targetFolderId });
@@ -1227,7 +1308,7 @@ export class FileRegistry extends EventEmitter {
     async _moveFolderOffline(id, targetParentId) {
         const folder = this._folders.get(id);
         if (!folder) throw new Error(`Folder not found: ${id}`);
-        const updated = { ...folder, parentId: targetParentId, updatedAt: new Date().toISOString() };
+        const updated = { ...folder, parentId: targetParentId, ctime: new Date().toISOString() };
         this._folders.set(id, updated);
         await this._sharedStore.putDriveFolder(updated);
         await this._mutationQueue.enqueue('move_folder', { id, targetParentId });
@@ -1239,7 +1320,7 @@ export class FileRegistry extends EventEmitter {
     async _setParentOffline(id, parentId) {
         const file = this._files.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
-        const updated = { ...file, parentId, updatedAt: new Date().toISOString() };
+        const updated = { ...file, parentId, ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('set_parent', { id, parentId });
@@ -1254,14 +1335,14 @@ export class FileRegistry extends EventEmitter {
 
     _upsertFile(file) {
         this._files.set(file.id, file);
-        this._persistFile(file).catch(() => {});
+        this._persistFile(file).catch(() => { });
         this._broadcastDriveFile(file);
         this.emit('change');
     }
 
     _upsertFolder(folder) {
         this._folders.set(folder.id, folder);
-        this._sharedStore?.putDriveFolder(folder).catch(() => {});
+        this._sharedStore?.putDriveFolder(folder).catch(() => { });
         this._driveChannel?.postMessage({ type: 'drive_folder_updated', folder });
         this.emit('change');
     }
@@ -1271,7 +1352,7 @@ export class FileRegistry extends EventEmitter {
         if (f) {
             const updated = { ...f, deleted: true };
             this._files.set(id, updated);
-            this._persistFile(updated).catch(() => {});
+            this._persistFile(updated).catch(() => { });
             this._broadcastDriveFile(updated);
         }
         this.emit('change');
@@ -1314,12 +1395,13 @@ export class FileRegistry extends EventEmitter {
         try {
             await this._api.uploadBlob(descriptor.id, file);
         } catch (err) {
-            this._api.deleteFile(descriptor.id).catch(() => {});
+            this._api.deleteFile(descriptor.id).catch(() => { });
             throw err;
         }
 
         await this._blobCache.invalidate(descriptor.id);
         this._upsertFile(descriptor);
+        if (scope === 'drive') this._recordOpen(descriptor.id);
         return descriptor;
     }
 
@@ -1335,24 +1417,25 @@ export class FileRegistry extends EventEmitter {
 
         const descriptor = {
             id,
-            owner:        this._username,
-            app:          app ?? null,
-            title:        title ?? file?.name ?? 'Untitled',
-            type:         'blob',
+            owner: this._username,
+            app: app ?? null,
+            title: title ?? file?.name ?? 'Untitled',
+            type: 'blob',
             scope,
-            folderId:     folderId ?? null,
-            parentId:     parentId ?? null,
-            roomId:       null,
-            blobKey:      id,
-            mimeType:     file?.type || null,
-            size:         file?.size ?? null,
-            filename:     file?.name ?? null,
-            publicRead:   publicRead ?? false,
-            publicWrite:  publicWrite ?? false,
-            deleted:      false,
-            createdAt:    now,
-            updatedAt:    now,
-            sharedWith:   [],
+            folderId: folderId ?? null,
+            parentId: parentId ?? null,
+            roomId: null,
+            blobKey: id,
+            mimeType: file?.type || null,
+            size: file?.size ?? null,
+            filename: file?.name ?? null,
+            publicRead: publicRead ?? false,
+            publicWrite: publicWrite ?? false,
+            deleted: false,
+            birthtime: now,
+            mtime: now,
+            ctime: now,
+            sharedWith: [],
             thumbnailKey: null,
         };
 
@@ -1385,6 +1468,7 @@ export class FileRegistry extends EventEmitter {
 
         this._broadcastDriveFile(descriptor);
         this.emit('change');
+        if (scope === 'drive') this._recordOpen(descriptor.id);
         return descriptor;
     }
 
@@ -1410,19 +1494,19 @@ export class FileRegistry extends EventEmitter {
         if (!file) return;
 
         const now = new Date().toISOString();
-        const updated = { ...file, updatedAt: now };
+        const updated = { ...file, mtime: now };
         this._files.set(docId, updated);
-        this._persistFile(updated).catch(() => {});
+        this._persistFile(updated).catch(() => { });
         this.emit('change');
 
         if (!this._coordinator) return;
 
         if (offline) {
             this._coordinator.markNeedsSync(docId, file.roomId, this._options.wsUrl)
-                .catch(() => {});
+                .catch(() => { });
         }
 
-        this._coordinator.queueTouch(docId).catch(() => {});
+        this._coordinator.queueTouch(docId).catch(() => { });
     }
 
     // -------------------------------------------------------
@@ -1448,7 +1532,18 @@ export class FileRegistry extends EventEmitter {
                 this.emit('change');
             } else if (data.type === 'drive_synced') {
                 // Another app did a full sync — reload drive from shared store
-                this._reloadDriveFromSharedStore().catch(() => {});
+                this._reloadDriveFromSharedStore().catch(() => { });
+            } else if (data.type === 'recents_updated' && data.fileId) {
+                // Another tab opened a file — reflect in our in-memory recents immediately
+                const { fileId, appName, atime } = data;
+                const existing = this._recents.find(r => r.fileId === fileId);
+                if (!existing || atime > existing.atime) {
+                    this._recents = [
+                        { fileId, appName, atime },
+                        ...this._recents.filter(r => r.fileId !== fileId),
+                    ].slice(0, 100);
+                    this.emit('change');
+                }
             }
         };
     }
@@ -1478,54 +1573,65 @@ export class FileRegistry extends EventEmitter {
     }
 
     // -------------------------------------------------------
-    // Recently opened (cross-app, cross-device)
+    // File access tracking — atime (cross-app, cross-device)
+    // mtime lives on the FileDescriptor and is updated by _onYjsDocUpdated / blob uploads.
     // -------------------------------------------------------
 
     _recordOpen(fileId) {
         const appName = this._appName;
-        const openedAt = new Date().toISOString();
+        const atime = new Date().toISOString();
 
-        // Update in-memory list immediately
+        // Update in-memory list immediately (most-recently-accessed first)
         this._recents = [
-            { fileId, appName, openedAt },
+            { fileId, appName, atime },
             ...this._recents.filter(r => r.fileId !== fileId),
         ].slice(0, 100);
 
         // Persist to shared IDB (fire-and-forget)
-        this._sharedStore?.recordRecent(fileId, appName).catch(() => {});
+        this._sharedStore?.recordAccess(fileId, appName).catch(() => { });
 
-        // Sync to server: immediately if online, otherwise queue
+        // Notify other open tabs so their recents list updates without waiting for a full sync
+        this._driveChannel?.postMessage({ type: 'recents_updated', fileId, appName, atime });
+
+        // Sync to server: immediately if online, otherwise queue (atime travels with the mutation
+        // so the server stamps the actual open time rather than the replay time)
         if (navigator.onLine) {
-            this._api.recordOpen(fileId, appName).catch(() => {});
+            this._api.recordOpen(fileId, appName, atime).catch(() => { });
         } else {
-            this._mutationQueue?.enqueue('record_open', { fileId, appName }).catch(() => {});
+            this._mutationQueue?.enqueue('record_open', { fileId, appName, atime }).catch(() => { });
         }
+
+        this.emit('change');
     }
 
     _getRecentlyOpened(limit) {
-        const results = [];
-        for (const { fileId } of this._recents) {
-            if (results.length >= limit) break;
-            const f = this._files.get(fileId);
-            if (f && !f.deleted && f.scope === 'drive') results.push(f);
+        // _recents is maintained in atime-descending order; iterate and break early.
+        // atime is the current user's own access time — mtime is intentionally excluded
+        // because it reflects any user's edits and would violate per-user ordering.
+        const result = [];
+        for (const rec of this._recents) {
+            const f = this._files.get(rec.fileId);
+            if (!f || f.deleted || f.scope !== 'drive') continue;
+            result.push({ ...f, _activityAt: rec.atime, _activityType: 'opened' });
+            if (result.length >= limit) break;
         }
-        return results;
+        return result;
     }
 
     _mergeServerRecents(serverRecents) {
-        // Merge server entries into the in-memory recents list
+        // Merge server atime entries — keep whichever is newer
         for (const r of serverRecents) {
             const fileId = r.fileId ?? r.file_id;
             const appName = r.appName ?? r.app_name ?? null;
-            const openedAt = r.openedAt ?? r.opened_at;
-            if (!fileId || !openedAt) continue;
+            const atime = r.atime ?? r.openedAt ?? r.opened_at;
+            if (!fileId || !atime) continue;
             const existing = this._recents.find(x => x.fileId === fileId);
-            if (!existing || openedAt > existing.openedAt) {
+            if (!existing || atime > existing.atime) {
                 this._recents = this._recents.filter(x => x.fileId !== fileId);
-                this._recents.push({ fileId, appName, openedAt });
+                this._recents.push({ fileId, appName, atime });
             }
         }
-        this._recents.sort((a, b) => b.openedAt < a.openedAt ? -1 : b.openedAt > a.openedAt ? 1 : 0);
+        this._recents.sort((a, b) => b.atime > a.atime ? 1 : -1); // newest first
         this._recents = this._recents.slice(0, 100);
     }
 
@@ -1537,12 +1643,12 @@ export class FileRegistry extends EventEmitter {
         if (typeof window === 'undefined') return;
         this._onOnline = async () => {
             // Flush queued mutations first, then resync metadata
-            await this._mutationQueue?.flush().catch(() => {});
-            this.sync().catch(() => {});
+            await this._mutationQueue?.flush().catch(() => { });
+            this.sync().catch(() => { });
         };
         this._onVisible = () => {
             if (document.visibilityState === 'visible' && navigator.onLine) {
-                this.sync().catch(() => {});
+                this.sync().catch(() => { });
             }
         };
         window.addEventListener('online', this._onOnline);
@@ -1558,7 +1664,7 @@ export class FileRegistry extends EventEmitter {
     _startSyncInterval() {
         const ms = this._options.syncInterval ?? 300_000;
         this._syncInterval = setInterval(() => {
-            if (navigator.onLine && !this._syncState.isSyncing) this.sync().catch(() => {});
+            if (navigator.onLine && !this._syncState.isSyncing) this.sync().catch(() => { });
         }, ms);
     }
 
@@ -1588,8 +1694,9 @@ export class FileRegistry extends EventEmitter {
  * @property {boolean} publicRead
  * @property {boolean} publicWrite
  * @property {boolean} deleted
- * @property {string|null} createdAt
- * @property {string|null} updatedAt
+ * @property {string|null} birthtime - creation time, set once, never changes
+ * @property {string|null} mtime     - content modification time (Yjs edits, blob upload)
+ * @property {string|null} ctime     - metadata change time (rename, move, delete, share)
  * @property {{username: string, permissions: string[]}[]} sharedWith
  * @property {string|null} thumbnailKey - key used to fetch thumbnail via getThumbnailUrl()
  */
@@ -1602,7 +1709,7 @@ export class FileRegistry extends EventEmitter {
  * @property {string|null} parentId
  * @property {boolean} publicRead
  * @property {boolean} publicWrite
- * @property {string|null} createdAt
- * @property {string|null} updatedAt
+ * @property {string|null} birthtime - creation time
+ * @property {string|null} ctime     - metadata change time (rename, move)
  * @property {{username: string, permissions: string[]}[]} sharedWith
  */

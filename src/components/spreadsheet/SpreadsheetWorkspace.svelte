@@ -16,6 +16,7 @@
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { CellTypeRegistry } from "../../stores/spreadsheet/index.js";
     import { authStore } from "../../stores/authStore.js";
+    import { router } from "../../lib/router.svelte.js";
 
     let { docId, registry = null } = $props();
 
@@ -25,7 +26,7 @@
 
     // ── Awareness / presence ───────────────────────────────────────────────────
     let awareness = $derived(spreadsheetSession.awareness);
-    let currentUser = $derived($authStore.user?.username ?? '');
+    let currentUser = $derived($authStore.user?.username ?? "");
 
     // ── Page break overlay state ───────────────────────────────────────────────
     let showPageBreaks = $state(false);
@@ -112,7 +113,7 @@
         if (docId) {
             loadDoc(docId);
         }
-        document.addEventListener('togglePageBreaks', handleTogglePageBreaks);
+        document.addEventListener("togglePageBreaks", handleTogglePageBreaks);
     });
 
     // Use $effect only for docId changes after mount
@@ -125,7 +126,10 @@
     });
 
     onDestroy(() => {
-        document.removeEventListener('togglePageBreaks', handleTogglePageBreaks);
+        document.removeEventListener(
+            "togglePageBreaks",
+            handleTogglePageBreaks,
+        );
         // Optionally unload document when leaving
         // unloadDocument();
     });
@@ -145,15 +149,17 @@
     // Cross-sheet formula editing: true when editing a formula and navigated to another sheet
     let isCrossSheetFormulaEdit = $derived(
         editSessionState.isFormulaMode &&
-        editSessionState.editingSheetId !== null &&
-        editSessionState.editingSheetId !== activeSheetId
+            editSessionState.editingSheetId !== null &&
+            editSessionState.editingSheetId !== activeSheetId,
     );
 
     let crossSheetOriginLabel = $derived.by(() => {
-        if (!isCrossSheetFormulaEdit) return '';
+        if (!isCrossSheetFormulaEdit) return "";
         const cell = editSessionState.cell;
-        if (!cell) return '';
-        const sheetName = spreadsheetSession.getSheetName(editSessionState.editingSheetId);
+        if (!cell) return "";
+        const sheetName = spreadsheetSession.getSheetName(
+            editSessionState.editingSheetId,
+        );
         const cellRef = toCellRef(cell.row, cell.col);
         return `${sheetName}!${cellRef}`;
     });
@@ -162,7 +168,7 @@
         if (editSessionState.isFormulaMode) {
             // Stay in formula edit mode — just switch the sheet for reference picking.
             // Switch surface to formula bar so the input remains accessible while browsing.
-            editSessionState.switchSurface('formulaBar', { focus: true });
+            editSessionState.switchSurface("formulaBar", { focus: true });
             spreadsheetSession.setActiveSheet(sheetId);
             return;
         }
@@ -172,7 +178,10 @@
     function handleCancelCrossSheetEdit() {
         const editingSheetId = editSessionState.editingSheetId;
         editSessionState.cancel();
-        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
+        if (
+            editingSheetId &&
+            editingSheetId !== spreadsheetSession.activeSheetId
+        ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
     }
@@ -190,8 +199,36 @@
     }
 
     function handleCloseDocument() {
-        window.location.hash = "";
+        router.goHome();
     }
+
+    // Capture the hash present in the URL at the moment this component mounts
+    // (before any effect can overwrite it with the default sheet id).
+    const _initialHash = window.location.hash.slice(1);
+    let _hashRestored = false;
+
+    // After loading completes, restore the sheet from the captured hash once.
+    // Then keep the hash in sync with every subsequent sheet change.
+    $effect(() => {
+        const sheetId = spreadsheetSession.activeSheetId;
+        if (!sheetId) return;
+
+        if (!_hashRestored && !isLoading && spreadsheetSession.sheets?.length) {
+            _hashRestored = true;
+            if (_initialHash && _initialHash !== sheetId) {
+                const exists = spreadsheetSession.sheets.some(
+                    (s) => s.id === _initialHash,
+                );
+                if (exists) {
+                    spreadsheetSession.setActiveSheet(_initialHash);
+                    return; // next run will update the hash
+                }
+            }
+        }
+
+        // Keep URL hash in sync with current sheet
+        history.replaceState({}, "", window.location.pathname + "#" + sheetId);
+    });
 </script>
 
 <div class="spreadsheet-workspace">
@@ -212,102 +249,172 @@
         </div>
     {:else}
         <div class="workspace-outer">
-        {#if showHistory && registry}
-            <HistoryPanel
-                {registry}
-                fileId={docId}
-                currentDoc={spreadsheetSession.ydoc ?? null}
-                onClose={() => { showHistory = false; }}
-            />
-        {/if}
-        <div class="workspace-container">
-            <!-- Toolbar -->
-            <Toolbar
-                onClose={handleCloseDocument}
-                {awareness}
-                {currentUser}
-                onShowHistory={registry ? () => { showHistory = true; } : undefined}
-            />
-
-            <!-- Formula Bar -->
-            <FormulaBar
-                {selectedCell}
-                onEdit={(value, row, col, sheetId) => {
-                    // Use provided row/col if available (from editingCell tracking)
-                    // otherwise fall back to current anchor
-                    const targetRow = row ?? selectionState.anchor?.row;
-                    const targetCol = col ?? selectionState.anchor?.col;
-                    if (targetRow === undefined || targetCol === undefined) return;
-
-                    // Route table cell edits to the table store, not the sheet store
-                    const renderContext = spreadsheetSession.renderContext;
-                    if (renderContext) {
-                        const cellType = renderContext.getCellType(targetRow, targetCol);
-                        if (cellType === CELL_TYPE.TABLE_DATA) {
-                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                            }
-                            return;
-                        }
-                        if (cellType === CELL_TYPE.TABLE_ENTRY) {
-                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                                info.table.setEntryValue(info.colDef.id, parsed);
-                            }
-                            return;
-                        }
-                        if (cellType === CELL_TYPE.TABLE_HEADER) {
-                            const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                            if (info?.table && info.colDef) {
-                                const newName = String(value ?? "").trim();
-                                if (newName) info.table.renameColumn(info.colDef.id, newName);
-                            }
-                            return;
-                        }
-                    }
-
-                    const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
-                    if (typeof value === 'string' && value.startsWith('=')) {
-                        spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
-                    } else {
-                        spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
-                    }
-                }}
-            />
-
-            <!-- Main Grid -->
-            <div class="grid-container">
-                <Grid
-                    showPageBreaks={showPageBreaks}
-                    printSettings={pageBreakPrintSettings ?? spreadsheetSession.activeSheetStore?.getPrintSettings() ?? null}
+            {#if showHistory && registry}
+                <HistoryPanel
+                    {registry}
+                    fileId={docId}
+                    currentDoc={spreadsheetSession.ydoc ?? null}
+                    onClose={() => {
+                        showHistory = false;
+                    }}
                 />
-                {#if isCrossSheetFormulaEdit}
-                    <div class="cross-sheet-indicator">
-                        <span class="cross-sheet-icon">⊞</span>
-                        <span class="cross-sheet-label">Editing <strong>{crossSheetOriginLabel}</strong></span>
-                        <span class="cross-sheet-hint">Click cells to add references · Enter to confirm · Esc to cancel</span>
-                        <button
-                            class="cross-sheet-cancel"
-                            onclick={handleCancelCrossSheetEdit}
-                            title="Cancel edit"
-                        >✕</button>
-                    </div>
-                {/if}
-            </div>
+            {/if}
+            <div class="workspace-container">
+                <!-- Toolbar -->
+                <Toolbar
+                    onClose={handleCloseDocument}
+                    {awareness}
+                    {currentUser}
+                    onShowHistory={registry
+                        ? () => {
+                              showHistory = true;
+                          }
+                        : undefined}
+                    {registry}
+                />
 
-            <!-- Sheet Tabs -->
-            <SheetTabs
-                {sheets}
-                {activeSheetId}
-                onSheetChange={handleSheetChange}
-                onAddSheet={handleAddSheet}
-                onDeleteSheet={handleDeleteSheet}
-                onRenameSheet={handleRenameSheet}
-            />
-        </div>
+                <!-- Formula Bar -->
+                <FormulaBar
+                    {selectedCell}
+                    onEdit={(value, row, col, sheetId) => {
+                        // Use provided row/col if available (from editingCell tracking)
+                        // otherwise fall back to current anchor
+                        const targetRow = row ?? selectionState.anchor?.row;
+                        const targetCol = col ?? selectionState.anchor?.col;
+                        if (targetRow === undefined || targetCol === undefined)
+                            return;
+
+                        // Route table cell edits to the table store, not the sheet store
+                        const renderContext = spreadsheetSession.renderContext;
+                        if (renderContext) {
+                            const cellType = renderContext.getCellType(
+                                targetRow,
+                                targetCol,
+                            );
+                            if (cellType === CELL_TYPE.TABLE_DATA) {
+                                const info =
+                                    renderContext.tableManager?.getCellInfo(
+                                        targetRow,
+                                        targetCol,
+                                    );
+                                if (
+                                    info?.table &&
+                                    info.colDef &&
+                                    !info.colDef.isNonEntry
+                                ) {
+                                    const parsed = CellTypeRegistry.parseInput(
+                                        { type: info.colDef.type },
+                                        value,
+                                    );
+                                    info.table.updateCell(
+                                        info.dataIndex,
+                                        info.colDef.id,
+                                        parsed,
+                                    );
+                                }
+                                return;
+                            }
+                            if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                                const info =
+                                    renderContext.tableManager?.getCellInfo(
+                                        targetRow,
+                                        targetCol,
+                                    );
+                                if (
+                                    info?.table &&
+                                    info.colDef &&
+                                    !info.colDef.isNonEntry
+                                ) {
+                                    const parsed = CellTypeRegistry.parseInput(
+                                        { type: info.colDef.type },
+                                        value,
+                                    );
+                                    info.table.setEntryValue(
+                                        info.colDef.id,
+                                        parsed,
+                                    );
+                                }
+                                return;
+                            }
+                            if (cellType === CELL_TYPE.TABLE_HEADER) {
+                                const info =
+                                    renderContext.tableManager?.getCellInfo(
+                                        targetRow,
+                                        targetCol,
+                                    );
+                                if (info?.table && info.colDef) {
+                                    const newName = String(value ?? "").trim();
+                                    if (newName)
+                                        info.table.renameColumn(
+                                            info.colDef.id,
+                                            newName,
+                                        );
+                                }
+                                return;
+                            }
+                        }
+
+                        const targetSheetId =
+                            sheetId ?? spreadsheetSession.activeSheetId;
+                        if (
+                            typeof value === "string" &&
+                            value.startsWith("=")
+                        ) {
+                            spreadsheetSession.setCellFormulaOnSheet(
+                                targetSheetId,
+                                targetRow,
+                                targetCol,
+                                value,
+                            );
+                        } else {
+                            spreadsheetSession.setCellValueOnSheet(
+                                targetSheetId,
+                                targetRow,
+                                targetCol,
+                                value,
+                            );
+                        }
+                    }}
+                />
+
+                <!-- Main Grid -->
+                <div class="grid-container">
+                    <Grid
+                        {showPageBreaks}
+                        printSettings={pageBreakPrintSettings ??
+                            spreadsheetSession.activeSheetStore?.getPrintSettings() ??
+                            null}
+                    />
+                    {#if isCrossSheetFormulaEdit}
+                        <div class="cross-sheet-indicator">
+                            <span class="cross-sheet-icon">⊞</span>
+                            <span class="cross-sheet-label"
+                                >Editing <strong>{crossSheetOriginLabel}</strong
+                                ></span
+                            >
+                            <span class="cross-sheet-hint"
+                                >Click cells to add references · Enter to
+                                confirm · Esc to cancel</span
+                            >
+                            <button
+                                class="cross-sheet-cancel"
+                                onclick={handleCancelCrossSheetEdit}
+                                title="Cancel edit">✕</button
+                            >
+                        </div>
+                    {/if}
+                </div>
+
+                <!-- Sheet Tabs -->
+                <SheetTabs
+                    {sheets}
+                    {activeSheetId}
+                    onSheetChange={handleSheetChange}
+                    onAddSheet={handleAddSheet}
+                    onDeleteSheet={handleDeleteSheet}
+                    onRenameSheet={handleRenameSheet}
+                />
+            </div>
         </div>
     {/if}
 </div>
@@ -405,12 +512,12 @@
     .cross-sheet-hint {
         opacity: 0.75;
         font-size: 0.75rem;
-        border-left: 1px solid rgba(255,255,255,0.3);
+        border-left: 1px solid rgba(255, 255, 255, 0.3);
         padding-left: 0.5rem;
     }
 
     .cross-sheet-cancel {
-        background: rgba(255,255,255,0.15);
+        background: rgba(255, 255, 255, 0.15);
         border: none;
         color: #fff;
         width: 20px;
@@ -426,6 +533,6 @@
     }
 
     .cross-sheet-cancel:hover {
-        background: rgba(255,255,255,0.25);
+        background: rgba(255, 255, 255, 0.25);
     }
 </style>

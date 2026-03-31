@@ -94,8 +94,9 @@ export class StorageAPI {
             publicRead:   !!raw.publicRead,
             publicWrite:  !!raw.publicWrite,
             deleted:      !!raw.deleted,
-            createdAt:    raw.createdAt    ?? null,
-            updatedAt:    raw.updatedAt    ?? null,
+            birthtime:    raw.birthtime  ?? raw.createdAt  ?? null,
+            mtime:        raw.mtime      ?? raw.updatedAt  ?? null,
+            ctime:        raw.ctime      ?? raw.updatedAt  ?? null,
             sharedWith:   this._normalizeShares(raw.sharedWith),
             thumbnailKey: raw.thumbnailKey ?? null,
         };
@@ -110,8 +111,8 @@ export class StorageAPI {
             parentId:    raw.parentId    ?? null,
             publicRead:  !!raw.publicRead,
             publicWrite: !!raw.publicWrite,
-            createdAt:   raw.createdAt   ?? null,
-            updatedAt:   raw.updatedAt   ?? null,
+            birthtime:   raw.birthtime ?? raw.createdAt ?? null,
+            ctime:       raw.ctime     ?? raw.updatedAt ?? null,
             sharedWith:  this._normalizeShares(raw.sharedWith),
         };
     }
@@ -135,9 +136,9 @@ export class StorageAPI {
             files:   (data.files   ?? []).map(f => this._normalizeFile(f)),
             folders: (data.folders ?? []).map(f => this._normalizeFolder(f)),
             recents: (data.recents ?? []).map(r => ({
-                fileId:   r.file_id ?? r.fileId,
-                appName:  r.app_name ?? r.appName ?? null,
-                openedAt: r.opened_at ?? r.openedAt,
+                fileId:  r.file_id  ?? r.fileId,
+                appName: r.app_name ?? r.appName ?? null,
+                atime:   r.atime    ?? r.opened_at ?? r.openedAt,
             })),
         };
     }
@@ -385,14 +386,15 @@ export class StorageAPI {
      * Fire-and-forget: errors are intentionally ignored by callers.
      * @param {string} fileId
      * @param {string} appName
+     * @param {string} atime  ISO 8601 timestamp of when the open occurred (client time)
      * @returns {Promise<void>}
      */
-    async recordOpen(fileId, appName) {
-        await this._post({ action: 'record_open', file_id: fileId, app_name: appName ?? '' });
+    async recordOpen(fileId, appName, atime) {
+        await this._post({ action: 'record_open', file_id: fileId, app_name: appName ?? '', opened_at: atime ?? '' });
     }
 
     /**
-     * Update a Yjs file's updatedAt timestamp on the server.
+     * Update a Yjs file's mtime on the server.
      * Called after offline edits are synced back to the server.
      * @param {string} id
      * @returns {Promise<void>}
@@ -483,7 +485,7 @@ export class StorageAPI {
  * @typedef {object} RecentEntry
  * @property {string}      fileId
  * @property {string|null} appName
- * @property {string}      openedAt  ISO datetime string
+ * @property {string}      atime  ISO datetime string (last access time)
  */
 
 /**

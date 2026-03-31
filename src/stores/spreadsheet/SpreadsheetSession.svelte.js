@@ -23,6 +23,7 @@ import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
 import { parseFormula } from '../../formulas/parser.js';
 import { evaluate } from '../../formulas/evaluator.js';
 import { FormulaError } from '../../formulas/functions.js';
+import { ExternalDocManager } from './ExternalDocManager.js';
 import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
 import { TableManager } from './features/TableManager.svelte.js';
 import { RepeaterEngine } from './features/RepeaterEngine.svelte.js';
@@ -86,6 +87,9 @@ export class SpreadsheetSession {
 
     /** @type {Function | null} Cleanup for undo manager observer */
     #cleanupUndoObserver = null;
+
+    /** @type {ExternalDocManager | null} Manages external doc loading for IMPORTRANGE */
+    #externalDocManager = null;
 
     /** @type {Promise | null} Lock for preventing concurrent loads */
     #loadPromise = null;
@@ -211,16 +215,16 @@ export class SpreadsheetSession {
                     this.#setupUndoObserver();
                 }
 
-                // Initialize formula engine for the active sheet
-                this.#initializeFormulaEngine(activeSheet);
+                // Create TableManager before formula engine so TABLE_* functions are
+                // registered before formulas are evaluated on first load.
+                this.tableManager = new TableManager(activeSheet, ydoc);
+
+                // Initialize formula engine for the active sheet (registers tableManager functions first)
+                this.#initializeFormulaEngine(activeSheet, this.tableManager);
 
                 // Create SheetRenderContext (after formula engine is ready)
                 this.renderContext = new SheetRenderContext(this.activeSheetStore, ydoc, this);
-
-                // Initialize TableManager and wire into renderContext + formula engine
-                this.tableManager = new TableManager(activeSheet, ydoc);
                 this.renderContext.tableManager = this.tableManager;
-                this.tableManager.registerFunctions(this.formulaEngine);
 
                 // Initialize RepeaterEngine and wire into renderContext
                 this.repeaterEngine = new RepeaterEngine(activeSheet, ydoc);
@@ -284,6 +288,12 @@ export class SpreadsheetSession {
         if (this.formulaEngine) {
             this.formulaEngine.clear();
             this.formulaEngine = null;
+        }
+
+        // Cleanup external doc manager
+        if (this.#externalDocManager) {
+            this.#externalDocManager.destroy();
+            this.#externalDocManager = null;
         }
 
         // Cleanup TableManager
@@ -417,11 +427,36 @@ export class SpreadsheetSession {
      * Initialize the formula engine for a sheet
      * @param {Y.Map} sheet
      */
-    #initializeFormulaEngine(sheet) {
+    #initializeFormulaEngine(sheet, tableManager = null) {
         if (!this.ydoc || !this.activeSheetStore) return;
+
+        // Create (or reuse) the external doc manager. It persists across sheet switches
+        // so that already-loaded docs don't need to be re-fetched.
+        if (!this.#externalDocManager) {
+            this.#externalDocManager = new ExternalDocManager(
+                storage,
+                (_fileId) => {
+                    // A referenced external doc just finished loading — recalculate
+                    // all formulas so IMPORTRANGE cells get their real values.
+                    this.formulaEngine?.recalculateAll();
+                }
+            );
+        }
 
         // Create new formula engine
         this.formulaEngine = new FormulaEngine();
+
+        // Register TABLE_* functions immediately so they are available when existing
+        // formulas are evaluated below (prevents #NAME? on first load).
+        tableManager?.registerFunctions(this.formulaEngine);
+
+        // Register IMPORTRANGE as a custom function, closing over the manager.
+        const extMgr = this.#externalDocManager;
+        this.formulaEngine.registerFunction('IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
+            if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
+            if (typeof rangeStr !== 'string') return FormulaError.VALUE;
+            return extMgr.getRange(String(fileIdOrUrl), rangeStr);
+        });
 
         // Set up cell value getter - returns raw cell values from Yjs
         this.formulaEngine.setCellValueGetter((row, col) => {
@@ -635,19 +670,21 @@ export class SpreadsheetSession {
                 this.#cleanupFormulaObserver();
                 this.#cleanupFormulaObserver = null;
             }
-            this.#initializeFormulaEngine(sheet);
 
             // Recreate feature engines for the new sheet
             if (this.tableManager) { this.tableManager.destroy(); }
             if (this.repeaterEngine) { this.repeaterEngine.destroy(); }
             if (this.renderContext) { this.renderContext.destroy(); }
 
-            this.renderContext = new SheetRenderContext(this.activeSheetStore, this.ydoc, this);
+            // Create TableManager before formula engine so TABLE_* functions are
+            // registered before formulas are evaluated on sheet switch.
             this.tableManager = new TableManager(sheet, this.ydoc);
+            this.#initializeFormulaEngine(sheet, this.tableManager);
+
+            this.renderContext = new SheetRenderContext(this.activeSheetStore, this.ydoc, this);
             this.repeaterEngine = new RepeaterEngine(sheet, this.ydoc);
             this.renderContext.tableManager = this.tableManager;
             this.renderContext.repeaterEngine = this.repeaterEngine;
-            this.tableManager.registerFunctions(this.formulaEngine);
         }
     }
 
@@ -673,19 +710,21 @@ export class SpreadsheetSession {
      * @returns {any}
      */
     getCellDisplayValue(row, col) {
-        const cell = this.getCell(row, col);
-        if (!cell.exists) return '';
-
-        const rawValue = cell.v;
-
-        // If it's a formula, get computed value from engine
-        if (typeof rawValue === 'string' && rawValue.startsWith('=')) {
-            const computed = this.formulaEngine?.getComputedValue(row, col);
-            return computed ?? '';
+        // Always check the formula engine first.
+        // It holds both formula-computed values (for cells with '=' formulas)
+        // and spill values (for neighbouring cells filled by array formulas like
+        // FILTER, IMPORTRANGE, etc.).  The engine's computedValues map is the
+        // single source of truth for any formula-derived display value.
+        if (this.formulaEngine) {
+            const key = `${row},${col}`;
+            if (key in this.formulaEngine.computedValues) {
+                return this.formulaEngine.computedValues[key] ?? '';
+            }
         }
 
-        // Otherwise return the raw value
-        return rawValue ?? '';
+        const cell = this.getCell(row, col);
+        if (!cell.exists) return '';
+        return cell.v ?? '';
     }
 
     /**

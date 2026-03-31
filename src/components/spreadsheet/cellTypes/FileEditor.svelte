@@ -21,8 +21,8 @@
      *   onCommit - callback(blobId, { mimeType, filename, size, fit? })
      *   onCancel - callback()
      */
+    import { untrack } from 'svelte';
     import storage from '../../../stores/storage.js';
-    import FileViewer from './FileViewer.svelte';
     import { getFileCategory, formatFileSize } from '../../../stores/spreadsheet/cellTypes/types/file.js';
 
     let {
@@ -47,8 +47,35 @@
     let isDragging    = $state(false);
     let isUploading   = $state(false);
     let uploadError   = $state(null);
-    let showViewer    = $state(false);
     let dropZoneEl    = $state(null);
+
+    function openViewer() {
+        if (!pendingBlobId) return;
+        window.dispatchEvent(new CustomEvent('show-file-viewer', {
+            detail: {
+                blobId:   pendingBlobId,
+                mimeType: pendingMeta.mimeType,
+                filename: pendingMeta.filename,
+                size:     pendingMeta.size,
+            },
+        }));
+    }
+    let innerEl       = $state(null);
+    let panelShift    = $state({ x: 0, y: 0 });
+
+    // Clamp the panel to the viewport after mount
+    $effect(() => {
+        const el = innerEl;
+        if (!el) return;
+        untrack(() => {
+            const rect = el.getBoundingClientRect();
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const x = rect.right  > vw - 8 ? Math.min(0, vw - 8 - rect.right)  : 0;
+            const y = rect.bottom > vh - 8 ? Math.min(0, vh - 8 - rect.bottom) : 0;
+            if (x !== 0 || y !== 0) panelShift = { x, y };
+        });
+    });
 
     // Track blobs uploaded during this session for cleanup on cancel
     let sessionUploads = $state(/** @type {string[]} */ ([]));
@@ -185,23 +212,32 @@
     role="dialog"
     aria-label="File editor"
 >
-    <div class="fe__inner" onclick={(e) => e.stopPropagation()}>
+    <div class="fe__inner" bind:this={innerEl} style={panelShift.x || panelShift.y ? `transform:translate(${panelShift.x}px,${panelShift.y}px)` : ''} onclick={(e) => e.stopPropagation()}>
 
         <!-- ── Existing file info / drop zone ── -->
         {#if pendingBlobId && !isUploading}
             <!-- File card -->
             <div class="fe__card">
-                {#if category === 'image' && previewUrl}
-                    <img
-                        src={previewUrl}
-                        alt={pendingMeta.filename || 'Image'}
-                        class="fe__img-thumb"
-                    />
-                {:else}
-                    <div class="fe__icon fe__icon--{category}">
-                        {CATEGORY_ICONS[category] ?? '📎'}
-                    </div>
-                {/if}
+                <!-- Preview area -->
+                <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                <div
+                    class="fe__preview"
+                    onclick={openViewer}
+                    title="Click to view"
+                >
+                    {#if category === 'image' && previewUrl}
+                        <img
+                            src={previewUrl}
+                            alt={pendingMeta.filename || 'Image'}
+                            class="fe__img-preview"
+                        />
+                    {:else}
+                        <div class="fe__preview-icon fe__preview-icon--{category}">
+                            {CATEGORY_ICONS[category] ?? '📎'}
+                        </div>
+                    {/if}
+                    <div class="fe__preview-overlay">View</div>
+                </div>
 
                 <div class="fe__card-meta">
                     <div class="fe__card-name" title={pendingMeta.filename}>
@@ -214,11 +250,6 @@
                         {/if}
                     </div>
                     <div class="fe__card-actions">
-                        <button
-                            class="fe__action-btn fe__action-btn--view"
-                            onclick={() => (showViewer = true)}
-                            title="View file"
-                        >View</button>
                         <a
                             class="fe__action-btn fe__action-btn--dl"
                             href={previewUrl}
@@ -321,23 +352,10 @@
                 class="fe__btn fe__btn--confirm"
                 onclick={handleConfirm}
                 disabled={isUploading}
-            >
-                {pendingBlobId ? 'Attach' : 'Clear'}
-            </button>
+            >OK</button>
         </div>
     </div>
 </div>
-
-<!-- File viewer modal -->
-{#if showViewer && pendingBlobId}
-    <FileViewer
-        blobId={pendingBlobId}
-        mimeType={pendingMeta.mimeType}
-        filename={pendingMeta.filename}
-        size={pendingMeta.size}
-        onClose={() => (showViewer = false)}
-    />
-{/if}
 
 <style>
     .fe {
@@ -365,7 +383,7 @@
 
     .fe__card {
         display: flex;
-        gap: 12px;
+        gap: 10px;
         align-items: flex-start;
         background: #f8fafc;
         border: 1px solid #e2e8f0;
@@ -373,32 +391,60 @@
         padding: 10px;
     }
 
-    .fe__img-thumb {
-        width: 56px;
-        height: 56px;
-        object-fit: cover;
-        border-radius: 5px;
+    /* Clickable preview area */
+    .fe__preview {
+        position: relative;
+        width: 72px;
+        height: 72px;
+        border-radius: 6px;
         flex-shrink: 0;
+        overflow: hidden;
+        cursor: pointer;
         background: #e2e8f0;
     }
 
-    .fe__icon {
-        width: 56px;
-        height: 56px;
-        border-radius: 8px;
+    .fe__img-preview {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+
+    .fe__preview-icon {
+        width: 100%;
+        height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 26px;
-        flex-shrink: 0;
+        font-size: 30px;
     }
 
-    .fe__icon--image { background: #d1fae5; }
-    .fe__icon--pdf   { background: #fee2e2; }
-    .fe__icon--text  { background: #dbeafe; }
-    .fe__icon--video { background: #ede9fe; }
-    .fe__icon--audio { background: #fef3c7; }
-    .fe__icon--other { background: #f1f5f9; }
+    .fe__preview-icon--image { background: #d1fae5; }
+    .fe__preview-icon--pdf   { background: #fee2e2; }
+    .fe__preview-icon--text  { background: #dbeafe; }
+    .fe__preview-icon--video { background: #ede9fe; }
+    .fe__preview-icon--audio { background: #fef3c7; }
+    .fe__preview-icon--other { background: #f1f5f9; }
+
+    /* "View" label shown on hover */
+    .fe__preview-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.45);
+        color: #fff;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        opacity: 0;
+        transition: opacity 0.12s;
+    }
+
+    .fe__preview:hover .fe__preview-overlay {
+        opacity: 1;
+    }
 
     .fe__card-meta {
         flex: 1;

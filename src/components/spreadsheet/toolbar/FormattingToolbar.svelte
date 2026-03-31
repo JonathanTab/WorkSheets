@@ -36,14 +36,27 @@
     /** Maximum cells to sample when computing mixed formatting state */
     const MAX_SAMPLE_CELLS = 200;
 
-    // Derived: Get formatting state for selected cells
-    // Selection range expanded to cover any merged cells it touches — used by
-    // the border picker so that "outside border" sets edges on the full merge
-    // extent rather than just the primary cell's 1×1 footprint.
+    // Derived: effective selection range for the border picker.
+    // For rows/cols/all modes uses effectiveRange so that borders can be applied
+    // to whole-row and whole-column selections. For range mode also expands to
+    // cover any merged cells the selection touches.
     let borderSelectionRange = $derived.by(() => {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return null;
+
+        const mode = selectionState.selectionMode;
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+
+        // For whole-axis / all modes, use effectiveRange directly (no merges to expand)
+        if (mode !== 'range') {
+            return selectionState.effectiveRange(rowCount, colCount);
+        }
+
+        // For range mode, expand to cover any merged cells the selection touches
         const range = selectionState.range;
         if (!range) return null;
-        const mergeEngine = spreadsheetSession.activeSheetStore?.mergeEngine;
+        const mergeEngine = sheetStore.mergeEngine;
         if (!mergeEngine || mergeEngine.merges.length === 0) return range;
         let { startRow, endRow, startCol, endCol } = range;
         let changed = true;
@@ -52,9 +65,9 @@
             for (const m of mergeEngine.merges) {
                 if (m.startRow <= endRow && m.endRow >= startRow && m.startCol <= endCol && m.endCol >= startCol) {
                     if (m.startRow < startRow) { startRow = m.startRow; changed = true; }
-                    if (m.endRow > endRow) { endRow = m.endRow; changed = true; }
-                    if (m.startCol < startCol) { startCol = m.startCol; changed = true; }
-                    if (m.endCol > endCol) { endCol = m.endCol; changed = true; }
+                    if (m.endRow > endRow)      { endRow   = m.endRow;   changed = true; }
+                    if (m.startCol < startCol)  { startCol = m.startCol; changed = true; }
+                    if (m.endCol > endCol)      { endCol   = m.endCol;   changed = true; }
                 }
             }
         }

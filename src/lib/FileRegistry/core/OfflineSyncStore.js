@@ -10,10 +10,14 @@
  *
  * Stores (v2 additions):
  *   'mutations'     - Offline metadata mutations (create/rename/delete/move/etc.)
- *   'recents'       - Cross-app recently opened files (fileId → {appName, openedAt})
+ *   'recents'       - Cross-app per-user access log (fileId → {appName, atime})
  *   'drive_files'   - Shared drive FileDescriptor cache (across all apps for this user)
  *   'drive_folders' - Shared drive Folder cache
  *   'drive_meta'    - Drive sync metadata (lastSync timestamp, etc.)
+ *
+ * Stores (v3 additions):
+ *   'pending_blobs' - Offline-created blob files awaiting upload (previously in v2
+ *                     but not always migrated; bumped to v3 to guarantee creation)
  */
 export class OfflineSyncStore {
     /** @param {string} username */
@@ -26,7 +30,7 @@ export class OfflineSyncStore {
     async open() {
         if (this._db) return;
         this._db = await new Promise((resolve, reject) => {
-            const req = indexedDB.open(this.dbName, 2);
+            const req = indexedDB.open(this.dbName, 3);
             req.onerror = () => reject(req.error);
             req.onsuccess = () => resolve(req.result);
             req.onupgradeneeded = (e) => {
@@ -48,9 +52,9 @@ export class OfflineSyncStore {
                     db.createObjectStore('drive_files', { keyPath: 'id' });
                     db.createObjectStore('drive_folders', { keyPath: 'id' });
                     db.createObjectStore('drive_meta');
-
-                    // Pending offline blobs awaiting upload when connection is restored.
-                    // Keyed by the client-generated file ID.
+                }
+                // V3: guarantee pending_blobs exists (was in v2 but not always migrated)
+                if (!db.objectStoreNames.contains('pending_blobs')) {
                     db.createObjectStore('pending_blobs', { keyPath: 'id' });
                 }
             };
@@ -63,7 +67,7 @@ export class OfflineSyncStore {
 
     /**
      * Record a Yjs room as needing sync. Idempotent — same fileId overwrites.
-     * @param {{ fileId: string, roomId: string, wsUrl: string, modifiedAt: string }} entry
+     * @param {{ fileId: string, roomId: string, wsUrl: string, mtime: string }} entry
      */
     async addPending(entry) {
         return this._put('pending', entry);
@@ -73,7 +77,7 @@ export class OfflineSyncStore {
         return this._delete('pending', fileId);
     }
 
-    /** @returns {Promise<{fileId, roomId, wsUrl, modifiedAt}[]>} */
+    /** @returns {Promise<{fileId, roomId, wsUrl, mtime}[]>} */
     async getAllPending() {
         return this._getAll('pending');
     }
@@ -84,7 +88,7 @@ export class OfflineSyncStore {
 
     /**
      * Queue a server touch for a file. Idempotent.
-     * @param {{ fileId: string, modifiedAt: string }} entry
+     * @param {{ fileId: string, mtime: string }} entry
      */
     async addToTouchQueue(entry) {
         return this._put('touchQueue', entry);
@@ -94,7 +98,7 @@ export class OfflineSyncStore {
         return this._delete('touchQueue', fileId);
     }
 
-    /** @returns {Promise<{fileId, modifiedAt}[]>} */
+    /** @returns {Promise<{fileId, mtime}[]>} */
     async getAllTouchQueue() {
         return this._getAll('touchQueue');
     }
@@ -130,39 +134,39 @@ export class OfflineSyncStore {
     // -------------------------------------------------------
 
     /**
-     * Record a file as recently opened for the given app.
-     * Keyed by fileId — overwrites previous entry so each file appears once.
+     * Record a file as accessed (updates atime). Keyed by fileId.
      * @param {string} fileId
      * @param {string} appName
      */
-    async recordRecent(fileId, appName) {
-        return this._put('recents', { fileId, appName, openedAt: new Date().toISOString() });
+    async recordAccess(fileId, appName) {
+        return this._put('recents', { fileId, appName, atime: new Date().toISOString() });
     }
 
     /**
-     * Returns recents sorted by openedAt descending.
+     * Returns recents sorted by atime descending.
      * @param {number} [limit=100]
-     * @returns {Promise<{fileId: string, appName: string, openedAt: string}[]>}
+     * @returns {Promise<{fileId: string, appName: string, atime: string}[]>}
      */
     async getRecents(limit = 100) {
         const all = await this._getAll('recents');
-        all.sort((a, b) => b.openedAt < a.openedAt ? -1 : b.openedAt > a.openedAt ? 1 : 0);
+        all.sort((a, b) => b.atime > a.atime ? 1 : -1); // newest first
         return all.slice(0, limit);
     }
 
     /**
-     * Merge recents from server. For each entry, only update if server's openedAt is newer.
-     * @param {{ fileId: string, appName: string|null, opened_at: string }[]} serverRecents
+     * Merge recents from server — keep whichever atime is newer.
+     * @param {{ fileId: string, appName: string|null, atime?: string, opened_at?: string }[]} serverRecents
      */
     async mergeRecents(serverRecents) {
         for (const r of serverRecents) {
             const fileId = r.fileId ?? r.file_id;
             if (!fileId) continue;
-            const openedAt = r.openedAt ?? r.opened_at;
+            const atime = r.atime ?? r.openedAt ?? r.opened_at;
             const appName = r.appName ?? r.app_name ?? null;
+            if (!atime) continue;
             const existing = await this._get('recents', fileId);
-            if (!existing || openedAt > existing.openedAt) {
-                await this._put('recents', { fileId, appName, openedAt });
+            if (!existing || atime > existing.atime) {
+                await this._put('recents', { fileId, appName, atime });
             }
         }
     }

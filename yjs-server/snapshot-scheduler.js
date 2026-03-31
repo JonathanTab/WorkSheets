@@ -1,43 +1,55 @@
 import * as Y from 'yjs';
 
 /**
- * SnapshotScheduler — intelligent automatic snapshot management.
+ * SnapshotScheduler — session-aware automatic snapshot management.
  *
- * Smart snapshot strategies:
- *   1. Change-threshold triggering: Snapshot after N significant updates
- *   2. Adaptive intervals: Adjust timing based on editing frequency
- *   3. Update size awareness: Track bytes changed for significance
- *   4. Session-based triggers: Handle user join/leave patterns intelligently
- *   5. Retention policy: Auto-cleanup of old snapshots
- *   6. User activity awareness: Different strategies for collaborative sessions
+ * Snapshot trigger model:
+ *   - Editing session boundary: snapshot when a user pauses editing for SESSION_IDLE_MS.
+ *     e.g. user logs in daily and makes one change → one snapshot per visit.
+ *   - Long-session cap: during continuous editing, snapshot at most every IN_SESSION_CAP_MS.
+ *     e.g. user edits for 5 hours → snapshot roughly every 15 minutes.
+ *   - Room empty: immediate snapshot when all users disconnect (if unsaved changes exist).
+ *   - Real-change guard: every snapshot candidate is checked against the Y.js state vector
+ *     from the previous snapshot — pure no-ops (presence, dedup) never trigger a save.
+ *
+ * Retention model (per file, auto snapshots only):
+ *   - Slot-based thinning: within each time slot, keep only the newest snapshot.
+ *   - Slot sizes grow with age: 4h → 1d → 3d → 7d → 30d.
+ *   - Same-slot duplicates are only deleted once the older copy is ≥ 6 months old,
+ *     preserving full resolution within the 6-month window.
+ *   - Manual snapshots are never touched.
+ *   - Minimum 5 auto snapshots per file always preserved.
  *
  * Configuration (environment variables):
- *   SNAPSHOT_MIN_INTERVAL     - Min quiet period before snapshot (default: 5 min)
- *   SNAPSHOT_MAX_INTERVAL     - Max time between snapshots (default: 30 min)
- *   SNAPSHOT_UPDATE_THRESHOLD - Number of updates to trigger snapshot (default: 50)
- *   SNAPSHOT_BYTE_THRESHOLD   - Bytes changed to trigger snapshot (default: 50KB)
- *   SNAPSHOT_RETENTION_COUNT  - Max snapshots per file to keep (default: 20)
- *   SNAPSHOT_RETENTION_AGE    - Max age in hours for snapshots (default: 720 = 30 days)
+ *   SNAPSHOT_IDLE        - Idle time (ms) that ends a session (default: 5 min)
+ *   SNAPSHOT_CAP         - Max interval (ms) between checkpoints during active editing (default: 15 min)
+ *   SNAPSHOT_COLLAB_IDLE - Idle time for multi-user sessions (default: 2 min)
+ *   SNAPSHOT_COLLAB_CAP  - Checkpoint interval for multi-user sessions (default: 10 min)
  */
 
-// Configuration with sensible defaults
 const CONFIG = {
-    MIN_INTERVAL: parseInt(process.env.SNAPSHOT_MIN_INTERVAL ?? String(5 * 60 * 1000)),      // 5 min
-    MAX_INTERVAL: parseInt(process.env.SNAPSHOT_MAX_INTERVAL ?? String(30 * 60 * 1000)),    // 30 min
-    UPDATE_THRESHOLD: parseInt(process.env.SNAPSHOT_UPDATE_THRESHOLD ?? '50'),              // 50 updates
-    BYTE_THRESHOLD: parseInt(process.env.SNAPSHOT_BYTE_THRESHOLD ?? String(50 * 1024)),     // 50KB
-    RETENTION_COUNT: parseInt(process.env.SNAPSHOT_RETENTION_COUNT ?? '20'),                // keep 20 snapshots
-    RETENTION_AGE_MS: parseInt(process.env.SNAPSHOT_RETENTION_AGE ?? '720') * 60 * 60 * 1000, // 30 days in ms
-    // Adaptive interval multipliers
-    ADAPTIVE_MIN_FACTOR: 0.5,   // Fast editing: reduce min interval by 50%
-    ADAPTIVE_MAX_FACTOR: 2.0,   // Slow editing: increase max interval by 100%
-    COLLAB_MULTIPLIER: 0.7,     // Multi-user sessions: reduce intervals by 30%
+    SESSION_IDLE_MS:  parseInt(process.env.SNAPSHOT_IDLE        ?? String(5  * 60_000)),
+    IN_SESSION_CAP_MS: parseInt(process.env.SNAPSHOT_CAP        ?? String(15 * 60_000)),
+    COLLAB_IDLE_MS:   parseInt(process.env.SNAPSHOT_COLLAB_IDLE ?? String(2  * 60_000)),
+    COLLAB_CAP_MS:    parseInt(process.env.SNAPSHOT_COLLAB_CAP  ?? String(10 * 60_000)),
 };
+
+// Slot sizes for retention thinning, from most-recent to oldest.
+// Each entry covers snapshots with age in [prevMaxAge, maxAge).
+const RETENTION_SLOTS = [
+    { maxAge:   7 * 86_400_000, slotMs:  4 * 3_600_000 }, // 0–7d:    1 per 4h
+    { maxAge:  30 * 86_400_000, slotMs:     86_400_000 }, // 7–30d:   1 per day
+    { maxAge:  90 * 86_400_000, slotMs:  3 * 86_400_000 }, // 30–90d:  1 per 3 days
+    { maxAge: 180 * 86_400_000, slotMs:  7 * 86_400_000 }, // 90–180d: 1 per week
+    { maxAge: Infinity,         slotMs: 30 * 86_400_000 }, // >180d:   1 per month
+];
+
+const SIX_MONTHS_MS = 180 * 86_400_000;
 
 export class SnapshotScheduler {
     /**
      * @param {function(roomId: string, fileId: string, ydoc: Y.Doc, trigger: string, createdBy: string|null, desc: string|null): string} saveFn
-     * @param {object} [sqliteDb] - Optional SQLite database for retention cleanup
+     * @param {object} [sqliteDb] - SQLite database for retention cleanup
      */
     constructor(saveFn, sqliteDb = null) {
         this.save = saveFn;
@@ -45,469 +57,323 @@ export class SnapshotScheduler {
 
         /**
          * @type {Map<string, {
-         *   debounceTimer: ReturnType<typeof setTimeout>|null,
-         *   maxTimer: ReturnType<typeof setTimeout>|null,
+         *   idleTimer: ReturnType<typeof setTimeout>|null,
+         *   burstCapTimer: ReturnType<typeof setTimeout>|null,
          *   lastSnapshot: number,
          *   lastActivity: number,
          *   dirty: boolean,
          *   fileId: string|null,
-         *   ydoc: import('yjs').Doc,
-         *   updateCount: number,
-         *   byteCount: number,
+         *   ydoc: Y.Doc,
          *   userCount: number,
-         *   editRate: number,        // updates per minute
-         *   editRateSamples: number[], // recent edit rates for averaging
-         *   adaptiveMinInterval: number,
-         *   adaptiveMaxInterval: number,
+         *   sessionChanges: number,
          *   sessionStart: number,
-         *   recentUpdates: Array<{ time: number, size: number }>, // last N updates for rate calc
-         *   lastSnapshotState: Uint8Array|null // encoded state vector from last snapshot for change detection
+         *   lastSnapshotSV: Uint8Array|null,
+         *   lastCheckedSV: Uint8Array|null,
          * }>}
          */
         this.rooms = new Map();
 
-        // Run retention cleanup periodically
         this._startRetentionCleanup();
     }
 
-    /**
-     * Set the SQLite database for retention cleanup.
-     * @param {object} db
-     */
     setDatabase(db) {
         this.sqliteDb = db;
     }
 
     /**
-     * Called whenever a room receives an update.
-     * Tracks update frequency and size for intelligent snapshot decisions.
+     * Called whenever a room receives a document update.
+     * Only triggers snapshot logic when the Y.js state vector actually advances.
      */
-    markDirty(roomId, fileId, ydoc, updateSize = 0) {
-        const now = Date.now();
+    markDirty(roomId, fileId, ydoc, _updateSize = 0) {
         let entry = this.rooms.get(roomId);
-
         if (!entry) {
-            entry = this._createEntry(roomId, fileId, ydoc);
+            entry = this._createEntry(fileId, ydoc);
             this.rooms.set(roomId, entry);
         }
 
         entry.ydoc = ydoc;
-        entry.dirty = true;
-        entry.lastActivity = now;
-        entry.updateCount++;
-        entry.byteCount += updateSize;
+        entry.lastActivity = Date.now();
 
-        // Track recent updates for rate calculation
-        entry.recentUpdates.push({ time: now, size: updateSize });
-        // Keep only last 100 updates for rate calculation
-        if (entry.recentUpdates.length > 100) {
-            entry.recentUpdates.shift();
+        // Only count changes where the document state vector actually advances.
+        // This filters out no-ops, duplicate relays, and pure-awareness packets.
+        const currentSV = Y.encodeStateVector(ydoc);
+        if (!this._svEqual(currentSV, entry.lastCheckedSV)) {
+            entry.lastCheckedSV = currentSV;
+            entry.dirty = true;
+            entry.sessionChanges++;
         }
 
-        // Calculate edit rate (updates per minute over last 5 minutes)
-        this._updateEditRate(entry, now);
-
-        // Adapt intervals based on editing patterns
-        this._adaptIntervals(entry);
-
-        // Check if we should snapshot based on thresholds
-        const shouldSnapshot = this._checkThresholds(entry);
-
-        if (shouldSnapshot) {
-            this._takeSnapshot(roomId, entry, 'threshold');
-            return;
-        }
-
-        // Reset debounce timer with adaptive interval
-        if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-        entry.debounceTimer = setTimeout(() => {
-            entry.debounceTimer = null;
-            if (entry.dirty) {
-                this._takeSnapshot(roomId, entry, 'auto');
-            }
-        }, entry.adaptiveMinInterval);
-
-        // Ensure max interval cap (snapshot even during continuous editing)
-        if (!entry.maxTimer) {
-            entry.maxTimer = setTimeout(() => {
-                entry.maxTimer = null;
-                if (entry.dirty) {
-                    this._takeSnapshot(roomId, entry, 'auto');
-                }
-            }, entry.adaptiveMaxInterval);
-        }
+        this._scheduleSessionSnapshot(roomId, entry);
     }
 
     /**
      * Called when a user joins or leaves a room.
-     * @param {string} roomId
-     * @param {number} userCount - Current number of users in room
+     * Collab mode tightens the idle and cap intervals.
      */
     updateUserCount(roomId, userCount) {
         const entry = this.rooms.get(roomId);
         if (!entry) return;
-
-        const wasCollab = entry.userCount > 1;
-        const isCollab = userCount > 1;
         entry.userCount = userCount;
-
-        // If transitioning to/from collaborative mode, adjust intervals
-        if (wasCollab !== isCollab) {
-            this._adaptIntervals(entry);
-        }
+        // Timers will naturally pick up the new intervals on their next reset.
     }
 
     /**
      * Called when all connections to a room close.
-     * Takes an intelligent snapshot based on session analysis.
+     * Snapshots immediately if there are unsaved changes.
      */
     onRoomEmpty(roomId, fileId, ydoc, activeUsernames) {
         const entry = this.rooms.get(roomId);
-        const sessionLength = entry ? (Date.now() - entry.sessionStart) : 0;
-
-        // Cancel pending timers
-        if (entry) {
-            if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-            if (entry.maxTimer) clearTimeout(entry.maxTimer);
-        }
-
-        // Check if there are real changes to the document
-        const lastState = entry ? entry.lastSnapshotState : null;
-        const hasRealChanges = this._hasRealChanges(ydoc, lastState);
-
-        if (!hasRealChanges) {
-            console.log(`[snapshot-scheduler] Skipping room_empty snapshot for ${roomId} - no real changes`);
-            return;
-        }
-
-        // Determine trigger and description based on session analysis
-        const hadSignificantChanges = entry && (entry.updateCount > 5 || entry.byteCount > 1024);
-        let trigger = 'room_empty';
-        let description = null;
 
         if (entry) {
-            if (hadSignificantChanges) {
-                // Add context to description
-                const duration = Math.round(sessionLength / 60000);
-                description = `Session: ${entry.updateCount} updates, ${Math.round(entry.byteCount / 1024)}KB, ${duration}min`;
-            } else if (entry.updateCount > 0) {
-                // Minor changes - still snapshot but mark as minor
-                trigger = 'room_empty_minor';
-                description = `Minor session: ${entry.updateCount} updates`;
+            if (entry.idleTimer)     clearTimeout(entry.idleTimer);
+            if (entry.burstCapTimer) clearTimeout(entry.burstCapTimer);
+            entry.idleTimer     = null;
+            entry.burstCapTimer = null;
+        }
+
+        if (!entry?.dirty) {
+            // Double-check state vector in case we're tracking from a fresh connection
+            if (!this._hasRealChanges(ydoc, entry?.lastSnapshotSV ?? null)) {
+                console.log(`[snapshot-scheduler] Skipping room_empty for ${roomId} — no changes`);
+                return;
             }
         }
 
         const createdBy = activeUsernames.length > 0 ? activeUsernames.join(',') : null;
-        this.save(roomId, fileId, ydoc, trigger, createdBy, description);
+        const changes = entry?.sessionChanges ?? 0;
+        const desc = changes > 0 ? `${changes} change${changes !== 1 ? 's' : ''}` : null;
+
+        this._commitSnapshot(roomId, fileId ?? entry?.fileId, ydoc, 'room_empty', createdBy, desc, entry);
     }
 
     /** Remove tracking for a room after it's been destroyed. */
     cleanup(roomId) {
         const entry = this.rooms.get(roomId);
         if (!entry) return;
-        if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-        if (entry.maxTimer) clearTimeout(entry.maxTimer);
+        if (entry.idleTimer)     clearTimeout(entry.idleTimer);
+        if (entry.burstCapTimer) clearTimeout(entry.burstCapTimer);
         this.rooms.delete(roomId);
     }
 
-    /**
-     * Create a new tracking entry for a room.
-     * @private
-     */
-    _createEntry(roomId, fileId, ydoc) {
-        // Capture initial state for change detection
-        const initialState = ydoc ? Y.encodeStateAsUpdate(ydoc) : null;
-
+    /** Debugging / monitoring. */
+    getStats(roomId) {
+        const entry = this.rooms.get(roomId);
+        if (!entry) return null;
+        const idleMs  = entry.userCount > 1 ? CONFIG.COLLAB_IDLE_MS  : CONFIG.SESSION_IDLE_MS;
+        const capMs   = entry.userCount > 1 ? CONFIG.COLLAB_CAP_MS   : CONFIG.IN_SESSION_CAP_MS;
         return {
-            debounceTimer: null,
-            maxTimer: null,
-            lastSnapshot: Date.now(),
-            lastActivity: Date.now(),
-            dirty: false,
+            dirty:              entry.dirty,
+            sessionChanges:     entry.sessionChanges,
+            userCount:          entry.userCount,
+            idleTimeout:        Math.round(idleMs  / 1000) + 's',
+            burstCap:           Math.round(capMs   / 1000) + 's',
+            sessionLength:      Math.round((Date.now() - entry.sessionStart) / 60_000) + 'min',
+            timeSinceSnapshot:  Math.round((Date.now() - entry.lastSnapshot)  / 1000)  + 's',
+        };
+    }
+
+    // -------------------------------------------------------------------------
+    // Private
+    // -------------------------------------------------------------------------
+
+    _createEntry(fileId, ydoc) {
+        return {
+            idleTimer:      null,
+            burstCapTimer:  null,
+            lastSnapshot:   Date.now(),
+            lastActivity:   Date.now(),
+            dirty:          false,
             fileId,
             ydoc,
-            updateCount: 0,
-            byteCount: 0,
-            userCount: 1,
-            editRate: 0,
-            editRateSamples: [],
-            adaptiveMinInterval: CONFIG.MIN_INTERVAL,
-            adaptiveMaxInterval: CONFIG.MAX_INTERVAL,
-            sessionStart: Date.now(),
-            recentUpdates: [],
-            lastSnapshotState: initialState,
+            userCount:      1,
+            sessionChanges: 0,
+            sessionStart:   Date.now(),
+            lastSnapshotSV: ydoc ? Y.encodeStateVector(ydoc) : null,
+            lastCheckedSV:  ydoc ? Y.encodeStateVector(ydoc) : null,
         };
     }
 
     /**
-     * Check if the document has real changes compared to the last snapshot.
-     * Uses Y.js state vector comparison to detect actual content changes.
-     * @private
-     * @param {import('yjs').Doc} ydoc
-     * @param {Uint8Array|null} lastState
-     * @returns {boolean}
+     * Set up (or reset) the two timers that drive session-based snapshotting.
+     *
+     *   idleTimer     — resets on every update; fires when editing pauses (session end).
+     *   burstCapTimer — starts once at session onset; fires to checkpoint a long session.
+     *                   Cleared after firing; next markDirty call restarts it.
      */
-    _hasRealChanges(ydoc, lastState) {
-        if (!ydoc) return false;
+    _scheduleSessionSnapshot(roomId, entry) {
+        const idleMs = entry.userCount > 1 ? CONFIG.COLLAB_IDLE_MS  : CONFIG.SESSION_IDLE_MS;
+        const capMs  = entry.userCount > 1 ? CONFIG.COLLAB_CAP_MS   : CONFIG.IN_SESSION_CAP_MS;
 
-        const currentState = Y.encodeStateAsUpdate(ydoc);
-
-        // If no previous state, any content is a change
-        if (!lastState || lastState.length === 0) {
-            // Check if document has any actual content
-            return currentState.length > 0;
-        }
-
-        // Compare state vectors using Y.js's diff method
-        // If the diff is empty, there are no real changes
-        try {
-            // Create a temporary doc to apply both states and check if they differ
-            const tempDoc = new Y.Doc();
-            Y.applyUpdate(tempDoc, lastState);
-
-            const lastStateVector = Y.encodeStateVector(tempDoc);
-            tempDoc.destroy();
-
-            // Get the difference - what's in current that's not in last
-            const diff = Y.diffUpdate(currentState, lastStateVector);
-
-            // If diff has content, there are real changes
-            // diff is an empty Uint8Array if no differences
-            return diff.length > 0;
-        } catch (err) {
-            // If comparison fails, be conservative and assume there are changes
-            console.warn('[snapshot-scheduler] State comparison error, assuming changes:', err.message);
-            return true;
-        }
-    }
-
-    /**
-     * Calculate and update edit rate.
-     * @private
-     */
-    _updateEditRate(entry, now) {
-        const fiveMinutesAgo = now - 5 * 60 * 1000;
-        const recentUpdates = entry.recentUpdates.filter(u => u.time > fiveMinutesAgo);
-        entry.recentUpdates = recentUpdates;
-
-        if (recentUpdates.length > 0) {
-            const timeSpan = now - recentUpdates[0].time;
-            if (timeSpan > 0) {
-                entry.editRate = (recentUpdates.length / timeSpan) * 60000; // updates per minute
+        // Idle timer: always reset — fires when editing stops for idleMs.
+        if (entry.idleTimer) clearTimeout(entry.idleTimer);
+        entry.idleTimer = setTimeout(() => {
+            entry.idleTimer = null;
+            // Session ended — clear cap timer too (it's no longer needed).
+            if (entry.burstCapTimer) {
+                clearTimeout(entry.burstCapTimer);
+                entry.burstCapTimer = null;
             }
-        }
+            if (entry.dirty) {
+                this._takeSnapshot(roomId, entry, 'session_end');
+            }
+        }, idleMs);
 
-        // Store sample for averaging
-        entry.editRateSamples.push(entry.editRate);
-        if (entry.editRateSamples.length > 10) {
-            entry.editRateSamples.shift();
+        // Burst-cap timer: start only once per session; checkpoint long editing bursts.
+        if (!entry.burstCapTimer) {
+            entry.burstCapTimer = setTimeout(() => {
+                entry.burstCapTimer = null; // cleared — next markDirty restarts it
+                if (entry.dirty) {
+                    this._takeSnapshot(roomId, entry, 'session_cap');
+                }
+            }, capMs);
         }
     }
 
     /**
-     * Adapt snapshot intervals based on editing patterns.
-     * @private
+     * Check whether the document has changed since the last snapshot.
+     * Compares Y.js state vectors directly — cheap and allocation-free.
      */
-    _adaptIntervals(entry) {
-        // Calculate average edit rate
-        const avgEditRate = entry.editRateSamples.length > 0
-            ? entry.editRateSamples.reduce((a, b) => a + b, 0) / entry.editRateSamples.length
-            : entry.editRate;
+    _hasRealChanges(ydoc, lastSnapshotSV) {
+        if (!ydoc) return false;
+        const currentSV = Y.encodeStateVector(ydoc);
+        return !this._svEqual(currentSV, lastSnapshotSV);
+    }
 
-        // High edit rate = faster snapshots (don't wait as long)
-        // Low edit rate = slower snapshots (don't poll with tiny changes)
-        let minFactor = 1;
-        let maxFactor = 1;
-
-        if (avgEditRate > 10) {
-            // Very active editing: snapshot more frequently
-            minFactor = CONFIG.ADAPTIVE_MIN_FACTOR;
-            maxFactor = 0.8;
-        } else if (avgEditRate > 5) {
-            // Moderate editing
-            minFactor = 0.7;
-            maxFactor = 0.9;
-        } else if (avgEditRate < 1) {
-            // Slow editing: wait longer
-            minFactor = 1.5;
-            maxFactor = CONFIG.ADAPTIVE_MAX_FACTOR;
+    /** Byte-by-byte equality for two state vectors (or null). */
+    _svEqual(a, b) {
+        if (!a && !b) return true;
+        if (!a || !b) return false;
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i] !== b[i]) return false;
         }
-
-        // Collaborative sessions: snapshot more frequently
-        if (entry.userCount > 1) {
-            minFactor *= CONFIG.COLLAB_MULTIPLIER;
-            maxFactor *= CONFIG.COLLAB_MULTIPLIER;
-        }
-
-        entry.adaptiveMinInterval = Math.round(CONFIG.MIN_INTERVAL * minFactor);
-        entry.adaptiveMaxInterval = Math.round(CONFIG.MAX_INTERVAL * maxFactor);
-
-        // Clamp to reasonable bounds
-        entry.adaptiveMinInterval = Math.max(60000, Math.min(entry.adaptiveMinInterval, 30 * 60 * 1000));
-        entry.adaptiveMaxInterval = Math.max(entry.adaptiveMinInterval * 2, Math.min(entry.adaptiveMaxInterval, 2 * 60 * 60 * 1000));
+        return true;
     }
 
     /**
-     * Check if thresholds warrant an immediate snapshot.
-     * @private
-     */
-    _checkThresholds(entry) {
-        // Update count threshold
-        if (entry.updateCount >= CONFIG.UPDATE_THRESHOLD) {
-            return true;
-        }
-
-        // Byte count threshold
-        if (entry.byteCount >= CONFIG.BYTE_THRESHOLD) {
-            return true;
-        }
-
-        // Time since last snapshot exceeds adaptive max
-        const timeSinceSnapshot = Date.now() - entry.lastSnapshot;
-        if (timeSinceSnapshot >= entry.adaptiveMaxInterval) {
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
-     * Take a snapshot and reset counters.
-     * Only saves if there are real changes to the document.
-     * @private
+     * Take a snapshot if dirty and real changes exist.
+     * Resets dirty state and updates lastSnapshotSV on success.
      */
     _takeSnapshot(roomId, entry, trigger) {
         if (!entry.dirty) return;
 
-        // Check for real changes before snapshotting
-        if (!this._hasRealChanges(entry.ydoc, entry.lastSnapshotState)) {
-            console.log(`[snapshot-scheduler] Skipping snapshot for ${roomId} - no real changes`);
-            entry.dirty = false;
-            entry.updateCount = 0;
-            entry.byteCount = 0;
+        // Final guard: verify the state vector actually advanced since last snapshot.
+        if (!this._hasRealChanges(entry.ydoc, entry.lastSnapshotSV)) {
+            entry.dirty          = false;
+            entry.sessionChanges = 0;
             return;
         }
 
-        entry.dirty = false;
-        entry.lastSnapshot = Date.now();
+        const desc = entry.sessionChanges > 0
+            ? `${entry.sessionChanges} change${entry.sessionChanges !== 1 ? 's' : ''}`
+            : null;
 
-        const description = this._generateDescription(entry, trigger);
+        this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, null, desc, entry);
+    }
 
+    /** Persist the snapshot and update entry bookkeeping. */
+    _commitSnapshot(roomId, fileId, ydoc, trigger, createdBy, desc, entry) {
         try {
-            this.save(roomId, entry.fileId, entry.ydoc, trigger, null, description);
-            // Update the last snapshot state after successful save
-            entry.lastSnapshotState = Y.encodeStateAsUpdate(entry.ydoc);
+            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, desc ?? null);
         } catch (err) {
             console.error(`[snapshot-scheduler] Failed to save snapshot for ${roomId}:`, err);
-        }
-
-        // Reset counters
-        entry.updateCount = 0;
-        entry.byteCount = 0;
-    }
-
-    /**
-     * Generate a human-readable description for the snapshot.
-     * @private
-     */
-    _generateDescription(entry, trigger) {
-        const parts = [];
-
-        if (entry.updateCount > 0) {
-            parts.push(`${entry.updateCount} updates`);
-        }
-        if (entry.byteCount > 0) {
-            parts.push(`${Math.round(entry.byteCount / 1024)}KB`);
-        }
-        if (entry.userCount > 1) {
-            parts.push(`${entry.userCount} users`);
-        }
-        if (entry.editRate > 0) {
-            parts.push(`${entry.editRate.toFixed(1)} edits/min`);
-        }
-
-        if (parts.length === 0) return null;
-        return parts.join(', ');
-    }
-
-    /**
-     * Start periodic retention cleanup.
-     * @private
-     */
-    _startRetentionCleanup() {
-        // Run cleanup every hour
-        setInterval(() => {
-            this._runRetentionCleanup();
-        }, 60 * 60 * 1000);
-
-        // Also run on startup after a short delay
-        setTimeout(() => {
-            this._runRetentionCleanup();
-        }, 10000);
-    }
-
-    /**
-     * Clean up old snapshots based on retention policy.
-     * @private
-     */
-    _runRetentionCleanup() {
-        if (!this.sqliteDb) {
             return;
         }
+
+        if (entry) {
+            entry.dirty          = false;
+            entry.lastSnapshot   = Date.now();
+            entry.sessionChanges = 0;
+            entry.sessionStart   = Date.now();
+            entry.lastSnapshotSV = Y.encodeStateVector(ydoc);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Retention cleanup
+    // -------------------------------------------------------------------------
+
+    _startRetentionCleanup() {
+        setTimeout(() => this._runRetentionCleanup(), 15_000);
+        setInterval(() => this._runRetentionCleanup(), 60 * 60_000);
+    }
+
+    /**
+     * Per-file slot-based thinning.
+     *
+     * For each file, auto-snapshots are bucketed into time slots whose width grows
+     * with age (4h near, 30d far). Within each slot we keep only the newest snapshot.
+     * A redundant (older) snapshot in the same slot is only deleted once it is
+     * ≥ 6 months old — within the 6-month window we accumulate but never prune.
+     *
+     * Manual snapshots are never touched.
+     * A minimum of 5 auto snapshots per file is always preserved.
+     */
+    _runRetentionCleanup() {
+        if (!this.sqliteDb) return;
 
         try {
             const now = Date.now();
-            const cutoffTime = now - CONFIG.RETENTION_AGE_MS;
 
-            // Delete snapshots older than retention age (except manual ones)
-            const ageResult = this.sqliteDb.prepare(`
-                DELETE FROM snapshots
-                WHERE created_at < ?
-                AND trigger != 'manual'
-            `).run(cutoffTime);
+            const fileIds = this.sqliteDb.prepare(
+                `SELECT DISTINCT file_id FROM snapshots WHERE trigger != 'manual'`
+            ).all().map(r => r.file_id);
 
-            if (ageResult.changes > 0) {
-                console.log(`[snapshot-scheduler] Cleaned up ${ageResult.changes} old snapshots (age-based)`);
+            let totalThinned = 0;
+
+            for (const fileId of fileIds) {
+                const snaps = this.sqliteDb.prepare(`
+                    SELECT id, created_at FROM snapshots
+                    WHERE file_id = ? AND trigger != 'manual'
+                    ORDER BY created_at ASC
+                `).all(fileId);
+
+                if (snaps.length <= 5) continue;
+
+                const slotKeeper = new Map(); // slotKey → { id, created_at }
+                const toDelete   = [];
+
+                for (const snap of snaps) {
+                    const age  = now - snap.created_at;
+                    const rule = RETENTION_SLOTS.find(s => age < s.maxAge)
+                               ?? RETENTION_SLOTS[RETENTION_SLOTS.length - 1];
+                    const slotKey = `${rule.slotMs}_${Math.floor(snap.created_at / rule.slotMs)}`;
+
+                    if (slotKeeper.has(slotKey)) {
+                        const older = slotKeeper.get(slotKey);
+                        // older is a same-slot duplicate — only delete it if it's old enough
+                        if (now - older.created_at >= SIX_MONTHS_MS) {
+                            toDelete.push(older.id);
+                        }
+                        slotKeeper.set(slotKey, snap); // newer is now the slot keeper
+                    } else {
+                        slotKeeper.set(slotKey, snap);
+                    }
+                }
+
+                // Guarantee minimum 5 survivors: cancel newest deletions if needed.
+                const wouldRemain = snaps.length - toDelete.length;
+                if (wouldRemain < 5) {
+                    toDelete.splice(toDelete.length - (5 - wouldRemain));
+                }
+
+                if (toDelete.length === 0) continue;
+
+                for (let i = 0; i < toDelete.length; i += 100) {
+                    const chunk = toDelete.slice(i, i + 100);
+                    const ph = chunk.map(() => '?').join(',');
+                    this.sqliteDb.prepare(
+                        `DELETE FROM snapshots WHERE id IN (${ph})`
+                    ).run(chunk);
+                }
+                totalThinned += toDelete.length;
             }
 
-            // Keep only RETENTION_COUNT most recent snapshots per file
-            // (excluding manual snapshots which are always kept)
-            const countResult = this.sqliteDb.prepare(`
-                DELETE FROM snapshots
-                WHERE id IN (
-                    SELECT id FROM snapshots
-                    WHERE trigger != 'manual'
-                    ORDER BY created_at DESC
-                    LIMIT -1 OFFSET ?
-                )
-            `).run(CONFIG.RETENTION_COUNT);
-
-            if (countResult.changes > 0) {
-                console.log(`[snapshot-scheduler] Cleaned up ${countResult.changes} excess snapshots (count-based)`);
+            if (totalThinned > 0) {
+                console.log(`[snapshot-scheduler] Retention: thinned ${totalThinned} duplicate snapshots`);
             }
         } catch (err) {
             console.error('[snapshot-scheduler] Retention cleanup error:', err);
         }
-    }
-
-    /**
-     * Get statistics about a room's snapshot state.
-     * Useful for debugging and monitoring.
-     */
-    getStats(roomId) {
-        const entry = this.rooms.get(roomId);
-        if (!entry) return null;
-
-        return {
-            dirty: entry.dirty,
-            updateCount: entry.updateCount,
-            byteCount: entry.byteCount,
-            userCount: entry.userCount,
-            editRate: Math.round(entry.editRate * 10) / 10,
-            adaptiveMinInterval: Math.round(entry.adaptiveMinInterval / 1000) + 's',
-            adaptiveMaxInterval: Math.round(entry.adaptiveMaxInterval / 60000) + 'min',
-            timeSinceLastSnapshot: Math.round((Date.now() - entry.lastSnapshot) / 1000) + 's',
-            sessionLength: Math.round((Date.now() - entry.sessionStart) / 60000) + 'min',
-        };
     }
 }

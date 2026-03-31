@@ -110,18 +110,18 @@ export class YjsSyncCoordinator {
             fileId,
             roomId,
             wsUrl,
-            modifiedAt: new Date().toISOString(),
+            mtime: new Date().toISOString(),
         });
     }
 
     /**
-     * Queue a server-side touch (updatedAt bump) for a file.
+     * Queue a server-side mtime bump for a file.
      * @param {string} fileId
      */
     async queueTouch(fileId) {
         await this._pendingStore.addToTouchQueue({
             fileId,
-            modifiedAt: new Date().toISOString(),
+            mtime: new Date().toISOString(),
         });
         // Process immediately if we're online and leading
         if (navigator.onLine && this._isLeader) {
@@ -193,7 +193,7 @@ export class YjsSyncCoordinator {
             if (!navigator.onLine) break;
 
             // Expire stale entries (file likely deleted or permanently offline)
-            if (entry.modifiedAt && now - new Date(entry.modifiedAt).getTime() > MAX_AGE_MS) {
+            if (entry.mtime && now - new Date(entry.mtime).getTime() > MAX_AGE_MS) {
                 console.log(`[YjsSyncCoordinator] Expiring stale pending entry for ${entry.fileId}`);
                 await this._pendingStore.removePending(entry.fileId);
                 continue;

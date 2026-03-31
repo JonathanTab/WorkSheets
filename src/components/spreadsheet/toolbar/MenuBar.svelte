@@ -31,10 +31,12 @@
     import AlertModal from "../../modals/AlertModal.svelte";
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
     import DataValidationPanel from "../DataValidationPanel.svelte";
+    import FormulaDocsPanel from "../FormulaDocsPanel.svelte";
 
     let isExportingPDF = $state(false);
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
+    let showFormulaDocs = $state(false);
 
     // Helper to show alert modal
     function showAlert(title, message, type = "info") {
@@ -475,6 +477,13 @@
     // ─── HELP MENU ────────────────────────────────────────────────────────────
     const helpItems = [
         {
+            label: "Formula Reference",
+            icon: functionIcon,
+            isSvgIcon: true,
+            action: () => (showFormulaDocs = true),
+        },
+        { divider: true },
+        {
             label: "Keyboard Shortcuts",
             shortcut: "Ctrl+/",
             action: () => showKeyboardShortcuts(),
@@ -824,6 +833,10 @@ Ctrl+/ - Show keyboard shortcuts`;
 
 {#if showDVPanel}
     <DataValidationPanel onclose={() => (showDVPanel = false)} />
+{/if}
+
+{#if showFormulaDocs}
+    <FormulaDocsPanel onclose={() => (showFormulaDocs = false)} />
 {/if}
 
 <style>

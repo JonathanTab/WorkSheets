@@ -2,12 +2,13 @@
  * operations.js - Pure Yjs spreadsheet operations for CLI/scripting use.
  *
  * All functions take a loaded Y.Doc and operate directly on the Yjs data
- * structures defined in schema.js — no Svelte, no browser APIs.
+ * structures — no Svelte, no browser APIs.
  *
  * Cell coordinates are 0-based (row 0, col 0 = top-left).
  */
 
 import * as Y from 'yjs';
+import { randomUUID } from 'node:crypto';
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
@@ -23,6 +24,24 @@ function sheetById(ydoc, sheetId) {
     const s = sheetsMap(ydoc)?.get(sheetId);
     if (!s) throw new Error(`Sheet "${sheetId}" not found`);
     return s;
+}
+
+function _getTable(ydoc, sheetId, tableId) {
+    const tables = sheetById(ydoc, sheetId).get('tables');
+    const table = tables?.get(tableId);
+    if (!table) throw new Error(`Table "${tableId}" not found in sheet "${sheetId}"`);
+    return table;
+}
+
+function _getFormulaCols(table) {
+    const formulaCols = new Set();
+    const colsArr = table.get('columns');
+    if (colsArr) {
+        colsArr.toArray().forEach(c => {
+            if (c.get('isNonEntry')) formulaCols.add(c.get('id'));
+        });
+    }
+    return formulaCols;
 }
 
 // ─── Sheets ────────────────────────────────────────────────────────────────
@@ -42,6 +61,99 @@ export function listSheets(ydoc) {
     });
 }
 
+/**
+ * Get metadata for a single sheet.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @returns {{ id, name, rowCount, colCount, frozenRows, frozenColumns }}
+ */
+export function getSheetMeta(ydoc, sheetId) {
+    const sheet = sheetById(ydoc, sheetId);
+    return {
+        id:              sheetId,
+        name:            sheet.get('name')            ?? sheetId,
+        rowCount:        sheet.get('rowCount')        ?? 0,
+        colCount:        sheet.get('colCount')        ?? 0,
+        frozenRows:      sheet.get('frozenRows')      ?? 0,
+        frozenColumns:   sheet.get('frozenColumns')   ?? 0,
+    };
+}
+
+/**
+ * Create a new sheet and append it to sheetOrder.
+ * @param {Y.Doc} ydoc
+ * @param {string} name
+ * @param {{ id?: string, rowCount?: number, colCount?: number, insertAt?: number }} [opts]
+ * @returns {string} The new sheet ID
+ */
+export function createSheet(ydoc, name, opts = {}) {
+    const r = root(ydoc);
+    const sheets = r.get('sheets');
+    const sheetOrder = r.get('sheetOrder');
+    if (!sheets || !sheetOrder) throw new Error('Document does not appear to be a spreadsheet');
+
+    const id = opts.id ?? randomUUID();
+
+    ydoc.transact(() => {
+        const sheet = new Y.Map();
+        sheet.set('id',            id);
+        sheet.set('name',          name);
+        sheet.set('rowCount',      opts.rowCount ?? 100);
+        sheet.set('colCount',      opts.colCount ?? 26);
+        sheet.set('frozenRows',    0);
+        sheet.set('frozenColumns', 0);
+        sheet.set('cells',              new Y.Map());
+        sheet.set('rowMeta',            new Y.Map());
+        sheet.set('colMeta',            new Y.Map());
+        sheet.set('tables',             new Y.Map());
+        sheet.set('borders',            new Y.Map());
+        sheet.set('repeaters',          new Y.Map());
+        sheet.set('merges',             new Y.Array());
+        sheet.set('conditionalFormats', new Y.Array());
+        sheet.set('dataValidations',    new Y.Array());
+        sheet.set('printSettings',      new Y.Map());
+        sheets.set(id, sheet);
+
+        if (opts.insertAt != null) {
+            sheetOrder.insert(opts.insertAt, [id]);
+        } else {
+            sheetOrder.push([id]);
+        }
+    });
+
+    return id;
+}
+
+/**
+ * Rename a sheet.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} name
+ */
+export function renameSheet(ydoc, sheetId, name) {
+    const sheet = sheetById(ydoc, sheetId);
+    ydoc.transact(() => { sheet.set('name', name); });
+}
+
+/**
+ * Delete a sheet entirely (removes from sheets map and sheetOrder).
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ */
+export function deleteSheet(ydoc, sheetId) {
+    const r = root(ydoc);
+    const sheets = r.get('sheets');
+    const sheetOrder = r.get('sheetOrder');
+    if (!sheets?.has(sheetId)) throw new Error(`Sheet "${sheetId}" not found`);
+
+    ydoc.transact(() => {
+        const arr = sheetOrder.toArray();
+        const idx = arr.indexOf(sheetId);
+        if (idx !== -1) sheetOrder.delete(idx, 1);
+        sheets.delete(sheetId);
+    });
+}
+
 // ─── Cells ─────────────────────────────────────────────────────────────────
 
 /**
@@ -50,7 +162,7 @@ export function listSheets(ydoc) {
  * @param {string} sheetId
  * @param {number} row  0-based
  * @param {number} col  0-based
- * @returns {object|null}  Cell properties (v, t, bold, etc.) or null
+ * @returns {object|null}
  */
 export function getCell(ydoc, sheetId, row, col) {
     const cells = sheetById(ydoc, sheetId).get('cells');
@@ -65,7 +177,7 @@ export function getCell(ydoc, sheetId, row, col) {
  * @param {number} row  0-based
  * @param {number} col  0-based
  * @param {any} value   Plain value or formula string starting with "="
- * @param {object} [props]  Extra cell properties (t, bold, etc.)
+ * @param {object} [props]  Extra cell properties (t, bold, color, etc.)
  */
 export function setCell(ydoc, sheetId, row, col, value, props = {}) {
     const sheet = sheetById(ydoc, sheetId);
@@ -94,9 +206,7 @@ export function setCell(ydoc, sheetId, row, col, value, props = {}) {
  */
 export function clearCell(ydoc, sheetId, row, col) {
     const cells = sheetById(ydoc, sheetId).get('cells');
-    ydoc.transact(() => {
-        cells.delete(`${row},${col}`);
-    });
+    ydoc.transact(() => { cells.delete(`${row},${col}`); });
 }
 
 /**
@@ -124,6 +234,62 @@ export function getRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
     return result;
 }
 
+/**
+ * Write a 2-D array of values starting at (startRow, startCol).
+ * null/undefined entries in the array are skipped (leave cell unchanged).
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {number} startRow
+ * @param {number} startCol
+ * @param {any[][]} values2d  2-D array of values/formulas
+ * @param {object} [props]    Formatting props applied to every written cell
+ */
+export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}) {
+    const cells = sheetById(ydoc, sheetId).get('cells');
+    const hasProps = Object.keys(props).length > 0;
+
+    ydoc.transact(() => {
+        for (let ri = 0; ri < values2d.length; ri++) {
+            const rowArr = values2d[ri];
+            if (!Array.isArray(rowArr)) continue;
+            for (let ci = 0; ci < rowArr.length; ci++) {
+                const value = rowArr[ci];
+                if (value === null || value === undefined) continue;
+                const key = `${startRow + ri},${startCol + ci}`;
+                let cell = cells.get(key);
+                if (!cell) {
+                    cell = new Y.Map();
+                    cells.set(key, cell);
+                }
+                cell.set('v', value);
+                if (hasProps) {
+                    for (const [k, v] of Object.entries(props)) cell.set(k, v);
+                }
+            }
+        }
+    });
+}
+
+/**
+ * Clear all cells in a rectangular range.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {number} startRow
+ * @param {number} startCol
+ * @param {number} endRow   inclusive
+ * @param {number} endCol   inclusive
+ */
+export function clearRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
+    const cells = sheetById(ydoc, sheetId).get('cells');
+    ydoc.transact(() => {
+        for (let r = startRow; r <= endRow; r++) {
+            for (let c = startCol; c <= endCol; c++) {
+                cells.delete(`${r},${c}`);
+            }
+        }
+    });
+}
+
 // ─── Tables ────────────────────────────────────────────────────────────────
 
 /**
@@ -144,8 +310,8 @@ export function listTables(ydoc, sheetId) {
             : [];
         result.push({
             id,
-            name: t.get('name') ?? id,
-            mode: t.get('mode') ?? 'inline',
+            name:    t.get('name') ?? id,
+            mode:    t.get('mode') ?? 'inline',
             columns,
         });
     });
@@ -153,7 +319,52 @@ export function listTables(ydoc, sheetId) {
 }
 
 /**
- * Get all rows for a table (in raw insertion order, newest last).
+ * Find a table by name (case-sensitive). Returns the table ID or null.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} name
+ * @returns {string|null}
+ */
+export function findTableByName(ydoc, sheetId, name) {
+    const tables = sheetById(ydoc, sheetId).get('tables');
+    if (!tables) return null;
+    for (const [id, t] of tables.entries()) {
+        if (t.get('name') === name) return id;
+    }
+    return null;
+}
+
+/**
+ * Resolve row data keyed by column names (or IDs) to keyed by column IDs.
+ * Keys that don't match any column name pass through unchanged.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} tableId
+ * @param {object} data
+ * @returns {object}
+ */
+export function resolveColumnNames(ydoc, sheetId, tableId, data) {
+    const table = _getTable(ydoc, sheetId, tableId);
+    const colsArr = table.get('columns');
+    if (!colsArr) return data;
+
+    const nameToId = new Map();
+    colsArr.toArray().forEach(c => {
+        const id   = c.get('id');
+        const name = c.get('name');
+        if (id) nameToId.set(id, id);        // pass-through for IDs
+        if (id && name) nameToId.set(name, id);
+    });
+
+    const result = {};
+    for (const [k, v] of Object.entries(data)) {
+        result[nameToId.get(k) ?? k] = v;
+    }
+    return result;
+}
+
+/**
+ * Get all rows for a table (in raw insertion order, oldest first).
  * @param {Y.Doc} ydoc
  * @param {string} sheetId
  * @param {string} tableId
@@ -167,25 +378,44 @@ export function getTableRows(ydoc, sheetId, tableId) {
 }
 
 /**
+ * Filter table rows by a criteria object.
+ * Values are compared with loose equality (==) so numbers and numeric strings match.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} tableId
+ * @param {object} where  { columnId: value, ... }
+ * @returns {{ index: number, row: object }[]}
+ */
+export function findTableRows(ydoc, sheetId, tableId, where) {
+    const table  = _getTable(ydoc, sheetId, tableId);
+    const rowArr = table.get('rows');
+    if (!rowArr) return [];
+
+    const entries = Object.entries(where);
+    const results = [];
+    rowArr.toArray().forEach((r, index) => {
+        const row = r.toJSON ? r.toJSON() : { ...r };
+        // eslint-disable-next-line eqeqeq
+        if (entries.every(([k, v]) => row[k] == v)) {
+            results.push({ index, row });
+        }
+    });
+    return results;
+}
+
+/**
  * Insert a row into a table.
  * @param {Y.Doc} ydoc
  * @param {string} sheetId
  * @param {string} tableId
- * @param {object} rowData  Plain object mapping columnId → value
+ * @param {object} rowData  { columnId: value, ... }
  */
 export function insertTableRow(ydoc, sheetId, tableId, rowData) {
-    const table = _getTable(ydoc, sheetId, tableId);
+    const table  = _getTable(ydoc, sheetId, tableId);
     const rowArr = table.get('rows');
     if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
-    // Collect formula/computed column IDs to skip them
-    const formulaCols = new Set();
-    const colsArr = table.get('columns');
-    if (colsArr) {
-        colsArr.forEach(c => {
-            if (c.get('isNonEntry')) formulaCols.add(c.get('id'));
-        });
-    }
+    const formulaCols = _getFormulaCols(table);
 
     ydoc.transact(() => {
         const yRow = new Y.Map();
@@ -197,16 +427,16 @@ export function insertTableRow(ydoc, sheetId, tableId, rowData) {
 }
 
 /**
- * Update an existing table row by its index (0 = oldest).
+ * Update an existing table row by its 0-based index.
  * Only the provided keys are changed; others are left as-is.
  * @param {Y.Doc} ydoc
  * @param {string} sheetId
  * @param {string} tableId
- * @param {number} rowIndex  0-based index into raw row array
+ * @param {number} rowIndex
  * @param {object} updates
  */
 export function updateTableRow(ydoc, sheetId, tableId, rowIndex, updates) {
-    const table = _getTable(ydoc, sheetId, tableId);
+    const table  = _getTable(ydoc, sheetId, tableId);
     const rowArr = table.get('rows');
     if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
@@ -221,27 +451,65 @@ export function updateTableRow(ydoc, sheetId, tableId, rowIndex, updates) {
 }
 
 /**
- * Delete a table row by its index.
+ * Insert a new row or update the first existing row matching `where`.
+ * The match check uses loose equality (==).
  * @param {Y.Doc} ydoc
  * @param {string} sheetId
  * @param {string} tableId
- * @param {number} rowIndex  0-based index into raw row array
+ * @param {object} where    Criteria to find an existing row
+ * @param {object} rowData  Fields to set (merged with where on insert)
+ * @returns {{ inserted: boolean, index: number }}
  */
-export function deleteTableRow(ydoc, sheetId, tableId, rowIndex) {
-    const table = _getTable(ydoc, sheetId, tableId);
+export function upsertTableRow(ydoc, sheetId, tableId, where, rowData) {
+    const table  = _getTable(ydoc, sheetId, tableId);
     const rowArr = table.get('rows');
     if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
-    ydoc.transact(() => {
-        rowArr.delete(rowIndex, 1);
+    const formulaCols = _getFormulaCols(table);
+    const entries = Object.entries(where);
+
+    // Find first matching row
+    let matchIndex = -1;
+    rowArr.toArray().forEach((r, i) => {
+        if (matchIndex >= 0) return;
+        const row = r.toJSON ? r.toJSON() : { ...r };
+        // eslint-disable-next-line eqeqeq
+        if (entries.every(([k, v]) => row[k] == v)) matchIndex = i;
     });
+
+    ydoc.transact(() => {
+        if (matchIndex >= 0) {
+            const yRow = rowArr.get(matchIndex);
+            for (const [k, v] of Object.entries(rowData)) {
+                if (!formulaCols.has(k)) yRow.set(k, v);
+            }
+        } else {
+            const yRow = new Y.Map();
+            const merged = { ...where, ...rowData };
+            for (const [k, v] of Object.entries(merged)) {
+                if (!formulaCols.has(k)) yRow.set(k, v);
+            }
+            rowArr.push([yRow]);
+        }
+    });
+
+    return {
+        inserted: matchIndex < 0,
+        index:    matchIndex >= 0 ? matchIndex : rowArr.length - 1,
+    };
 }
 
-// ─── Internal ──────────────────────────────────────────────────────────────
+/**
+ * Delete a table row by its 0-based index.
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} tableId
+ * @param {number} rowIndex
+ */
+export function deleteTableRow(ydoc, sheetId, tableId, rowIndex) {
+    const table  = _getTable(ydoc, sheetId, tableId);
+    const rowArr = table.get('rows');
+    if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
-function _getTable(ydoc, sheetId, tableId) {
-    const tables = sheetById(ydoc, sheetId).get('tables');
-    const table = tables?.get(tableId);
-    if (!table) throw new Error(`Table "${tableId}" not found in sheet "${sheetId}"`);
-    return table;
+    ydoc.transact(() => { rowArr.delete(rowIndex, 1); });
 }

@@ -9,6 +9,13 @@
         onToggleExpand,
         getChildFolders,
         depth = 0,
+        // Drag-and-drop support (optional)
+        dropTargetId = null,
+        onFolderDragOver = null,
+        onFolderDragLeave = null,
+        onFolderDrop = null,
+        // Context menu support (optional)
+        onContextMenu = null,
     } = $props();
 
     function isExpanded(folderId) {
@@ -28,7 +35,18 @@
         <button
             class="tree-item"
             class:active
+            class:drag-target={dropTargetId === fld.id}
             onclick={() => onNavigate(fld.id)}
+            oncontextmenu={onContextMenu
+                ? (e) => onContextMenu(e, fld)
+                : undefined}
+            ondragover={onFolderDragOver
+                ? (e) => onFolderDragOver(e, fld.id)
+                : undefined}
+            ondragleave={onFolderDragLeave
+                ? (e) => onFolderDragLeave(e, fld.id)
+                : undefined}
+            ondrop={onFolderDrop ? (e) => onFolderDrop(e, fld.id) : undefined}
         >
             {#if children.length > 0}
                 <span
@@ -52,6 +70,11 @@
                 {onToggleExpand}
                 {getChildFolders}
                 depth={depth + 1}
+                {dropTargetId}
+                {onFolderDragOver}
+                {onFolderDragLeave}
+                {onFolderDrop}
+                {onContextMenu}
             />
         {/if}
     </div>
@@ -87,6 +110,15 @@
     .tree-item.active {
         background: var(--color-primary-soft);
         color: var(--color-primary);
+    }
+
+    .tree-item.drag-target {
+        background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+        color: var(--color-primary);
+        outline: 2px solid var(--color-primary);
+        outline-offset: -2px;
+        box-shadow: 0 0 12px
+            color-mix(in srgb, var(--color-primary) 40%, transparent);
     }
 
     .tree-expand {

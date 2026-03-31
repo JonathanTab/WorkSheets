@@ -587,13 +587,14 @@ try {
             $files   = array_map('normalizeFile',   $filesStmt->fetchAll());
             $folders = array_map('normalizeFolder', $foldersStmt->fetchAll());
 
-            // Top-50 recently opened files for this user (cross-device sync)
+            // Top-100 recently opened files for this user (cross-device sync).
+            // strftime normalises legacy space-format timestamps to ISO 8601.
             $recentsStmt = $db->prepare("
-                SELECT file_id, app_name, opened_at
+                SELECT file_id, app_name, strftime('%Y-%m-%dT%H:%M:%SZ', opened_at) AS opened_at
                 FROM recent_files
                 WHERE user = :user
                 ORDER BY opened_at DESC
-                LIMIT 50
+                LIMIT 100
             ");
             $recentsStmt->execute([':user' => $viewAs]);
             $recents = $recentsStmt->fetchAll();
@@ -1350,16 +1351,29 @@ try {
             $user    = requireAuth();
             $fileId  = post('file_id');
             $appName = post('app_name') ?: null;
+            $clientTs = post('opened_at') ?: null;
             if (!$fileId) error('file_id required');
             if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
 
+            // Use client timestamp if valid ISO; otherwise fall back to server time.
+            // strftime returns NULL for invalid input, so a NULL result means we ignore it.
+            $ts = null;
+            if ($clientTs) {
+                $stmt = $db->prepare("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?)");
+                $stmt->execute([$clientTs]);
+                $ts = $stmt->fetchColumn() ?: null;
+            }
+            if (!$ts) {
+                $ts = $db->query("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")->fetchColumn();
+            }
+
             $db->prepare("
                 INSERT INTO recent_files (user, file_id, app_name, opened_at)
-                VALUES (?, ?, ?, datetime('now'))
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(user, file_id) DO UPDATE
-                    SET app_name = excluded.app_name,
+                    SET app_name  = excluded.app_name,
                         opened_at = excluded.opened_at
-            ")->execute([$user, $fileId, $appName]);
+            ")->execute([$user, $fileId, $appName, $ts]);
 
             respond(['success' => true]);
         }

@@ -11,9 +11,13 @@ import { WebsocketProvider } from 'y-websocket';
 const SYNC_TIMEOUT_MS = 15_000;
 
 export class NodeYjsRuntime {
-    /** @param {string} wsUrl */
-    constructor(wsUrl) {
-        this.wsUrl = wsUrl;
+    /**
+     * @param {string} wsUrl
+     * @param {string|null} [apiKey]  Bearer token passed as ?auth= query param
+     */
+    constructor(wsUrl, apiKey = null) {
+        this.wsUrl  = wsUrl;
+        this.apiKey = apiKey;
         /** @type {Map<string, { ydoc: Y.Doc, provider: WebsocketProvider }>} */
         this._active = new Map();
     }
@@ -31,7 +35,9 @@ export class NodeYjsRuntime {
         }
 
         const ydoc = new Y.Doc();
-        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc);
+
+        const wsOpts = this.apiKey ? { params: { auth: this.apiKey } } : {};
+        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, wsOpts);
 
         await new Promise((resolve, reject) => {
             if (provider.synced) { resolve(); return; }
@@ -53,9 +59,9 @@ export class NodeYjsRuntime {
     /**
      * Wait a brief moment for outgoing updates to be flushed over WebSocket.
      * Call this after making mutations before calling shutdown().
-     * @param {number} [ms=800]
+     * @param {number} [ms=1000]
      */
-    flush(ms = 800) {
+    flush(ms = 1000) {
         return new Promise(r => setTimeout(r, ms));
     }
 
