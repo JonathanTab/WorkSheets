@@ -2,6 +2,9 @@
     import { openModal, closeModal } from "../../lib/ui/modalStore.svelte.js";
     import DeleteSheetModal from "../modals/DeleteSheetModal.svelte";
     import SelectionStats from "./SelectionStats.svelte";
+    import BottomSheet from "../ui/BottomSheet.svelte";
+    import { mobileState } from "../../stores/mobileState.svelte.js";
+    import { edit as editIcon, trash as trashIcon } from "../../lib/icons/index.js";
 
     let {
         sheets = [],
@@ -65,16 +68,40 @@
             });
         }
     }
+
+    // ─── Mobile long-press tab menu ────────────────────────────────────────────
+    let tabLongPressTimer = null;
+    let tabMenuSheetId = $state(null); // which sheet's action menu is open
+
+    function handleTabTouchStart(sheetId, e) {
+        if (e.touches.length !== 1) return;
+        tabLongPressTimer = setTimeout(() => {
+            tabMenuSheetId = sheetId;
+        }, 500);
+    }
+
+    function handleTabTouchMove() {
+        clearTimeout(tabLongPressTimer);
+    }
+
+    function handleTabTouchEnd() {
+        clearTimeout(tabLongPressTimer);
+    }
+
+    let tabMenuSheet = $derived(sheets.find((s) => s.id === tabMenuSheetId) ?? null);
 </script>
 
 <div class="sheet-tabs">
-    <div class="tabs-container">
+    <div class="tabs-container" class:snap={mobileState.isMobile}>
         {#each sheets as sheet (sheet.id)}
             <button
                 class="tab"
                 class:active={sheet.id === activeSheetId}
                 onclick={() => handleTabClick(sheet.id)}
                 ondblclick={() => handleTabDoubleClick(sheet.id)}
+                ontouchstart={mobileState.isMobile ? (e) => handleTabTouchStart(sheet.id, e) : undefined}
+                ontouchmove={mobileState.isMobile ? handleTabTouchMove : undefined}
+                ontouchend={mobileState.isMobile ? handleTabTouchEnd : undefined}
             >
                 {#if renamingSheetId === sheet.id}
                     <input
@@ -113,8 +140,38 @@
     <button class="add-sheet-btn" onclick={handleAddSheet} title="Add sheet">
         +
     </button>
-    <SelectionStats />
+    {#if !mobileState.isMobile}
+        <SelectionStats />
+    {/if}
 </div>
+
+<!-- Mobile: tab action sheet (long-press on tab) -->
+<BottomSheet
+    open={tabMenuSheetId !== null}
+    onClose={() => (tabMenuSheetId = null)}
+    title={tabMenuSheet?.name ?? "Sheet"}
+    maxHeight="40vh"
+>
+    <div class="tab-action-sheet">
+        <button class="tab-action-item" onclick={() => {
+            if (tabMenuSheetId) startRenaming(tabMenuSheetId);
+            tabMenuSheetId = null;
+        }}>
+            <span class="tab-action-icon">{@html editIcon}</span>
+            Rename
+        </button>
+        {#if sheets.length > 1}
+            <button class="tab-action-item danger" onclick={() => {
+                const id = tabMenuSheetId;
+                tabMenuSheetId = null;
+                if (id) handleDeleteClick(id);
+            }}>
+                <span class="tab-action-icon">{@html trashIcon}</span>
+                Delete
+            </button>
+        {/if}
+    </div>
+</BottomSheet>
 
 <style>
     .sheet-tabs {
@@ -228,6 +285,59 @@
     .add-sheet-btn:hover {
         background: var(--hover-bg, #e2e8f0);
         color: var(--text-color, #1e293b);
+    }
+
+    /* Scroll-snap for mobile tabs */
+    .tabs-container.snap {
+        scroll-snap-type: x mandatory;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .tabs-container.snap .tab {
+        scroll-snap-align: start;
+    }
+
+    /* Tab action sheet content */
+    .tab-action-sheet {
+        padding: 8px 0 env(safe-area-inset-bottom, 16px);
+    }
+
+    .tab-action-item {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        padding: 14px 16px;
+        background: transparent;
+        border: none;
+        font-size: 0.9375rem;
+        color: var(--color-text, #1e293b);
+        cursor: pointer;
+        text-align: left;
+        min-height: 48px;
+        gap: 10px;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    .tab-action-item:active {
+        background: var(--color-fill, #f1f5f9);
+    }
+
+    .tab-action-item.danger {
+        color: var(--color-danger, #dc2626);
+    }
+
+    .tab-action-icon {
+        display: flex;
+        align-items: center;
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+        opacity: 0.7;
+    }
+
+    .tab-action-icon :global(svg) {
+        width: 18px;
+        height: 18px;
     }
 
     /* ── Mobile: bigger touch targets ── */

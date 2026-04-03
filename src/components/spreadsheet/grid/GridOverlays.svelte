@@ -67,12 +67,19 @@
         return sheetStore.getCellTypeConfig(row, col);
     });
 
-    // Date subFormat for DatePickerEditor (date, time, datetime)
-    let dateSubFormat = $derived(cellCtConfig?.subFormat ?? 'date');
+    let effectiveDateSubFormat = $derived.by(() => {
+        if (cellCtConfig?.subFormat) return cellCtConfig.subFormat;
+        if (pickerMode === "time") return "time";
+        if (pickerMode === "datetime-local") return "datetime";
+        return "date";
+    });
 
     // Use contenteditable for all non-formula, non-picker, non-image, non-file text cells
     let isContentEditable = $derived(
-        isEditing && !pickerMode && !isFormulaMode,
+        isEditing &&
+            editSessionState.surface === "grid" &&
+            !pickerMode &&
+            !isFormulaMode,
     );
     let formulaSegments = $derived(
         isFormulaMode ? segmentFormula(editValue ?? "") : [],
@@ -293,7 +300,7 @@
      */
     export function applyRichFormat(prop, value) {
         if (!richEditEl) return false;
-        richEditEl.focus();
+        focusNoScroll(richEditEl);
         const sel = window.getSelection();
         const hasSelection =
             sel && !sel.isCollapsed && richEditEl.contains(sel.anchorNode);
@@ -344,10 +351,19 @@
         onCommitEdit?.(val);
     }
 
+    function focusNoScroll(el) {
+        if (!el) return;
+        try {
+            el.focus({ preventScroll: true });
+        } catch {
+            el.focus();
+        }
+    }
+
     export function focusEditor() {
         setTimeout(() => {
-            if (isContentEditable) richEditEl?.focus();
-            else cellEditInputEl?.focus();
+            if (isContentEditable) focusNoScroll(richEditEl);
+            else focusNoScroll(cellEditInputEl);
         }, 0);
     }
 
@@ -395,10 +411,10 @@
                     }}
                     onCancel={onCancelEdit}
                 />
-            {:else if pickerMode === 'date'}
+            {:else if pickerMode === 'date' || pickerMode === 'time' || pickerMode === 'datetime-local'}
                 <DatePickerEditor
                     value={editValue}
-                    subFormat={dateSubFormat}
+                    subFormat={effectiveDateSubFormat}
                     onchange={(val) => onEditInput?.(val)}
                     oncommit={(val) => handlePickerCommit(val)}
                     oncancel={onCancelEdit}

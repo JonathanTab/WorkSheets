@@ -16,6 +16,7 @@
      *   autofocus    — focus on mount (default true)
      */
     import { onMount } from "svelte";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
     import {
         parseLocalDate,
         formatDate,
@@ -213,9 +214,30 @@
     function positionCalendar() {
         if (!inputEl) return;
         const r = inputEl.getBoundingClientRect();
+        const margin = 8;
+        const vv = window.visualViewport;
+        const viewportTop = vv?.offsetTop ?? 0;
+        const viewportLeft = vv?.offsetLeft ?? 0;
+        const viewportWidth = vv?.width ?? window.innerWidth;
+        const viewportBottomViaVv = viewportTop + (vv?.height ?? window.innerHeight);
+        const keyboardTop =
+            mobileState.isMobile && mobileState.isKeyboardOpen
+                ? window.innerHeight - mobileState.keyboardHeight
+                : viewportBottomViaVv;
+        const viewportBottom = Math.max(
+            viewportTop + margin,
+            Math.min(viewportBottomViaVv, keyboardTop) - margin,
+        );
+        const estimatedHeight = showsTime ? 330 : 286;
+        const estimatedWidth = Math.max(240, r.width);
+
         calTop = r.bottom + 2;
-        calLeft = r.left;
-        calMinW = Math.max(240, r.width);
+        if (calTop + estimatedHeight > viewportBottom) {
+            calTop = Math.max(viewportTop + margin, r.top - estimatedHeight - 2);
+        }
+        const maxLeft = viewportLeft + viewportWidth - estimatedWidth - margin;
+        calLeft = Math.min(Math.max(viewportLeft + margin, r.left), Math.max(viewportLeft + margin, maxLeft));
+        calMinW = estimatedWidth;
     }
 
     function openCalendar() {
@@ -231,6 +253,12 @@
             focusedDay = null;
         }
     }
+
+    $effect(() => {
+        const _kb = mobileState.keyboardHeight;
+        const _open = mobileState.isKeyboardOpen;
+        if (showCalendar) positionCalendar();
+    });
 
     // ── Reset state ───────────────────────────────────────────────────────────
 
@@ -484,8 +512,11 @@
     onMount(() => {
         document.addEventListener("mousedown", handleDocMousedown, true);
         if (autofocus && inputEl) {
-            inputEl.focus();
-            inputEl.select();
+            // Mobile: avoid forcing soft keyboard + viewport jump for date/time pickers.
+            if (!mobileState.isMobile) {
+                inputEl.focus();
+                inputEl.select();
+            }
         }
         // Auto-open the calendar when mounting in grid overlay context (autofocus=true).
         // Entry row (autofocus=false) opens the calendar via handleInputFocus instead.
@@ -505,6 +536,9 @@
         oninput={handleInput}
         onkeydown={handleKeydown}
         onfocus={handleInputFocus}
+        onclick={handleInputFocus}
+        readonly={mobileState.isMobile}
+        inputmode={mobileState.isMobile ? "none" : "text"}
         autocomplete="off"
         spellcheck="false"
     />

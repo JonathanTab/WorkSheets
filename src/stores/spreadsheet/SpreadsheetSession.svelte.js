@@ -897,6 +897,26 @@ export class SpreadsheetSession {
         this.activeSheetStore?.clearCell(row, col);
     }
 
+    /** Insert a blank row before rowIndex */
+    insertRowAt(rowIndex) {
+        this.activeSheetStore?.insertRowAt(rowIndex);
+    }
+
+    /** Delete the row at rowIndex */
+    deleteRowAt(rowIndex) {
+        this.activeSheetStore?.deleteRowAt(rowIndex);
+    }
+
+    /** Insert a blank column before colIndex */
+    insertColumnAt(colIndex) {
+        this.activeSheetStore?.insertColumnAt(colIndex);
+    }
+
+    /** Delete the column at colIndex */
+    deleteColumnAt(colIndex) {
+        this.activeSheetStore?.deleteColumnAt(colIndex);
+    }
+
     /**
      * Get a range of cells for rendering
      * @param {number} startRow

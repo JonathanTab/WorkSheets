@@ -1,5 +1,6 @@
 <script>
     import { HEADER_WIDTH } from "../../../stores/spreadsheet/constants.js";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
 
     let {
         virtualizer,
@@ -7,6 +8,7 @@
         isRowSelected,
         onRowHeaderMouseDown,
         onStartRowResize,
+        onStartRowResizeTouch,
         onStartFreezeRowDrag,
     } = $props();
 
@@ -57,6 +59,17 @@
                         role="separator"
                         aria-orientation="horizontal"
                     ></div>
+                    {#if mobileState.isMobile}
+                        <div
+                            class="resize-handle-touch row-resize-touch"
+                            ontouchstart={(e) => { e.preventDefault(); e.stopPropagation(); onStartRowResizeTouch?.(row, e); }}
+                            role="separator"
+                            aria-orientation="horizontal"
+                            aria-label="Resize row"
+                        >
+                            <div class="resize-pill"></div>
+                        </div>
+                    {/if}
                 </div>
             {/each}
         </div>
@@ -96,6 +109,17 @@
                         role="separator"
                         aria-orientation="horizontal"
                     ></div>
+                    {#if mobileState.isMobile}
+                        <div
+                            class="resize-handle-touch row-resize-touch"
+                            ontouchstart={(e) => { e.preventDefault(); e.stopPropagation(); onStartRowResizeTouch?.(row, e); }}
+                            role="separator"
+                            aria-orientation="horizontal"
+                            aria-label="Resize row"
+                        >
+                            <div class="resize-pill"></div>
+                        </div>
+                    {/if}
                 </div>
             {/each}
         </div>
@@ -176,6 +200,37 @@
         width: 100%;
         height: 4px;
         cursor: row-resize;
+    }
+
+    /* Mobile: tall touch target for row resize */
+    .resize-handle-touch {
+        position: absolute;
+        z-index: 31;
+        left: 0;
+        right: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: none;
+        cursor: row-resize;
+    }
+
+    .row-resize-touch {
+        bottom: 0;
+        height: 16px;
+    }
+
+    .resize-pill {
+        height: 2px;
+        width: 60%;
+        border-radius: 1px;
+        background: var(--color-primary, #3b82f6);
+        opacity: 0.4;
+        pointer-events: none;
+    }
+
+    .row-resize-touch:active .resize-pill {
+        opacity: 0.9;
     }
 
     /* ── Freeze handle ── */

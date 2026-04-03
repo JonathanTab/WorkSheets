@@ -1,4 +1,6 @@
 <script>
+    import { onMount } from "svelte";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
     import { createEventDispatcher } from "svelte";
     const dispatch = createEventDispatcher();
 
@@ -21,16 +23,27 @@
             dispatch("cancel");
         }
     }
+
+    let inputEl;
+
+    onMount(() => {
+        if (mobileState.isMobile) return;
+        try {
+            inputEl?.focus({ preventScroll: true });
+        } catch {
+            inputEl?.focus();
+        }
+    });
 </script>
 
 <input
+    bind:this={inputEl}
     {type}
     class="picker-editor"
     {value}
     on:input={handleChange}
     on:blur={handleBlur}
     on:keydown={handleKeydown}
-    autofocus
 />
 
 <style>

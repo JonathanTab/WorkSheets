@@ -18,11 +18,14 @@
         menu,
     } from "../../../lib/icons/index.js";
     import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
+    import BottomSheet from "../../ui/BottomSheet.svelte";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
 
     let {
         table,
         colId,
         onClose,
+        inline = false,  // when true, always render inline (no BottomSheet wrapping)
     } = $props();
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
@@ -187,13 +190,7 @@
     ];
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings">
-    <div class="panel-header">
-        <span class="panel-title">Column</span>
-        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
-    </div>
-
+{#snippet colPanelContent()}
     <div class="panel-body">
         <!-- Type picker -->
         <section class="section">
@@ -341,7 +338,22 @@
             {@html trash} Delete Column
         </button>
     </div>
-</div>
+{/snippet}
+
+{#if mobileState.isMobile && !inline}
+    <BottomSheet open={true} onClose={onClose} title="Column Settings" maxHeight="85vh">
+        {@render colPanelContent()}
+    </BottomSheet>
+{:else}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings">
+        <div class="panel-header">
+            <span class="panel-title">Column</span>
+            <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
+        </div>
+        {@render colPanelContent()}
+    </div>
+{/if}
 
 <style>
     .col-panel {
@@ -695,4 +707,15 @@
 
     .delete-btn:hover:not(:disabled) { background: #fef2f2; }
     .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Mobile: larger controls inside BottomSheet */
+    @media (pointer: coarse), (max-width: 768px) {
+        .section { padding: 12px 16px; }
+        .section-label { font-size: 11px; margin-bottom: 8px; }
+        .align-btn { width: 40px; height: 36px; }
+        .toggle-label { min-height: 44px; }
+        .formula-input { font-size: 14px; padding: 8px; }
+        .col-chip { font-size: 12px; padding: 6px 10px; }
+        .delete-btn { padding: 12px 14px; font-size: 13px; min-height: 44px; }
+    }
 </style>

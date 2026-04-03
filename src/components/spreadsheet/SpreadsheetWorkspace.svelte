@@ -4,7 +4,9 @@
     import FormulaBar from "./FormulaBar.svelte";
     import SheetTabs from "./SheetTabs.svelte";
     import Toolbar from "./Toolbar.svelte";
+    import MobileToolbar from "./MobileToolbar.svelte";
     import HistoryPanel from "../HistoryPanel.svelte";
+    import { mobileState } from "../../stores/mobileState.svelte.js";
     import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import {
         spreadsheetSession,
@@ -24,6 +26,7 @@
     let isLoading = $state(true);
     let error = $state(null);
     let showHistory = $state(false);
+    let formulaBarRef = $state(null);
 
     // ── Awareness / presence ───────────────────────────────────────────────────
     let awareness = $derived(spreadsheetSession.awareness);
@@ -261,22 +264,32 @@
                     }}
                 />
             {/if}
-            <div class="workspace-container">
-                <!-- Toolbar -->
-                <Toolbar
-                    onClose={handleCloseDocument}
-                    {awareness}
-                    {currentUser}
-                    onShowHistory={registry
-                        ? () => {
-                              showHistory = true;
-                          }
-                        : undefined}
-                    {registry}
-                />
+            <div class="workspace-container" class:mobile={mobileState.isMobile}>
+                <!-- Toolbar: desktop two-row vs mobile single-row -->
+                {#if mobileState.isMobile}
+                    <MobileToolbar
+                        onClose={handleCloseDocument}
+                        {awareness}
+                        {currentUser}
+                    />
+                {:else}
+                    <Toolbar
+                        onClose={handleCloseDocument}
+                        {awareness}
+                        {currentUser}
+                        onShowHistory={registry
+                            ? () => {
+                                  showHistory = true;
+                              }
+                            : undefined}
+                        {registry}
+                    />
+                {/if}
 
-                <!-- Formula Bar -->
+                <!-- Formula Bar: static on desktop, floating on mobile -->
                 <FormulaBar
+                    bind:this={formulaBarRef}
+                    floating={mobileState.isMobile}
                     {selectedCell}
                     onEdit={(value, row, col, sheetId) => {
                         // Use provided row/col if available (from editingCell tracking)
@@ -383,6 +396,8 @@
                 <div class="grid-container">
                     <Grid
                         {showPageBreaks}
+                        requestMobileKeyboardFocus={() =>
+                            formulaBarRef?.captureKeyboardFocus?.()}
                         printSettings={pageBreakPrintSettings ??
                             spreadsheetSession.activeSheetStore?.getPrintSettings() ??
                             null}
@@ -536,5 +551,11 @@
 
     .cross-sheet-cancel:hover {
         background: rgba(255, 255, 255, 0.25);
+    }
+
+    /* ── Mobile layout: formula bar floats at bottom ── */
+    .workspace-container.mobile .grid-container {
+        /* Grid fills up to the fixed-bottom formula bar + sheet tabs */
+        border-bottom: none;
     }
 </style>

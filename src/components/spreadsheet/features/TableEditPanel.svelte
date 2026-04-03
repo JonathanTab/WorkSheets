@@ -12,6 +12,8 @@
      */
 
     import TableColumnPanel from "./TableColumnPanel.svelte";
+    import BottomSheet from "../../ui/BottomSheet.svelte";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
     import {
         close,
         check,
@@ -196,37 +198,7 @@
     }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-    class="table-edit-panel"
-    onkeydown={handleKeydown}
-    role="dialog"
-    aria-label="Table settings"
->
-    <!-- Header -->
-    <div class="panel-header">
-        <span class="panel-icon">{@html grid}</span>
-        {#if editingName}
-            <input
-                class="name-edit-input"
-                type="text"
-                bind:value={editingNameValue}
-                onblur={commitNameEdit}
-                onkeydown={(e) => {
-                    if (e.key === "Enter") { e.stopPropagation(); commitNameEdit(); }
-                    else if (e.key === "Escape") { e.stopPropagation(); cancelNameEdit(); }
-                }}
-                autofocus
-            />
-        {:else}
-            <button class="name-btn" onclick={startNameEdit} title="Click to rename">
-                {table?.name ?? "Table"}
-            </button>
-        {/if}
-        <span class="row-count">{rowCount} row{rowCount !== 1 ? "s" : ""}</span>
-        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
-    </div>
-
+{#snippet panelContent()}
     <!-- Active filters/sort indicator -->
     {#if filterCount > 0 || isSorted}
         <div class="stats-bar">
@@ -306,6 +278,7 @@
                         <TableColumnPanel
                             {table}
                             colId={col.id}
+                            inline={true}
                             onClose={() => (configColId = null)}
                         />
                     </div>
@@ -369,7 +342,47 @@
             {@html trash} Delete Table
         </button>
     </div>
+{/snippet}
+
+{#if mobileState.isMobile}
+    <BottomSheet open={true} onClose={onClose} title={table?.name ?? "Table"} maxHeight="85vh">
+        {@render panelContent()}
+    </BottomSheet>
+{:else}
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+    class="table-edit-panel"
+    onkeydown={handleKeydown}
+    role="dialog"
+    aria-label="Table settings"
+>
+    <!-- Header -->
+    <div class="panel-header">
+        <span class="panel-icon">{@html grid}</span>
+        {#if editingName}
+            <input
+                class="name-edit-input"
+                type="text"
+                bind:value={editingNameValue}
+                onblur={commitNameEdit}
+                onkeydown={(e) => {
+                    if (e.key === "Enter") { e.stopPropagation(); commitNameEdit(); }
+                    else if (e.key === "Escape") { e.stopPropagation(); cancelNameEdit(); }
+                }}
+                autofocus
+            />
+        {:else}
+            <button class="name-btn" onclick={startNameEdit} title="Click to rename">
+                {table?.name ?? "Table"}
+            </button>
+        {/if}
+        <span class="row-count">{rowCount} row{rowCount !== 1 ? "s" : ""}</span>
+        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
+    </div>
+
+    {@render panelContent()}
 </div>
+{/if}
 
 <style>
     .table-edit-panel {
@@ -723,4 +736,19 @@
     }
 
     .delete-btn:hover { background: #fef2f2; }
+
+    /* Mobile: larger touch targets inside BottomSheet */
+    @media (pointer: coarse), (max-width: 768px) {
+        .panel-body { padding: 10px 14px; gap: 8px; }
+        .col-item { padding: 8px; min-height: 44px; }
+        .col-section-label { font-size: 11px; }
+        .col-name { font-size: 14px; }
+        .type-badge { font-size: 11px; height: 24px; padding: 0 8px; }
+        .add-col-btn { padding: 10px 10px; font-size: 13px; min-height: 44px; }
+        .sort-col-select { height: 36px; font-size: 13px; }
+        .sort-dir-btn { height: 36px; }
+        .pos-edit-btn { padding: 6px 12px; font-size: 13px; }
+        .panel-footer { padding: 10px 14px 12px; gap: 10px; }
+        .export-btn, .delete-btn { padding: 10px 12px; font-size: 13px; min-height: 44px; }
+    }
 </style>

@@ -1,5 +1,8 @@
 <script>
-    import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
+    import {
+        spreadsheetSession,
+        selectionState,
+    } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { segmentFormula } from "../../formulas/reference-highlighter.js";
     import {
@@ -11,6 +14,7 @@
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
     import { close, check } from "../../lib/icons/index.js";
     import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+    import { mobileState } from "../../stores/mobileState.svelte.js";
 
     /** Get the raw editable value for a cell, including table cells. */
     function getTableAwareEditValue(row, col) {
@@ -39,10 +43,12 @@
         return spreadsheetSession.getCellEditValue(row, col);
     }
 
-    let { selectedCell = null, onEdit } = $props();
+    let { selectedCell = null, onEdit, floating = false } = $props();
 
     let previousCellKey = $state(null); // Track previous cell to detect actual cell changes
     let editInputEl = $state(null);
+    let captureInputEl = $state(null);
+    let formulaOverlayEl = $state(null);
 
     // Cell reference — shows origin cell during editing, active anchor otherwise.
     // When editing cross-sheet (formula started on a different sheet), shows "SheetName!A1".
@@ -132,11 +138,96 @@
         }
     }
 
-    function commitEdit() {
+    function blurMobileKeyboard() {
+        if (!mobileState.isMobile) return;
+        setTimeout(() => {
+            editInputEl?.blur();
+            captureInputEl?.blur();
+        }, 0);
+    }
+
+    function focusNoScroll(el, { select = false } = {}) {
+        if (!el) return;
+        // Synchronously prevent iOS from scrolling the page body when an input is focused.
+        if (mobileState.isMobile) window.scrollTo(0, 0);
+        try {
+            el.focus({ preventScroll: true });
+        } catch {
+            el.focus();
+        }
+        if (mobileState.isMobile) window.scrollTo(0, 0);
+        if (select && typeof el.select === "function") {
+            el.select();
+        }
+    }
+
+    function enforcePageTop() {
+        if (!mobileState.isMobile) return;
+        if (window.scrollY !== 0 || (window.visualViewport?.offsetTop ?? 0) !== 0) {
+            window.scrollTo(0, 0);
+        }
+    }
+
+    function moveSelection(dRow, dCol) {
+        const rowCount = spreadsheetSession.activeSheetStore?.rowCount;
+        const colCount = spreadsheetSession.activeSheetStore?.colCount;
+        selectionState.moveSelection(dRow, dCol, false, rowCount, colCount);
+        selectionState.endSelection();
+    }
+
+    function navigateMobile(dRow, dCol) {
+        if (isEditing) commitEdit({ blurKeyboard: false });
+        moveSelection(dRow, dCol);
+        if (mobileState.isMobile) captureKeyboardFocus();
+    }
+
+    function getEditingTableContext() {
+        const cell = editSessionState.cell;
+        if (!cell) return null;
+        const renderContext = spreadsheetSession.renderContext;
+        if (!renderContext) return null;
+        const cellType = renderContext.getCellType(cell.row, cell.col);
+        const info = renderContext.tableManager?.getCellInfo(cell.row, cell.col);
+        if (!info?.table || !info.colDef) return null;
+        return { cellType, info, row: cell.row, col: cell.col };
+    }
+
+    function commitAndMoveDown() {
+        const tableCtx = getEditingTableContext();
+        if (isEditing) commitEdit({ blurKeyboard: false });
+
+        if (tableCtx?.cellType === CELL_TYPE.TABLE_ENTRY) {
+            tableCtx.info.table.commitEntry();
+            const firstEditable = tableCtx.info.table.columns.findIndex(
+                (c) => !c.isNonEntry,
+            );
+            if (firstEditable >= 0) {
+                const targetCol = tableCtx.info.table.startCol + firstEditable;
+                selectionState.startSelection(tableCtx.row, targetCol);
+                selectionState.endSelection();
+            }
+            if (mobileState.isMobile) captureKeyboardFocus();
+            return;
+        }
+
+        moveSelection(1, 0);
+        if (mobileState.isMobile) captureKeyboardFocus();
+    }
+
+    export function captureKeyboardFocus() {
+        if (!mobileState.isMobile) return false;
+        focusNoScroll(captureInputEl);
+        requestAnimationFrame(() => enforcePageTop());
+        return document.activeElement === captureInputEl;
+    }
+
+    function commitEdit(options = {}) {
+        const { blurKeyboard = true } = options;
         // Rich text sessions are always committed by the cell's contenteditable editor.
         // The formula bar must never commit the plain-text draft over a rich text value.
         if (hasRichText) {
             editSessionState.cancel();
+            if (blurKeyboard) blurMobileKeyboard();
             return;
         }
 
@@ -151,6 +242,7 @@
         ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
+        if (blurKeyboard) blurMobileKeyboard();
     }
 
     function cancelEdit() {
@@ -162,11 +254,13 @@
         ) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         }
+        blurMobileKeyboard();
     }
 
     function handleKeydown(e) {
         if (e.key === "Enter") {
-            commitEdit();
+            if (mobileState.isMobile) commitAndMoveDown();
+            else commitEdit();
             e.preventDefault();
         } else if (e.key === "Escape") {
             cancelEdit();
@@ -184,6 +278,7 @@
             e.target.selectionStart,
             e.target.selectionEnd,
         );
+        syncFormulaOverlayScrollFromEvent(e);
     }
 
     function handleSelect(e) {
@@ -191,12 +286,36 @@
             e.target.selectionStart,
             e.target.selectionEnd,
         );
+        syncFormulaOverlayScrollFromEvent(e);
+    }
+
+    function syncFormulaOverlayScrollFromEvent(e) {
+        const target = /** @type {HTMLInputElement | null} */ (e?.target ?? null);
+        if (!target) return;
+        syncFormulaOverlayScroll(target.scrollLeft || 0);
+    }
+
+    function syncFormulaOverlayScrollFromInput() {
+        syncFormulaOverlayScroll(editInputEl?.scrollLeft || 0);
+    }
+
+    function syncFormulaOverlayScroll(scrollLeft = 0) {
+        if (!formulaOverlayEl) return;
+        // Sync by setting scrollLeft on the overlay container — avoids the GPU-layer
+        // pre-clipping bug that happens when will-change:transform is inside overflow:hidden.
+        formulaOverlayEl.scrollLeft = scrollLeft;
     }
 
     $effect(() => {
-        editSessionState.setFocusHandle("formulaBar", () =>
-            editInputEl?.focus(),
-        );
+        editSessionState.setFocusHandle("formulaBar", () => {
+            if (editInputEl) focusNoScroll(editInputEl);
+            else if (mobileState.isMobile) focusNoScroll(captureInputEl);
+            // Double rAF: first frame lets iOS settle, second corrects any residual scroll.
+            requestAnimationFrame(() => {
+                enforcePageTop();
+                requestAnimationFrame(enforcePageTop);
+            });
+        });
         return () => {
             editSessionState.clearFocusHandle("formulaBar");
         };
@@ -206,6 +325,23 @@
         if (isEditing && editSessionState.surface === "formulaBar") {
             editSessionState.requestFocus("formulaBar");
         }
+    });
+
+    // Keep formula color overlay text horizontally aligned with the real input.
+    $effect(() => {
+        const _editing = isEditing;
+        const _formula = isFormulaMode;
+        if (!_editing || !_formula || !editInputEl) {
+            syncFormulaOverlayScroll(0);
+            return;
+        }
+        let rafId = 0;
+        const tick = () => {
+            syncFormulaOverlayScrollFromInput();
+            rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(rafId);
     });
 
     // Reset edit value ONLY when the cell actually changes (not on every reactive update)
@@ -223,7 +359,13 @@
     });
 </script>
 
-<div class="formula-bar">
+<div
+    class="formula-bar"
+    class:floating
+    style={floating
+        ? `bottom: ${Math.max(mobileState.viewportKeyboardHeight, 36)}px`
+        : ""}
+>
     <div class="formula-bar-row">
         <div class="cell-reference">
             {cellRef || "-"}
@@ -279,12 +421,16 @@
                         onkeydown={handleKeydown}
                         oninput={handleInput}
                         onselect={handleSelect}
+                        onscroll={syncFormulaOverlayScrollFromInput}
+                        onkeyup={syncFormulaOverlayScrollFromInput}
+                        onclick={syncFormulaOverlayScrollFromInput}
                         class="edit-input"
                     />
                     {#if isFormulaMode}
                         <!-- Color overlay for references -->
-                        <div class="formula-overlay" aria-hidden="true">
-                            <span class="formula-overlay-text"
+                        <div class="formula-overlay" aria-hidden="true" bind:this={formulaOverlayEl}>
+                            <span
+                                class="formula-overlay-text"
                                 >{#each formulaSegments as segment}{#if segment.color}<span
                                             style="color: {segment.color}; font-weight: 600;"
                                             >{segment.text}</span
@@ -321,6 +467,33 @@
         </div>
     </div>
     <!-- end .formula-bar-row -->
+    <input
+        bind:this={captureInputEl}
+        class="capture-input"
+        type="text"
+        tabindex="-1"
+        aria-hidden="true"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+    />
+    {#if mobileState.isMobile}
+        <div class="mobile-nav-row">
+            <button class="mobile-nav-btn" onclick={() => navigateMobile(0, -1)}>
+                Prev
+            </button>
+            <button class="mobile-nav-btn" onclick={() => navigateMobile(0, 1)}>
+                Next
+            </button>
+            <button class="mobile-nav-btn primary" onclick={() => commitEdit({ blurKeyboard: true })}>
+                Commit
+            </button>
+            <button class="mobile-nav-btn primary" onclick={commitAndMoveDown}>
+                Newline
+            </button>
+        </div>
+    {/if}
 </div>
 
 <style>
@@ -410,6 +583,40 @@
         position: relative;
     }
 
+    .capture-input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+        left: 0;
+        bottom: 0;
+    }
+
+    .mobile-nav-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.375rem;
+        padding: 0.375rem 0.5rem 0.5rem;
+        border-top: 1px solid var(--border-color, #e2e8f0);
+    }
+
+    .mobile-nav-btn {
+        border: 1px solid var(--border-color, #cbd5e1);
+        border-radius: 8px;
+        background: var(--formula-nav-btn-bg, #f8fafc);
+        color: var(--text-color, #0f172a);
+        font-size: 0.8125rem;
+        font-weight: 600;
+        padding: 0.5rem 0.375rem;
+        min-height: 36px;
+        touch-action: manipulation;
+    }
+
+    .mobile-nav-btn.primary {
+        background: var(--formula-nav-btn-primary-bg, #e2e8f0);
+    }
+
     .display-value {
         padding: 0.25rem 0.5rem;
         font-size: 0.875rem;
@@ -459,17 +666,27 @@
         width: 100%;
         padding: 0.25rem 0.5rem;
         font-size: 0.875rem;
+        line-height: 20px;
         border: 2px solid var(--focus-color, #3b82f6);
         border-radius: 4px;
         outline: none;
         background: var(--input-bg, #ffffff);
         color: var(--text-color, #1e293b);
-        font-family: monospace;
+        font-family:
+            ui-monospace,
+            SFMono-Regular,
+            Menlo,
+            Monaco,
+            Consolas,
+            "Liberation Mono",
+            "Courier New",
+            monospace;
+        font-variant-ligatures: none;
+        letter-spacing: 0;
         position: relative;
         z-index: 2;
         height: 28px;
         box-sizing: border-box;
-        line-height: 20px;
     }
 
     /* When editing a formula, make input text transparent to show overlay */
@@ -487,9 +704,24 @@
         bottom: 0;
         padding: 0.25rem 0.5rem;
         font-size: 0.875rem;
+        line-height: 20px;
         pointer-events: none;
-        overflow: hidden;
-        font-family: monospace;
+        /* Scrollable so we can sync scrollLeft with the real input — avoids the GPU-layer
+           clipping bug that occurs with overflow:hidden + will-change:transform. */
+        overflow-x: scroll;
+        overflow-y: hidden;
+        scrollbar-width: none; /* Firefox */
+        font-family:
+            ui-monospace,
+            SFMono-Regular,
+            Menlo,
+            Monaco,
+            Consolas,
+            "Liberation Mono",
+            "Courier New",
+            monospace;
+        font-variant-ligatures: none;
+        letter-spacing: 0;
         z-index: 1;
         color: var(--text-color, #1e293b);
         /* Match the input styling */
@@ -501,15 +733,32 @@
         align-items: center;
     }
 
+    .formula-overlay::-webkit-scrollbar {
+        display: none; /* Chrome/Safari */
+    }
+
     .formula-overlay-text {
         white-space: pre;
-        overflow: hidden;
         min-width: 0;
+        display: inline-block;
+        line-height: inherit;
+        flex-shrink: 0;
     }
 
     .formula-function {
         font-weight: 600;
         color: var(--function-color, #7c3aed);
+    }
+
+    /* ── Floating mode (mobile) ── */
+    .formula-bar.floating {
+        position: fixed;
+        left: 0;
+        right: 0;
+        z-index: 200;
+        border-top: 1px solid var(--color-border, #e2e8f0);
+        border-bottom: none;
+        box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.1);
     }
 
     /* ── Mobile: taller touch targets ── */
@@ -535,6 +784,15 @@
         }
         .edit-input {
             height: 36px;
+            font-size: 16px;
+            line-height: 24px;
+        }
+        .formula-overlay {
+            font-size: 16px;
+            line-height: 24px;
+        }
+        .mobile-nav-btn {
+            min-height: 40px;
             font-size: 0.875rem;
         }
     }

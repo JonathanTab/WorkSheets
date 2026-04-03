@@ -4,6 +4,9 @@
         spreadsheetSession,
     } from "../../stores/spreadsheetStore.svelte.js";
 
+    /** compact — inline badge mode for mobile toolbar (no dropdown, just icon+value) */
+    let { compact = false } = $props();
+
     // Dropdown state
     let isOpen = $state(false);
     let selectedStat = $state("sum"); // 'sum', 'average', 'min', 'max', 'count'
@@ -219,6 +222,35 @@
 
 <svelte:window onclick={handleClickOutside} />
 
+{#if compact}
+    <!-- Compact badge for mobile toolbar -->
+    {#if hasSelection && stats?.hasNumbers}
+        <button
+            class="stats-compact"
+            onclick={toggleDropdown}
+            title="Selection stats"
+        >
+            <span class="stats-icon">{displayIcon}</span>
+            <span class="stats-value">{displayValue}</span>
+        </button>
+        {#if isOpen && stats}
+            <div class="stats-dropdown stats-dropdown-compact">
+                {#each ["sum", "average", "min", "max", "count"] as type}
+                    <button
+                        class="stats-option"
+                        class:selected={selectedStat === type}
+                        onclick={() => selectStat(type)}
+                    >
+                        <span class="option-icon">{getStatIcon(type)}</span>
+                        <span class="option-label">{getStatLabel(type)}:</span>
+                        <span class="option-value">{formatNumber(stats[type])}</span>
+                    </button>
+                {/each}
+            </div>
+        {/if}
+    {/if}
+{:else}
+
 <div
     class="selection-stats"
     class:active={hasSelection && stats?.hasNumbers}
@@ -256,6 +288,8 @@
         </div>
     {/if}
 </div>
+
+{/if}
 
 <style>
     .selection-stats {
@@ -361,5 +395,35 @@
     .option-value {
         font-family: monospace;
         font-weight: 500;
+    }
+
+    /* Compact mode for mobile toolbar */
+    .stats-compact {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 4px 8px;
+        height: 32px;
+        background: var(--color-fill, #f1f5f9);
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.8125rem;
+        color: var(--color-text, #1e293b);
+        position: relative;
+    }
+
+    .stats-compact:active {
+        background: var(--color-border, #e2e8f0);
+    }
+
+    .stats-dropdown-compact {
+        position: fixed;
+        top: auto;
+        bottom: auto;
+        right: 8px;
+        /* Positioned via JS would be better; for now anchor to top of viewport */
+        top: 88px;
+        z-index: 350;
     }
 </style>

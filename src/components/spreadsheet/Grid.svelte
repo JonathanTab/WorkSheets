@@ -10,7 +10,7 @@
      *   3. event-layer     (z:4) — native scroll container over cell area,
      *                              captures scroll + mouse → HitTestEngine
      */
-    import { onMount, onDestroy, untrack } from "svelte";
+    import { onMount, onDestroy, untrack, setContext } from "svelte";
     import {
         cut as cutIcon,
         copy as copyIcon,
@@ -71,9 +71,17 @@
     import storage from "../../stores/storage.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../modals/AlertModal.svelte";
+    import { mobileState } from "../../stores/mobileState.svelte.js";
+    import { isRichText } from "../../stores/spreadsheet/richText.js";
+    import SelectionHandles from "./grid/SelectionHandles.svelte";
+    import MobileCellActionBar from "./grid/MobileCellActionBar.svelte";
 
     // ─── Props ─────────────────────────────────────────────────────────────────
-    let { showPageBreaks = false, printSettings = null } = $props();
+    let {
+        showPageBreaks = false,
+        printSettings = null,
+        requestMobileKeyboardFocus = null,
+    } = $props();
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
     let containerEl = $state(null);
@@ -91,6 +99,8 @@
     /** @type {RenderScheduler|null} */
     let selectionScheduler = null;
     const hitTestEngine = new HitTestEngine();
+    // Expose to child components (e.g. SelectionHandles) without prop drilling
+    setContext("hitTestEngine", hitTestEngine);
     // Track which canvas element each renderer was created for, so we can
     // detect when the {#if} block remounts and recreates canvas elements.
     let rendererCanvasEl = null;
@@ -185,6 +195,20 @@
     /**
      * Calculate position for filter popover, ensuring it stays within viewport.
      */
+    function getContainerKeyboardOverlapPx() {
+        if (!mobileState.isMobile || !mobileState.isKeyboardOpen || !containerEl)
+            return 0;
+        const cr = containerEl.getBoundingClientRect();
+        const keyboardTop = window.innerHeight - mobileState.keyboardHeight;
+        return Math.max(0, cr.bottom - keyboardTop);
+    }
+
+    function getContainerVisibleBottomPx() {
+        if (!containerEl) return 0;
+        const cr = containerEl.getBoundingClientRect();
+        return Math.max(0, cr.height - getContainerKeyboardOverlapPx());
+    }
+
     function calculateFilterPopoverPosition(cellLeft, cellTop, cellWidth) {
         if (!containerEl) return { left: cellLeft, top: cellTop };
 
@@ -192,6 +216,7 @@
         const popoverWidth = 240; // max-width from TableFilterPopover styles
         const popoverHeight = 300; // approximate height
         const margin = 8;
+        const visibleBottom = getContainerVisibleBottomPx();
 
         let left = cellLeft;
         let top = cellTop;
@@ -210,8 +235,7 @@
 
         // Check bottom edge - if would go off screen, position above the header instead
         const bottomEdge = top + popoverHeight;
-        const containerBottom = containerRect.height;
-        if (bottomEdge > containerBottom - margin) {
+        if (bottomEdge > visibleBottom - margin) {
             // Position above the header row (top is already at header bottom)
             top = cellTop - popoverHeight - 24 - margin; // 24 is approx header height
             // If still too low, clamp to available space
@@ -239,7 +263,8 @@
 
         const containerRect = containerEl.getBoundingClientRect();
         const panelWidth = type === "table" ? 250 : 240;
-        const panelMaxHeight = window.innerHeight * 0.8;
+        const visibleBottom = getContainerVisibleBottomPx();
+        const panelMaxHeight = Math.min(window.innerHeight * 0.8, visibleBottom - 16);
         const margin = 8;
 
         let anchorRight, anchorTop;
@@ -286,13 +311,12 @@
 
         // Check bottom edge
         const bottomEdge = y + panelMaxHeight;
-        const containerBottom = containerRect.height;
-        if (bottomEdge > containerBottom - margin) {
+        if (bottomEdge > visibleBottom - margin) {
             // Try to position above the anchor instead
             y = anchorTop - panelMaxHeight - margin;
             // If still too low, just clamp to bottom
-            if (y + panelMaxHeight > containerBottom - margin) {
-                y = containerBottom - panelMaxHeight - margin;
+            if (y + panelMaxHeight > visibleBottom - margin) {
+                y = visibleBottom - panelMaxHeight - margin;
             }
         }
 
@@ -362,6 +386,7 @@
     let touchScrolled = false; // true once movement threshold exceeded
     let lastTapTime = 0; // for double-tap detection
     let lastTapPos = null; // position of last tap
+    let isLongPressDragging = false; // long-press-drag range selection mode
     let longPressTimer = null; // for long-press context menu
     const TOUCH_MOVE_THRESHOLD = 8; // px — max movement still considered a tap
     const DOUBLE_TAP_DELAY = 300; // ms — max interval between taps
@@ -1174,6 +1199,55 @@
         return null;
     });
 
+    /**
+     * Selection bounding box in container-local px for SelectionHandles (mobile).
+     * Returns {x, y, width, height} or null when there is no range.
+     */
+    let selectionHandleRect = $derived.by(() => {
+        if (!virtualizer || !renderPlan) return null;
+        const mode = selectionState.selectionMode;
+        let x, y, width, height;
+        if (mode === 'range') {
+            const eff = expandedRange ?? selectionState.range;
+            if (!eff) {
+                // Single anchor cell
+                const anch = selectionState.anchor;
+                if (!anch) return null;
+                x = cellContainerLeft(anch.col);
+                y = cellContainerTop(anch.row);
+                width = virtualizer.getColWidth(anch.col);
+                height = virtualizer.getRowHeight(anch.row);
+            } else {
+                x = cellContainerLeft(eff.startCol);
+                y = cellContainerTop(eff.startRow);
+                const right = cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
+                const bottom = cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
+                width = Math.max(0, right - x);
+                height = Math.max(0, bottom - y);
+            }
+        } else if (mode === 'rows') {
+            const sr = selectionState.selectedRows;
+            if (!sr) return null;
+            x = HEADER_WIDTH;
+            y = cellContainerTop(sr.start);
+            width = renderPlan.totalWidth;
+            height = Math.max(0, cellContainerTop(sr.end) + virtualizer.getRowHeight(sr.end) - y);
+        } else if (mode === 'cols') {
+            const sc = selectionState.selectedCols;
+            if (!sc) return null;
+            x = cellContainerLeft(sc.start);
+            y = HEADER_HEIGHT;
+            width = Math.max(0, cellContainerLeft(sc.end) + virtualizer.getColWidth(sc.end) - x);
+            height = renderPlan.totalHeight;
+        } else if (mode === 'all') {
+            x = HEADER_WIDTH; y = HEADER_HEIGHT;
+            width = renderPlan.totalWidth; height = renderPlan.totalHeight;
+        } else {
+            return null;
+        }
+        return { x, y, width, height };
+    });
+
     let anchorBorderStyle = $derived.by(() => {
         if (!anchor || !virtualizer || !renderPlan) return null;
 
@@ -1215,6 +1289,8 @@
         const col = editSessionState.cell?.col;
         if (row == null || col == null || row < 0 || col < 0) return null;
 
+        let bounds = null;
+
         // If editing a merged cell, span the entire merged area
         const mergeEngine = renderContext?.mergeEngine;
         if (mergeEngine?.isMergePrimary(row, col)) {
@@ -1228,16 +1304,76 @@
                 let height = 0;
                 for (let r = merge.startRow; r <= merge.endRow; r++)
                     height += virtualizer.getRowHeight(r);
-                return { top, left, width, height };
+                bounds = { top, left, width, height };
             }
         }
 
-        return {
-            top: cellContainerTop(row),
-            left: cellContainerLeft(col),
-            width: virtualizer.getColWidth(col),
-            height: virtualizer.getRowHeight(row),
-        };
+        if (!bounds) {
+            bounds = {
+                top: cellContainerTop(row),
+                left: cellContainerLeft(col),
+                width: virtualizer.getColWidth(col),
+                height: virtualizer.getRowHeight(row),
+            };
+        }
+
+        // Keep in-cell editor visible above the soft keyboard on mobile.
+        if (mobileState.isMobile && mobileState.isKeyboardOpen && containerEl) {
+            const visibleBottom = getContainerVisibleBottomPx();
+            const margin = 8;
+            const pickerMode = editSessionState.pickerMode;
+            const preferredEditorHeight =
+                pickerMode === "image-picker"
+                    ? 340
+                    : pickerMode === "file-picker"
+                      ? 360
+                      : pickerMode
+                        ? 320
+                        : bounds.height;
+            const preferredEditorWidth =
+                pickerMode === "image-picker"
+                    ? 300
+                    : pickerMode === "file-picker"
+                      ? 320
+                      : bounds.width;
+            const maxTop = Math.max(
+                HEADER_HEIGHT,
+                visibleBottom - preferredEditorHeight - margin,
+            );
+            if (bounds.top > maxTop) bounds.top = maxTop;
+            const maxLeft = Math.max(
+                HEADER_WIDTH,
+                containerEl.clientWidth - preferredEditorWidth - margin,
+            );
+            if (bounds.left > maxLeft) bounds.left = maxLeft;
+            if (bounds.left < HEADER_WIDTH) bounds.left = HEADER_WIDTH;
+        }
+
+        return bounds;
+    });
+
+    let dropdownOverlayStyle = $derived.by(() => {
+        if (!focusedDropdownCell || !containerEl) return "display:none;";
+        const margin = 8;
+        const preferredWidth = Math.max(focusedDropdownCell.width, 140);
+        let left = focusedDropdownCell.left;
+        let top = focusedDropdownCell.top + focusedDropdownCell.height;
+        const visibleBottom = getContainerVisibleBottomPx();
+        const preferredHeight = 220;
+        let maxHeight = preferredHeight;
+
+        if (left + preferredWidth > containerEl.clientWidth - margin) {
+            left = Math.max(margin, containerEl.clientWidth - preferredWidth - margin);
+        }
+        if (left < margin) left = margin;
+
+        // Flip above the cell when there isn't enough room below.
+        if (top + preferredHeight > visibleBottom - margin) {
+            top = Math.max(margin, focusedDropdownCell.top - preferredHeight - 4);
+        }
+
+        maxHeight = Math.max(96, visibleBottom - top - margin);
+        return `position:absolute; left:${Math.round(left)}px; top:${Math.round(top)}px; width:${Math.round(preferredWidth)}px; max-height:${Math.round(maxHeight)}px; z-index:30;`;
     });
 
     // ─── Range outline + edit button (table / repeater) ──────────────────────
@@ -1563,7 +1699,7 @@
         touchStartPos = { x: touch.clientX, y: touch.clientY };
         touchScrolled = false;
 
-        // Long-press: show context menu
+        // Long-press: enter drag-to-select mode OR show context menu
         const savedClientX = touch.clientX;
         const savedClientY = touch.clientY;
         longPressTimer = setTimeout(() => {
@@ -1576,22 +1712,32 @@
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
                 const snappedHit = snapToMergePrimary(hit.row, hit.col);
                 if (!isSelected(snappedHit.row, snappedHit.col)) {
-                    selectionState.startSelection(
-                        snappedHit.row,
-                        snappedHit.col,
-                    );
+                    selectionState.startSelection(snappedHit.row, snappedHit.col);
                     selectionState.endSelection();
                 }
+                // Enter drag-range mode — touch-move now extends selection instead of scrolling
+                isLongPressDragging = true;
+                if (scrollEl) scrollEl.style.touchAction = "none";
+                // Context menu shows on touchend if no drag occurs
                 contextMenuPosition = { x: savedClientX, y: savedClientY };
-                contextMenuVisible = true;
             }
             touchStartPos = null; // cancel tap after long-press
         }, LONG_PRESS_DELAY);
     }
 
     function handleEventLayerTouchMove(e) {
-        if (!touchStartPos || e.touches.length !== 1) return;
+        if (e.touches.length !== 1) return;
         const touch = e.touches[0];
+        // If in long-press-drag mode, extend selection instead of scrolling
+        if (isLongPressDragging) {
+            const { localX, localY } = getTouchLocalCoords(touch);
+            const hit = hitTestEngine.hitTest(localX, localY);
+            if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
+                selectionState.extendSelection(hit.row, hit.col);
+            }
+            return;
+        }
+        if (!touchStartPos) return;
         const dx = touch.clientX - touchStartPos.x;
         const dy = touch.clientY - touchStartPos.y;
         if (Math.sqrt(dx * dx + dy * dy) > TOUCH_MOVE_THRESHOLD) {
@@ -1605,6 +1751,25 @@
 
     function handleEventLayerTouchEnd(e) {
         clearTimeout(longPressTimer);
+
+        // End long-press-drag mode
+        if (isLongPressDragging) {
+            isLongPressDragging = false;
+            if (scrollEl) scrollEl.style.touchAction = "";
+            selectionState.endSelection();
+            // Show context menu only if the finger barely moved (< threshold)
+            if (e.changedTouches.length === 1) {
+                const touch = e.changedTouches[0];
+                const dx = touch.clientX - contextMenuPosition.x;
+                const dy = touch.clientY - contextMenuPosition.y;
+                if (Math.sqrt(dx * dx + dy * dy) < TOUCH_MOVE_THRESHOLD * 3) {
+                    contextMenuVisible = true;
+                }
+            }
+            touchStartPos = null;
+            return;
+        }
+
         if (!touchStartPos) return;
         if (e.changedTouches.length !== 1) {
             touchStartPos = null;
@@ -1683,6 +1848,11 @@
 
     function handleEventLayerTouchCancel() {
         clearTimeout(longPressTimer);
+        if (isLongPressDragging) {
+            isLongPressDragging = false;
+            if (scrollEl) scrollEl.style.touchAction = "";
+            selectionState.endSelection();
+        }
         touchStartPos = null;
         touchScrolled = false;
     }
@@ -1775,7 +1945,8 @@
                         containerEl.getBoundingClientRect().left -
                         cellLeft;
 
-                    if (relX > cellWidth - 22) {
+                    const filterZoneWidth = mobileState.isMobile ? 36 : 22;
+                    if (relX > cellWidth - filterZoneWidth) {
                         // Filter icon area
                         const cellBottom =
                             cellContainerTop(row) +
@@ -1976,6 +2147,48 @@
         selectionState.endSelection();
     }
 
+    function getTableAwareEditValue(row, col, cellType = null) {
+        const resolvedCellType = cellType ?? renderContext?.getCellType(row, col);
+        if (resolvedCellType === CELL_TYPE.TABLE_DATA) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                return info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+            }
+        }
+        if (resolvedCellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            if (info?.table && info.colDef) {
+                return info.table.entryBuffer?.[info.colDef.id] ?? "";
+            }
+        }
+        if (resolvedCellType === CELL_TYPE.TABLE_HEADER) {
+            const info = renderContext?.tableManager?.getCellInfo(row, col);
+            return info?.colDef?.name ?? "";
+        }
+        return spreadsheetSession.getCellEditValue(row, col);
+    }
+
+    function getPreferredEditSurface(row, col, cellType = null) {
+        if (!mobileState.isMobile) return "grid";
+
+        // Cells with specialized popups/editors should stay on the grid surface.
+        const ct = renderContext?.getCellTypeConfig(row, col);
+        const uiEditorTypes = new Set([
+            "dropdown",
+            "date",
+            "time",
+            "datetime",
+            "image",
+            "file",
+        ]);
+        if (uiEditorTypes.has(ct?.type)) return "grid";
+
+        const rawValue = getTableAwareEditValue(row, col, cellType);
+        // Rich-text content must be edited in the cell editor to preserve markup.
+        if (isRichText(rawValue)) return "grid";
+        return "formulaBar";
+    }
+
     function handleCellDoubleClick(row, col) {
         // Snap to merge primary so only the primary cell can be edited
         const mergeEngine = renderContext?.mergeEngine;
@@ -1988,6 +2201,13 @@
         }
 
         const cellType = renderContext?.getCellType(row, col);
+        const editSurface = getPreferredEditSurface(row, col, cellType);
+        const startCellEdit = () => {
+            if (mobileState.isMobile && editSurface === "formulaBar") {
+                requestMobileKeyboardFocus?.();
+            }
+            beginCellEdit(row, col, { surface: editSurface });
+        };
 
         // ── REPEATER non-template: not editable ───────────────────────────────
         if (cellType === CELL_TYPE.REPEATER) {
@@ -2008,7 +2228,7 @@
                 ) {
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
-                    beginCellEdit(row, col, { surface: "grid" });
+                    startCellEdit();
                 }
             }
             return;
@@ -2020,12 +2240,12 @@
             if (info?.table && info.colDef) {
                 selectionState.startSelection(row, col);
                 selectionState.endSelection();
-                beginCellEdit(row, col, { surface: "grid" });
+                startCellEdit();
             }
             return;
         }
 
-        beginCellEdit(row, col, { surface: "grid" });
+        startCellEdit();
     }
 
     function handleCellContextMenu(row, col, e) {
@@ -2858,6 +3078,66 @@
         resizing = null;
     }
 
+    // ─── Touch-based resize ──────────────────────────────────────────────────
+
+    function handleResizeTouchMove(e) {
+        if (!resizing || !virtualizer || e.touches.length !== 1) return;
+        e.preventDefault();
+        const touch = e.touches[0];
+        if (resizing.type === "col") {
+            const newWidth = Math.max(20, resizing.startSize + (touch.clientX - resizing.startPos));
+            for (const idx of resizing.selectedIndices) virtualizer.setTempColWidth(idx, newWidth);
+        } else {
+            const newHeight = Math.max(10, resizing.startSize + (touch.clientY - resizing.startPos));
+            for (const idx of resizing.selectedIndices) virtualizer.setTempRowHeight(idx, newHeight);
+        }
+    }
+
+    function handleResizeTouchEnd() {
+        if (!resizing || !virtualizer || !sheetStore) return;
+        if (resizing.type === "col") {
+            const finalWidth = virtualizer.getColWidth(resizing.index);
+            for (const idx of resizing.selectedIndices) sheetStore.setColWidth(idx, finalWidth);
+            virtualizer.clearTempColWidths();
+        } else {
+            const finalHeight = virtualizer.getRowHeight(resizing.index);
+            for (const idx of resizing.selectedIndices) sheetStore.setRowHeight(idx, finalHeight);
+            virtualizer.clearTempRowHeights();
+        }
+        document.removeEventListener("touchmove", handleResizeTouchMove);
+        document.removeEventListener("touchend", handleResizeTouchEnd);
+        document.removeEventListener("touchcancel", handleResizeTouchEnd);
+        resizing = null;
+    }
+
+    function startColResizeTouch(col, e) {
+        const touch = e.touches[0];
+        let indices = [col];
+        if (selectionState.selectionMode === "cols" && selectionState.selectedCols &&
+            col >= selectionState.selectedCols.start && col <= selectionState.selectedCols.end) {
+            indices = [];
+            for (let c = selectionState.selectedCols.start; c <= selectionState.selectedCols.end; c++) indices.push(c);
+        }
+        resizing = { type: "col", index: col, startPos: touch.clientX, startSize: virtualizer.getColWidth(col), selectedIndices: indices };
+        document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
+        document.addEventListener("touchend", handleResizeTouchEnd);
+        document.addEventListener("touchcancel", handleResizeTouchEnd);
+    }
+
+    function startRowResizeTouch(row, e) {
+        const touch = e.touches[0];
+        let indices = [row];
+        if (selectionState.selectionMode === "rows" && selectionState.selectedRows &&
+            row >= selectionState.selectedRows.start && row <= selectionState.selectedRows.end) {
+            indices = [];
+            for (let r = selectionState.selectedRows.start; r <= selectionState.selectedRows.end; r++) indices.push(r);
+        }
+        resizing = { type: "row", index: row, startPos: touch.clientY, startSize: virtualizer.getRowHeight(row), selectedIndices: indices };
+        document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
+        document.addEventListener("touchend", handleResizeTouchEnd);
+        document.addEventListener("touchcancel", handleResizeTouchEnd);
+    }
+
     // ─── Freeze-handle drag ───────────────────────────────────────────────────
 
     /**
@@ -3046,6 +3326,33 @@
         if (scrollEl.scrollLeft !== scrollLeft)
             scrollEl.scrollLeft = scrollLeft;
     }
+
+    // Keep the active editor cell in view when the soft keyboard opens on mobile.
+    $effect(() => {
+        const _editing = editSessionState.isEditing;
+        const _surface = editSessionState.surface;
+        const _picker = editSessionState.pickerMode;
+        const cell = editSessionState.cell;
+        const _kbOpen = mobileState.isKeyboardOpen;
+        if (
+            !mobileState.isMobile ||
+            !_editing ||
+            _surface !== "grid" ||
+            !!_picker ||
+            !_kbOpen ||
+            !cell ||
+            !scrollEl ||
+            !virtualizer
+        ) {
+            return;
+        }
+        const { scrollTop, scrollLeft } = virtualizer.scrollToCell(
+            cell.row,
+            cell.col,
+        );
+        if (scrollEl.scrollTop !== scrollTop) scrollEl.scrollTop = scrollTop;
+        if (scrollEl.scrollLeft !== scrollLeft) scrollEl.scrollLeft = scrollLeft;
+    });
 
     /**
      * Jump to the edge of a data region in the given direction (Ctrl+Arrow).
@@ -4209,14 +4516,14 @@
                   ...(tableCellInfo.colDef
                       ? [
                             {
-                                label: "Sort A→Z",
+                                label: "Sort Ascending",
                                 action: tableSortAsc,
-                                icon: "▲",
+                                icon: tableCellInfo.table.sortColId === tableCellInfo.colDef.id && tableCellInfo.table.sortDir === "asc" ? "▲" : "△",
                             },
                             {
-                                label: "Sort Z→A",
+                                label: "Sort Descending",
                                 action: tableSortDesc,
-                                icon: "▼",
+                                icon: tableCellInfo.table.sortColId === tableCellInfo.colDef.id && tableCellInfo.table.sortDir === "desc" ? "▼" : "▽",
                             },
                             {
                                 label: "Clear Sort",
@@ -4446,6 +4753,7 @@
                     if (rect.width > 0 && rect.height > 0)
                         virtualizer.setContainerSize(rect.width, rect.height);
                 }
+                mobileState.refreshKeyboardMetrics();
             };
             window.visualViewport.addEventListener("resize", onVVResize);
             vvCleanup = () => {
@@ -4459,6 +4767,19 @@
         if (!anchor) {
             selectionState.startSelection(0, 0);
             selectionState.endSelection();
+        }
+    });
+
+    // Re-measure viewport-dependent layout when soft-keyboard metrics change.
+    $effect(() => {
+        const _kb = mobileState.keyboardHeight;
+        const _isOpen = mobileState.isKeyboardOpen;
+        if (!mobileState.isMobile || !containerEl || !virtualizer) return;
+        const rect = containerEl.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+            untrack(() => {
+                virtualizer.setContainerSize(rect.width, rect.height);
+            });
         }
     });
 
@@ -4572,6 +4893,7 @@
                     {colHeader}
                     onColHeaderMouseDown={handleColHeaderMouseDown}
                     onStartColResize={startColResize}
+                    onStartColResizeTouch={startColResizeTouch}
                     onStartFreezeColDrag={startFreezeColDrag}
                 />
             </div>
@@ -4587,6 +4909,7 @@
                     {isRowSelected}
                     onRowHeaderMouseDown={handleRowHeaderMouseDown}
                     onStartRowResize={startRowResize}
+                    onStartRowResizeTouch={startRowResizeTouch}
                     onStartFreezeRowDrag={startFreezeRowDrag}
                 />
             </div>
@@ -4602,6 +4925,13 @@
             <!-- Anchor border -->
             {#if anchorBorderStyle}
                 <div class="anchor-border" style={anchorBorderStyle}></div>
+            {/if}
+
+            <!-- Mobile selection handles -->
+            {#if mobileState.isMobile && !editSessionState.isEditing}
+                <SelectionHandles
+                    rect={selectionHandleRect}
+                />
             {/if}
 
             <!-- Frozen-row divider line -->
@@ -4747,11 +5077,7 @@
                     : focusedDropdownCell.options}
                 <div
                     class="dropdown-cell-overlay"
-                    style="position:absolute; left:{focusedDropdownCell.left}px; top:{focusedDropdownCell.top +
-                        focusedDropdownCell.height}px; width:{Math.max(
-                        focusedDropdownCell.width,
-                        140,
-                    )}px; z-index:30;"
+                    style={dropdownOverlayStyle}
                 >
                     <input
                         class="dropdown-filter-input"
@@ -4984,14 +5310,31 @@
     {/if}
 </div>
 
-<!-- Context menu (portalled) -->
+<!-- Context menu (portalled) — desktop uses popup, mobile uses action bar -->
 {#if contextMenuVisible}
-    <ContextMenu
-        x={contextMenuPosition.x}
-        y={contextMenuPosition.y}
-        items={contextMenuItems}
-        onClose={closeContextMenu}
-    />
+    {#if mobileState.isMobile}
+        <MobileCellActionBar
+            rect={selectionHandleRect}
+            containerEl={containerEl}
+            tableInfo={tableCellInfo}
+            onClose={closeContextMenu}
+            onCopy={() => { clipboardManager.copy(); closeContextMenu(); }}
+            onCut={() => { clipboardManager.cut(); closeContextMenu(); }}
+            onPaste={() => { clipboardManager.paste(); closeContextMenu(); }}
+            onClear={() => { clearSelection(); closeContextMenu(); }}
+            onDeleteRow={() => {
+                tableDeleteRow();
+                closeContextMenu();
+            }}
+        />
+    {:else}
+        <ContextMenu
+            x={contextMenuPosition.x}
+            y={contextMenuPosition.y}
+            items={contextMenuItems}
+            onClose={closeContextMenu}
+        />
+    {/if}
 {/if}
 
 <!-- File viewer (portalled outside grid-root to escape contain:layout stacking context) -->

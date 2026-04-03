@@ -5,6 +5,7 @@
      * Looks like a regular spreadsheet column header: bold name, subtle bg,
      * heavy bottom border. Filter button is shown only when active or on hover.
      * Renaming is handled by double-clicking the cell (via parent).
+     * Clicking cycles the sort: none → desc (newest first) → asc → none.
      */
 
     import TableFilterPopover from "./TableFilterPopover.svelte";
@@ -14,6 +15,15 @@
 
     let col = $derived(table?.columns?.[colIndex] ?? null);
     let hasFilter = $derived(col?.id && table?.filters?.[col.id]);
+    let isSorted = $derived(col?.id && table?.sortColId === col?.id);
+    let sortArrow = $derived(isSorted ? (table?.sortDir === "asc" ? "▲" : "▼") : null);
+    let headerTitle = $derived(
+        isSorted
+            ? table?.sortDir === "desc"
+                ? `${col?.name}: descending — click for ascending`
+                : `${col?.name}: ascending — click to clear sort`
+            : `${col?.name} — click to sort descending`
+    );
 
     let showFilterPopover = $state(false);
 
@@ -25,14 +35,35 @@
     function closeFilterPopover() {
         showFilterPopover = false;
     }
+
+    function handleHeaderClick(e) {
+        if (!col?.id || !table) return;
+        if (!isSorted) {
+            // First click: sort desc (newest/largest at top — matches default insert order)
+            table.setSort(col.id, "desc");
+        } else if (table.sortDir === "desc") {
+            // Second click: flip to asc
+            table.setSort(col.id, "asc");
+        } else {
+            // Third click: clear sort (back to default insert-order newest-first)
+            table.clearSort();
+        }
+    }
 </script>
 
 <div
     class="table-header-cell"
     style="width:{width}px; height:{height}px;"
-    title={col?.name ?? ""}
+    title={headerTitle}
+    onclick={handleHeaderClick}
+    role="button"
+    tabindex="0"
+    onkeydown={(e) => e.key === "Enter" && handleHeaderClick(e)}
 >
     <span class="col-name">{col?.name ?? ""}</span>
+    {#if sortArrow}
+        <span class="sort-arrow">{sortArrow}</span>
+    {/if}
     <button
         class="filter-btn"
         class:active={hasFilter}
@@ -66,6 +97,19 @@
         position: relative;
         padding: 0 2px 0 4px;
         gap: 2px;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .table-header-cell:hover {
+        background: var(--table-header-bg-hover, #e2e8f0);
+    }
+
+    .sort-arrow {
+        font-size: 9px;
+        color: var(--color-accent, #3b82f6);
+        flex-shrink: 0;
+        line-height: 1;
     }
 
     .col-name {
@@ -109,5 +153,14 @@
         top: 100%;
         right: 0;
         z-index: 50;
+    }
+
+    /* Mobile: bigger filter button */
+    @media (pointer: coarse), (max-width: 768px) {
+        .filter-btn {
+            width: 36px;
+            height: 36px;
+            opacity: 0.6;
+        }
     }
 </style>

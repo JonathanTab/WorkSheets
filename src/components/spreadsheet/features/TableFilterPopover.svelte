@@ -7,6 +7,8 @@
      */
 
     import { close } from "../../../lib/icons/index.js";
+    import BottomSheet from "../../ui/BottomSheet.svelte";
+    import { mobileState } from "../../../stores/mobileState.svelte.js";
 
     let { table, colId, onClose = () => {} } = $props();
 
@@ -126,14 +128,7 @@
     }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="filter-popover" onkeydown={handleKeydown} role="dialog">
-    <div class="filter-header">
-        <span class="filter-col-name">{col?.name ?? colId}</span>
-        {#if hasFilter}<span class="active-dot" title="Filter active"></span>{/if}
-        <button class="close-btn" onclick={() => onClose()} aria-label="Close">{@html close}</button>
-    </div>
-
+{#snippet filterBody()}
     <div class="filter-body">
         <select bind:value={operator} class="operator-select">
             {#each operators as op}
@@ -171,7 +166,23 @@
         {/if}
         <button class="btn btn-done" onclick={onClose} type="button">Done</button>
     </div>
-</div>
+{/snippet}
+
+{#if mobileState.isMobile}
+    <BottomSheet open={true} onClose={onClose} title="Filter: {col?.name ?? colId}" maxHeight="60vh">
+        {@render filterBody()}
+    </BottomSheet>
+{:else}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="filter-popover" onkeydown={handleKeydown} role="dialog">
+        <div class="filter-header">
+            <span class="filter-col-name">{col?.name ?? colId}</span>
+            {#if hasFilter}<span class="active-dot" title="Filter active"></span>{/if}
+            <button class="close-btn" onclick={() => onClose()} aria-label="Close">{@html close}</button>
+        </div>
+        {@render filterBody()}
+    </div>
+{/if}
 
 <style>
     .filter-popover {
@@ -322,4 +333,14 @@
     }
 
     .btn-done:hover { background: #334155; border-color: #334155; }
+
+    /* Mobile: larger controls inside BottomSheet */
+    @media (pointer: coarse), (max-width: 768px) {
+        .filter-body { padding: 12px 16px; gap: 10px; }
+        .operator-select { height: 40px; font-size: 14px; padding: 0 10px; }
+        .value-input { height: 40px; font-size: 14px; padding: 0 12px; }
+        .quick-chip { font-size: 13px; padding: 6px 12px; }
+        .filter-footer { padding: 10px 16px; gap: 10px; }
+        .btn { height: 40px; padding: 0 16px; font-size: 14px; }
+    }
 </style>

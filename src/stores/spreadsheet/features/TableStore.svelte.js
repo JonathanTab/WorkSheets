@@ -266,6 +266,14 @@ export class TableStore {
     insertSortColId = $state(null);
     insertSortDir = $state("asc");
 
+    // ── Cumulative direction ───────────────────────────────────────────────────
+    // When true, cumulative functions accumulate from the bottom of the display
+    // upward (suffix sum: oldest rows at bottom contribute first). This matches
+    // the default newest-first display and any desc sort, so that CUMSUM(amount)
+    // at a given row always means "total of this row and all chronologically
+    // earlier (older) rows below it."
+    cumReverse = $derived(this.sortColId === null || this.sortDir === "desc");
+
     // ── Derived sorted+filtered view ──────────────────────────────────────────
     // Raw rows are appended at the end (O(1) efficiency).
     // For display, we reverse so newest rows appear at top.
@@ -897,9 +905,28 @@ export class TableStore {
         const n = rows.length;
         if (n === 0) return 0;
 
+        const clampedIdx = Math.min(upToDisplayIndex, n - 1);
+
+        if (this.cumReverse) {
+            // Suffix sum: display is newest-first, so row 0 is newest and row n-1
+            // is oldest. cache[i] = sum of rows[i..n-1] = "this row + all older rows".
+            // Newest row (i=0) shows the grand total; oldest row (i=n-1) shows just itself.
+            let cache = this.#cumCache.get(colId);
+            if (!cache || cache.length < n) {
+                cache = new Float64Array(n);
+                let running = 0;
+                for (let i = n - 1; i >= 0; i--) {
+                    running += Number(rows[i]?.[colId]) || 0;
+                    cache[i] = running;
+                }
+                this.#cumCache.set(colId, cache);
+            }
+            return cache[clampedIdx] ?? 0;
+        }
+
+        // Prefix sum: display is oldest-first (asc sort). cache[i] = sum of rows[0..i].
         let cache = this.#cumCache.get(colId);
         const dirtyFrom = this.#cumDirtyFrom.get(colId) ?? 0;
-        const clampedIdx = Math.min(upToDisplayIndex, n - 1);
 
         if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
             if (!cache || cache.length < n) {
@@ -908,7 +935,6 @@ export class TableStore {
             const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
             let running = startVal;
             for (let i = dirtyFrom; i < n; i++) {
-                // Use raw row value (not getValue which could recurse for formula cols)
                 running += Number(rows[i]?.[colId]) || 0;
                 cache[i] = running;
             }
@@ -1174,9 +1200,24 @@ export class TableStore {
         const n = rows.length;
         if (n === 0) return 0;
 
+        const clampedIdx = Math.min(upToIndex, n - 1);
+
+        if (this.cumReverse) {
+            let cache = this.#runningIfCache.get(key);
+            if (!cache || cache.length < n) {
+                cache = new Float64Array(n);
+                let running = 0;
+                for (let i = n - 1; i >= 0; i--) {
+                    running += matchCondition(rows[i][filterCol], op, filterVal) ? (Number(rows[i][sumCol]) || 0) : 0;
+                    cache[i] = running;
+                }
+                this.#runningIfCache.set(key, cache);
+            }
+            return cache[clampedIdx] ?? 0;
+        }
+
         let cache = this.#runningIfCache.get(key);
         const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
-        const clampedIdx = Math.min(upToIndex, n - 1);
 
         if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
             if (!cache || cache.length < n) cache = new Float64Array(n);
@@ -1203,9 +1244,26 @@ export class TableStore {
         const n = rows.length;
         if (n === 0) return 0;
 
+        const clampedIdx = Math.min(upToIndex, n - 1);
+
+        if (this.cumReverse) {
+            let cache = this.#runningIfCache.get(key);
+            if (!cache || cache.length < n) {
+                cache = new Float64Array(n);
+                let running = 0;
+                for (let i = n - 1; i >= 0; i--) {
+                    const row = rows[i];
+                    const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
+                    running += allMatch ? (Number(row[sumCol]) || 0) : 0;
+                    cache[i] = running;
+                }
+                this.#runningIfCache.set(key, cache);
+            }
+            return cache[clampedIdx] ?? 0;
+        }
+
         let cache = this.#runningIfCache.get(key);
         const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
-        const clampedIdx = Math.min(upToIndex, n - 1);
 
         if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
             if (!cache || cache.length < n) cache = new Float64Array(n);
