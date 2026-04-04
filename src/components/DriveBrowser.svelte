@@ -1847,6 +1847,15 @@
                 <!-- List View (Table) -->
                 <div class="file-table-container">
                     <table class="file-table">
+                        <colgroup>
+                            <col class="col-check" />
+                            <col class="col-name" />
+                            {#if !isMobile}
+                                <col class="col-owner" />
+                            {/if}
+                            <col class="col-modified" />
+                            <col class="col-actions" />
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th class="col-check">
@@ -1864,11 +1873,11 @@
                                                 : clearSelection()}
                                     />
                                 </th>
-                                <th
-                                    class="col-name"
-                                    onclick={() => toggleSort("name")}
-                                >
-                                    <div class="col-name-header">
+                                <th class="col-name">
+                                    <button
+                                        class="sort-header"
+                                        onclick={() => toggleSort("name")}
+                                    >
                                         <span>Name</span>
                                         {#if sortColumn === "name"}
                                             <span class="sort-icon"
@@ -1881,41 +1890,49 @@
                                                 >{@html sortAsc}</span
                                             >
                                         {/if}
-                                    </div>
+                                    </button>
                                 </th>
-                                <th
-                                    class="col-owner desktop-only"
-                                    onclick={() => toggleSort("owner")}
-                                >
-                                    <span>Owner</span>
-                                    {#if sortColumn === "owner"}
-                                        <span class="sort-icon"
-                                            >{@html sortDirection === "asc"
-                                                ? sortAsc
-                                                : sortDesc}</span
+                                {#if !isMobile}
+                                    <th class="col-owner">
+                                        <button
+                                            class="sort-header"
+                                            onclick={() => toggleSort("owner")}
                                         >
-                                    {:else}
-                                        <span class="sort-icon placeholder"
-                                            >{@html sortAsc}</span
-                                        >
-                                    {/if}
-                                </th>
-                                <th
-                                    class="col-modified"
-                                    onclick={() => toggleSort("modified")}
-                                >
-                                    <span>Modified</span>
-                                    {#if sortColumn === "modified"}
-                                        <span class="sort-icon"
-                                            >{@html sortDirection === "asc"
-                                                ? sortAsc
-                                                : sortDesc}</span
-                                        >
-                                    {:else}
-                                        <span class="sort-icon placeholder"
-                                            >{@html sortAsc}</span
-                                        >
-                                    {/if}
+                                            <span>Owner</span>
+                                            {#if sortColumn === "owner"}
+                                                <span class="sort-icon"
+                                                    >{@html sortDirection ===
+                                                    "asc"
+                                                        ? sortAsc
+                                                        : sortDesc}</span
+                                                >
+                                            {:else}
+                                                <span
+                                                    class="sort-icon placeholder"
+                                                    >{@html sortAsc}</span
+                                                >
+                                            {/if}
+                                        </button>
+                                    </th>
+                                {/if}
+                                <th class="col-modified">
+                                    <button
+                                        class="sort-header"
+                                        onclick={() => toggleSort("modified")}
+                                    >
+                                        <span>Modified</span>
+                                        {#if sortColumn === "modified"}
+                                            <span class="sort-icon"
+                                                >{@html sortDirection === "asc"
+                                                    ? sortAsc
+                                                    : sortDesc}</span
+                                            >
+                                        {:else}
+                                            <span class="sort-icon placeholder"
+                                                >{@html sortAsc}</span
+                                            >
+                                        {/if}
+                                    </button>
                                 </th>
                                 <th class="col-actions"></th>
                             </tr>
@@ -2037,9 +2054,11 @@
                                             {/if}
                                         </div>
                                     </td>
-                                    <td class="col-owner desktop-only"
-                                        >{getOwnerName(item)}</td
-                                    >
+                                    {#if !isMobile}
+                                        <td class="col-owner"
+                                            >{getOwnerName(item)}</td
+                                        >
+                                    {/if}
                                     <td class="col-modified"
                                         >{tab === "recent"
                                             ? formatActivity(item)
@@ -2050,41 +2069,46 @@
                                               )}</td
                                     >
                                     <td class="col-actions">
-                                        {#if tab === "trash"}
-                                            <button
-                                                class="action-btn"
-                                                title="Restore"
-                                                onclick={(e) =>
-                                                    handleRestoreFile(item, e)}
-                                            >
-                                                {@html refresh}
-                                            </button>
-                                            <button
-                                                class="action-btn danger"
-                                                title="Delete forever"
-                                                onclick={(e) =>
-                                                    handlePermanentDeleteFile(
-                                                        item,
-                                                        e,
-                                                    )}
-                                            >
-                                                {@html trash}
-                                            </button>
-                                        {:else}
-                                            <button
-                                                class="action-btn"
-                                                onclick={(e) => {
-                                                    e.stopPropagation();
-                                                    showContextMenu(
-                                                        e,
-                                                        item,
-                                                        item.itemType,
-                                                    );
-                                                }}
-                                            >
-                                                {@html moreVertical}
-                                            </button>
-                                        {/if}
+                                        <div class="row-actions">
+                                            {#if tab === "trash"}
+                                                <button
+                                                    class="action-btn"
+                                                    title="Restore"
+                                                    onclick={(e) =>
+                                                        handleRestoreFile(
+                                                            item,
+                                                            e,
+                                                        )}
+                                                >
+                                                    {@html refresh}
+                                                </button>
+                                                <button
+                                                    class="action-btn danger"
+                                                    title="Delete forever"
+                                                    onclick={(e) =>
+                                                        handlePermanentDeleteFile(
+                                                            item,
+                                                            e,
+                                                        )}
+                                                >
+                                                    {@html trash}
+                                                </button>
+                                            {:else}
+                                                <button
+                                                    class="action-btn"
+                                                    onclick={(e) => {
+                                                        e.stopPropagation();
+                                                        showContextMenu(
+                                                            e,
+                                                            item,
+                                                            item.itemType,
+                                                        );
+                                                    }}
+                                                >
+                                                    {@html moreVertical}
+                                                </button>
+                                            {/if}
+                                        </div>
                                     </td>
                                 </tr>
                             {/each}
@@ -3122,11 +3146,36 @@
         table-layout: fixed;
     }
 
+    .file-table col.col-check {
+        width: 2.5rem;
+    }
+
+    .file-table col.col-name {
+        width: auto;
+    }
+
+    .file-table col.col-owner {
+        width: 11rem;
+    }
+
+    .file-table col.col-modified {
+        width: 9.5rem;
+    }
+
+    .file-table col.col-actions {
+        width: 4.25rem;
+    }
+
     .file-table thead {
         position: sticky;
         top: 0;
         background: var(--color-bg);
         z-index: 1;
+    }
+
+    .file-table th,
+    .file-table td {
+        box-sizing: border-box;
     }
 
     .file-table th {
@@ -3136,51 +3185,48 @@
         color: var(--color-text-secondary);
         border-bottom: 1px solid var(--color-border);
         white-space: nowrap;
-        cursor: pointer;
-        user-select: none;
-        transition: color 0.15s;
         vertical-align: middle;
     }
 
-    .file-table th:hover {
+    .sort-header {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.125rem;
+        border: none;
+        background: transparent;
+        padding: 0;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+        user-select: none;
+        transition: color 0.15s;
+    }
+
+    .sort-header:hover {
         color: var(--color-text);
     }
 
-    .col-check {
-        width: 36px;
+    .file-table th.col-check,
+    .file-table td.col-check {
         text-align: center !important;
+    }
+
+    .file-table th.col-check {
         cursor: default !important;
     }
 
-    .col-check:hover {
+    .file-table th.col-check:hover {
         color: var(--color-text-secondary);
-    }
-
-    .col-name {
-        width: auto;
-    }
-
-    .col-name-header {
-        display: inline-flex;
-        align-items: center;
     }
 
     .col-name-content {
         display: flex;
         align-items: center;
         gap: 0.5rem;
+        min-width: 0;
     }
 
-    .col-owner {
-        width: 15%;
-    }
-
-    .col-modified {
-        width: 15%;
-    }
-
-    .col-actions {
-        width: 40px;
+    .file-table th.col-actions {
         cursor: default !important;
     }
 
@@ -3247,13 +3293,23 @@
 
     .file-row .col-check {
         text-align: center;
-        width: 36px;
         padding: 0.5rem 0.25rem;
     }
 
     .file-row .col-check input {
         margin: 0;
         vertical-align: middle;
+    }
+
+    .file-row .col-actions {
+        padding-right: 0.375rem;
+    }
+
+    .row-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.125rem;
     }
 
     .item-icon {
@@ -3299,8 +3355,8 @@
         outline: none;
     }
 
-    .col-owner,
-    .col-modified {
+    .file-row .col-owner,
+    .file-row .col-modified {
         color: var(--color-text-secondary);
     }
 
@@ -3662,8 +3718,12 @@
             width: 100px;
         }
 
-        .col-modified {
-            width: 80px;
+        .file-table col.col-modified {
+            width: 7.25rem;
+        }
+
+        .file-table col.col-actions {
+            width: 3.25rem;
         }
 
         .file-grid {
