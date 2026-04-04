@@ -14,11 +14,9 @@
     let { table, colIndex, dataIndex, width = 80, height = 24 } = $props();
 
     let col = $derived(table?.columns?.[colIndex] ?? null);
-    let rawValue = $derived(
-        col && dataIndex >= 0 ? table?.getValue(dataIndex, col.id) : null,
-    );
+    let rawValue = $derived(col && dataIndex >= 0 ? table?.getValue(dataIndex, col.id) : null);
 
-    let ct = $derived(col?.ct);
+    let ct = $derived(col?.typeConfig);
     let descriptor = $derived(ct ? CellTypeRegistry.get(ct.type) : null);
 
     let isCheckbox = $derived(ct?.type === "checkbox");

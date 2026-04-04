@@ -11,6 +11,7 @@
      *   - Export CSV / Delete table
      */
 
+    import { onMount } from "svelte";
     import TableColumnPanel from "./TableColumnPanel.svelte";
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
@@ -32,6 +33,7 @@
         tableManager,
         onClose,
     } = $props();
+    let panelEl = $state(null);
 
     let columns = $derived(table?.columns ?? []);
     let rowCount = $derived(table?.sortedFilteredRows?.length ?? 0);
@@ -196,6 +198,10 @@
         const icons = { text: "A", number: "#", currency: "$", percent: "%", date: "D", checkbox: "✓", rating: "★", url: "↗", dropdown: "▾" };
         return icons[col.type] ?? "A";
     }
+
+    onMount(() => {
+        if (!mobileState.isMobile) panelEl?.focus();
+    });
 </script>
 
 {#snippet panelContent()}
@@ -351,10 +357,12 @@
 {:else}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+    bind:this={panelEl}
     class="table-edit-panel"
     onkeydown={handleKeydown}
     role="dialog"
     aria-label="Table settings"
+    tabindex="-1"
 >
     <!-- Header -->
     <div class="panel-header">
@@ -387,16 +395,16 @@
 <style>
     .table-edit-panel {
         background: var(--cell-bg, #fff);
-        border: 1px solid var(--border-color, #e2e8f0);
+        border: 1px solid var(--cell-border, #e2e8f0);
         border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
         width: 250px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        max-height: 80vh;
+        max-height: min(78vh, 560px);
     }
 
     .panel-header {
@@ -404,8 +412,8 @@
         align-items: center;
         gap: 6px;
         padding: 8px 10px 6px;
-        border-bottom: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        border-bottom: 1px solid var(--cell-border, #e2e8f0);
+        background: var(--table-header-bg, #f8fafc);
         flex-shrink: 0;
     }
 
@@ -475,7 +483,7 @@
         gap: 4px;
         padding: 4px 10px;
         background: var(--header-bg, #f8fafc);
-        border-bottom: 1px solid var(--border-color, #e2e8f0);
+        border-bottom: 1px solid var(--cell-border, #e2e8f0);
         flex-shrink: 0;
         flex-wrap: wrap;
     }
@@ -700,7 +708,7 @@
     .panel-footer {
         padding: 6px 10px 8px;
         border-top: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        background: var(--table-header-bg, #f8fafc);
         display: flex;
         gap: 6px;
         flex-shrink: 0;

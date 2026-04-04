@@ -474,6 +474,13 @@ export class SpreadsheetSession {
 
         // Set up cross-sheet getter — resolves SheetName!CellRef references at eval time.
         // Reads raw Yjs data from the target sheet and recursively evaluates formula chains.
+        // extMgr is captured from the enclosing scope (registered above).
+        const crossSheetCustomFns = extMgr ? new Map([['IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
+            if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
+            if (typeof rangeStr !== 'string') return FormulaError.VALUE;
+            return extMgr.getRange(String(fileIdOrUrl), rangeStr);
+        }]]) : null;
+
         this.formulaEngine.setCrossSheetGetter((sheetName, row, col) => {
             const targetSheet = this.sheets.find(s => s.name === sheetName);
             if (!targetSheet) return FormulaError.REF;
@@ -486,12 +493,16 @@ export class SpreadsheetSession {
             if (!cells) return null;
 
             // Recursive evaluator with cycle detection via visited set.
-            // Handles arbitrary-depth formula chains within the target sheet.
+            // Handles arbitrary-depth formula chains within the target sheet,
+            // including IMPORTRANGE (available via crossSheetCustomFns).
             const evalCell = (r, c, visited) => {
                 const k = `${r},${c}`;
                 if (visited.has(k)) return FormulaError.REF; // Circular ref
                 const cm = cells.get(k);
-                if (!cm) return null;
+                if (!cm) {
+                    // No Yjs data — may be a spill cell from an array formula anchor.
+                    return findSpillValue(r, c, visited);
+                }
                 const v = cm.get?.(CELL_KEYS.VALUE);
                 if (v === undefined || v === null) return null;
                 if (typeof v === 'string' && v.startsWith('=')) {
@@ -500,7 +511,14 @@ export class SpreadsheetSession {
                     try {
                         const ast = parseFormula(v);
                         if (!ast) return null;
-                        return evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, null, null);
+                        const result = evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, crossSheetCustomFns, null);
+                        // Array results (e.g. IMPORTRANGE) — return the scalar at the anchor position [0][0].
+                        // Spill cells are handled separately by findSpillValue.
+                        if (Array.isArray(result)) {
+                            const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);
+                            return arr2d[0]?.[0] ?? null;
+                        }
+                        return result;
                     } catch {
                         return FormulaError.ERROR;
                     }
@@ -509,6 +527,41 @@ export class SpreadsheetSession {
                     return Number(v);
                 }
                 return v;
+            };
+
+            // Scan the target sheet for an array-formula anchor (e.g. IMPORTRANGE) whose
+            // spill range covers (r,c), and return the element at the correct offset.
+            // extMgr.getRange() returns cached data synchronously after the initial load.
+            const findSpillValue = (r, c, visited) => {
+                let found = null;
+                cells.forEach((cm, anchorKey) => {
+                    if (found !== null) return;
+                    const parts = anchorKey.split(',');
+                    const ar = Number(parts[0]);
+                    const ac = Number(parts[1]);
+                    if (ar > r || ac > c) return; // anchor must be at or before target cell
+                    const v = cm.get?.(CELL_KEYS.VALUE);
+                    if (typeof v !== 'string' || !v.startsWith('=')) return;
+                    if (visited.has(anchorKey)) return;
+                    try {
+                        const ast = parseFormula(v);
+                        if (!ast) return;
+                        const nextVisited = new Set(visited);
+                        nextVisited.add(anchorKey);
+                        const result = evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, crossSheetCustomFns, null);
+                        if (!Array.isArray(result)) return;
+                        const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);
+                        const dr = r - ar;
+                        const dc = c - ac;
+                        if (dr === 0 && dc === 0) return; // anchor itself — handled by evalCell directly
+                        if (dr < arr2d.length && dc < (arr2d[0]?.length ?? 0)) {
+                            found = arr2d[dr][dc] ?? null;
+                        }
+                    } catch {
+                        // ignore errors from non-array formulas
+                    }
+                });
+                return found;
             };
 
             return evalCell(row, col, new Set());
@@ -751,13 +804,24 @@ export class SpreadsheetSession {
         const cells = sheetYMap.get('cells');
         if (!cells) return null;
 
+        const extMgr = this.#externalDocManager;
+        const customFns = extMgr ? new Map([['IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
+            if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
+            if (typeof rangeStr !== 'string') return FormulaError.VALUE;
+            return extMgr.getRange(String(fileIdOrUrl), rangeStr);
+        }]]) : null;
+
         // Recursive evaluator with cycle detection via visited set.
-        // Handles arbitrary-depth formula chains within the target sheet.
+        // Handles arbitrary-depth formula chains within the target sheet,
+        // including IMPORTRANGE.
         const evalCell = (r, c, visited) => {
             const k = `${r},${c}`;
             if (visited.has(k)) return FormulaError.REF; // Circular ref
             const cm = cells.get(k);
-            if (!cm) return null;
+            if (!cm) {
+                // No Yjs data — may be a spill cell from an array formula anchor.
+                return findSpillValue(r, c, visited);
+            }
             const v = cm.get?.(CELL_KEYS.VALUE);
             if (v === undefined || v === null) return null;
             if (typeof v === 'string' && v.startsWith('=')) {
@@ -766,7 +830,12 @@ export class SpreadsheetSession {
                 try {
                     const ast = parseFormula(v);
                     if (!ast) return null;
-                    return evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, null, null);
+                    const result = evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, customFns, null);
+                    if (Array.isArray(result)) {
+                        const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);
+                        return arr2d[0]?.[0] ?? null;
+                    }
+                    return result;
                 } catch {
                     return FormulaError.ERROR;
                 }
@@ -777,7 +846,111 @@ export class SpreadsheetSession {
             return v;
         };
 
+        const findSpillValue = (r, c, visited) => {
+            let found = null;
+            cells.forEach((cm, anchorKey) => {
+                if (found !== null) return;
+                const parts = anchorKey.split(',');
+                const ar = Number(parts[0]);
+                const ac = Number(parts[1]);
+                if (ar > r || ac > c) return;
+                const v = cm.get?.(CELL_KEYS.VALUE);
+                if (typeof v !== 'string' || !v.startsWith('=')) return;
+                if (visited.has(anchorKey)) return;
+                try {
+                    const ast = parseFormula(v);
+                    if (!ast) return;
+                    const nextVisited = new Set(visited);
+                    nextVisited.add(anchorKey);
+                    const result = evaluate(ast, (gr, gc) => evalCell(gr, gc, nextVisited), {}, customFns, null);
+                    if (!Array.isArray(result)) return;
+                    const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);
+                    const dr = r - ar;
+                    const dc = c - ac;
+                    if (dr === 0 && dc === 0) return;
+                    if (dr < arr2d.length && dc < (arr2d[0]?.length ?? 0)) {
+                        found = arr2d[dr][dc] ?? null;
+                    }
+                } catch {
+                    // ignore
+                }
+            });
+            return found;
+        };
+
         return evalCell(row, col, new Set());
+    }
+
+    /**
+     * Compute values for a range on any sheet, evaluating all formulas (including
+     * IMPORTRANGE) using a temporary FormulaEngine. Used for cross-sheet dropdown
+     * option resolution where spill values would otherwise be invisible.
+     * @param {string} sheetId
+     * @param {number} startRow
+     * @param {number} startCol
+     * @param {number} endRow
+     * @param {number} endCol
+     * @returns {Array<any>} flat array of values in row-major order
+     */
+    computeSheetRange(sheetId, startRow, startCol, endRow, endCol) {
+        if (sheetId === this.activeSheetId) {
+            const out = [];
+            for (let r = startRow; r <= endRow; r++)
+                for (let c = startCol; c <= endCol; c++)
+                    out.push(this.getCellDisplayValue(r, c));
+            return out;
+        }
+
+        const sheetYMap = this.root?.get('sheets')?.get(sheetId);
+        if (!sheetYMap) return [];
+        const cells = sheetYMap.get('cells');
+        if (!cells) return [];
+
+        // Temporary engine with the same IMPORTRANGE handler so cached data is reused
+        const eng = new FormulaEngine();
+        if (this.#externalDocManager) {
+            const extMgr = this.#externalDocManager;
+            eng.registerFunction('IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
+                if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
+                if (typeof rangeStr !== 'string') return FormulaError.VALUE;
+                return extMgr.getRange(String(fileIdOrUrl), rangeStr);
+            });
+        }
+        eng.setCellValueGetter((r, c) => {
+            const cm = cells.get(`${r},${c}`);
+            if (!cm) return null;
+            const v = cm.get(CELL_KEYS.VALUE);
+            if (typeof v === 'string' && v.startsWith('=')) return null;
+            if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
+            return v ?? null;
+        });
+
+        // Load all formula cells from this sheet
+        cells.forEach((cm, key) => {
+            const v = cm.get?.(CELL_KEYS.VALUE);
+            if (typeof v === 'string' && v.startsWith('=')) {
+                const [rs, cs] = key.split(',');
+                eng.setFormula(parseInt(rs), parseInt(cs), v);
+            }
+        });
+        eng.recalculateAll();
+
+        // Extract the requested range
+        const out = [];
+        for (let r = startRow; r <= endRow; r++) {
+            for (let c = startCol; c <= endCol; c++) {
+                const key = `${r},${c}`;
+                if (key in eng.computedValues) {
+                    out.push(eng.computedValues[key]);
+                } else {
+                    const cm = cells.get(key);
+                    const v = cm?.get?.(CELL_KEYS.VALUE);
+                    if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) out.push(Number(v));
+                    else out.push(v ?? null);
+                }
+            }
+        }
+        return out;
     }
 
     /**

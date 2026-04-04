@@ -21,7 +21,7 @@
      *   onCommit - callback(blobId, { mimeType, filename, size, fit? })
      *   onCancel - callback()
      */
-    import { untrack } from 'svelte';
+    import { onMount, untrack } from 'svelte';
     import storage from '../../../stores/storage.js';
     import { getFileCategory, formatFileSize } from '../../../stores/spreadsheet/cellTypes/types/file.js';
 
@@ -61,6 +61,7 @@
         }));
     }
     let innerEl       = $state(null);
+    let rootEl        = $state(null);
     let panelShift    = $state({ x: 0, y: 0 });
 
     // Clamp the panel to the viewport after mount
@@ -203,13 +204,19 @@
             handleConfirm();
         }
     }
+
+    onMount(() => {
+        rootEl?.focus();
+    });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+    bind:this={rootEl}
     class="fe"
     onkeydown={handleKeydown}
     role="dialog"
+    tabindex="-1"
     aria-label="File editor"
 >
     <div class="fe__inner" bind:this={innerEl} style={panelShift.x || panelShift.y ? `transform:translate(${panelShift.x}px,${panelShift.y}px)` : ''} onclick={(e) => e.stopPropagation()}>

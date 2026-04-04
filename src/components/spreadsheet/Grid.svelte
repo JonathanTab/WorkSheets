@@ -186,11 +186,12 @@
     let freezeDrag = $state(null);
 
     // ─── Overlay state ────────────────────────────────────────────────────────
-    /** @type {{ table:any, colId:string|null, left:number, top:number }|null} */
+    /** @type {{ table:any, colId:string|null, anchorRow:number, anchorCol:number }|null} */
     let activeFilterPopover = $state(null);
 
     // ─── Filter popover position (with boundary detection) ───────────────────
     let filterPopoverPosition = $state(null);
+    let filterPopoverEl = $state(null);
 
     /**
      * Calculate position for filter popover, ensuring it stays within viewport.
@@ -209,48 +210,107 @@
         return Math.max(0, cr.height - getContainerKeyboardOverlapPx());
     }
 
-    function calculateFilterPopoverPosition(cellLeft, cellTop, cellWidth) {
-        if (!containerEl) return { left: cellLeft, top: cellTop };
+    function clamp(v, min, max) {
+        return Math.min(Math.max(v, min), max);
+    }
 
-        const containerRect = containerEl.getBoundingClientRect();
-        const popoverWidth = 240; // max-width from TableFilterPopover styles
-        const popoverHeight = 300; // approximate height
-        const margin = 8;
+    function getOverlayViewportRect(margin = 8) {
+        if (!containerEl) return null;
+        const width = containerEl.clientWidth;
         const visibleBottom = getContainerVisibleBottomPx();
+        return {
+            left: margin,
+            top: margin,
+            right: Math.max(margin, width - margin),
+            bottom: Math.max(margin, visibleBottom - margin),
+        };
+    }
 
-        let left = cellLeft;
-        let top = cellTop;
+    /**
+     * Position a panel near an anchor while keeping it visible in the grid viewport.
+     * @param {{ left:number, top:number, width:number, height:number }} anchor
+     * @param {{ width:number, height:number }} panel
+     * @param {{ preferX?: 'start'|'end', preferY?: 'below'|'above', offset?: number, margin?: number }} [opts]
+     */
+    function placeOverlayNearAnchor(anchor, panel, opts = {}) {
+        const offset = opts.offset ?? 6;
+        const margin = opts.margin ?? 8;
+        const bounds = getOverlayViewportRect(margin);
+        if (!bounds) return { left: anchor.left, top: anchor.top + anchor.height + offset };
 
-        // Check right edge - if popover would go off right side, align to right edge of cell
-        const rightEdge = left + popoverWidth;
-        const containerRight = containerRect.width;
-        if (rightEdge > containerRight - margin) {
-            left = cellLeft + cellWidth - popoverWidth;
+        const panelWidth = Math.max(120, panel.width);
+        const panelHeight = Math.max(60, panel.height);
+        const preferX = opts.preferX ?? "start";
+        const preferY = opts.preferY ?? "below";
+
+        let left =
+            preferX === "end"
+                ? anchor.left + anchor.width - panelWidth
+                : anchor.left;
+        let top =
+            preferY === "above"
+                ? anchor.top - panelHeight - offset
+                : anchor.top + anchor.height + offset;
+
+        const roomBelow = bounds.bottom - (anchor.top + anchor.height + offset);
+        const roomAbove = anchor.top - offset - bounds.top;
+        if (preferY === "below" && roomBelow < panelHeight && roomAbove > roomBelow) {
+            top = anchor.top - panelHeight - offset;
+        } else if (preferY === "above" && roomAbove < panelHeight && roomBelow > roomAbove) {
+            top = anchor.top + anchor.height + offset;
         }
 
-        // Check left edge
-        if (left < margin) {
-            left = margin;
+        if (left + panelWidth > bounds.right) {
+            left = anchor.left + anchor.width - panelWidth;
         }
-
-        // Check bottom edge - if would go off screen, position above the header instead
-        const bottomEdge = top + popoverHeight;
-        if (bottomEdge > visibleBottom - margin) {
-            // Position above the header row (top is already at header bottom)
-            top = cellTop - popoverHeight - 24 - margin; // 24 is approx header height
-            // If still too low, clamp to available space
-            if (top < margin) {
-                top = margin;
-            }
-        }
-
+        left = clamp(left, bounds.left, Math.max(bounds.left, bounds.right - panelWidth));
+        top = clamp(top, bounds.top, Math.max(bounds.top, bounds.bottom - panelHeight));
         return { left: Math.round(left), top: Math.round(top) };
+    }
+
+    function getTableHeaderAnchorRect(table, colId) {
+        if (!table || !colId || !virtualizer) return null;
+        const idx = table.columns.findIndex((c) => c.id === colId);
+        if (idx < 0) return null;
+        const col = table.startCol + idx;
+        const row = table.startRow;
+        return {
+            left: cellContainerLeft(col),
+            top: cellContainerTop(row),
+            width: virtualizer.getColWidth(col),
+            height: virtualizer.getRowHeight(row),
+        };
+    }
+
+    function calculateFilterPopoverPosition() {
+        if (!activeFilterPopover || !containerEl || !virtualizer) return null;
+        const anchor = getTableHeaderAnchorRect(
+            activeFilterPopover.table,
+            activeFilterPopover.colId,
+        );
+        if (!anchor) return null;
+        const panelRect = filterPopoverEl?.getBoundingClientRect();
+        return placeOverlayNearAnchor(
+            anchor,
+            {
+                width: panelRect?.width ?? 244,
+                height: panelRect?.height ?? 320,
+            },
+            {
+                preferX: "end",
+                preferY: "below",
+                offset: 4,
+                margin: 8,
+            },
+        );
     }
 
     // ─── Edit panel position (with boundary detection) ────────────────────────
     /** @type {{ x: number, y: number }|null} */
     let editPanelPosition = $state(null);
     let editPanelEl = $state(null);
+    let columnConfigPosition = $state(null);
+    let columnConfigEl = $state(null);
 
     /**
      * Calculate position for edit panel, ensuring it stays within viewport.
@@ -261,11 +321,9 @@
     function calculateEditPanelPosition(type, store) {
         if (!containerEl || !virtualizer || !renderPlan) return { x: 0, y: 0 };
 
-        const containerRect = containerEl.getBoundingClientRect();
-        const panelWidth = type === "table" ? 250 : 240;
-        const visibleBottom = getContainerVisibleBottomPx();
-        const panelMaxHeight = Math.min(window.innerHeight * 0.8, visibleBottom - 16);
-        const margin = 8;
+        const panelRect = editPanelEl?.getBoundingClientRect();
+        const panelWidth = panelRect?.width ?? (type === "table" ? 258 : 248);
+        const panelHeight = panelRect?.height ?? 380;
 
         let anchorRight, anchorTop;
 
@@ -292,44 +350,45 @@
             anchorTop = rect.top;
         }
 
-        // Adjusted position (below the settings button)
-        let x = anchorRight;
-        let y = anchorTop + 26;
+        const placed = placeOverlayNearAnchor(
+            { left: anchorRight, top: anchorTop + 20, width: 18, height: 18 },
+            { width: panelWidth, height: panelHeight },
+            { preferX: "start", preferY: "below", offset: 6, margin: 8 },
+        );
+        return { x: placed.left, y: placed.top };
+    }
 
-        // Check right edge - if panel would go off right side, flip to left
-        const rightEdge = x + panelWidth;
-        const containerRight = containerRect.width;
-        if (rightEdge > containerRight - margin) {
-            // Flip to left side of the anchor
-            x = anchorRight - panelWidth - margin;
-        }
-
-        // Check left edge
-        if (x < margin) {
-            x = margin;
-        }
-
-        // Check bottom edge
-        const bottomEdge = y + panelMaxHeight;
-        if (bottomEdge > visibleBottom - margin) {
-            // Try to position above the anchor instead
-            y = anchorTop - panelMaxHeight - margin;
-            // If still too low, just clamp to bottom
-            if (y + panelMaxHeight > visibleBottom - margin) {
-                y = visibleBottom - panelMaxHeight - margin;
-            }
-        }
-
-        // Check top edge
-        if (y < margin) {
-            y = margin;
-        }
-
-        return { x: Math.round(x), y: Math.round(y) };
+    function calculateColumnConfigPosition() {
+        if (!activeColumnConfig || !containerEl || !virtualizer) return null;
+        const anchor = {
+            left: cellContainerLeft(activeColumnConfig.anchorCol),
+            top: cellContainerTop(activeColumnConfig.anchorRow),
+            width: virtualizer.getColWidth(activeColumnConfig.anchorCol),
+            height: virtualizer.getRowHeight(activeColumnConfig.anchorRow),
+        };
+        const panelRect = columnConfigEl?.getBoundingClientRect();
+        return placeOverlayNearAnchor(
+            anchor,
+            {
+                width: panelRect?.width ?? 286,
+                height: panelRect?.height ?? 460,
+            },
+            {
+                preferX: "start",
+                preferY: "below",
+                offset: 4,
+                margin: 8,
+            },
+        );
     }
 
     // Recalculate position when activeEditPanel changes
     $effect(() => {
+        const _sl = virtualizer?.scrollLeft;
+        const _st = virtualizer?.scrollTop;
+        const _cw = containerEl?.clientWidth;
+        const _vh = getContainerVisibleBottomPx();
+        const _panelEl = editPanelEl;
         if (activeEditPanel && containerEl && virtualizer && renderPlan) {
             editPanelPosition = calculateEditPanelPosition(
                 activeEditPanel.type,
@@ -342,18 +401,13 @@
 
     // Recalculate filter popover position when it changes
     $effect(() => {
+        const _sl = virtualizer?.scrollLeft;
+        const _st = virtualizer?.scrollTop;
+        const _cw = containerEl?.clientWidth;
+        const _vh = getContainerVisibleBottomPx();
+        const _panelEl = filterPopoverEl;
         if (activeFilterPopover && containerEl && virtualizer) {
-            const cellWidth = virtualizer.getColWidth(
-                activeFilterPopover.table.startCol +
-                    activeFilterPopover.table.columns.findIndex(
-                        (c) => c.id === activeFilterPopover.colId,
-                    ),
-            );
-            filterPopoverPosition = calculateFilterPopoverPosition(
-                activeFilterPopover.left,
-                activeFilterPopover.top,
-                cellWidth,
-            );
+            filterPopoverPosition = calculateFilterPopoverPosition();
         } else {
             filterPopoverPosition = null;
         }
@@ -366,8 +420,21 @@
     let dropdownFilterInputEl = $state(null);
     /** @type {{ type: 'table'|'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
-    /** @type {{ table:any, colId:string, left:number, top:number }|null} */
+    /** @type {{ table:any, colId:string, anchorRow:number, anchorCol:number }|null} */
     let activeColumnConfig = $state(null);
+
+    $effect(() => {
+        const _sl = virtualizer?.scrollLeft;
+        const _st = virtualizer?.scrollTop;
+        const _cw = containerEl?.clientWidth;
+        const _vh = getContainerVisibleBottomPx();
+        const _panelEl = columnConfigEl;
+        if (activeColumnConfig && containerEl && virtualizer) {
+            columnConfigPosition = calculateColumnConfigPosition();
+        } else {
+            columnConfigPosition = null;
+        }
+    });
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -1354,26 +1421,22 @@
 
     let dropdownOverlayStyle = $derived.by(() => {
         if (!focusedDropdownCell || !containerEl) return "display:none;";
-        const margin = 8;
-        const preferredWidth = Math.max(focusedDropdownCell.width, 140);
-        let left = focusedDropdownCell.left;
-        let top = focusedDropdownCell.top + focusedDropdownCell.height;
+        const preferredWidth = Math.max(focusedDropdownCell.width, 164);
+        const preferredHeight = 240;
+        const anchor = {
+            left: focusedDropdownCell.left,
+            top: focusedDropdownCell.top,
+            width: focusedDropdownCell.width,
+            height: focusedDropdownCell.height,
+        };
+        const placed = placeOverlayNearAnchor(
+            anchor,
+            { width: preferredWidth, height: preferredHeight },
+            { preferX: "start", preferY: "below", offset: 4, margin: 8 },
+        );
         const visibleBottom = getContainerVisibleBottomPx();
-        const preferredHeight = 220;
-        let maxHeight = preferredHeight;
-
-        if (left + preferredWidth > containerEl.clientWidth - margin) {
-            left = Math.max(margin, containerEl.clientWidth - preferredWidth - margin);
-        }
-        if (left < margin) left = margin;
-
-        // Flip above the cell when there isn't enough room below.
-        if (top + preferredHeight > visibleBottom - margin) {
-            top = Math.max(margin, focusedDropdownCell.top - preferredHeight - 4);
-        }
-
-        maxHeight = Math.max(96, visibleBottom - top - margin);
-        return `position:absolute; left:${Math.round(left)}px; top:${Math.round(top)}px; width:${Math.round(preferredWidth)}px; max-height:${Math.round(maxHeight)}px; z-index:30;`;
+        const maxHeight = Math.max(100, visibleBottom - placed.top - 8);
+        return `position:absolute; left:${placed.left}px; top:${placed.top}px; width:${Math.round(preferredWidth)}px; max-height:${Math.round(maxHeight)}px; z-index:30;`;
     });
 
     // ─── Range outline + edit button (table / repeater) ──────────────────────
@@ -1948,14 +2011,11 @@
                     const filterZoneWidth = mobileState.isMobile ? 36 : 22;
                     if (relX > cellWidth - filterZoneWidth) {
                         // Filter icon area
-                        const cellBottom =
-                            cellContainerTop(row) +
-                            virtualizer.getRowHeight(row);
                         activeFilterPopover = {
                             table: info.table,
                             colId: colDef.id,
-                            left: cellLeft,
-                            top: cellBottom,
+                            anchorRow: row,
+                            anchorCol: col,
                         };
                     }
                 }
@@ -3958,7 +4018,19 @@
     // ─── Dropdown range resolver ──────────────────────────────────────────────
     function resolveRangeOptions(rangeStr) {
         if (!sheetStore) return [];
-        const parts = rangeStr.trim().toUpperCase().split(":");
+
+        // Parse optional cross-sheet prefix: 'Sheet Name'!A1:A10 or SheetName!A1:A10
+        let targetSheetId = null;
+        let cellRange = rangeStr.trim();
+        const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
+        if (sheetRefMatch) {
+            const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
+            cellRange = sheetRefMatch[3];
+            const entry = spreadsheetSession.sheets.find(s => s.name === sheetName);
+            if (entry) targetSheetId = entry.id;
+        }
+
+        const parts = cellRange.trim().toUpperCase().split(":");
         function parseRef(ref) {
             const m = ref.match(/^([A-Z]+)(\d+)$/);
             if (!m) return null;
@@ -3970,11 +4042,23 @@
         const start = parseRef(parts[0]);
         const end = parts[1] ? parseRef(parts[1]) : start;
         if (!start || !end) return [];
+
         const opts = [];
-        for (let r = start.row; r <= end.row; r++) {
-            for (let c = start.col; c <= end.col; c++) {
-                const cell = sheetStore.getCell(r, c);
-                if (cell?.v != null && cell.v !== "") opts.push(String(cell.v));
+        if (!targetSheetId || targetSheetId === spreadsheetSession.activeSheetId) {
+            // Current sheet — use computed display values
+            for (let r = start.row; r <= end.row; r++) {
+                for (let c = start.col; c <= end.col; c++) {
+                    const v = spreadsheetSession.getCellDisplayValue(r, c);
+                    if (v != null && v !== "") opts.push(String(v));
+                }
+            }
+        } else {
+            // Another sheet — use a temporary FormulaEngine so spill/IMPORTRANGE values are visible
+            const values = spreadsheetSession.computeSheetRange(
+                targetSheetId, start.row, start.col, end.row, end.col
+            );
+            for (const v of values) {
+                if (v != null && v !== "" && !(v instanceof Object)) opts.push(String(v));
             }
         }
         return opts;
@@ -4543,16 +4627,8 @@
                                         activeColumnConfig = {
                                             table: tableCellInfo.table,
                                             colId: tableCellInfo.colDef.id,
-                                            left: cellContainerLeft(anchor.col),
-                                            top:
-                                                cellContainerTop(
-                                                    tableCellInfo.table
-                                                        .startRow,
-                                                ) +
-                                                virtualizer.getRowHeight(
-                                                    tableCellInfo.table
-                                                        .startRow,
-                                                ),
+                                            anchorRow: tableCellInfo.table.startRow,
+                                            anchorCol: anchor.col,
                                         };
                                     }
                                 },
@@ -5048,6 +5124,7 @@
             {#if activeEditPanel && editPanelPosition}
                 <div
                     class="edit-panel-anchor"
+                    bind:this={editPanelEl}
                     style="left:{editPanelPosition.x}px; top:{editPanelPosition.y}px;"
                 >
                     {#if activeEditPanel.type === "repeater"}
@@ -5184,6 +5261,7 @@
             {#if activeFilterPopover && filterPopoverPosition}
                 <div
                     class="filter-popover-anchor"
+                    bind:this={filterPopoverEl}
                     style="position:absolute; left:{filterPopoverPosition.left}px; top:{filterPopoverPosition.top}px; z-index:50;"
                 >
                     <TableFilterPopover
@@ -5195,10 +5273,11 @@
             {/if}
 
             <!-- Column config panel (floating, from context menu or header badge click) -->
-            {#if activeColumnConfig}
+            {#if activeColumnConfig && columnConfigPosition}
                 <div
                     class="col-config-anchor"
-                    style="position:absolute; left:{activeColumnConfig.left}px; top:{activeColumnConfig.top}px; z-index:60; pointer-events:auto;"
+                    bind:this={columnConfigEl}
+                    style="position:absolute; left:{columnConfigPosition.left}px; top:{columnConfigPosition.top}px; z-index:60; pointer-events:auto;"
                 >
                     <TableColumnPanel
                         table={activeColumnConfig.table}
@@ -5652,10 +5731,10 @@
     /* ── Dropdown cell overlay ── */
     .dropdown-cell-overlay {
         pointer-events: auto;
-        background: white;
-        border: 1px solid #cbd5e1;
-        border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+        background: var(--cell-bg, #ffffff);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 8px;
+        box-shadow: 0 8px 28px rgba(15, 23, 42, 0.16);
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -5664,14 +5743,14 @@
     }
 
     .dropdown-option {
-        padding: 5px 10px;
+        padding: 6px 10px;
         text-align: left;
         background: none;
         border: none;
-        border-bottom: 1px solid #f1f5f9;
+        border-bottom: 1px solid var(--cell-border, #e2e8f0);
         cursor: pointer;
         font-size: 0.8125rem;
-        color: #1e293b;
+        color: var(--text-color, #1e293b);
         white-space: nowrap;
     }
 
@@ -5679,8 +5758,8 @@
         border-bottom: none;
     }
     .dropdown-option:hover {
-        background: #eff6ff;
-        color: #1d4ed8;
+        background: var(--cell-hover, #f1f5f9);
+        color: var(--text-color, #1e293b);
     }
 
     .dropdown-filter-input {

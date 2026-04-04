@@ -212,17 +212,18 @@
     .dialog-overlay {
         position: fixed;
         inset: 0;
-        background: rgba(0, 0, 0, 0.1);
+        background: rgba(15, 23, 42, 0.16);
         z-index: 999;
     }
 
     .dialog {
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
-        border-radius: 6px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
-        min-width: 280px;
-        max-width: 320px;
+        background: var(--cell-bg, #fff);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 8px;
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.2);
+        width: min(360px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
+        overflow: auto;
     }
 
     .dialog-header {

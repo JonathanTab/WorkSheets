@@ -1,5 +1,5 @@
 <script>
-    import { onMount, onDestroy } from "svelte";
+    import { onMount, onDestroy, tick } from "svelte";
     import ColorPicker from "./ColorPicker.svelte";
 
     let {
@@ -80,6 +80,9 @@
     let open = $state(false);
     let buttonRef = $state(null);
     let panelRef = $state(null);
+    let panelStyle = $state("position:fixed; left:-9999px; top:-9999px;");
+    let panelResizeObserver = null;
+    let buttonResizeObserver = null;
 
     // Width options
     const widthOptions = [
@@ -94,8 +97,33 @@
         open = !open;
     }
 
-    function close() {
+    function close({ restoreFocus = false } = {}) {
         open = false;
+        if (restoreFocus) buttonRef?.focus();
+    }
+
+    function updatePanelPosition() {
+        if (!open || !buttonRef) return;
+        const margin = 8;
+        const gap = 6;
+        const br = buttonRef.getBoundingClientRect();
+        const pr = panelRef?.getBoundingClientRect();
+        const panelWidth = pr?.width ?? 236;
+        const panelHeight = pr?.height ?? 286;
+
+        let left = br.left;
+        let top = br.bottom + gap;
+
+        if (left + panelWidth > window.innerWidth - margin) {
+            left = br.right - panelWidth;
+        }
+        if (left < margin) left = margin;
+
+        if (top + panelHeight > window.innerHeight - margin) {
+            const aboveTop = br.top - panelHeight - gap;
+            top = aboveTop >= margin ? aboveTop : Math.max(margin, window.innerHeight - panelHeight - margin);
+        }
+        panelStyle = `position:fixed; left:${Math.round(left)}px; top:${Math.round(top)}px;`;
     }
 
     function handleBorderColorChange(color) {
@@ -252,19 +280,52 @@
     }
 
     function handleKeydown(e) {
+        if (!open) return;
         if (e.key === "Escape") {
-            close();
+            e.stopPropagation();
+            close({ restoreFocus: true });
         }
     }
+
+    $effect(() => {
+        if (!open) return;
+        tick().then(() => {
+            updatePanelPosition();
+            if (!panelResizeObserver && panelRef) {
+                panelResizeObserver = new ResizeObserver(() => updatePanelPosition());
+                panelResizeObserver.observe(panelRef);
+            }
+            if (!buttonResizeObserver && buttonRef) {
+                buttonResizeObserver = new ResizeObserver(() => updatePanelPosition());
+                buttonResizeObserver.observe(buttonRef);
+            }
+            // First useful keyboard target.
+            panelRef?.querySelector(".border-type-button")?.focus();
+        });
+        return () => {
+            panelResizeObserver?.disconnect();
+            panelResizeObserver = null;
+            buttonResizeObserver?.disconnect();
+            buttonResizeObserver = null;
+        };
+    });
 
     onMount(() => {
         document.addEventListener("click", handleClickOutside);
         document.addEventListener("keydown", handleKeydown);
+        window.addEventListener("resize", updatePanelPosition);
+        window.addEventListener("scroll", updatePanelPosition, true);
+        window.visualViewport?.addEventListener("resize", updatePanelPosition);
+        window.visualViewport?.addEventListener("scroll", updatePanelPosition);
     });
 
     onDestroy(() => {
         document.removeEventListener("click", handleClickOutside);
         document.removeEventListener("keydown", handleKeydown);
+        window.removeEventListener("resize", updatePanelPosition);
+        window.removeEventListener("scroll", updatePanelPosition, true);
+        window.visualViewport?.removeEventListener("resize", updatePanelPosition);
+        window.visualViewport?.removeEventListener("scroll", updatePanelPosition);
     });
 </script>
 
@@ -292,7 +353,7 @@
     </button>
 
     {#if open}
-        <div bind:this={panelRef} class="border-panel">
+        <div bind:this={panelRef} class="border-panel" style={panelStyle}>
             <!-- Color and Width Controls -->
             <div class="border-controls">
                 <div class="control-group">
@@ -565,19 +626,14 @@
     }
 
     .border-panel {
-        position: absolute;
-        top: 100%;
-        left: 0;
-        margin-top: 2px;
         padding: 10px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 6px;
-        box-shadow:
-            0 1px 3px rgba(0, 0, 0, 0.08),
-            0 4px 12px rgba(0, 0, 0, 0.12);
+        border-radius: 8px;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
         z-index: 1000;
         min-width: 200px;
+        max-width: calc(100vw - 16px);
     }
 
     .border-controls {

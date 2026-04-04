@@ -2,29 +2,32 @@
     /**
      * TableFilterPopover - Filter control for a table column.
      *
-     * Opens from the filter icon in the column header.
-     * Clean, minimal UI that matches the spreadsheet aesthetic.
+     * Filter state is local/session only — never written to the doc.
+     * Supports: contains, not contains, =, ≠, >, <, ≥, ≤, starts with, empty, not empty.
      */
 
     import { close } from "../../../lib/icons/index.js";
+    import { onMount } from "svelte";
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
 
     let { table, colId, onClose = () => {} } = $props();
+    let rootEl = $state(null);
+    let inputEl = $state(null);
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
-    let existingFilter = $derived(table?.filters?.[colId] ?? null);
     let colType = $derived(col?.type ?? "text");
 
-    let operator = $state(existingFilter?.op ?? "contains");
-    let filterValue = $state(existingFilter?.value ?? "");
+    function defaultOp(type) {
+        if (type === "number" || type === "currency" || type === "percent" || type === "date") return "=";
+        if (type === "checkbox") return "=";
+        return "contains";
+    }
 
-    $effect(() => {
-        if (existingFilter) {
-            operator = existingFilter.op ?? "contains";
-            filterValue = existingFilter.value ?? "";
-        }
-    });
+    // Initialise from any already-active filter for this column (read once at mount)
+    const existingFilter = table?.filters?.[colId] ?? null;
+    let operator    = $state(existingFilter?.op ?? defaultOp(colType));
+    let filterValue = $state(existingFilter?.value != null ? existingFilter.value : "");
 
     let operators = $derived.by(() => {
         switch (colType) {
@@ -32,61 +35,47 @@
             case "currency":
             case "percent":
                 return [
-                    { value: "=", label: "= Equals" },
-                    { value: "<>", label: "≠ Not equals" },
-                    { value: ">", label: "> Greater than" },
-                    { value: "<", label: "< Less than" },
-                    { value: ">=", label: "≥ or equal" },
-                    { value: "<=", label: "≤ or equal" },
-                    { value: "empty", label: "Is empty" },
+                    { value: "=",        label: "= Equals" },
+                    { value: "<>",       label: "≠ Not equals" },
+                    { value: ">",        label: "> Greater than" },
+                    { value: "<",        label: "< Less than" },
+                    { value: ">=",       label: "≥ or equal" },
+                    { value: "<=",       label: "≤ or equal" },
+                    { value: "empty",    label: "Is empty" },
                     { value: "notempty", label: "Is not empty" },
                 ];
             case "date":
                 return [
-                    { value: "=", label: "On date" },
-                    { value: "<>", label: "Not on date" },
-                    { value: ">", label: "After" },
-                    { value: "<", label: "Before" },
-                    { value: ">=", label: "On or after" },
-                    { value: "<=", label: "On or before" },
-                    { value: "empty", label: "Is empty" },
+                    { value: "=",        label: "On date" },
+                    { value: "<>",       label: "Not on date" },
+                    { value: ">",        label: "After" },
+                    { value: "<",        label: "Before" },
+                    { value: ">=",       label: "On or after" },
+                    { value: "<=",       label: "On or before" },
+                    { value: "empty",    label: "Is empty" },
                     { value: "notempty", label: "Is not empty" },
                 ];
             case "checkbox":
                 return [
-                    { value: "=", label: "Is checked" },
+                    { value: "=",  label: "Is checked" },
                     { value: "<>", label: "Is unchecked" },
                 ];
             default:
                 return [
-                    { value: "contains", label: "Contains" },
+                    { value: "contains",    label: "Contains" },
                     { value: "notcontains", label: "Does not contain" },
-                    { value: "=", label: "Equals" },
-                    { value: "<>", label: "Not equals" },
-                    { value: "startswith", label: "Starts with" },
-                    { value: "empty", label: "Is empty" },
-                    { value: "notempty", label: "Is not empty" },
+                    { value: "=",           label: "Equals" },
+                    { value: "<>",          label: "Not equals" },
+                    { value: "startswith",  label: "Starts with" },
+                    { value: "empty",       label: "Is empty" },
+                    { value: "notempty",    label: "Is not empty" },
                 ];
         }
     });
 
-    $effect(() => {
-        if (!existingFilter) {
-            if (colType === "checkbox" || colType === "date") operator = "=";
-            else if (colType === "number" || colType === "currency" || colType === "percent") operator = "=";
-            else operator = "contains";
-        }
-    });
-
-    let hasFilter = $derived(!!existingFilter);
-    let isNoValueOp = $derived(operator === "empty" || operator === "notempty");
+    let isNoValueOp  = $derived(operator === "empty" || operator === "notempty");
     let isCheckboxOp = $derived(colType === "checkbox");
-
-    let quickValues = $derived.by(() => {
-        if (!table || !colId) return [];
-        const vals = table.getColumn(colId).filter((v) => v != null && v !== "").map((v) => String(v));
-        return [...new Set(vals)].slice(0, 5);
-    });
+    let hasFilter    = $derived(!!table?.filters?.[colId]);
 
     let inputType = $derived.by(() => {
         if (colType === "date") return "date";
@@ -94,27 +83,61 @@
         return "text";
     });
 
-    $effect(() => {
-        if (!table || !colId) return;
-        const op = operator;
-        const val = filterValue;
-        const noVal = op === "empty" || op === "notempty";
-        const chkOp = colType === "checkbox";
-        if (noVal) {
-            table.setFilter(colId, op, "");
-        } else if (chkOp) {
-            table.setFilter(colId, op, op === "=" ? true : false);
-        } else if (String(val).trim() === "") {
-            table.clearFilter(colId);
-        } else {
-            table.setFilter(colId, op, val);
-        }
+    let quickValues = $derived.by(() => {
+        if (!table || !colId || isNoValueOp || isCheckboxOp) return [];
+        const vals = table.getColumn(colId).filter((v) => v != null && v !== "").map((v) => String(v));
+        return [...new Set(vals)].slice(0, 8);
     });
 
-    function handleClear() {
+    // ── Filter application ────────────────────────────────────────────────────
+    // Called explicitly (not via $effect) to avoid feedback loops.
+
+    function applyFilter() {
         if (!table || !colId) return;
-        table.clearFilter(colId);
+        const op  = operator;
+        const val = filterValue;
+
+        if (op === "empty" || op === "notempty") {
+            // No value needed — just the operator
+            table.setFilter(colId, op, "");
+        } else if (colType === "checkbox") {
+            // Always compare against `true`:  = means v==true (checked), <> means v!=true (unchecked)
+            table.setFilter(colId, op, true);
+        } else {
+            // For text/number/date: only apply if there's a non-empty value
+            const strVal = String(val ?? "").trim();
+            if (strVal === "" || strVal === "NaN") {
+                table.clearFilter(colId);
+            } else {
+                table.setFilter(colId, op, val);
+            }
+        }
+    }
+
+    function handleOperatorChange() {
+        // For no-value operators and checkbox, apply immediately on operator change.
+        // For value-based operators, only apply if there's already a value.
+        if (operator === "empty" || operator === "notempty" || colType === "checkbox") {
+            applyFilter();
+        } else {
+            const strVal = String(filterValue ?? "").trim();
+            if (strVal !== "" && strVal !== "NaN") applyFilter();
+            else table?.clearFilter(colId);
+        }
+    }
+
+    function handleClear() {
         filterValue = "";
+        operator = defaultOp(colType);
+        table?.clearFilter(colId);
+        // Don't call applyFilter — just clear and reset UI.
+    }
+
+    function useQuickValue(val) {
+        filterValue = val;
+        operator = colType === "text" || colType === "url" ? "contains" : "=";
+        applyFilter();
+        inputEl?.focus();
     }
 
     function handleKeydown(e) {
@@ -122,36 +145,38 @@
         else if (e.key === "Enter") { e.preventDefault(); onClose(); }
     }
 
-    function useQuickValue(val) {
-        filterValue = val;
-        operator = colType === "text" || colType === "url" ? "contains" : "=";
-    }
+    onMount(() => {
+        if (!mobileState.isMobile) {
+            inputEl?.focus() ?? rootEl?.focus();
+        }
+    });
 </script>
 
 {#snippet filterBody()}
     <div class="filter-body">
-        <select bind:value={operator} class="operator-select">
+        {#if !isNoValueOp && !isCheckboxOp}
+            <input
+                bind:this={inputEl}
+                type={inputType}
+                bind:value={filterValue}
+                oninput={applyFilter}
+                placeholder="Search…"
+                class="value-input"
+            />
+        {/if}
+
+        <select bind:value={operator} onchange={handleOperatorChange} class="operator-select">
             {#each operators as op}
                 <option value={op.value}>{op.label}</option>
             {/each}
         </select>
 
-        {#if !isNoValueOp && !isCheckboxOp}
-            <input
-                type={inputType}
-                bind:value={filterValue}
-                placeholder="Value…"
-                class="value-input"
-                autofocus
-            />
-        {/if}
-
-        {#if quickValues.length > 0 && !isNoValueOp && !isCheckboxOp}
+        {#if quickValues.length > 0}
             <div class="quick-values">
                 {#each quickValues as val}
                     <button
                         class="quick-chip"
-                        class:active={filterValue === val}
+                        class:active={String(filterValue) === String(val)}
                         onclick={() => useQuickValue(val)}
                         type="button"
                     >{val}</button>
@@ -161,9 +186,9 @@
     </div>
 
     <div class="filter-footer">
-        {#if hasFilter}
-            <button class="btn btn-clear" onclick={handleClear} type="button">Clear</button>
-        {/if}
+        <button class="btn btn-clear" onclick={handleClear} type="button" disabled={!hasFilter && !filterValue}>
+            Clear
+        </button>
         <button class="btn btn-done" onclick={onClose} type="button">Done</button>
     </div>
 {/snippet}
@@ -174,7 +199,7 @@
     </BottomSheet>
 {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="filter-popover" onkeydown={handleKeydown} role="dialog">
+    <div bind:this={rootEl} class="filter-popover" onkeydown={handleKeydown} role="dialog" tabindex="-1">
         <div class="filter-header">
             <span class="filter-col-name">{col?.name ?? colId}</span>
             {#if hasFilter}<span class="active-dot" title="Filter active"></span>{/if}
@@ -188,10 +213,12 @@
     .filter-popover {
         background: var(--cell-bg, #fff);
         border: 1px solid var(--cell-border, #e2e8f0);
-        border-radius: 6px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-        min-width: 190px;
-        max-width: 240px;
+        border-radius: 8px;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+        min-width: 200px;
+        max-width: 260px;
+        max-height: min(72vh, 440px);
+        overflow: auto;
         z-index: 100;
         font-size: 12px;
         color: var(--text-color, #1e293b);
@@ -249,23 +276,9 @@
         gap: 6px;
     }
 
-    .operator-select {
-        width: 100%;
-        height: 26px;
-        padding: 0 6px;
-        font-size: 12px;
-        border: 1px solid var(--cell-border, #e2e8f0);
-        border-radius: 4px;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        outline: none;
-    }
-
-    .operator-select:focus { border-color: #94a3b8; }
-
     .value-input {
         width: 100%;
-        height: 26px;
+        height: 28px;
         padding: 0 8px;
         font-size: 12px;
         border: 1px solid var(--cell-border, #e2e8f0);
@@ -278,10 +291,25 @@
 
     .value-input:focus { border-color: #94a3b8; }
 
+    .operator-select {
+        width: 100%;
+        height: 26px;
+        padding: 0 6px;
+        font-size: 11px;
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 4px;
+        background: var(--cell-bg, #fff);
+        color: var(--text-color, #64748b);
+        outline: none;
+    }
+
+    .operator-select:focus { border-color: #94a3b8; }
+
     .quick-values {
         display: flex;
         flex-wrap: wrap;
         gap: 3px;
+        margin-top: 2px;
     }
 
     .quick-chip {
@@ -292,11 +320,11 @@
         background: #f8fafc;
         color: #64748b;
         cursor: pointer;
-        max-width: 80px;
+        max-width: 90px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        line-height: 1.4;
+        line-height: 1.5;
     }
 
     .quick-chip:hover { border-color: #94a3b8; color: #1e293b; background: #f1f5f9; }
@@ -324,7 +352,10 @@
         color: var(--text-color, #475569);
     }
 
-    .btn:hover { background: #f1f5f9; border-color: #94a3b8; }
+    .btn:hover:not(:disabled) { background: #f1f5f9; border-color: #94a3b8; }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+
+    .btn-clear { margin-right: auto; }
 
     .btn-done {
         background: #1e293b;
@@ -337,9 +368,9 @@
     /* Mobile: larger controls inside BottomSheet */
     @media (pointer: coarse), (max-width: 768px) {
         .filter-body { padding: 12px 16px; gap: 10px; }
+        .value-input  { height: 44px; font-size: 16px; padding: 0 12px; }
         .operator-select { height: 40px; font-size: 14px; padding: 0 10px; }
-        .value-input { height: 40px; font-size: 14px; padding: 0 12px; }
-        .quick-chip { font-size: 13px; padding: 6px 12px; }
+        .quick-chip { font-size: 13px; padding: 6px 12px; max-width: none; }
         .filter-footer { padding: 10px 16px; gap: 10px; }
         .btn { height: 40px; padding: 0 16px; font-size: 14px; }
     }

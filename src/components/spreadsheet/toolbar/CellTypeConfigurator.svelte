@@ -215,8 +215,11 @@
             while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
             return s;
         };
-        const rangeStr = `${colLabel(sel.startCol)}${sel.startRow + 1}:${colLabel(sel.endCol)}${sel.endRow + 1}`;
-        updateDropdownRange(rangeStr);
+        const cellPart = `${colLabel(sel.startCol)}${sel.startRow + 1}:${colLabel(sel.endCol)}${sel.endRow + 1}`;
+        const sheetName = spreadsheetSession.getSheetName(spreadsheetSession.activeSheetId);
+        const needsQuotes = /[\s!']/.test(sheetName);
+        const quotedName = needsQuotes ? `'${sheetName.replace(/'/g, "''")}'` : sheetName;
+        updateDropdownRange(`${quotedName}!${cellPart}`);
     }
 
     const types = [
@@ -398,7 +401,7 @@
                             type="text"
                             class="range-input"
                             value={options.range ?? ''}
-                            placeholder="e.g. A1:A10"
+                            placeholder="e.g. A1:A10 or Sheet2!A1:A10"
                             onchange={(e) => updateDropdownRange(/** @type {HTMLInputElement} */(e.target).value.trim())}
                         />
                     </div>

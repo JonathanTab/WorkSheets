@@ -13,8 +13,9 @@
  *   tableYMap.get('rows')     → Y.Array<Y.Map>  (data rows, each colId→value)
  *   tableYMap.get('sortColId')   → string|null
  *   tableYMap.get('sortDir')     → 'asc'|'desc'
- *   tableYMap.get('filters')     → Y.Map<colId, { op, value }>
  *   tableYMap.get('accentColor') → string  (CSS hex, e.g. '#3b82f6')
+ *
+ * Filters are local session state only (not persisted in Yjs).
  *
  * ## Column definition (Y.Map fields)
  *   id, name, type, required,
@@ -274,37 +275,40 @@ export class TableStore {
     // earlier (older) rows below it."
     cumReverse = $derived(this.sortColId === null || this.sortDir === "desc");
 
-    // ── Derived sorted+filtered view ──────────────────────────────────────────
-    // Raw rows are appended at the end (O(1) efficiency).
-    // For display, we reverse so newest rows appear at top.
-    // "Bottom" of raw array = oldest = bottom of display.
-    // "Top" of raw array (end) = newest = top of display.
-    sortedFilteredRows = $derived.by(() => {
-        // Reverse raw rows so newest (last appended) appears first
+    // ── Sorted+filtered view (plain $state — updated imperatively) ───────────
+    // Using $state instead of $derived.by so that changes always propagate to
+    // components regardless of Svelte's cross-boundary reactive graph.
+    sortedFilteredRows = $state([]);
+
+    #rebuildView() {
         let result = [...this.rows].reverse();
 
-        // Apply filters
         for (const [colId, f] of Object.entries(this.filters)) {
             result = result.filter((row) => {
                 const v = row[colId];
+                const fv = f.value;
                 switch (f.op) {
-                    case "=": return v == f.value;
-                    case "<>": return v != f.value;
-                    case ">": return Number(v) > Number(f.value);
-                    case "<": return Number(v) < Number(f.value);
-                    case ">=": return Number(v) >= Number(f.value);
-                    case "<=": return Number(v) <= Number(f.value);
-                    case "contains": return String(v ?? "").toLowerCase().includes(String(f.value).toLowerCase());
-                    case "notcontains": return !String(v ?? "").toLowerCase().includes(String(f.value).toLowerCase());
-                    case "startswith": return String(v ?? "").toLowerCase().startsWith(String(f.value).toLowerCase());
-                    case "empty": return v == null || v === "";
-                    case "notempty": return v != null && v !== "";
+                    case "=":  return v == fv;
+                    case "<>": return v != fv;
+                    case ">": case "<": case ">=": case "<=": {
+                        const vd = Date.parse(v), fd = Date.parse(fv);
+                        const lv = (!isNaN(vd) && !isNaN(fd)) ? vd : Number(v);
+                        const lf = (!isNaN(vd) && !isNaN(fd)) ? fd : Number(fv);
+                        if (f.op === ">")  return lv > lf;
+                        if (f.op === "<")  return lv < lf;
+                        if (f.op === ">=") return lv >= lf;
+                        return lv <= lf;
+                    }
+                    case "contains":    return String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
+                    case "notcontains": return !String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
+                    case "startswith":  return String(v ?? "").toLowerCase().startsWith(String(fv).toLowerCase());
+                    case "empty":    return v == null || v === "" || v === false;
+                    case "notempty": return v != null && v !== "" && v !== false;
                     default: return true;
                 }
             });
         }
 
-        // Apply sort (overrides the default newest-first order)
         if (this.sortColId) {
             const col = this.sortColId;
             const dir = this.sortDir === "desc" ? -1 : 1;
@@ -320,14 +324,13 @@ export class TableStore {
             });
         }
 
-        // Invalidate cumulative cache when the view changes
         this.#cumCache.clear();
         this.#cumDirtyFrom.clear();
         this.#runningIfCache.clear();
         this.#runningIfDirtyFrom.clear();
 
-        return result;
-    });
+        this.sortedFilteredRows = result;
+    }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
     entryBuffer = $state({});
@@ -371,7 +374,6 @@ export class TableStore {
         this.insertSortDir = m.get("insertSortDir") ?? "asc";
         this.#syncColumns();
         this.#syncRows();
-        this.#syncFilters();
         // Recompute endCol from columns
         const cols = this.columns;
         this.endCol = cols.length > 0 ? this.startCol + cols.length - 1 : this.startCol;
@@ -417,16 +419,11 @@ export class TableStore {
         const arr = this.#tableYMap.get("rows");
         if (!arr) {
             this.rows = [];
+            this.#rebuildView();
             return;
         }
         this.rows = arr.toArray().map((r) => (r.toJSON ? r.toJSON() : { ...r }));
-        this.#cumCache.clear();
-        this.#cumDirtyFrom.clear();
-    }
-
-    #syncFilters() {
-        const fm = this.#tableYMap.get("filters");
-        this.filters = fm ? fm.toJSON() : {};
+        this.#rebuildView();
     }
 
     #observeYjs() {
@@ -444,10 +441,12 @@ export class TableStore {
             this.vpStartCol = m.get("vpStartCol") ?? this.vpStartCol;
             this.vpEndRow = m.get("vpEndRow") ?? this.vpEndRow;
             this.vpEndCol = m.get("vpEndCol") ?? this.vpEndCol;
+            const prevSort = this.sortColId + this.sortDir;
             this.sortColId = m.get("sortColId") ?? null;
             this.sortDir = m.get("sortDir") ?? "asc";
             this.insertSortColId = m.get("insertSortColId") ?? null;
             this.insertSortDir = m.get("insertSortDir") ?? "asc";
+            if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
         };
         m.observe(topObs);
         this.#observers.push(() => m.unobserve(topObs));
@@ -468,13 +467,6 @@ export class TableStore {
             this.#observers.push(() => rowArr.unobserveDeep(rowObs));
         }
 
-        // Filters observer
-        const fm = m.get("filters");
-        if (fm) {
-            const fObs = () => this.#syncFilters();
-            fm.observe(fObs);
-            this.#observers.push(() => fm.unobserve(fObs));
-        }
     }
 
     // ─── Mutation API ─────────────────────────────────────────────────────────
@@ -813,29 +805,20 @@ export class TableStore {
     }
 
     setFilter(colId, op, value) {
-        const fm = this.#tableYMap.get("filters");
-        if (!fm) return;
-        this.#ydoc.transact(() => {
-            const fMap = new Y.Map();
-            fMap.set("op", op);
-            fMap.set("value", value);
-            fm.set(colId, fMap);
-        });
+        this.filters = { ...this.filters, [colId]: { op, value } };
+        this.#rebuildView();
     }
 
     clearFilter(colId) {
-        const fm = this.#tableYMap.get("filters");
-        if (!fm) return;
-        this.#ydoc.transact(() => fm.delete(colId));
+        const f = { ...this.filters };
+        delete f[colId];
+        this.filters = f;
+        this.#rebuildView();
     }
 
     clearAllFilters() {
-        const fm = this.#tableYMap.get("filters");
-        if (!fm) return;
-        this.#ydoc.transact(() => {
-            const keys = [...fm.keys()];
-            for (const k of keys) fm.delete(k);
-        });
+        this.filters = {};
+        this.#rebuildView();
     }
 
     // ─── Entry form ───────────────────────────────────────────────────────────

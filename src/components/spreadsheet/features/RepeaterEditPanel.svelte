@@ -1,4 +1,5 @@
 <script>
+    import { onMount } from "svelte";
     import { close, trash, repeat } from "../../../lib/icons/index.js";
 
     /**
@@ -20,6 +21,7 @@
         repeaterEngine,
         onClose,
     } = $props();
+    let panelEl = $state(null);
 
     let count = $derived(repeater?.count ?? 1);
     let gap = $derived(repeater?.gap ?? 0);
@@ -84,14 +86,20 @@
             else onClose?.();
         }
     }
+
+    onMount(() => {
+        panelEl?.focus();
+    });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+    bind:this={panelEl}
     class="rep-edit-panel"
     onkeydown={handleKeydown}
     role="dialog"
     aria-label="Repeater settings"
+    tabindex="-1"
 >
     <!-- Accent top bar -->
     <div class="accent-top"></div>
@@ -245,15 +253,16 @@
 <style>
     .rep-edit-panel {
         background: var(--cell-bg, #fff);
-        border: 1px solid var(--border-color, #e2e8f0);
+        border: 1px solid var(--cell-border, #e2e8f0);
         border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.14);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
         width: 240px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        max-height: min(78vh, 520px);
     }
 
     .accent-top {
@@ -267,8 +276,8 @@
         align-items: center;
         gap: 6px;
         padding: 8px 10px 6px;
-        border-bottom: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        border-bottom: 1px solid var(--cell-border, #e2e8f0);
+        background: var(--table-header-bg, #f8fafc);
         flex-shrink: 0;
     }
 
@@ -439,15 +448,15 @@
         color: #94a3b8;
         font-style: italic;
         line-height: 1.4;
-        border-top: 1px solid var(--border-color, #e2e8f0);
+        border-top: 1px solid var(--cell-border, #e2e8f0);
         padding-top: 6px;
         margin-top: 2px;
     }
 
     .panel-footer {
         padding: 6px 10px 8px;
-        border-top: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        border-top: 1px solid var(--cell-border, #e2e8f0);
+        background: var(--table-header-bg, #f8fafc);
     }
 
     .delete-btn {

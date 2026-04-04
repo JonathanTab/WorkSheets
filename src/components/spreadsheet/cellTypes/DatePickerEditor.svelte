@@ -15,7 +15,7 @@
      *   onrowcommit()— Enter in entry row → commit row
      *   autofocus    — focus on mount (default true)
      */
-    import { onMount } from "svelte";
+    import { onMount, tick } from "svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
     import {
         parseLocalDate,
@@ -75,6 +75,8 @@
             if (m) {
                 return { date: parseLocalDate(m[1].trim()), time: parseTime(m[2].trim()) };
             }
+            const tOnly = parseTime(s);
+            if (tOnly) return { date: null, time: tOnly };
             return { date: parseLocalDate(s), time: null };
         }
         return { date: parseLocalDate(s), time: null };
@@ -132,21 +134,29 @@
     let pickerH = $state(_stored.time?.h ?? new Date().getHours());
     let pickerM = $state(_stored.time?.mi ?? 0);
     let hasTime = $state(!!_stored.time);
+    let isTextEditing = $state(false);
+    let focusFromPointer = $state(false);
 
     let _lastValue = $state(value);
+
+    function syncFromValue(nextValue) {
+        const p = parseStored(nextValue);
+        selectedDate = p.date;
+        viewYear = (p.date ?? new Date()).getFullYear();
+        viewMonth = (p.date ?? new Date()).getMonth();
+        focusedDay = null;
+        showCalendar = false;
+        pickerH = p.time?.h ?? new Date().getHours();
+        pickerM = p.time?.mi ?? 0;
+        hasTime = !!p.time;
+        displayText = buildDisplay(p.date, pickerH, pickerM, hasTime);
+    }
+
     $effect(() => {
         if (value !== _lastValue) {
             _lastValue = value;
-            const p = parseStored(value);
-            selectedDate = p.date;
-            viewYear = (p.date ?? new Date()).getFullYear();
-            viewMonth = (p.date ?? new Date()).getMonth();
-            focusedDay = null;
-            showCalendar = false;
-            pickerH = p.time?.h ?? new Date().getHours();
-            pickerM = p.time?.mi ?? 0;
-            hasTime = !!p.time;
-            displayText = buildDisplay(p.date, pickerH, pickerM, hasTime);
+            if (isTextEditing && document.activeElement === inputEl) return;
+            syncFromValue(value);
         }
     });
 
@@ -211,10 +221,11 @@
 
     // ── Calendar positioning ──────────────────────────────────────────────────
 
-    function positionCalendar() {
-        if (!inputEl) return;
-        const r = inputEl.getBoundingClientRect();
-        const margin = 8;
+    function clamp(n, min, max) {
+        return Math.min(Math.max(n, min), max);
+    }
+
+    function getVisibleViewportBounds(margin = 8) {
         const vv = window.visualViewport;
         const viewportTop = vv?.offsetTop ?? 0;
         const viewportLeft = vv?.offsetLeft ?? 0;
@@ -228,21 +239,56 @@
             viewportTop + margin,
             Math.min(viewportBottomViaVv, keyboardTop) - margin,
         );
-        const estimatedHeight = showsTime ? 330 : 286;
-        const estimatedWidth = Math.max(240, r.width);
-
-        calTop = r.bottom + 2;
-        if (calTop + estimatedHeight > viewportBottom) {
-            calTop = Math.max(viewportTop + margin, r.top - estimatedHeight - 2);
-        }
-        const maxLeft = viewportLeft + viewportWidth - estimatedWidth - margin;
-        calLeft = Math.min(Math.max(viewportLeft + margin, r.left), Math.max(viewportLeft + margin, maxLeft));
-        calMinW = estimatedWidth;
+        return {
+            top: viewportTop + margin,
+            left: viewportLeft + margin,
+            right: viewportLeft + viewportWidth - margin,
+            bottom: viewportBottom,
+        };
     }
 
-    function openCalendar() {
-        positionCalendar();
+    function positionCalendar() {
+        if (!inputEl) return;
+        const r = inputEl.getBoundingClientRect();
+        const bounds = getVisibleViewportBounds(8);
+        const gap = 6;
+        const popupRect = calendarEl?.getBoundingClientRect();
+        const popupWidth = Math.max(calMinW, popupRect?.width ?? Math.max(240, r.width));
+        const popupHeight = popupRect?.height ?? (showsTime ? 332 : 286);
+
+        const spaceBelow = bounds.bottom - (r.bottom + gap);
+        const spaceAbove = (r.top - gap) - bounds.top;
+        const spaceRight = bounds.right - (r.right + gap);
+        const spaceLeft = (r.left - gap) - bounds.left;
+
+        let top = r.bottom + gap;
+        let left = r.left;
+
+        if (spaceBelow >= popupHeight) {
+            top = r.bottom + gap;
+        } else if (spaceAbove >= popupHeight) {
+            top = r.top - popupHeight - gap;
+        } else if (spaceRight >= popupWidth || spaceLeft >= popupWidth) {
+            left = spaceRight >= spaceLeft ? r.right + gap : r.left - popupWidth - gap;
+            top = clamp(r.top, bounds.top, Math.max(bounds.top, bounds.bottom - popupHeight));
+        } else {
+            top = spaceBelow >= spaceAbove ? r.bottom + gap : r.top - popupHeight - gap;
+        }
+
+        left = clamp(left, bounds.left, Math.max(bounds.left, bounds.right - popupWidth));
+        top = clamp(top, bounds.top, Math.max(bounds.top, bounds.bottom - popupHeight));
+
+        calTop = Math.round(top);
+        calLeft = Math.round(left);
+        calMinW = Math.max(220, Math.round(r.width));
+    }
+
+    async function openCalendar() {
+        if (!inputEl) return;
+        calMinW = Math.max(220, Math.round(inputEl.getBoundingClientRect().width));
         showCalendar = true;
+        await tick();
+        positionCalendar();
         if (
             selectedDate &&
             selectedDate.getFullYear() === viewYear &&
@@ -394,16 +440,39 @@
     function handleInput(e) {
         const t = /** @type {HTMLInputElement} */ (e.target);
         displayText = t.value;
+        _lastValue = t.value;
+        isTextEditing = true;
+
+        const hasDateSignal =
+            /[\/\-\s]/.test(displayText) ||
+            /[a-z]/i.test(displayText) ||
+            /^\d{4}$/.test(displayText);
+
         if (subFormat === 'time') {
             const p = parseTime(displayText);
             if (p) { pickerH = p.h; pickerM = p.mi; hasTime = true; }
         } else if (subFormat === 'datetime') {
             const p = parseStored(displayText);
-            if (p.date) { selectedDate = p.date; viewYear = p.date.getFullYear(); viewMonth = p.date.getMonth(); }
-            if (p.time) { pickerH = p.time.h; pickerM = p.time.mi; hasTime = true; }
+            if (p.date && hasDateSignal) {
+                selectedDate = p.date;
+                viewYear = p.date.getFullYear();
+                viewMonth = p.date.getMonth();
+            }
+            if (p.time) {
+                pickerH = p.time.h;
+                pickerM = p.time.mi;
+                hasTime = true;
+            }
         } else {
-            const d = parseLocalDate(displayText);
-            if (d) { selectedDate = d; viewYear = d.getFullYear(); viewMonth = d.getMonth(); focusedDay = d.getDate(); }
+            if (hasDateSignal) {
+                const d = parseLocalDate(displayText);
+                if (d) {
+                    selectedDate = d;
+                    viewYear = d.getFullYear();
+                    viewMonth = d.getMonth();
+                    focusedDay = d.getDate();
+                }
+            }
         }
         onchange?.(displayText);
     }
@@ -506,11 +575,28 @@
     }
 
     function handleInputFocus() {
-        if (!showCalendar) openCalendar();
+        isTextEditing = true;
+        if ((mobileState.isMobile || focusFromPointer) && !showCalendar) openCalendar();
+        focusFromPointer = false;
+    }
+
+    function handleInputMouseDown() {
+        focusFromPointer = true;
+    }
+
+    function handleInputBlur() {
+        isTextEditing = false;
     }
 
     onMount(() => {
         document.addEventListener("mousedown", handleDocMousedown, true);
+        const repositionIfOpen = () => {
+            if (showCalendar) positionCalendar();
+        };
+        window.addEventListener("resize", repositionIfOpen);
+        window.addEventListener("scroll", repositionIfOpen, true);
+        window.visualViewport?.addEventListener("resize", repositionIfOpen);
+        window.visualViewport?.addEventListener("scroll", repositionIfOpen);
         if (autofocus && inputEl) {
             // Mobile: avoid forcing soft keyboard + viewport jump for date/time pickers.
             if (!mobileState.isMobile) {
@@ -518,11 +604,15 @@
                 inputEl.select();
             }
         }
-        // Auto-open the calendar when mounting in grid overlay context (autofocus=true).
-        // Entry row (autofocus=false) opens the calendar via handleInputFocus instead.
-        if (autofocus) openCalendar();
+        if (autofocus && mobileState.isMobile) openCalendar();
         return () =>
-            document.removeEventListener("mousedown", handleDocMousedown, true);
+            {
+                document.removeEventListener("mousedown", handleDocMousedown, true);
+                window.removeEventListener("resize", repositionIfOpen);
+                window.removeEventListener("scroll", repositionIfOpen, true);
+                window.visualViewport?.removeEventListener("resize", repositionIfOpen);
+                window.visualViewport?.removeEventListener("scroll", repositionIfOpen);
+            };
     });
 </script>
 
@@ -536,6 +626,8 @@
         oninput={handleInput}
         onkeydown={handleKeydown}
         onfocus={handleInputFocus}
+        onblur={handleInputBlur}
+        onmousedown={handleInputMouseDown}
         onclick={handleInputFocus}
         readonly={mobileState.isMobile}
         inputmode={mobileState.isMobile ? "none" : "text"}
@@ -552,6 +644,7 @@
         style="top:{calTop}px; left:{calLeft}px; min-width:{calMinW}px;"
         onmousedown={(e) => e.preventDefault()}
         role="dialog"
+        tabindex="-1"
         aria-label={subFormat === 'time' ? 'Time picker' : 'Date picker'}
     >
         {#if showsCalendar}
@@ -683,6 +776,8 @@
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.14);
         padding: 8px;
         user-select: none;
+        max-height: min(420px, 78vh);
+        overflow: auto;
     }
 
     .cal-header {

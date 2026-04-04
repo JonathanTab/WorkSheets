@@ -15,6 +15,7 @@
      *   onCommit - callback(blobId, fitMode)
      *   onCancel - callback()
      */
+    import { onMount } from 'svelte';
     import storage from '../../../stores/storage.js';
 
     let {
@@ -37,6 +38,7 @@
     let pendingBlobId = $state(value || null); // will be committed on confirm
     let fit = $state('contain');
     let dropZoneEl = $state(null);
+    let rootEl = $state(null);
 
     // Load preview URL for the current (or pending) blobId
     $effect(() => {
@@ -144,13 +146,19 @@
             handleConfirm();
         }
     }
+
+    onMount(() => {
+        rootEl?.focus();
+    });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+    bind:this={rootEl}
     class="image-editor"
     onkeydown={handleKeydown}
     role="dialog"
+    tabindex="-1"
     aria-label="Image editor"
 >
     <div class="image-editor__inner" onclick={(e) => e.stopPropagation()}>

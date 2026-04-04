@@ -1,4 +1,5 @@
 <script>
+    import { onMount } from "svelte";
     import { close } from "../../../lib/icons/index.js";
 
     /**
@@ -10,6 +11,7 @@
      */
 
     let { table, onclose = null } = $props();
+    let rootEl = $state(null);
 
     let columns = $derived(table?.columns ?? []);
 
@@ -88,13 +90,19 @@
     function handleKeydown(e) {
         if (e.key === "Escape") onclose?.();
     }
+
+    onMount(() => {
+        rootEl?.focus();
+    });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+    bind:this={rootEl}
     class="entry-box"
     onkeydown={handleKeydown}
     role="dialog"
+    tabindex="-1"
     aria-label="Table entry form"
 >
     <div class="entry-box-header">

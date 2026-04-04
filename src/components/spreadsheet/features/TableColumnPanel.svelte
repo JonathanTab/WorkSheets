@@ -17,6 +17,7 @@
         alignRight,
         menu,
     } from "../../../lib/icons/index.js";
+    import { onMount } from "svelte";
     import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
@@ -27,6 +28,7 @@
         onClose,
         inline = false,  // when true, always render inline (no BottomSheet wrapping)
     } = $props();
+    let panelEl = $state(null);
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
 
@@ -188,6 +190,10 @@
             ]
         }
     ];
+
+    onMount(() => {
+        if (!(mobileState.isMobile && !inline)) panelEl?.focus();
+    });
 </script>
 
 {#snippet colPanelContent()}
@@ -346,7 +352,7 @@
     </BottomSheet>
 {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings">
+    <div bind:this={panelEl} class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings" tabindex="-1">
         <div class="panel-header">
             <span class="panel-title">Column</span>
             <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
@@ -358,24 +364,24 @@
 <style>
     .col-panel {
         background: var(--cell-bg, #fff);
-        border: 1px solid var(--border-color, #e2e8f0);
+        border: 1px solid var(--cell-border, #e2e8f0);
         border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
         width: 280px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        max-height: 90vh;
+        max-height: min(78vh, 620px);
     }
 
     .panel-header {
         display: flex;
         align-items: center;
         padding: 8px 10px;
-        border-bottom: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        border-bottom: 1px solid var(--cell-border, #e2e8f0);
+        background: var(--table-header-bg, #f8fafc);
     }
 
     .panel-title {
@@ -686,8 +692,8 @@
 
     .panel-footer {
         padding: 8px 12px;
-        border-top: 1px solid var(--border-color, #e2e8f0);
-        background: var(--header-bg, #f8fafc);
+        border-top: 1px solid var(--cell-border, #e2e8f0);
+        background: var(--table-header-bg, #f8fafc);
     }
 
     .delete-btn {
