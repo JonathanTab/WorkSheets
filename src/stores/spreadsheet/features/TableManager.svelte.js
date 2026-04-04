@@ -166,14 +166,19 @@ export class TableManager {
         // This fires after TableStore's top-level observer (same attachment order)
         tableYMap.observe(rebuildOnChange);
         this.#observers.push(() => tableYMap.unobserve(rebuildOnChange));
-        // Observe column definition changes (type, name, typeConfig, etc.) so the
-        // canvas repaints when column metadata changes. Column changes don't affect
-        // row structure, so we just bump tableVersion without rebuilding the index.
-        const colArr = tableYMap.get("columns");
-        if (colArr) {
+        // Observe column definition/order changes so the canvas repaints when
+        // column metadata changes. These don't affect row structure so we just bump tableVersion.
+        const defsMap = tableYMap.get("columnDefs");
+        const orderArr = tableYMap.get("columnOrder");
+        if (defsMap) {
             const bumpOnColChange = () => { this.tableVersion++; };
-            colArr.observeDeep(bumpOnColChange);
-            this.#observers.push(() => colArr.unobserveDeep(bumpOnColChange));
+            defsMap.observeDeep(bumpOnColChange);
+            this.#observers.push(() => defsMap.unobserveDeep(bumpOnColChange));
+        }
+        if (orderArr) {
+            const bumpOnOrderChange = () => { this.tableVersion++; };
+            orderArr.observe(bumpOnOrderChange);
+            this.#observers.push(() => orderArr.unobserve(bumpOnOrderChange));
         }
     }
 
@@ -351,7 +356,8 @@ export class TableManager {
             tm.set("sortDir", "asc");
             tm.set("accentColor", accentColor);
 
-            const colArr = new Y.Array();
+            const defsMap = new Y.Map();
+            const orderArr = new Y.Array();
             for (const c of opts.columns ?? []) {
                 const cm = new Y.Map();
                 cm.set("id", c.id);
@@ -361,9 +367,11 @@ export class TableManager {
                 if (c.hAlign) cm.set("hAlign", c.hAlign);
                 if (c.isNonEntry) cm.set("isNonEntry", true);
                 if (c.formula) cm.set("formula", c.formula);
-                colArr.push([cm]);
+                defsMap.set(c.id, cm);
+                orderArr.push([c.id]);
             }
-            tm.set("columns", colArr);
+            tm.set("columnDefs", defsMap);
+            tm.set("columnOrder", orderArr);
             tm.set("rows", new Y.Array());
             tm.set("filters", new Y.Map());
 

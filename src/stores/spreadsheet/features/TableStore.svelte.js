@@ -9,8 +9,9 @@
  *   viewport — table is rendered as an overlay panel covering vpStartRow..vpEndRow
  *
  * ## Data layout in Yjs
- *   tableYMap.get('columns')  → Y.Array<Y.Map>  (column definitions)
- *   tableYMap.get('rows')     → Y.Array<Y.Map>  (data rows, each colId→value)
+ *   tableYMap.get('columnOrder') → Y.Array<string>  (column IDs in display order)
+ *   tableYMap.get('columnDefs')  → Y.Map<colId, Y.Map>  (column definitions keyed by ID)
+ *   tableYMap.get('rows')        → Y.Array<Y.Map>  (data rows, each colId→value)
  *   tableYMap.get('sortColId')   → string|null
  *   tableYMap.get('sortDir')     → 'asc'|'desc'
  *   tableYMap.get('accentColor') → string  (CSS hex, e.g. '#3b82f6')
@@ -350,8 +351,36 @@ export class TableStore {
     constructor(tableYMap, ydoc) {
         this.#tableYMap = tableYMap;
         this.#ydoc = ydoc;
+        this.#migrateColumnsIfNeeded();
         this.#syncFromYjs();
         this.#observeYjs();
+    }
+
+    /**
+     * One-time migration: converts old `columns` Y.Array<Y.Map> to
+     * `columnDefs` Y.Map<colId,Y.Map> + `columnOrder` Y.Array<string>.
+     * Safe to call on already-migrated docs (no-ops if new keys exist).
+     */
+    #migrateColumnsIfNeeded() {
+        if (this.#tableYMap.has("columnDefs") || this.#tableYMap.has("columnOrder")) return;
+        const oldCols = this.#tableYMap.get("columns");
+        if (!oldCols) return;
+        this.#ydoc.transact(() => {
+            const defsMap = new Y.Map();
+            const orderArr = new Y.Array();
+            for (let i = 0; i < oldCols.length; i++) {
+                const old = oldCols.get(i);
+                const colId = old.get("id");
+                if (!colId) continue;
+                const cm = new Y.Map();
+                for (const [k, v] of old.entries()) cm.set(k, v);
+                defsMap.set(colId, cm);
+                orderArr.push([colId]);
+            }
+            this.#tableYMap.set("columnDefs", defsMap);
+            this.#tableYMap.set("columnOrder", orderArr);
+            this.#tableYMap.delete("columns");
+        });
     }
 
     // ─── Yjs sync ────────────────────────────────────────────────────────────
@@ -380,25 +409,25 @@ export class TableStore {
     }
 
     #syncColumns() {
-        const arr = this.#tableYMap.get("columns");
-        if (!arr) {
+        const defsMap = this.#tableYMap.get("columnDefs");
+        const orderArr = this.#tableYMap.get("columnOrder");
+        if (!defsMap || !orderArr) {
             this.columns = [];
             return;
         }
-        this.columns = arr.toArray().map((c) => {
+        this.columns = orderArr.toArray().flatMap((colId) => {
+            const c = defsMap.get(colId);
+            if (!c) return [];
             const raw = c.toJSON ? c.toJSON() : { ...c };
-            // Parse conditionalFormats if stored as JSON string
             if (typeof raw.conditionalFormats === "string") {
                 try { raw.conditionalFormats = JSON.parse(raw.conditionalFormats); } catch { raw.conditionalFormats = []; }
             }
-            // Parse typeConfig if stored as JSON string
             let typeConfig = null;
             if (typeof raw.typeConfig === "string") {
                 try { typeConfig = JSON.parse(raw.typeConfig); } catch { typeConfig = null; }
             }
-            // Ensure defaults
-            return {
-                id: raw.id ?? "",
+            return [{
+                id: raw.id ?? colId,
                 name: raw.name ?? "",
                 type: typeConfig?.type ?? raw.type ?? "text",
                 typeConfig,
@@ -410,7 +439,7 @@ export class TableStore {
                 isNonEntry: raw.isNonEntry ?? false,
                 formula: raw.formula ?? null,
                 conditionalFormats: Array.isArray(raw.conditionalFormats) ? raw.conditionalFormats : [],
-            };
+            }];
         });
         this.endCol = this.startCol + this.columns.length - 1;
     }
@@ -451,12 +480,17 @@ export class TableStore {
         m.observe(topObs);
         this.#observers.push(() => m.unobserve(topObs));
 
-        // Columns observer
-        const colArr = m.get("columns");
-        if (colArr) {
+        // Columns observer — watch both the defs map (deep) and the order array
+        const defsMap = m.get("columnDefs");
+        const orderArr = m.get("columnOrder");
+        if (defsMap && orderArr) {
             const colObs = () => this.#syncColumns();
-            colArr.observeDeep(colObs);
-            this.#observers.push(() => colArr.unobserveDeep(colObs));
+            defsMap.observeDeep(colObs);
+            orderArr.observe(colObs);
+            this.#observers.push(() => {
+                defsMap.unobserveDeep(colObs);
+                orderArr.unobserve(colObs);
+            });
         }
 
         // Rows observer (deep – catches cell-level edits too)
@@ -594,16 +628,11 @@ export class TableStore {
      * @param {string} newName
      */
     renameColumn(colId, newName) {
-        const colArr = this.#tableYMap.get("columns");
-        if (!colArr) return;
+        const defsMap = this.#tableYMap.get("columnDefs");
+        if (!defsMap) return;
         this.#ydoc.transact(() => {
-            for (let i = 0; i < colArr.length; i++) {
-                const cm = colArr.get(i);
-                if (cm?.get?.("id") === colId) {
-                    cm.set("name", newName);
-                    break;
-                }
-            }
+            const cm = defsMap.get(colId);
+            if (cm) cm.set("name", newName);
         });
     }
 
@@ -613,23 +642,18 @@ export class TableStore {
      * @param {Object} changes - Partial column definition
      */
     updateColumnDef(colId, changes) {
-        const colArr = this.#tableYMap.get("columns");
-        if (!colArr) return;
+        const defsMap = this.#tableYMap.get("columnDefs");
+        if (!defsMap) return;
         this.#ydoc.transact(() => {
-            for (let i = 0; i < colArr.length; i++) {
-                const cm = colArr.get(i);
-                if (cm?.get?.("id") === colId) {
-                    for (const [key, value] of Object.entries(changes)) {
-                        if (key === "conditionalFormats") {
-                            // Store arrays as JSON string
-                            cm.set(key, JSON.stringify(value));
-                        } else if (value === null || value === undefined) {
-                            cm.delete(key);
-                        } else {
-                            cm.set(key, value);
-                        }
-                    }
-                    break;
+            const cm = defsMap.get(colId);
+            if (!cm) return;
+            for (const [key, value] of Object.entries(changes)) {
+                if (key === "conditionalFormats") {
+                    cm.set(key, JSON.stringify(value));
+                } else if (value === null || value === undefined) {
+                    cm.delete(key);
+                } else {
+                    cm.set(key, value);
                 }
             }
         });
@@ -669,8 +693,9 @@ export class TableStore {
      * @returns {string} the new column's id
      */
     insertColumn(atIndex, colDef) {
-        const colArr = this.#tableYMap.get("columns");
-        if (!colArr) return "";
+        const defsMap = this.#tableYMap.get("columnDefs");
+        const orderArr = this.#tableYMap.get("columnOrder");
+        if (!defsMap || !orderArr) return "";
 
         const colId = colDef.id ?? `col${Date.now()}`;
 
@@ -684,8 +709,9 @@ export class TableStore {
             if (colDef.formula) cm.set("formula", colDef.formula);
             if (colDef.hAlign) cm.set("hAlign", colDef.hAlign);
 
-            const insertAt = Math.max(0, Math.min(atIndex, colArr.length));
-            colArr.insert(insertAt, [cm]);
+            defsMap.set(colId, cm);
+            const insertAt = Math.max(0, Math.min(atIndex, orderArr.length));
+            orderArr.insert(insertAt, [colId]);
         });
 
         return colId;
@@ -696,26 +722,19 @@ export class TableStore {
      * @param {string} colId
      */
     deleteColumn(colId) {
-        const colArr = this.#tableYMap.get("columns");
+        const defsMap = this.#tableYMap.get("columnDefs");
+        const orderArr = this.#tableYMap.get("columnOrder");
         const rowArr = this.#tableYMap.get("rows");
-        if (!colArr) return;
+        if (!defsMap || !orderArr) return;
 
         this.#ydoc.transact(() => {
-            // Find and remove the column definition
-            for (let i = 0; i < colArr.length; i++) {
-                const cm = colArr.get(i);
-                if (cm?.get?.("id") === colId) {
-                    colArr.delete(i, 1);
-                    break;
-                }
-            }
-            // Remove that column's data from all rows
+            defsMap.delete(colId);
+            const idx = orderArr.toArray().indexOf(colId);
+            if (idx >= 0) orderArr.delete(idx, 1);
             if (rowArr) {
                 for (let i = 0; i < rowArr.length; i++) {
                     const row = rowArr.get(i);
-                    if (row?.has?.(colId)) {
-                        row.delete(colId);
-                    }
+                    if (row?.has?.(colId)) row.delete(colId);
                 }
             }
         });
@@ -727,22 +746,14 @@ export class TableStore {
      * @param {number} toIndex
      */
     reorderColumns(fromIndex, toIndex) {
-        const colArr = this.#tableYMap.get("columns");
-        if (!colArr || fromIndex === toIndex) return;
-        if (fromIndex < 0 || toIndex < 0 || fromIndex >= colArr.length || toIndex >= colArr.length) return;
+        const orderArr = this.#tableYMap.get("columnOrder");
+        if (!orderArr || fromIndex === toIndex) return;
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= orderArr.length || toIndex >= orderArr.length) return;
 
         this.#ydoc.transact(() => {
-            // Read all column maps
-            const colMaps = [];
-            for (let i = 0; i < colArr.length; i++) {
-                colMaps.push(colArr.get(i));
-            }
-            // Remove and re-insert
-            const [moved] = colMaps.splice(fromIndex, 1);
-            colMaps.splice(toIndex, 0, moved);
-            // Delete all and re-push in new order
-            colArr.delete(0, colArr.length);
-            colArr.push(colMaps);
+            const colId = orderArr.get(fromIndex);
+            orderArr.delete(fromIndex, 1);
+            orderArr.insert(toIndex, [colId]);
         });
     }
 

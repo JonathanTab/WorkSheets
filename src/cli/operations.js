@@ -33,13 +33,22 @@ function _getTable(ydoc, sheetId, tableId) {
     return table;
 }
 
+/** Returns ordered column Y.Maps for a table, supporting both new and legacy layouts. */
+function _getOrderedColMaps(table) {
+    const defsMap = table.get('columnDefs');
+    const orderArr = table.get('columnOrder');
+    if (defsMap && orderArr) {
+        return orderArr.toArray().map(id => defsMap.get(id)).filter(Boolean);
+    }
+    // Legacy: columns was a Y.Array<Y.Map>
+    const old = table.get('columns');
+    return old ? old.toArray() : [];
+}
+
 function _getFormulaCols(table) {
     const formulaCols = new Set();
-    const colsArr = table.get('columns');
-    if (colsArr) {
-        colsArr.toArray().forEach(c => {
-            if (c.get('isNonEntry')) formulaCols.add(c.get('id'));
-        });
+    for (const c of _getOrderedColMaps(table)) {
+        if (c.get('isNonEntry')) formulaCols.add(c.get('id'));
     }
     return formulaCols;
 }
@@ -304,10 +313,7 @@ export function listTables(ydoc, sheetId) {
 
     const result = [];
     tables.forEach((t, id) => {
-        const colsArr = t.get('columns');
-        const columns = colsArr
-            ? colsArr.toArray().map(c => c.toJSON ? c.toJSON() : { ...c })
-            : [];
+        const columns = _getOrderedColMaps(t).map(c => c.toJSON ? c.toJSON() : { ...c });
         result.push({
             id,
             name:    t.get('name') ?? id,
@@ -345,16 +351,16 @@ export function findTableByName(ydoc, sheetId, name) {
  */
 export function resolveColumnNames(ydoc, sheetId, tableId, data) {
     const table = _getTable(ydoc, sheetId, tableId);
-    const colsArr = table.get('columns');
-    if (!colsArr) return data;
+    const colMaps = _getOrderedColMaps(table);
+    if (!colMaps.length) return data;
 
     const nameToId = new Map();
-    colsArr.toArray().forEach(c => {
+    for (const c of colMaps) {
         const id   = c.get('id');
         const name = c.get('name');
-        if (id) nameToId.set(id, id);        // pass-through for IDs
+        if (id) nameToId.set(id, id);
         if (id && name) nameToId.set(name, id);
-    });
+    }
 
     const result = {};
     for (const [k, v] of Object.entries(data)) {
