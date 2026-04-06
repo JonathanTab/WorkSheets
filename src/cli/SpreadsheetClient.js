@@ -178,4 +178,35 @@ export class SpreadsheetClient {
     updateTableRow(ydoc, sheetId, tableId, idx, data)  { return ops.updateTableRow(ydoc, sheetId, tableId, idx, data); }
     upsertTableRow(ydoc, sheetId, tableId, where, data){ return ops.upsertTableRow(ydoc, sheetId, tableId, where, data); }
     deleteTableRow(ydoc, sheetId, tableId, rowIndex)   { return ops.deleteTableRow(ydoc, sheetId, tableId, rowIndex); }
+
+    // ─── Blobs ──────────────────────────────────────────────────────────────
+
+    /**
+     * Create a blob file entry and upload its binary content.
+     * @param {{ title: string, mimeType?: string, size?: number, scope?: string, app?: string }} opts
+     * @param {Blob|Buffer|Uint8Array} data
+     * @returns {Promise<{ id: string, url: string }>}
+     */
+    async uploadBlob(opts, data) {
+        const file = await this._api.createFile({
+            type:     'blob',
+            title:    opts.title,
+            mimeType: opts.mimeType ?? 'application/octet-stream',
+            size:     opts.size     ?? null,
+            scope:    opts.scope    ?? 'app',
+            app:      opts.app      ?? 'worksheets',
+        });
+        const blob = data instanceof Blob ? data : new Blob([data], { type: opts.mimeType ?? 'application/octet-stream' });
+        await this._api.uploadBlob(file.id, blob);
+        return { id: file.id, url: this._api.getBlobUrl(file.id) };
+    }
+
+    /**
+     * Get the download URL for a blob file.
+     * @param {string} blobId
+     * @returns {string}
+     */
+    getBlobUrl(blobId) {
+        return this._api.getBlobUrl(blobId);
+    }
 }

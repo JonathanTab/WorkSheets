@@ -44,6 +44,23 @@
         fit:       ctConfig?.fit       ?? 'contain',
     });
 
+    // Populate metadata from the file registry when ctConfig doesn't have it.
+    // This handles table file cells where metadata isn't stored in cell type config,
+    // and works offline since the registry is local.
+    $effect(() => {
+        const blobId = pendingBlobId;
+        if (!blobId || pendingMeta.mimeType) return;
+        const descriptor = storage.app.get(blobId);
+        if (descriptor) {
+            pendingMeta = {
+                ...pendingMeta,
+                mimeType: descriptor.mimeType || '',
+                filename: pendingMeta.filename || descriptor.filename || '',
+                size:     pendingMeta.size     ?? descriptor.size     ?? null,
+            };
+        }
+    });
+
     let isDragging    = $state(false);
     let isUploading   = $state(false);
     let uploadError   = $state(null);

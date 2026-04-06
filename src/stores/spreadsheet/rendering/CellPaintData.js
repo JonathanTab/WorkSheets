@@ -372,6 +372,10 @@ export function buildPaneData(params) {
                 item.clipContent = true;
                 item.hAlign = 'center';
                 item.vAlign = 'middle';
+            } else if (ct?.type === 'file') {
+                item.rawValue = cellRawValue ?? null; // blob ID string
+                item.ctConfig = ct;
+                item.clipContent = true;
             } else {
                 item.renderType = 'text';
 

@@ -9,8 +9,12 @@
     "build:pwa": "npm run generate-assets && npm run build",
     "generate-assets": "node scripts/generate-pwa-assets.js",
     "preview": "vite preview",
-    "deploy:dev": "deploy.sh",
-    "cli": "node src/cli/index.js"
+    "deploy": "bash scripts/deploy.sh all",
+    "deploy:full": "bash scripts/deploy.sh full",
+    "deploy:frontend": "bash scripts/deploy.sh frontend",
+    "deploy:servers": "bash scripts/deploy.sh servers",
+    "deploy:servers:full": "bash scripts/deploy.sh servers:full",
+    "api": "node spreadsheet-api/server.js"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
