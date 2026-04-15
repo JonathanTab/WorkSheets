@@ -315,22 +315,23 @@ export const spreadsheetSchema = {
     version: SCHEMA_VERSION,
     initialize: (ydoc) => {
         const root = ydoc.getMap('spreadsheet');
+        const sheets = root.get('sheets');
 
-        // Check if already initialized
-        if (root.has('metadata') && root.has('sheets')) {
-            // Migrate existing sheets to add new fields if missing (v3)
-            const sheets = root.get('sheets');
-            if (sheets) {
-                sheets.forEach((sheet) => {
-                    if (!sheet.has('tables')) sheet.set('tables', new Y.Map());
-                    if (!sheet.has('repeaters')) sheet.set('repeaters', new Y.Map());
-                    if (!sheet.has('printSettings')) sheet.set('printSettings', new Y.Map());
-                });
-            }
-            return;
-        }
+        // If no sheets structure exists, the doc either hasn't synced yet or is
+        // a truly new doc. Do NOT call initializeDocument here — creating local
+        // Y.Maps races with incoming server content and can overwrite server data
+        // via CRDT conflict resolution. New documents are initialized at creation
+        // time via createAndInitializeFile → initializeDocument.
+        if (!sheets) return;
 
-        initializeDocument(ydoc);
+        // Migrate existing sheets to add sub-fields introduced in schema v3+.
+        // These writes are CRDT-safe: they only touch keys that are genuinely
+        // absent on both client and server (older docs pre-date these fields).
+        sheets.forEach((sheet) => {
+            if (!sheet.has('tables')) sheet.set('tables', new Y.Map());
+            if (!sheet.has('repeaters')) sheet.set('repeaters', new Y.Map());
+            if (!sheet.has('printSettings')) sheet.set('printSettings', new Y.Map());
+        });
     },
     migrate: async (ydoc) => {
     }

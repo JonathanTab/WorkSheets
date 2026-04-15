@@ -257,6 +257,10 @@ export class CanvasRenderer {
             // boundaries stay visible under spilled text. Overflow cells use
             // naturalWidth so their right/bottom lines stay at the column edge.
             if (showGridLines) {
+                // halfPx: offset in CSS pixels that maps to exactly 0.5 physical pixels.
+                // At DPR=2 → 0.25 CSS px; at DPR=1.5 → 0.333 CSS px; at DPR=1 → 0.5 CSS px.
+                // Using 0.5 (CSS px) at DPR=1.5 would land at 0.75 physical px — subpixel blur.
+                const halfPx = 0.5 / dpr;
                 ctx.beginPath();
                 ctx.strokeStyle = this.#theme.gridline;
                 ctx.lineWidth = 1;
@@ -266,11 +270,11 @@ export class CanvasRenderer {
                     // at the original column boundary, not the extended edge.
                     const rightW = cell.naturalWidth ?? cell.width;
                     // right edge
-                    ctx.moveTo(x + rightW - 0.5, y);
-                    ctx.lineTo(x + rightW - 0.5, y + height);
+                    ctx.moveTo(x + rightW - halfPx, y);
+                    ctx.lineTo(x + rightW - halfPx, y + height);
                     // bottom edge
-                    ctx.moveTo(x, y + height - 0.5);
-                    ctx.lineTo(x + rightW, y + height - 0.5);
+                    ctx.moveTo(x, y + height - halfPx);
+                    ctx.lineTo(x + rightW, y + height - halfPx);
                 }
                 ctx.stroke();
             }
@@ -384,17 +388,21 @@ export class CanvasRenderer {
         ctx.fillStyle = this.#theme.cellBg;
         ctx.fillRect(x, y, width, height);
 
+        const dpr = this.#dpr;
+        const halfPx = 0.5 / dpr;
+        const snap = (v) => Math.round(v * dpr) / dpr;
+
         // Gridlines (bottom + right)
         ctx.strokeStyle = this.#theme.gridline;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(x,           y + height - 0.5);
-        ctx.lineTo(x + width,   y + height - 0.5);
-        ctx.moveTo(x + width - 0.5, y);
-        ctx.lineTo(x + width - 0.5, y + height);
+        ctx.moveTo(x,               y + height - halfPx);
+        ctx.lineTo(x + width,       y + height - halfPx);
+        ctx.moveTo(x + width - halfPx, y);
+        ctx.lineTo(x + width - halfPx, y + height);
         ctx.stroke();
 
-        const textY = Math.round(y + height / 2);
+        const textY = snap(y + height / 2);
 
         if (col?.isNonEntry) {
             // Formula column — show 'fx' hint
@@ -403,7 +411,7 @@ export class CanvasRenderer {
             ctx.fillStyle = 'rgba(100,116,139,0.35)';
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'center';
-            ctx.fillText('fx', Math.round(x + width / 2), textY);
+            ctx.fillText('fx', snap(x + width / 2), textY);
             return;
         }
 
@@ -416,7 +424,7 @@ export class CanvasRenderer {
             ctx.fillStyle = this.#theme.defaultText;
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
-            ctx.fillText(String(value), Math.round(x + 4), textY, width - 8);
+            ctx.fillText(String(value), snap(x + 4), textY, width - 8);
         } else {
             // Column-name placeholder (italic + muted)
             const placeholderFont = `italic 12px ${this.#theme.defaultFontFamily}`;
@@ -424,7 +432,7 @@ export class CanvasRenderer {
             ctx.fillStyle = this.#theme.entryPlaceholderText;
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
-            ctx.fillText(col?.name ?? '', Math.round(x + 4), textY);
+            ctx.fillText(col?.name ?? '', snap(x + 4), textY);
         }
     }
 
@@ -571,7 +579,8 @@ export class CanvasRenderer {
             ctx.fillStyle = this.#theme.entryPlaceholderText || 'rgba(100,116,139,0.5)';
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
-            ctx.fillText(cell.placeholderText, cell.x + 4, Math.round(cell.y + cell.height / 2), cell.width - 8);
+            const _dpr = this.#dpr;
+            ctx.fillText(cell.placeholderText, cell.x + 4, Math.round((cell.y + cell.height / 2) * _dpr) / _dpr, cell.width - 8);
             if (cell.tableHeaderInfo) this.#paintHeaderFilterIcon(ctx, cell);
             return;
         }
@@ -598,28 +607,33 @@ export class CanvasRenderer {
 
         ctx.textBaseline = 'middle';
 
-        // Round to integer pixels for crisp, native-looking text rendering.
-        // Clamp so that large fonts don't bleed above the cell top (no clip on plain text).
-        const minTextY = Math.ceil(y + 1 + fontSize / 2);
+        // Snap to physical pixel boundaries: Math.round(v * dpr) / dpr ensures the
+        // canvas draws at an integer physical pixel, not a fractional one.
+        // Plain Math.round() only gives integer CSS pixels, which at DPR=1.5 can still
+        // land on a half physical pixel (e.g. CSS 11 → 16.5 phys px).
+        const dpr = this.#dpr;
+        const snap = (v) => Math.round(v * dpr) / dpr;
+
+        const minTextY = snap(y + 1 + fontSize / 2);
         let textY;
         if (vAlign === 'top') {
-            textY = Math.round(y + pad + fontSize / 2);
+            textY = snap(y + pad + fontSize / 2);
         } else if (vAlign === 'bottom') {
-            textY = Math.max(Math.round(y + height - pad - fontSize / 2), minTextY);
+            textY = Math.max(snap(y + height - pad - fontSize / 2), minTextY);
         } else {
-            textY = Math.max(Math.round(y + height / 2), minTextY);
+            textY = Math.max(snap(y + height / 2), minTextY);
         }
 
         let textX;
         if (hAlign === 'center') {
             ctx.textAlign = 'center';
-            textX = Math.round(x + width / 2);
+            textX = snap(x + width / 2);
         } else if (hAlign === 'right') {
             ctx.textAlign = 'right';
-            textX = Math.round(x + width - pad);
+            textX = snap(x + width - pad);
         } else {
             ctx.textAlign = 'left';
-            textX = Math.round(x + pad);
+            textX = snap(x + pad);
         }
 
         ctx.fillText(text, textX, textY);
@@ -881,14 +895,16 @@ export class CanvasRenderer {
         const filterActive = !!info.filterActive;
         const { x, y, width, height } = cell;
         const filterAreaW = 18;
-        const textY = Math.round(y + height / 2);
+        const dpr = this.#dpr;
+        const snap = (v) => Math.round(v * dpr) / dpr;
+        const textY = snap(y + height / 2);
         const filterFont = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
         if (filterFont !== this.#lastFont) { ctx.font = filterFont; this.#lastFont = filterFont; }
         ctx.fillStyle = filterActive ? (this.#theme.filterActiveColor || '#3b82f6') : (this.#theme.filterIconColor || '#64748b');
         ctx.globalAlpha = filterActive ? 1 : 0.3;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('☰', Math.round(x + width - filterAreaW / 2), textY);
+        ctx.fillText('☰', snap(x + width - filterAreaW / 2), textY);
         ctx.globalAlpha = 1;
     }
 
@@ -904,20 +920,23 @@ export class CanvasRenderer {
         ctx.fillStyle = this.#theme.tableHeaderBg;
         ctx.fillRect(x, y, width, height);
 
+        const dpr = this.#dpr;
+        const halfPx = 0.5 / dpr;
+
         // Bottom border (slightly heavier to anchor the header)
         ctx.strokeStyle = this.#theme.tableHeaderBorder;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(x, y + height - 0.75);
-        ctx.lineTo(x + width, y + height - 0.75);
+        ctx.moveTo(x, y + height - halfPx);
+        ctx.lineTo(x + width, y + height - halfPx);
         ctx.stroke();
         ctx.lineWidth = 1;
 
         // Right border
         ctx.strokeStyle = this.#theme.gridline;
         ctx.beginPath();
-        ctx.moveTo(x + width - 0.5, y);
-        ctx.lineTo(x + width - 0.5, y + height);
+        ctx.moveTo(x + width - halfPx, y);
+        ctx.lineTo(x + width - halfPx, y + height);
         ctx.stroke();
 
         const pad = 4;
@@ -925,7 +944,7 @@ export class CanvasRenderer {
         const textAreaW = width - pad - filterAreaW - 2;
 
         ctx.textBaseline = 'middle';
-        const textY = Math.round(y + height / 2);
+        const textY = Math.round((y + height / 2) * dpr) / dpr;
 
         // Column name — bold, same size as regular cells
         const headerFont = `600 ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
@@ -933,11 +952,13 @@ export class CanvasRenderer {
         ctx.fillStyle = this.#theme.tableHeaderText;
         ctx.textAlign = 'left';
 
+        const snap = (v) => Math.round(v * dpr) / dpr;
+
         ctx.save();
         ctx.beginPath();
         ctx.rect(x + pad, y, Math.max(0, textAreaW), height);
         ctx.clip();
-        ctx.fillText(colName, x + pad, textY);
+        ctx.fillText(colName, snap(x + pad), textY);
         ctx.restore();
 
         // Filter icon — always visible but dim; brighter when a filter is active
@@ -946,7 +967,7 @@ export class CanvasRenderer {
         ctx.fillStyle = filterActive ? this.#theme.filterActiveColor : this.#theme.filterIconColor;
         ctx.globalAlpha = filterActive ? 1 : 0.3;
         ctx.textAlign = 'center';
-        ctx.fillText('☰', Math.round(x + width - filterAreaW / 2), textY);
+        ctx.fillText('☰', snap(x + width - filterAreaW / 2), textY);
         ctx.globalAlpha = 1;
     }
 
@@ -1103,7 +1124,7 @@ export class CanvasRenderer {
             if (!edge) return;
             ctx.strokeStyle = edge.color || '#000000';
             const lineWidth = edge.width || 1;
-            ctx.lineWidth = lineWidth;
+            const edgeStyle = edge.style || 'solid';
 
             // Calculate offset based on line width to ensure proper positioning
             // For lineWidth=1: offset=0.5 (center of pixel)
@@ -1111,30 +1132,39 @@ export class CanvasRenderer {
             const offset = lineWidth === 1 ? 0.5 : Math.ceil(lineWidth / 2);
 
             // Adjust coordinates based on edge position
-            let adjustedX1 = x1, adjustedY1 = y1, adjustedX2 = x2, adjustedY2 = y2;
+            const adjust = (ax1, ay1, ax2, ay2) => {
+                let bx1 = ax1, by1 = ay1, bx2 = ax2, by2 = ay2;
+                if (position === 'top') { by1 -= (offset - 0.5); by2 -= (offset - 0.5); }
+                else if (position === 'bottom') { by1 += (offset - 0.5); by2 += (offset - 0.5); }
+                else if (position === 'left') { bx1 -= (offset - 0.5); bx2 -= (offset - 0.5); }
+                else if (position === 'right') { bx1 += (offset - 0.5); bx2 += (offset - 0.5); }
+                return [bx1, by1, bx2, by2];
+            };
 
-            if (position === 'top') {
-                // Top edge: position above the cell (-offset)
-                adjustedY1 = y1 - (offset - 0.5);
-                adjustedY2 = y2 - (offset - 0.5);
-            } else if (position === 'bottom') {
-                // Bottom edge: position below the cell (+offset)
-                adjustedY1 = y1 + (offset - 0.5);
-                adjustedY2 = y2 + (offset - 0.5);
-            } else if (position === 'left') {
-                // Left edge: position left of the cell (-offset)
-                adjustedX1 = x1 - (offset - 0.5);
-                adjustedX2 = x2 - (offset - 0.5);
-            } else if (position === 'right') {
-                // Right edge: position right of the cell (+offset)
-                adjustedX1 = x1 + (offset - 0.5);
-                adjustedX2 = x2 + (offset - 0.5);
+            if (edgeStyle === 'double') {
+                // Draw two thin parallel lines, 2px apart
+                ctx.lineWidth = 1;
+                ctx.setLineDash([]);
+                const gap = 2;
+                const isH = (y1 === y2);
+                // Line 1 (inward offset -gap)
+                let [ax1, ay1, ax2, ay2] = adjust(x1, y1, x2, y2);
+                if (isH) { ay1 -= gap; ay2 -= gap; } else { ax1 -= gap; ax2 -= gap; }
+                ctx.beginPath(); ctx.moveTo(ax1, ay1); ctx.lineTo(ax2, ay2); ctx.stroke();
+                // Line 2 (outward offset +gap)
+                let [bx1, by1, bx2, by2] = adjust(x1, y1, x2, y2);
+                if (isH) { by1 += gap; by2 += gap; } else { bx1 += gap; bx2 += gap; }
+                ctx.beginPath(); ctx.moveTo(bx1, by1); ctx.lineTo(bx2, by2); ctx.stroke();
+            } else {
+                ctx.lineWidth = lineWidth;
+                ctx.setLineDash(edgeStyle === 'dashed' ? [4, 4] : []);
+                const [ax1, ay1, ax2, ay2] = adjust(x1, y1, x2, y2);
+                ctx.beginPath();
+                ctx.moveTo(ax1, ay1);
+                ctx.lineTo(ax2, ay2);
+                ctx.stroke();
+                if (edgeStyle === 'dashed') ctx.setLineDash([]);
             }
-
-            ctx.beginPath();
-            ctx.moveTo(adjustedX1, adjustedY1);
-            ctx.lineTo(adjustedX2, adjustedY2);
-            ctx.stroke();
         };
 
         // Paint borders with proper positioning for their edges

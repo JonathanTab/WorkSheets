@@ -205,6 +205,9 @@ class Tokenizer {
             } else if (char === '%') {
                 tokens.push({ type: TokenType.OPERATOR, value: '%' });
                 this.advance();
+            } else if (char === '&') {
+                tokens.push({ type: TokenType.OPERATOR, value: '&' });
+                this.advance();
             } else if (char === '=') {
                 tokens.push({ type: TokenType.OPERATOR, value: '=' });
                 this.advance();
@@ -323,7 +326,7 @@ export class Parser {
         let left = this.parseMultiplicative();
 
         while (this.currentToken?.type === TokenType.OPERATOR &&
-            ['+', '-'].includes(this.currentToken.value)) {
+            ['+', '-', '&'].includes(this.currentToken.value)) {
             const op = this.currentToken.value;
             this.advance();
             const right = this.parseMultiplicative();

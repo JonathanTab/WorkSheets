@@ -171,57 +171,66 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
 
     switch (ast.op) {
         case '+': {
+            // Treat null/undefined as 0 for numeric coercion, empty string for string concat
+            const leftCoerce = left ?? 0;
+            const rightCoerce = right ?? 0;
             // Try to convert string numbers to actual numbers for addition
             const leftNum =
-                typeof left === 'string' && left.trim() !== '' && !isNaN(Number(left))
-                    ? Number(left)
-                    : left;
+                typeof leftCoerce === 'string' && leftCoerce.trim() !== '' && !isNaN(Number(leftCoerce))
+                    ? Number(leftCoerce)
+                    : leftCoerce;
             const rightNum =
-                typeof right === 'string' && right.trim() !== '' && !isNaN(Number(right))
-                    ? Number(right)
-                    : right;
+                typeof rightCoerce === 'string' && rightCoerce.trim() !== '' && !isNaN(Number(rightCoerce))
+                    ? Number(rightCoerce)
+                    : rightCoerce;
 
             if (typeof leftNum === 'number' && typeof rightNum === 'number') {
                 return leftNum + rightNum;
             }
             // Only concatenate if at least one is a non-numeric string
-            if (typeof left === 'string' || typeof right === 'string') {
-                return String(left) + String(right);
+            if (typeof leftCoerce === 'string' || typeof rightCoerce === 'string') {
+                return String(leftCoerce) + String(rightCoerce);
+            }
+            return FormulaError.VALUE;
+        }
+        case '&':
+            return String(left ?? '') + String(right ?? '');
+
+        case '-': {
+            const l = left ?? 0, r = right ?? 0;
+            if (typeof l === 'number' && typeof r === 'number') return l - r;
+            return FormulaError.VALUE;
+        }
+
+        case '*': {
+            const l = left ?? 0, r = right ?? 0;
+            if (typeof l === 'number' && typeof r === 'number') return l * r;
+            return FormulaError.VALUE;
+        }
+
+        case '/': {
+            const l = left ?? 0, r = right ?? 0;
+            if (typeof l === 'number' && typeof r === 'number') {
+                if (r === 0) return FormulaError.DIV_ZERO;
+                return l / r;
             }
             return FormulaError.VALUE;
         }
 
-        case '-':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left - right;
-            }
+        case '^': {
+            const l = left ?? 0, r = right ?? 0;
+            if (typeof l === 'number' && typeof r === 'number') return Math.pow(l, r);
             return FormulaError.VALUE;
+        }
 
-        case '*':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left * right;
+        case '%': {
+            const l = left ?? 0, r = right ?? 0;
+            if (typeof l === 'number' && typeof r === 'number') {
+                if (r === 0) return FormulaError.DIV_ZERO;
+                return l % r;
             }
             return FormulaError.VALUE;
-
-        case '/':
-            if (typeof left === 'number' && typeof right === 'number') {
-                if (right === 0) return FormulaError.DIV_ZERO;
-                return left / right;
-            }
-            return FormulaError.VALUE;
-
-        case '^':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return Math.pow(left, right);
-            }
-            return FormulaError.VALUE;
-
-        case '%':
-            if (typeof left === 'number' && typeof right === 'number') {
-                if (right === 0) return FormulaError.DIV_ZERO;
-                return left % right;
-            }
-            return FormulaError.VALUE;
+        }
 
         case '=':
             return left === right;

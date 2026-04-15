@@ -115,6 +115,10 @@ export class FormulaEngine {
      * neighbouring cells (spill range) and stored in computedValues.
      * The anchor cell always gets the top-left scalar value.
      *
+     * When spill cell values change, dependent formula cells are marked dirty
+     * so that formulas referencing spill cells (e.g. concat formulas next to
+     * an IMPORTRANGE) are recalculated in the next recalculateDirty pass.
+     *
      * @param {number} row  - anchor row
      * @param {number} col  - anchor col
      * @param {any}    rawResult - value returned by evaluate()
@@ -126,7 +130,12 @@ export class FormulaEngine {
         this.#clearSpill(anchorKey);
 
         if (!Array.isArray(rawResult)) {
+            const oldAnchor = this.computedValues[anchorKey];
             this.computedValues[anchorKey] = rawResult;
+            // If the anchor value changed, notify dependents
+            if (oldAnchor !== rawResult) {
+                this.#graph.markDependentsDirty(anchorKey);
+            }
             return rawResult;
         }
 
@@ -139,25 +148,38 @@ export class FormulaEngine {
         const cols = arr2d[0]?.length ?? 0;
 
         if (rows === 0 || cols === 0) {
+            const oldAnchor = this.computedValues[anchorKey];
             this.computedValues[anchorKey] = null;
+            if (oldAnchor !== null) {
+                this.#graph.markDependentsDirty(anchorKey);
+            }
             return null;
         }
 
         // Record the spill range for cleanup later
         this.#spillRanges.set(anchorKey, { anchorRow: row, anchorCol: col, rows, cols });
 
-        // Distribute individual cell values
+        // Distribute individual cell values; mark dependents dirty when values change
         for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
                 const k = cellKey(row + r, col + c);
                 if (r === 0 && c === 0) continue; // anchor handled below
                 this.#spillSources.set(k, anchorKey);
-                this.computedValues[k] = arr2d[r][c] ?? null;
+                const newVal = arr2d[r][c] ?? null;
+                const oldVal = this.computedValues[k];
+                this.computedValues[k] = newVal;
+                if (oldVal !== newVal) {
+                    this.#graph.markDependentsDirty(k);
+                }
             }
         }
 
         const topLeft = arr2d[0][0] ?? null;
+        const oldAnchor = this.computedValues[anchorKey];
         this.computedValues[anchorKey] = topLeft;
+        if (oldAnchor !== topLeft) {
+            this.#graph.markDependentsDirty(anchorKey);
+        }
         return topLeft;
     }
 
@@ -393,31 +415,35 @@ export class FormulaEngine {
         }
 
         this.#isRecalculating = true;
-        const updated = [];
+        const allUpdated = [];
 
         try {
-            // Get dirty cells in topological order
-            const dirtyCells = this.#graph.getDirtyCellsOrdered();
+            // Loop until stable: spill cells from #storeResult may mark new dependents
+            // dirty during evaluation. Clear dirty BEFORE evaluating so those newly
+            // dirtied cells are picked up in the next iteration rather than lost.
+            let iterations = 0;
+            while (this.#graph.dirtyCells.size > 0 && iterations < 100) {
+                iterations++;
+                const dirtyCells = this.#graph.getDirtyCellsOrdered();
+                this.#graph.clearDirty(); // Clear before eval so new dirty cells accumulate
 
-            for (const key of dirtyCells) {
-                const { row, col } = parseCellKey(key);
+                for (const key of dirtyCells) {
+                    const { row, col } = parseCellKey(key);
 
-                // Re-evaluate and store (handles array/spill output)
-                const rawResult = this.evaluateCell(row, col);
-                const value = this.#storeResult(row, col, rawResult);
+                    // Re-evaluate and store (handles array/spill output)
+                    const rawResult = this.evaluateCell(row, col);
+                    const value = this.#storeResult(row, col, rawResult);
 
-                updated.push({ row, col, value });
+                    allUpdated.push({ row, col, value });
+                }
             }
-
-            // Clear dirty set
-            this.#graph.clearDirty();
         } finally {
             this.#isRecalculating = false;
         }
 
-        if (updated.length > 0) this.computedVersion++;
+        if (allUpdated.length > 0) this.computedVersion++;
 
-        return updated;
+        return allUpdated;
     }
 
     /**
@@ -433,6 +459,25 @@ export class FormulaEngine {
         }
 
         return this.recalculateDirty();
+    }
+
+    /**
+     * Mark only TABLE_*-dependent formula cells dirty and recalculate.
+     * Used when table row data changes: avoids a full recalc of unrelated
+     * formulas (IMPORTRANGE, cross-sheet refs, etc.).  recalculateDirty()
+     * still propagates through the graph, so any sheet cells that depend on
+     * TABLE_* results are picked up automatically.
+     * @returns {Array<{row: number, col: number, value: any}>}
+     */
+    recalculateTableDependents() {
+        let anyDirty = false;
+        for (const [key, info] of this.#graph.formulas) {
+            if (info.formula.toUpperCase().includes('TABLE_')) {
+                this.#graph.dirtyCells.add(key);
+                anyDirty = true;
+            }
+        }
+        return anyDirty ? this.recalculateDirty() : [];
     }
 
     /**

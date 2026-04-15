@@ -603,40 +603,49 @@ export class SpreadsheetSession {
                 const formulasToClear = [];
                 const valueChanges = [];
 
-                // Process deep changes - events is an array for observeDeep
+                // Track cell keys handled by top-level events so deep events don't double-process
+                // them. When a new cell Y.Map is added to the cells map, Yjs fires BOTH a
+                // top-level 'add' event on cells AND a deep 'v add' event on the inner Y.Map.
+                // We process the top-level event and skip the redundant deep one.
+                const topLevelHandled = new Set();
+
                 for (const event of events) {
-                    // Check if this is a change to the cells map itself (add/remove cells)
-                    if (event.changes.keys) {
-                        event.changes.keys.forEach((change, key) => {
-                            if (change.action === 'add' || change.action === 'update') {
-                                const cellYMap = cells.get(key);
-                                const v = cellYMap?.get?.(CELL_KEYS.VALUE);
-                                if (typeof v === 'string' && v.startsWith('=')) {
+                    // Top-level: change to the cells Y.Map itself (cell added/deleted/replaced)
+                    if (!event.path || event.path.length === 0) {
+                        if (event.changes.keys) {
+                            event.changes.keys.forEach((change, key) => {
+                                if (change.action === 'add' || change.action === 'update') {
+                                    topLevelHandled.add(key);
+                                    const cellYMap = cells.get(key);
+                                    const v = cellYMap?.get?.(CELL_KEYS.VALUE);
+                                    if (typeof v === 'string' && v.startsWith('=')) {
+                                        const [row, col] = key.split(',').map(Number);
+                                        formulasToSet.push({ row, col, formula: v });
+                                    }
+                                } else if (change.action === 'delete') {
+                                    topLevelHandled.add(key);
                                     const [row, col] = key.split(',').map(Number);
-                                    formulasToSet.push({ row, col, formula: v });
+                                    formulasToClear.push({ row, col });
                                 }
-                            } else if (change.action === 'delete') {
-                                // Cell was deleted, clear from formula engine
-                                const [row, col] = key.split(',').map(Number);
-                                formulasToClear.push({ row, col });
-                            }
-                        });
+                            });
+                        }
                     }
 
-                    // Check if this is a deep change to a cell's properties (value changes)
+                    // Deep: change to a property inside an existing cell Y.Map
                     if (event.path && event.path.length > 0 && event.changes.keys) {
                         const cellKey = event.path[0];
-                        const [row, col] = cellKey.split(',').map(Number);
-                        const cellYMap = cells.get(cellKey);
+                        // Skip if the top-level event already handled this cell (e.g. new cell creation)
+                        if (topLevelHandled.has(cellKey)) continue;
 
                         const hasValueChange = event.changes.keys.has(CELL_KEYS.VALUE);
-
                         if (hasValueChange) {
+                            const [row, col] = cellKey.split(',').map(Number);
+                            const cellYMap = cells.get(cellKey);
                             const v = cellYMap?.get?.(CELL_KEYS.VALUE);
                             if (typeof v === 'string' && v.startsWith('=')) {
                                 formulasToSet.push({ row, col, formula: v });
                             } else {
-                                // Value changed and it's not a formula
+                                // Value changed to a non-formula
                                 formulasToClear.push({ row, col });
                                 valueChanges.push({ row, col });
                             }
@@ -653,9 +662,17 @@ export class SpreadsheetSession {
                     this.formulaEngine.setFormula(row, col, formula);
                 }
 
-                // Trigger dependent recalculation for value changes
+                // Trigger dependent recalculation for non-formula value changes
                 for (const { row, col } of valueChanges) {
                     this.formulaEngine.cellValueChanged(row, col);
+                }
+
+                // Re-evaluate all dirty formula cells in topological order. This ensures
+                // correct results when e.g. IMPORTRANGE fills spill cells that other
+                // formulas depend on, or when a batch paste brings in many interdependent
+                // formulas at once.
+                if (formulasToSet.length > 0) {
+                    this.formulaEngine.recalculateDirty();
                 }
 
                 // Note: We do NOT write computed values back to Yjs!
@@ -663,8 +680,26 @@ export class SpreadsheetSession {
             };
 
             cells.observeDeep(observer);
+
+            // TABLE_* functions (TABLE_SUMIF, TABLE_SUM, etc.) are custom functions
+            // registered at eval time — they are NOT in the cell dependency graph, so
+            // editing table rows never marks those formula cells dirty.  Watch the
+            // tables Yjs map and force a full recalc whenever any table data changes.
+            // This observer is attached AFTER TableStore + TableManager observers, so
+            // sortedFilteredRows is already up-to-date by the time recalculateAll runs.
+            const tablesYMap = sheet.get('tables');
+            const tablesObserver = tablesYMap ? () => {
+                this.formulaEngine?.recalculateTableDependents();
+            } : null;
+            if (tablesYMap && tablesObserver) {
+                tablesYMap.observeDeep(tablesObserver);
+            }
+
             this.#cleanupFormulaObserver = () => {
                 cells.unobserveDeep(observer);
+                if (tablesYMap && tablesObserver) {
+                    tablesYMap.unobserveDeep(tablesObserver);
+                }
             };
         }
     }
@@ -777,6 +812,15 @@ export class SpreadsheetSession {
             const key = `${row},${col}`;
             if (key in this.formulaEngine.computedValues) {
                 return this.formulaEngine.computedValues[key] ?? '';
+            }
+        }
+
+        // Table cells store their data in TableStore rows, not in the sheet cell map.
+        if (this.tableManager) {
+            const info = this.tableManager.getCellInfo(row, col);
+            if (info?.table) {
+                if (info.rowType === 'header') return info.colDef?.name ?? '';
+                if (info.rowType === 'data')   return this.tableManager.getCellDisplayValue(row, col);
             }
         }
 

@@ -9,6 +9,34 @@ export default defineConfig({
     define: {
         __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
+    build: {
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    'vendor-prosemirror': [
+                        'prosemirror-state',
+                        'prosemirror-view',
+                        'prosemirror-model',
+                        'prosemirror-commands',
+                        'prosemirror-keymap',
+                        'prosemirror-schema-basic',
+                        'prosemirror-schema-list',
+                        'prosemirror-history',
+                        'prosemirror-inputrules',
+                        'prosemirror-dropcursor',
+                        'prosemirror-gapcursor',
+                    ],
+                    'vendor-yjs': [
+                        'yjs',
+                        'y-indexeddb',
+                        'y-websocket',
+                        'y-prosemirror',
+                    ],
+                    'vendor-pdf': ['jspdf'],
+                },
+            },
+        },
+    },
     plugins: [svelte(), tailwindcss(), VitePWA({
         registerType: 'autoUpdate',
         injectRegister: 'inline',

@@ -23,6 +23,8 @@
     let activeSubmenu = $state(null);
     let hoveredSubmenu = $state(null);
     let dropdownStyle = $state("position:fixed; left:-9999px; top:-9999px;");
+    let submenuStyle = $state("position:fixed; left:-9999px; top:-9999px;");
+    let activeSubmenuTriggerRect = $state(null);
     let submenuDirection = $state("right");
     let panelResizeObserver = null;
     let buttonResizeObserver = null;
@@ -79,24 +81,47 @@
         }
     }
 
-    function handleItemClick(item) {
+    function updateSubmenuPosition(triggerRect) {
+        const margin = 8;
+        const gap = 2;
+        const subWidth = 200; // approximate; submenu renders off-screen first tick
+        let left = submenuDirection === "left"
+            ? triggerRect.left - subWidth - gap
+            : triggerRect.right + gap;
+        let top = triggerRect.top - 6;
+        if (left < margin) left = triggerRect.right + gap;
+        if (left + subWidth > window.innerWidth - margin) left = triggerRect.left - subWidth - gap;
+        if (left < margin) left = margin;
+        submenuStyle = `position:fixed; left:${Math.round(left)}px; top:${Math.round(top)}px; z-index:1002;`;
+    }
+
+    function handleItemClick(item, event) {
         if (item.disabled) return;
         if (item.submenu) {
-            // Toggle submenu
-            activeSubmenu = activeSubmenu === item.label ? null : item.label;
+            if (activeSubmenu === item.label) {
+                activeSubmenu = null;
+            } else {
+                activeSubmenu = item.label;
+                const rect = event.currentTarget.getBoundingClientRect();
+                activeSubmenuTriggerRect = rect;
+                updateSubmenuPosition(rect);
+            }
             return;
         }
         close();
         item.action?.();
     }
 
-    function handleItemMouseEnter(item) {
+    function handleItemMouseEnter(item, event) {
         if (item.submenu && !item.disabled) {
             hoveredSubmenu = item.label;
+            const rect = event.currentTarget.getBoundingClientRect();
+            activeSubmenuTriggerRect = rect;
             // Small delay before activating submenu
             setTimeout(() => {
                 if (hoveredSubmenu === item.label) {
                     activeSubmenu = item.label;
+                    updateSubmenuPosition(rect);
                 }
             }, 100);
         }
@@ -246,8 +271,8 @@
                         class:disabled={item.disabled}
                         class:has-submenu={item.submenu}
                         class:submenu-open={activeSubmenu === item.label}
-                        onclick={() => handleItemClick(item)}
-                        onmouseenter={() => handleItemMouseEnter(item)}
+                        onclick={(e) => handleItemClick(item, e)}
+                        onmouseenter={(e) => handleItemMouseEnter(item, e)}
                         onmouseleave={handleItemMouseLeave}
                         disabled={item.disabled}
                     >
@@ -265,7 +290,7 @@
                         {/if}
                     </button>
                     {#if item.submenu && activeSubmenu === item.label}
-                        <div class="submenu-panel" class:left={submenuDirection === "left"}>
+                        <div class="submenu-panel" style={submenuStyle}>
                             {#each item.submenu as subItem, j}
                                 {#if subItem.divider}
                                     <div class="divider"></div>
@@ -453,30 +478,18 @@
     }
 
     .submenu-panel {
-        position: absolute;
-        left: 100%;
-        top: -6px;
         min-width: 180px;
         max-width: min(260px, calc(100vw - 16px));
         max-height: calc(100vh - 16px);
         overflow: auto;
         padding: 6px 0;
-        margin-left: 2px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: 6px;
         box-shadow:
             0 2px 8px rgba(0, 0, 0, 0.12),
             0 8px 24px rgba(0, 0, 0, 0.14);
-        z-index: 1001;
         animation: submenu-enter 0.1s ease-out;
-    }
-
-    .submenu-panel.left {
-        left: auto;
-        right: 100%;
-        margin-left: 0;
-        margin-right: 2px;
     }
 
     @keyframes submenu-enter {

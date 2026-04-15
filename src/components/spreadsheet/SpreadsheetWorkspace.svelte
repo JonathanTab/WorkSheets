@@ -13,6 +13,7 @@
         selectionState,
         loadDocument,
         unloadDocument,
+        initializeSpreadsheet,
     } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
@@ -111,9 +112,17 @@
         pageBreakPrintSettings = e.detail.settings ?? null;
     }
 
+    const APP_NAME = "WorkSheets";
+
+    $effect(() => {
+        const meta = /** @type {any} */ (spreadsheetSession.metadata);
+        const title = meta?.title ?? meta?.name;
+        document.title = title ? `${title} — ${APP_NAME}` : APP_NAME;
+    });
+
     // Use onMount for initial load
-    onMount(() => {
-        console.log("[SpreadsheetWorkspace] onMount, docId:", docId);
+    onMount(async () => {
+        await initializeSpreadsheet();
         if (docId) {
             loadDoc(docId);
         }

@@ -6,96 +6,26 @@
     import InstallPrompt from "./components/InstallPrompt.svelte";
     import MaintenanceOverlay from "./components/MaintenanceOverlay.svelte";
     import { authStore } from "./stores/authStore";
-    import { initializeSpreadsheet } from "./stores/spreadsheetStore.svelte.js";
 
     let initialized = $state(false);
     let loading = $state(true);
-    let isOffline = $state(false);
-    let isInitializing = $state(false);
 
     let unsubscribeAuth = null;
 
-    // Initialize stores on mount with offline-first approach
+    // Initialize on mount: just auth — each workspace initializes itself
     onMount(() => {
-        console.log("[App] Starting mount...");
-
-        // Set initial offline status
-        isOffline = !navigator.onLine;
-
-        // Listen for network changes
-        const handleOnline = () => {
-            console.log("Network connection restored");
-            isOffline = false;
-        };
-
-        const handleOffline = () => {
-            console.log("Network connection lost");
-            isOffline = true;
-        };
-
-        window.addEventListener("online", handleOnline);
-        window.addEventListener("offline", handleOffline);
-
         (async () => {
             try {
-                // Load cached authentication data immediately (no network required)
-                console.log("[App] Loading cached auth data...");
                 const isAuthenticated = await authStore.initOffline();
-
-                if (isAuthenticated) {
-                    // User has cached credentials, load documents from cache
-                    console.log(
-                        "[App] User has cached credentials, initializing spreadsheet...",
-                    );
-                    isInitializing = true;
-                    console.log("[App] About to call initializeSpreadsheet...");
-                    initialized = await initializeSpreadsheet();
-                    console.log(
-                        "[App] initializeSpreadsheet returned:",
-                        initialized,
-                    );
-                    isInitializing = false;
-
-                    if (!initialized) {
-                        console.error("[App] Document initialization failed");
-                    }
-                } else {
-                    // No cached credentials found - user needs to log in
-                    console.log(
-                        "[App] No cached credentials found - user needs to authenticate",
-                    );
-                    initialized = false;
-                }
-
-                console.log(
-                    "[App] Initialization sequence complete, setting loading=false",
-                );
+                initialized = isAuthenticated;
                 loading = false;
-                console.log("[App] loading state updated to:", loading);
 
-                // Subscribe to auth changes for login/logout handling
-                console.log("[App] Subscribing to auth changes...");
-                unsubscribeAuth = authStore.subscribe(async (state) => {
-                    // Only react to auth changes after initial setup is complete
+                // React to login / logout after initial auth is resolved
+                unsubscribeAuth = authStore.subscribe((state) => {
                     if (loading) return;
-
-                    if (
-                        state.user?.username &&
-                        !initialized &&
-                        !isInitializing
-                    ) {
-                        // User just logged in, initialize documents
-                        console.log(
-                            "[App] User logged in - initializing documents",
-                        );
-                        isInitializing = true;
-                        initialized = await initializeSpreadsheet();
-                        isInitializing = false;
+                    if (state.user?.username && !initialized) {
+                        initialized = true;
                     } else if (!state.user?.username) {
-                        // User logged out, reset initialization state
-                        console.log(
-                            "[App] User logged out - resetting document state",
-                        );
                         initialized = false;
                     }
                 });
@@ -103,14 +33,10 @@
                 console.error("[App] Initialization error:", error);
                 initialized = false;
                 loading = false;
-            } finally {
-                console.log("[App] finally block, loading should be false");
             }
         })();
 
         return () => {
-            window.removeEventListener("online", handleOnline);
-            window.removeEventListener("offline", handleOffline);
             if (unsubscribeAuth) unsubscribeAuth();
         };
     });

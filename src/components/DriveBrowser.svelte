@@ -8,6 +8,7 @@
     import RenameDocumentModal from "./modals/RenameDocumentModal.svelte";
     import MoveFileModal from "./modals/MoveFileModal.svelte";
     import ShareFileModal from "./modals/ShareFileModal.svelte";
+    import VersionHistoryModal from "./modals/VersionHistoryModal.svelte";
     import PromptModal from "./modals/PromptModal.svelte";
     import ConfirmModal from "./modals/ConfirmModal.svelte";
     import UploadFileModal from "./modals/UploadFileModal.svelte";
@@ -671,6 +672,12 @@
         e?.stopPropagation();
         closeContextMenu();
         openModal(ShareFileModal, { file });
+    }
+
+    function handleVersionHistory(file, e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        openModal(VersionHistoryModal, { registry, file });
     }
 
     async function handleDeleteFolder(folder, e) {
@@ -2379,6 +2386,14 @@
             >
                 {@html share} Share…
             </button>
+            {#if !isBlobFile(contextMenu.item)}
+                <button
+                    class="ctx-item"
+                    onclick={(e) => handleVersionHistory(contextMenu.item, e)}
+                >
+                    {@html clock} Version History…
+                </button>
+            {/if}
             <hr class="ctx-sep" />
             <button
                 class="ctx-item danger"

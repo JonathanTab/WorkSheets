@@ -1,10 +1,4 @@
 <script>
-    import { onDestroy } from "svelte";
-    import DriveBrowser from "../components/DriveBrowser.svelte";
-    import SpreadsheetWorkspace from "../components/spreadsheet/SpreadsheetWorkspace.svelte";
-    import DocWorkspace from "../components/docs/DocWorkspace.svelte";
-    import SvgWorkspace from "../components/svg/SvgWorkspace.svelte";
-    import { spreadsheetSession } from "../stores/spreadsheetStore.svelte.js";
     import { router } from "../lib/router.svelte.js";
     import storage from "../stores/storage.js";
 
@@ -12,15 +6,15 @@
 
     let route = $derived(router.route);
 
-    // Reactively update document title
+    // Kick off all workspace imports immediately so every chunk is in-flight
+    // on first load (and precached by the service worker for offline use).
+    const sheetMod  = import("../components/spreadsheet/SpreadsheetWorkspace.svelte");
+    const docMod    = import("../components/docs/DocWorkspace.svelte");
+    const svgMod    = import("../components/svg/SvgWorkspace.svelte");
+    const driveMod  = import("../components/DriveBrowser.svelte");
+
     $effect(() => {
-        const view = route.view;
-        if (view === 'sheet') {
-            const docTitle = spreadsheetSession.metadata?.title ?? spreadsheetSession.metadata?.name;
-            document.title = docTitle ? `${docTitle} — ${APP_NAME}` : APP_NAME;
-        } else if (view === 'doc') {
-            document.title = APP_NAME;
-        } else {
+        if (route.view !== 'sheet') {
             document.title = APP_NAME;
         }
     });
@@ -28,13 +22,21 @@
 
 <div class="home-container">
     {#if route.view === 'sheet'}
-        <SpreadsheetWorkspace docId={route.docId} registry={storage} />
+        {#await sheetMod then { default: SpreadsheetWorkspace }}
+            <SpreadsheetWorkspace docId={route.docId} registry={storage} />
+        {/await}
     {:else if route.view === 'doc'}
-        <DocWorkspace docId={route.docId} registry={storage} />
+        {#await docMod then { default: DocWorkspace }}
+            <DocWorkspace docId={route.docId} registry={storage} />
+        {/await}
     {:else if route.view === 'svg'}
-        <SvgWorkspace docId={route.docId} registry={storage} />
+        {#await svgMod then { default: SvgWorkspace }}
+            <SvgWorkspace docId={route.docId} registry={storage} />
+        {/await}
     {:else}
-        <DriveBrowser registry={storage} />
+        {#await driveMod then { default: DriveBrowser }}
+            <DriveBrowser registry={storage} />
+        {/await}
     {/if}
 </div>
 

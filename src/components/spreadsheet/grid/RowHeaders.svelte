@@ -90,7 +90,7 @@
     <div class="scrollable-rows" style="top:{frozenHeight}px;">
         <div
             class="scrollable-inner"
-            style="transform:translateY({-scrollTop}px);"
+            style="transform:translateY({Math.round(-scrollTop)}px);"
         >
             {#each bodyRowIndices as row (row)}
                 {@const height = virtualizer.getRowHeight(row)}

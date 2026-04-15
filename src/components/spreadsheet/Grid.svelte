@@ -3846,23 +3846,23 @@
             case "c":
                 if ((e.ctrlKey || e.metaKey) && selection) {
                     copySelection();
-                    e.preventDefault();
+                    // Don't preventDefault — browser fires a native copy event which
+                    // handleCopy() intercepts to write all MIME formats synchronously.
                 }
                 break;
             case "x":
                 if ((e.ctrlKey || e.metaKey) && selection) {
                     cutSelection();
-                    e.preventDefault();
+                    // Don't preventDefault — browser fires a native cut event which
+                    // handleCut() intercepts to write all MIME formats synchronously.
                 }
                 break;
             case "v":
-                if ((e.ctrlKey || e.metaKey) && e.shiftKey && selection) {
-                    // Ctrl+Shift+V → paste values only
-                    pasteSelection("values");
-                    e.preventDefault();
-                } else if ((e.ctrlKey || e.metaKey) && selection) {
-                    pasteSelection("full");
-                    e.preventDefault();
+                if ((e.ctrlKey || e.metaKey) && selection) {
+                    // Set pending paste mode — don't preventDefault so the browser
+                    // fires a native paste event, giving us access to all MIME types
+                    // (including Google Sheets' compact JSON) via e.clipboardData
+                    clipboardManager._pendingPasteMode = e.shiftKey ? "values" : "full";
                 }
                 break;
             case "a":
@@ -3957,6 +3957,60 @@
                 spreadsheetSession.ydoc,
                 mode,
             );
+    }
+
+    /**
+     * Handle native copy event — fires after keydown (Ctrl+C) when we do NOT
+     * call preventDefault on the keydown. Delegates to ClipboardManager which
+     * writes all MIME formats synchronously via e.clipboardData.setData().
+     * This path is permission-free and works in all browsers.
+     */
+    function handleCopy(e) {
+        // Guard: ignore if a text input / cell editor has focus — let it copy normally.
+        const target = e.target;
+        if (
+            target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            (target instanceof HTMLElement && target.isContentEditable)
+        ) return;
+
+        clipboardManager.handleNativeCopyEvent(e);
+    }
+
+    /**
+     * Handle native cut event — same as copy but for Ctrl+X.
+     */
+    function handleCut(e) {
+        const target = e.target;
+        if (
+            target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            (target instanceof HTMLElement && target.isContentEditable)
+        ) return;
+
+        clipboardManager.handleNativeCopyEvent(e);
+    }
+
+    /**
+     * Handle native paste event — gives access to all MIME types including
+     * Google Sheets' compact JSON via e.clipboardData.
+     */
+    function handlePaste(e) {
+        const mode = clipboardManager._pendingPasteMode;
+        if (!mode) return; // Not our paste (e.g. paste into an input field)
+
+        e.preventDefault();
+        clipboardManager._pendingPasteMode = null;
+
+        if (sheetStore && spreadsheetSession.ydoc) {
+            clipboardManager.pasteFromEvent(
+                e.clipboardData,
+                sheetStore,
+                spreadsheetSession,
+                spreadsheetSession.ydoc,
+                mode,
+            );
+        }
     }
 
     /**
@@ -4913,7 +4967,7 @@
     });
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} oncopy={handleCopy} oncut={handleCut} onpaste={handlePaste} />
 
 <div class="grid-root" bind:this={containerEl}>
     {#if renderPlan && virtualizer}

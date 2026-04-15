@@ -83,7 +83,7 @@
     <div class="scrollable-cols" style="left:{frozenWidth}px;">
         <div
             class="scrollable-inner"
-            style="transform:translateX({-scrollLeft}px);"
+            style="transform:translateX({Math.round(-scrollLeft)}px);"
         >
             {#each bodyColIndices as col (col)}
                 {@const width = virtualizer.getColWidth(col)}

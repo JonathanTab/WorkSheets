@@ -518,6 +518,15 @@ export const functions = {
         }
     },
 
+    CONCAT: {
+        description: 'Join text strings',
+        minArgs: 1,
+        maxArgs: Infinity,
+        call: (args) => {
+            return args.map(toString).join('');
+        }
+    },
+
     // =========================================================================
     // Lookup Functions
     // =========================================================================
