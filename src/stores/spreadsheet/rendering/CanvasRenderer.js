@@ -53,7 +53,7 @@ export class CanvasRenderer {
     /** @type {number} CSS height */
     #cssHeight = 0;
 
-    /** @type {Object} */
+    /** @type {typeof DEFAULT_THEME} */
     #theme = { ...DEFAULT_THEME };
 
     /** @type {string} Last font string set on ctx — avoids redundant ctx.font assignments */
@@ -247,7 +247,7 @@ export class CanvasRenderer {
             ctx.fillStyle = this.#theme.cellBg;
             ctx.fillRect(clipX, clipY, clipW, clipH);
 
-            // Paint each cell (backgrounds, content, custom borders, overlays)
+            // Paint each cell (backgrounds, content, overlays)
             for (const cell of cells) {
                 this.#paintCell(ctx, cell);
             }
@@ -277,6 +277,13 @@ export class CanvasRenderer {
                     ctx.lineTo(x + rightW, y + height - halfPx);
                 }
                 ctx.stroke();
+            }
+
+            // Paint custom borders after gridlines so they always render on top.
+            for (const cell of /** @type {import('./CellPaintData.js').CellPaintItem[]} */ (cells)) {
+                if (!cell.gridlineOnly && cell.borders) {
+                    this.#paintCustomBorders(ctx, cell.borders, cell.x, cell.y, cell.width, cell.height);
+                }
             }
         } finally {
             ctx.restore(); // removes the DPR scale — back to physical pixel space
@@ -483,10 +490,7 @@ export class CanvasRenderer {
         // 3. Default gridlines are drawn in a single batched stroke in paintPane()
         //    (not per-cell) to minimise canvas state changes.
 
-        // 4. Custom borders (overwrite specific edges)
-        if (cell.borders) {
-            this.#paintCustomBorders(ctx, cell.borders, x, y, width, height);
-        }
+        // 4. Custom borders — painted in a second pass in paintPane(), after grid lines.
 
         // 5. Data validation invalid — red outline
         if (cell.dvInvalid) {
@@ -892,20 +896,47 @@ export class CanvasRenderer {
     #paintHeaderFilterIcon(ctx, cell) {
         const info = cell.tableHeaderInfo;
         if (!info) return;
-        const filterActive = !!info.filterActive;
         const { x, y, width, height } = cell;
-        const filterAreaW = 18;
+        this.#drawMagnifyingGlass(ctx, !!info.filterActive, x, y, width, height);
+    }
+
+    /**
+     * Draw a magnifying glass icon in the right side of a table header cell.
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {boolean} active
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     */
+    #drawMagnifyingGlass(ctx, active, x, y, width, height) {
+        const filterAreaW = FILTER_BTN_WIDTH;
         const dpr = this.#dpr;
         const snap = (v) => Math.round(v * dpr) / dpr;
-        const textY = snap(y + height / 2);
-        const filterFont = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
-        if (filterFont !== this.#lastFont) { ctx.font = filterFont; this.#lastFont = filterFont; }
-        ctx.fillStyle = filterActive ? (this.#theme.filterActiveColor || '#3b82f6') : (this.#theme.filterIconColor || '#64748b');
-        ctx.globalAlpha = filterActive ? 1 : 0.3;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('☰', snap(x + width - filterAreaW / 2), textY);
-        ctx.globalAlpha = 1;
+        const cx = snap(x + width - filterAreaW / 2);
+        const cy = snap(y + height / 2);
+        const r = 3.5;
+        const handleLen = 3;
+        const angle = Math.PI * 0.75;
+
+        ctx.save();
+        ctx.globalAlpha = active ? 1 : 0.65;
+        ctx.strokeStyle = active ? this.#theme.filterActiveColor : '#475569';
+        ctx.lineWidth = 2.25;
+        ctx.lineCap = 'round';
+
+        ctx.beginPath();
+        ctx.arc(cx - 1, cy - 1, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const hx = cx - 1 + Math.cos(angle) * r;
+        const hy = cy - 1 + Math.sin(angle) * r;
+        ctx.beginPath();
+        ctx.moveTo(hx, hy);
+        ctx.lineTo(hx + Math.cos(angle) * handleLen, hy + Math.sin(angle) * handleLen);
+        ctx.stroke();
+
+        ctx.restore();
     }
 
     /**
@@ -961,14 +992,8 @@ export class CanvasRenderer {
         ctx.fillText(colName, snap(x + pad), textY);
         ctx.restore();
 
-        // Filter icon — always visible but dim; brighter when a filter is active
-        const filterFont = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
-        if (filterFont !== this.#lastFont) { ctx.font = filterFont; this.#lastFont = filterFont; }
-        ctx.fillStyle = filterActive ? this.#theme.filterActiveColor : this.#theme.filterIconColor;
-        ctx.globalAlpha = filterActive ? 1 : 0.3;
-        ctx.textAlign = 'center';
-        ctx.fillText('☰', snap(x + width - filterAreaW / 2), textY);
-        ctx.globalAlpha = 1;
+        // Filter icon — magnifying glass
+        this.#drawMagnifyingGlass(ctx, filterActive, x, y, width, height);
     }
 
     /**

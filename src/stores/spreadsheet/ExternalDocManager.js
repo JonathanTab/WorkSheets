@@ -153,7 +153,7 @@ export class ExternalDocManager {
         this.#cache.set(fileId, { status: 'loading', ydoc: null, root: null, error: null });
 
         try {
-            const ydoc = await this.#storage.drive.loadDoc(fileId);
+            const ydoc = await this.#storage.drive.loadDoc(fileId, { recordOpen: false });
             const root = ydoc.getMap('spreadsheet');
             this.#cache.set(fileId, { status: 'ready', ydoc, root, error: null });
             this.#onDocReady?.(fileId);

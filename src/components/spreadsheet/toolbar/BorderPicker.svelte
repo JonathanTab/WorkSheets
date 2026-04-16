@@ -3,7 +3,6 @@
     import ColorPicker from "./ColorPicker.svelte";
 
     let {
-        value = null,
         onchange = undefined,
         selectionRange = null,
     } = $props();
@@ -189,7 +188,11 @@
     <button bind:this={buttonRef} class="border-button" onclick={toggle} title="Borders">
         <div class="border-icon">
             <svg width="16" height="16" viewBox="0 0 16 16">
-                <rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1" />
+                <!-- outer border -->
+                <rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <!-- inner cross -->
+                <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="1.25"/>
+                <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.25"/>
             </svg>
         </div>
         <span class="arrow">▾</span>
@@ -253,8 +256,7 @@
                 {#each borderPositions as pos}
                     <button
                         class="position-btn"
-                        class:clear-active={clearMode}
-                        onclick={() => handlePositionClick(pos.id)}
+                            onclick={() => handlePositionClick(pos.id)}
                         title={pos.description}
                     >
                         <div class="pos-icon">
@@ -442,7 +444,6 @@
     }
     .position-btn:hover { background: var(--color-fill); }
     .position-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
-    .position-btn.clear-active { color: var(--color-danger, #e53e3e); }
 
     .pos-icon {
         width: 20px;
@@ -458,7 +459,6 @@
         text-transform: uppercase;
         letter-spacing: 0.02em;
     }
-    .position-btn.clear-active .pos-label { color: var(--color-danger, #e53e3e); opacity: 0.8; }
 
     /* Clear all button */
     .clear-all-btn {

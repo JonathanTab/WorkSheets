@@ -97,7 +97,14 @@
     let searchQuery = $state("");
     let contentSearchResults = $state(/** @type {any[]} */ ([]));
     let isContentSearching = $state(false);
-    let viewMode = $state("list"); // "list" | "grid"
+    let viewMode = $state(
+        (typeof localStorage !== "undefined" &&
+            localStorage.getItem("drive-view-mode")) ||
+            "list",
+    ); // "list" | "grid"
+    $effect(() => {
+        localStorage.setItem("drive-view-mode", viewMode);
+    });
     let contextMenu = $state(null); // { x, y, item, type: 'file'|'folder' }
     let renamingFolderId = $state(null);
     let renameFolderValue = $state("");
@@ -105,6 +112,7 @@
     let sortColumn = $state("modified"); // "name" | "owner" | "modified" | "size"
     let sortDirection = $state("desc"); // "asc" | "desc" - default desc for modified (most recent first)
     let lastSelectedKey = $state(/** @type {string|null} */ (null)); // key of last clicked item
+    let focusedItemKey = $state(/** @type {string|null} */ (null)); // key of single-clicked (focused) item
     let expandedFolders = $state(new Set()); // For folder tree expansion
     let recentFiles = $state(/** @type {any[]} */ ([]));
     let deletedFiles = $state(registry.drive.listDeletedFiles?.() ?? []);
@@ -129,6 +137,7 @@
     let draggingItem = $state(null); // { id, itemType } being dragged
     let dropTargetId = $state(null); // folder id (or ROOT_FOLDER_ID) being hovered over
     let isInternalDragging = $state(false); // true while dragging an internal item (not external files)
+    let isTrashDropTarget = $state(false); // true when dragging a file over the Trash nav item
 
     // Undo / redo stacks for file operations
     let undoStack = $state(
@@ -386,6 +395,7 @@
     function clearSelection() {
         selectedItems = new Set();
         lastSelectedKey = null;
+        focusedItemKey = null;
     }
 
     function toggleItem(item, event) {
@@ -424,6 +434,25 @@
         }
 
         selectedItems = newSelection;
+    }
+
+    // First click focuses the row (shows action btn, no checkbox change).
+    // Second click on the same focused row toggles the checkbox.
+    // Modifier keys (shift/ctrl/meta) fall through to toggleItem immediately.
+    function handleRowClick(item, event) {
+        const key = itemKey(item);
+        if (event.shiftKey || event.ctrlKey || event.metaKey) {
+            toggleItem(item, event);
+            focusedItemKey = key;
+            return;
+        }
+        if (focusedItemKey === key) {
+            // Second click: toggle checkbox
+            toggleItem(item, event);
+        } else {
+            // First click: just focus
+            focusedItemKey = key;
+        }
     }
 
     function selectAll() {
@@ -921,6 +950,7 @@
             const nextKey = itemKey(displayItems[next]);
             selectedItems = new Set([nextKey]);
             lastSelectedKey = nextKey;
+            focusedItemKey = nextKey;
         }
     }
 
@@ -1181,6 +1211,46 @@
                 redo: async () => registry.drive.moveFile(id, targetId),
             });
         }
+    }
+
+    // ---- Trash drag-and-drop ----
+    function handleTrashDragOver(e) {
+        if (!draggingItem || draggingItem.itemType !== "file") return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        isTrashDropTarget = true;
+    }
+
+    function handleTrashDragLeave(e) {
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+            isTrashDropTarget = false;
+        }
+    }
+
+    async function handleDropOnTrash(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        isTrashDropTarget = false;
+        isInternalDragging = false;
+        dropTargetId = null;
+
+        const raw = e.dataTransfer?.getData(DRAG_MIME);
+        if (!raw) return;
+
+        const { id, itemType } = JSON.parse(raw);
+        draggingItem = null;
+
+        if (itemType !== "file") return; // only soft-delete files via drag
+
+        const f = driveFiles.find((x) => x.id === id);
+        if (!f) return;
+        await registry.drive.deleteFile(id).catch(console.error);
+        pushUndo({
+            description: `Delete "${f.title}"`,
+            undo: async () => registry.drive.restoreFile(id),
+            redo: async () => registry.drive.deleteFile(id),
+        });
     }
 
     // ---- Undo / Redo ----
@@ -1518,7 +1588,11 @@
             <button
                 class="nav-item"
                 class:active={tab === "trash"}
+                class:drag-target={isTrashDropTarget}
                 onclick={() => switchTab("trash")}
+                ondragover={handleTrashDragOver}
+                ondragleave={handleTrashDragLeave}
+                ondrop={handleDropOnTrash}
             >
                 <span class="nav-icon">{@html trash}</span>
                 <span class="nav-label">Trash</span>
@@ -1953,6 +2027,8 @@
                                         "folder"}
                                     class:drag-target={item.itemType ===
                                         "folder" && dropTargetId === item.id}
+                                    class:focused={focusedItemKey ===
+                                        itemKey(item)}
                                     class:dragging={draggingItem?.id ===
                                         item.id}
                                     draggable={tab !== "trash"}
@@ -1982,7 +2058,7 @@
                                         )
                                             handleDropOnFolder(e, item.id);
                                     }}
-                                    onclick={(e) => toggleItem(item, e)}
+                                    onclick={(e) => handleRowClick(item, e)}
                                     ondblclick={() => {
                                         if (item.itemType === "folder") {
                                             navigateFolder(item.id);
@@ -2129,6 +2205,7 @@
                         <div
                             class="grid-item"
                             class:selected={isSelected(item)}
+                            class:focused={focusedItemKey === itemKey(item)}
                             class:folder={item.itemType === "folder"}
                             class:drag-target={item.itemType === "folder" &&
                                 dropTargetId === item.id}
@@ -2160,7 +2237,7 @@
                                 )
                                     handleDropOnFolder(e, item.id);
                             }}
-                            onclick={(e) => toggleItem(item, e)}
+                            onclick={(e) => handleRowClick(item, e)}
                             ondblclick={() => {
                                 if (item.itemType === "folder") {
                                     navigateFolder(item.id);
@@ -2552,6 +2629,13 @@
     .nav-item.active {
         background: var(--color-primary-soft);
         color: var(--color-primary);
+    }
+
+    .nav-item.drag-target {
+        background: color-mix(in srgb, var(--color-danger, #dc2626) 12%, transparent);
+        color: var(--color-danger, #dc2626);
+        outline: 2px solid var(--color-danger, #dc2626);
+        outline-offset: -2px;
     }
 
     .nav-icon {
@@ -3272,6 +3356,10 @@
         background: var(--color-fill);
     }
 
+    .file-row.focused {
+        background: var(--color-fill);
+    }
+
     .file-row.selected {
         background: var(--color-primary-soft);
     }
@@ -3395,7 +3483,9 @@
         height: 14px;
     }
 
-    .file-row:hover .action-btn {
+    .file-row:hover .action-btn,
+    .file-row.focused .action-btn,
+    .file-row.selected .action-btn {
         opacity: 1;
     }
 
@@ -3473,6 +3563,11 @@
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     }
 
+    .grid-item.focused {
+        border-color: var(--color-primary);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    }
+
     .grid-item.selected {
         border-color: var(--color-primary);
         background: var(--color-primary-soft);
@@ -3511,6 +3606,7 @@
     }
 
     .grid-item:hover .grid-item-check,
+    .grid-item.focused .grid-item-check,
     .grid-item.selected .grid-item-check {
         opacity: 1;
     }

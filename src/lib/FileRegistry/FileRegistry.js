@@ -576,14 +576,16 @@ class DriveView {
     // -------------------------------------------------------
 
     /**
-     * Load a Yjs document. Records this file as recently opened.
-     * @param {string} id @returns {Promise<import('yjs').Doc>}
+     * Load a Yjs document. Records this file as recently opened unless opts.recordOpen is false.
+     * @param {string} id
+     * @param {{ recordOpen?: boolean }} [opts]
+     * @returns {Promise<import('yjs').Doc>}
      */
-    async loadDoc(id) {
+    async loadDoc(id, opts = {}) {
         const file = this.getFile(id);
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
-        this._r._recordOpen(id);
+        if (opts.recordOpen !== false) this._r._recordOpen(id);
         return this._r._runtime.load(id, file.roomId);
     }
 
@@ -995,6 +997,7 @@ export class FileRegistry extends EventEmitter {
     async sync() {
         if (this._syncPromise) return this._syncPromise;
         if (!navigator.onLine) return;
+        if (!this._sharedStore) return; // init() not yet complete
         this._syncPromise = this._doSync().finally(() => { this._syncPromise = null; });
         return this._syncPromise;
     }

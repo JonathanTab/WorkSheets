@@ -117,14 +117,29 @@
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    let _stored = parseStored(value);
+    /**
+     * Returns true when `v` is a canonical stored-value string that should be
+     * parsed and re-formatted for display.  Short "seed" strings typed by the
+     * user to start an edit (e.g. "1", "12", "Jan") are NOT stored values and
+     * should be shown as-is so the first typed character is preserved.
+     */
+    function looksLikeStoredValue(v) {
+        const s = String(v ?? '').trim();
+        if (!s) return true;                              // empty → parse normally
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return true;  // YYYY-MM-DD (ISO / datetime)
+        if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return true; // HH:mm:ss  (stored time)
+        // Legacy full ISO strings ("2026-01-05T05:00:00.000Z") caught above
+        return false;
+    }
 
-    let displayText = $state(buildDisplay(
-        _stored.date,
-        _stored.time?.h ?? 0,
-        _stored.time?.mi ?? 0,
-        !!_stored.time
-    ));
+    let _stored = parseStored(value);
+    let _useStoredDisplay = looksLikeStoredValue(value);
+
+    let displayText = $state(
+        _useStoredDisplay
+            ? buildDisplay(_stored.date, _stored.time?.h ?? 0, _stored.time?.mi ?? 0, !!_stored.time)
+            : String(value ?? '')   // raw seed text — show as typed, calendar still tracks parse
+    );
     let selectedDate = $state(_stored.date);
     let viewYear = $state((_stored.date ?? new Date()).getFullYear());
     let viewMonth = $state((_stored.date ?? new Date()).getMonth());
@@ -603,8 +618,10 @@
                 inputEl.focus();
                 inputEl.select();
             }
+            // Always open the calendar immediately so the picker is ready for
+            // keyboard interaction without requiring a click first.
+            openCalendar();
         }
-        if (autofocus && mobileState.isMobile) openCalendar();
         return () =>
             {
                 document.removeEventListener("mousedown", handleDocMousedown, true);

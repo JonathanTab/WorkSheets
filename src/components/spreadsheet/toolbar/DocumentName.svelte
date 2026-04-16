@@ -8,16 +8,12 @@
     import ConnectionStatus from "./ConnectionStatus.svelte";
     import MoveFileModal from "../../modals/MoveFileModal.svelte";
     import ShareFileModal from "../../modals/ShareFileModal.svelte";
-
-    const moveSvg  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>`;
-    const shareSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
+    import { folder as folderIcon, share as shareIcon } from "../../../lib/icons/index.js";
 
     let isEditing = $state(false);
     let editValue = $state("");
     let inputRef  = $state(null);
     let isSaving  = $state(false);
-    let showMenu  = $state(false);
-    let menuRef   = $state(null);
 
     let documentTitle = $derived(spreadsheetSession.docTitle || "Untitled");
 
@@ -28,13 +24,6 @@
             document.title = "Worksheets";
         }
     });
-
-    // Close menu on outside click
-    function handleWindowClick(e) {
-        if (showMenu && menuRef && !menuRef.contains(e.target)) {
-            showMenu = false;
-        }
-    }
 
     async function startEditing() {
         editValue = documentTitle;
@@ -65,7 +54,6 @@
     }
 
     function openMoveModal() {
-        showMenu = false;
         const docId = spreadsheetSession.docId;
         if (!docId) return;
         const file = storage.drive.getFile(docId);
@@ -79,7 +67,6 @@
     }
 
     function openShareModal() {
-        showMenu = false;
         const docId = spreadsheetSession.docId;
         if (!docId) return;
         const file = storage.drive.getFile(docId);
@@ -97,8 +84,6 @@
         return folder?.name ?? null;
     });
 </script>
-
-<svelte:window onclick={handleWindowClick} />
 
 <div class="document-name">
     {#if isEditing}
@@ -118,29 +103,20 @@
             <button class="name-display" onclick={startEditing} title="Click to rename">
                 {documentTitle}
             </button>
-            <div class="doc-actions" bind:this={menuRef}>
-                <button
-                    class="doc-action-btn"
-                    title="More options"
-                    onclick={(e) => { e.stopPropagation(); showMenu = !showMenu; }}
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
-                        <circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>
-                    </svg>
-                </button>
-                {#if showMenu}
-                    <div class="doc-menu">
-                        <button class="doc-menu-item" onclick={openMoveModal}>
-                            {@html moveSvg} Move to…
-                        </button>
-                        <button class="doc-menu-item" onclick={openShareModal}>
-                            {@html shareSvg} Share…
-                        </button>
-                    </div>
-                {/if}
-            </div>
+            <button
+                class="move-btn"
+                onclick={openMoveModal}
+                title="Move to folder"
+                aria-label="Move to folder"
+            >
+                {@html folderIcon}
+            </button>
         </div>
     {/if}
+    <button class="share-pill" onclick={openShareModal} title="Share document">
+        {@html shareIcon}
+        Share
+    </button>
     <ConnectionStatus />
 </div>
 
@@ -148,14 +124,13 @@
     .document-name {
         display: flex;
         align-items: center;
-        gap: 0.25rem;
+        gap: 0.375rem;
     }
 
     .title-area {
         display: flex;
         align-items: center;
         gap: 0.25rem;
-        position: relative;
     }
 
     .folder-hint {
@@ -197,76 +172,75 @@
         box-shadow: 0 0 0 2px var(--color-focus-ring);
     }
 
-    .doc-actions {
-        position: relative;
-        display: flex;
-        align-items: center;
-    }
-
-    .doc-action-btn {
+    .move-btn {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 22px;
-        height: 22px;
+        width: 24px;
+        height: 24px;
         border: none;
         border-radius: 4px;
         background: transparent;
-        color: var(--color-text-muted);
+        color: var(--color-text-secondary);
         cursor: pointer;
         padding: 0;
-        opacity: 0;
-        transition: opacity 0.15s;
+        transition: background 0.1s, color 0.1s;
+        flex-shrink: 0;
     }
 
-    .title-area:hover .doc-action-btn {
-        opacity: 1;
+    .move-btn :global(svg) {
+        width: 14px;
+        height: 14px;
     }
 
-    .doc-action-btn:hover {
+    .move-btn:hover {
         background: var(--color-fill);
         color: var(--color-text);
     }
 
-    .doc-menu {
-        position: absolute;
-        top: calc(100% + 4px);
-        left: 0;
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-        z-index: 200;
-        min-width: 140px;
-        padding: 0.25rem;
-    }
-
-    .doc-menu-item {
+    .share-pill {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        width: 100%;
-        padding: 0.5rem 0.625rem;
-        border: none;
-        border-radius: 6px;
-        background: transparent;
-        color: var(--color-text);
+        gap: 0.3rem;
+        padding: 0.25rem 0.75rem;
         font-size: 0.8125rem;
+        font-weight: 600;
+        color: #fff;
+        background: var(--color-primary, #3b82f6);
+        border: none;
+        border-radius: 999px;
         cursor: pointer;
-        text-align: left;
+        white-space: nowrap;
+        transition: background 0.12s, transform 0.1s;
+        line-height: 1;
     }
 
-    .doc-menu-item:hover {
-        background: var(--color-fill);
+    .share-pill :global(svg) {
+        width: 13px;
+        height: 13px;
+        flex-shrink: 0;
     }
 
-    /* ── Mobile: always show action button, truncate name ── */
+    .share-pill:hover {
+        background: var(--color-primary-hover, #2563eb);
+    }
+
+    .share-pill:active {
+        transform: scale(0.96);
+    }
+
+    .share-pill:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 2px;
+    }
+
+    /* ── Mobile ── */
     @media (pointer: coarse), (max-width: 768px) {
         .name-display {
             max-width: 120px;
             font-size: 0.8125rem;
         }
-        .doc-action-btn {
+        .move-btn {
             opacity: 1;
             width: 30px;
             height: 30px;
@@ -274,9 +248,8 @@
         .folder-hint {
             display: none;
         }
-        .doc-menu-item {
-            padding: 0.625rem 0.75rem;
-            font-size: 0.875rem;
+        .share-pill {
+            padding: 0.3rem 0.625rem;
         }
     }
 </style>

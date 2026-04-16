@@ -1318,7 +1318,7 @@ class ClipboardManager {
             }
         }
 
-        if (mode === 'full' && !isSingleCell && dataValidations?.length > 0) {
+        if (mode === 'full' && dataValidations?.length > 0) {
             for (const rule of dataValidations) {
                 sheetStore.addDataValidation?.({
                     ...rule,
@@ -1331,7 +1331,7 @@ class ClipboardManager {
             }
         }
 
-        if (mode === 'full' && !isSingleCell && conditionalFormats?.length > 0) {
+        if (mode === 'full' && conditionalFormats?.length > 0) {
             for (const rule of conditionalFormats) {
                 sheetStore.addConditionalFormat?.({
                     ...rule,
@@ -1373,7 +1373,13 @@ class ClipboardManager {
     }
 
     applyValueOnly(sheetStore, cell, row, col) {
-        const value = cell.displayValue ?? cell.v;
+        // For formula cells (values-only paste): prefer displayValue so the computed
+        // result is stored, not the formula string.
+        // For regular cells: prefer cell.v to preserve typed values (booleans, numbers).
+        // Falling back to the opposite ensures something is stored when one is null.
+        const value = (cell.isFormula || cell.formula)
+            ? (cell.displayValue ?? cell.v)
+            : (cell.v ?? cell.displayValue);
         if (value !== null && value !== undefined) {
             sheetStore.setCellValue(row, col, value);
         }

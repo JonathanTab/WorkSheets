@@ -13,7 +13,6 @@
         selectionState,
         loadDocument,
         unloadDocument,
-        initializeSpreadsheet,
     } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
@@ -122,7 +121,6 @@
 
     // Use onMount for initial load
     onMount(async () => {
-        await initializeSpreadsheet();
         if (docId) {
             loadDoc(docId);
         }
@@ -209,6 +207,10 @@
 
     function handleRenameSheet(sheetId, name) {
         spreadsheetSession.renameSheet(sheetId, name);
+    }
+
+    function handleMoveSheet(sheetId, toIndex) {
+        spreadsheetSession.moveSheet(sheetId, toIndex);
     }
 
     function handleCloseDocument() {
@@ -439,6 +441,7 @@
                     onAddSheet={handleAddSheet}
                     onDeleteSheet={handleDeleteSheet}
                     onRenameSheet={handleRenameSheet}
+                    onMoveSheet={handleMoveSheet}
                 />
             </div>
         </div>

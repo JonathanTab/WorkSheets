@@ -3,6 +3,7 @@
     import DeleteSheetModal from "../modals/DeleteSheetModal.svelte";
     import SelectionStats from "./SelectionStats.svelte";
     import BottomSheet from "../ui/BottomSheet.svelte";
+    import ContextMenu from "../ui/ContextMenu.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { edit as editIcon, trash as trashIcon } from "../../lib/icons/index.js";
 
@@ -13,10 +14,84 @@
         onAddSheet,
         onDeleteSheet,
         onRenameSheet,
+        onMoveSheet,
     } = $props();
 
     let renamingSheetId = $state(null);
     let renameValue = $state("");
+    let clickTimer = null;
+
+    // ─── Drag-to-reorder ──────────────────────────────────────────────────────
+    let draggedSheetId = $state(null);
+    /** Insert position: 0..sheets.length (before tab i, or after the last) */
+    let dropTargetIndex = $state(null);
+
+    function handleDragStart(sheetId, e) {
+        draggedSheetId = sheetId;
+        e.dataTransfer.effectAllowed = "move";
+    }
+
+    /** Determine insert index based on whether cursor is in left or right half of the tab. */
+    function insertIndexForEvent(tabIndex, e) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        return e.clientX < rect.left + rect.width / 2 ? tabIndex : tabIndex + 1;
+    }
+
+    function handleDragOver(tabIndex, e) {
+        if (!draggedSheetId) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        dropTargetIndex = insertIndexForEvent(tabIndex, e);
+    }
+
+    function handleDrop(tabIndex, e) {
+        e.preventDefault();
+        if (draggedSheetId !== null) {
+            onMoveSheet?.(draggedSheetId, insertIndexForEvent(tabIndex, e));
+        }
+        draggedSheetId = null;
+        dropTargetIndex = null;
+    }
+
+    function handleDragEnd() {
+        draggedSheetId = null;
+        dropTargetIndex = null;
+    }
+
+
+    // ─── Context menu ──────────────────────────────────────────────────────────
+    let contextMenu = $state(null); // { sheetId, x, y }
+
+    function openContextMenu(sheetId, x, y) {
+        contextMenu = { sheetId, x, y };
+    }
+
+    function closeContextMenu() {
+        contextMenu = null;
+    }
+
+    function contextMenuItems(sheetId) {
+        const items = /** @type {any[]} */ ([
+            {
+                label: "Rename",
+                icon: editIcon,
+                isSvgIcon: true,
+                action: () => startRenaming(sheetId),
+            },
+        ]);
+        if (sheets.length > 1) {
+            items.push({ divider: true });
+            items.push({
+                label: "Delete",
+                icon: trashIcon,
+                isSvgIcon: true,
+                action: () => handleDeleteClick(sheetId),
+            });
+        }
+        return items;
+    }
+
+    // ─── Tab interactions ──────────────────────────────────────────────────────
 
     function handleAddSheet() {
         const name = `Sheet ${sheets.length + 1}`;
@@ -24,10 +99,27 @@
     }
 
     function handleTabClick(sheetId) {
-        if (sheetId !== activeSheetId) {
-            onSheetChange(sheetId);
-        }
+        clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => {
+            clickTimer = null;
+            if (sheetId !== activeSheetId) {
+                onSheetChange(sheetId);
+            }
+        }, 150);
     }
+
+    function handleTabDoubleClick(sheetId) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+        startRenaming(sheetId);
+    }
+
+    function handleTabContextMenu(sheetId, e) {
+        e.preventDefault();
+        openContextMenu(sheetId, e.clientX, e.clientY);
+    }
+
+    // ─── Rename ────────────────────────────────────────────────────────────────
 
     function startRenaming(sheetId) {
         const sheet = sheets.find((s) => s.id === sheetId);
@@ -51,12 +143,10 @@
         renameValue = "";
     }
 
-    function handleTabDoubleClick(sheetId) {
-        startRenaming(sheetId);
-    }
+    // ─── Delete ────────────────────────────────────────────────────────────────
 
     function handleDeleteClick(sheetId) {
-        if (sheets.length <= 1) return; // Can't delete last sheet
+        if (sheets.length <= 1) return;
         const sheet = sheets.find((s) => s.id === sheetId);
         if (sheet) {
             openModal(DeleteSheetModal, {
@@ -71,7 +161,7 @@
 
     // ─── Mobile long-press tab menu ────────────────────────────────────────────
     let tabLongPressTimer = null;
-    let tabMenuSheetId = $state(null); // which sheet's action menu is open
+    let tabMenuSheetId = $state(null);
 
     function handleTabTouchStart(sheetId, e) {
         if (e.touches.length !== 1) return;
@@ -92,13 +182,26 @@
 </script>
 
 <div class="sheet-tabs">
+    <button class="add-sheet-btn" onclick={handleAddSheet} title="Add sheet">
+        +
+    </button>
     <div class="tabs-container" class:snap={mobileState.isMobile}>
-        {#each sheets as sheet (sheet.id)}
+        {#each sheets as sheet, i (sheet.id)}
+            {#if dropTargetIndex === i}
+                <div class="drop-indicator"></div>
+            {/if}
             <button
                 class="tab"
                 class:active={sheet.id === activeSheetId}
+                class:dragging={draggedSheetId === sheet.id}
+                draggable={renamingSheetId !== sheet.id}
                 onclick={() => handleTabClick(sheet.id)}
                 ondblclick={() => handleTabDoubleClick(sheet.id)}
+                oncontextmenu={(e) => handleTabContextMenu(sheet.id, e)}
+                ondragstart={(e) => handleDragStart(sheet.id, e)}
+                ondragover={(e) => handleDragOver(i, e)}
+                ondrop={(e) => handleDrop(i, e)}
+                ondragend={handleDragEnd}
                 ontouchstart={mobileState.isMobile ? (e) => handleTabTouchStart(sheet.id, e) : undefined}
                 ontouchmove={mobileState.isMobile ? handleTabTouchMove : undefined}
                 ontouchend={mobileState.isMobile ? handleTabTouchEnd : undefined}
@@ -109,41 +212,37 @@
                         type="text"
                         bind:value={renameValue}
                         onclick={(e) => e.stopPropagation()}
+                        ondblclick={(e) => e.stopPropagation()}
                         onblur={() => finishRenaming(sheet.id)}
                         onkeydown={(e) => {
-                            if (e.key === "Enter") {
-                                finishRenaming(sheet.id);
-                            } else if (e.key === "Escape") {
-                                cancelRenaming();
-                            }
+                            if (e.key === "Enter") finishRenaming(sheet.id);
+                            else if (e.key === "Escape") cancelRenaming();
                         }}
                         autofocus
                     />
                 {:else}
                     <span class="tab-name">{sheet.name}</span>
-                    {#if sheets.length > 1}
-                        <button
-                            class="tab-delete"
-                            onclick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteClick(sheet.id);
-                            }}
-                            title="Delete sheet"
-                        >
-                            ×
-                        </button>
-                    {/if}
                 {/if}
             </button>
         {/each}
+        {#if dropTargetIndex === sheets.length}
+            <div class="drop-indicator"></div>
+        {/if}
     </div>
-    <button class="add-sheet-btn" onclick={handleAddSheet} title="Add sheet">
-        +
-    </button>
     {#if !mobileState.isMobile}
         <SelectionStats />
     {/if}
 </div>
+
+<!-- Desktop: right-click context menu -->
+{#if contextMenu}
+    <ContextMenu
+        x={contextMenu.x}
+        y={contextMenu.y}
+        items={contextMenuItems(contextMenu.sheetId)}
+        onClose={closeContextMenu}
+    />
+{/if}
 
 <!-- Mobile: tab action sheet (long-press on tab) -->
 <BottomSheet
@@ -194,77 +293,70 @@
     .tab {
         display: flex;
         align-items: center;
-        gap: 0.25rem;
-        padding: 0 0.75rem;
-        height: 28px;
+        padding: 0 0.875rem;
+        height: 30px;
         background: transparent;
         border: none;
         border-bottom: 2px solid transparent;
         cursor: pointer;
-        font-size: 0.8125rem;
-        color: var(--text-muted, #64748b);
+        font-size: 0.875rem;
+        color: var(--text-secondary, #475569);
         white-space: nowrap;
-        transition: all 0.15s;
+        transition: color 0.15s, background 0.15s, border-color 0.15s;
         box-sizing: border-box;
+        flex-shrink: 0;
     }
 
     .tab:hover {
         background: var(--hover-bg, #e2e8f0);
     }
 
+    .tab.dragging {
+        opacity: 0.4;
+    }
+
+    .drop-indicator {
+        width: 2px;
+        height: 20px;
+        background: var(--active-color, #3b82f6);
+        border-radius: 1px;
+        flex-shrink: 0;
+        pointer-events: none;
+    }
+
     .tab.active {
         color: var(--text-color, #1e293b);
+        font-weight: 500;
         border-bottom-color: var(--active-color, #3b82f6);
         background: var(--active-bg, #ffffff);
     }
 
     .tab-name {
-        max-width: 120px;
+        max-width: 200px;
         overflow: hidden;
         text-overflow: ellipsis;
     }
 
     .tab-rename-input {
-        width: 100px;
-        min-width: 60px;
-        height: 20px;
+        /* Grow/shrink to fit content */
+        field-sizing: content;
+        min-width: 40px;
+        max-width: 200px;
+        height: 22px;
         padding: 0 4px;
         border: 1px solid var(--active-color, #3b82f6);
         border-radius: 3px;
-        font-size: 0.8125rem;
+        font-size: 0.875rem;
+        font-family: inherit;
+        font-weight: inherit;
         background: white;
         color: var(--text-color, #1e293b);
-        font-family: inherit;
         box-sizing: border-box;
     }
 
     .tab-rename-input:focus {
         outline: none;
         box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
-    }
-
-    .tab-delete {
-        display: none;
-        width: 16px;
-        height: 16px;
-        border: none;
-        background: transparent;
-        color: var(--text-muted, #64748b);
-        cursor: pointer;
-        font-size: 1rem;
-        line-height: 1;
-        border-radius: 4px;
-    }
-
-    .tab:hover .tab-delete {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .tab-delete:hover {
-        background: var(--danger-bg, #fee2e2);
-        color: var(--danger-color, #ef4444);
     }
 
     .add-sheet-btn {
@@ -353,12 +445,6 @@
         .add-sheet-btn {
             width: 36px;
             height: 36px;
-        }
-        /* Show delete button always on touch (no hover) */
-        .tab .tab-delete {
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
     }
 </style>

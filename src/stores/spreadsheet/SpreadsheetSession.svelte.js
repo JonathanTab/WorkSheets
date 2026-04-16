@@ -1215,6 +1215,29 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Move a sheet to a new index in sheetOrder.
+     * @param {string} sheetId
+     * @param {number} toIndex
+     */
+    moveSheet(sheetId, toIndex) {
+        if (!this.root || !this.ydoc) return;
+
+        const sheetOrder = this.root.get('sheetOrder');
+        if (!sheetOrder) return;
+
+        const arr = sheetOrder.toArray();
+        const fromIndex = arr.indexOf(sheetId);
+        if (fromIndex === -1 || fromIndex === toIndex) return;
+
+        const clampedTo = Math.max(0, Math.min(toIndex, arr.length - 1));
+
+        this.ydoc.transact(() => {
+            sheetOrder.delete(fromIndex, 1);
+            sheetOrder.insert(clampedTo, [sheetId]);
+        });
+    }
+
+    /**
      * Rename a sheet
      * @param {string} sheetId
      * @param {string} name

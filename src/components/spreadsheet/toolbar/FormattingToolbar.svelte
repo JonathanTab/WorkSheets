@@ -7,15 +7,13 @@
         clipboardManager,
         editSessionState,
     } from "../../../stores/spreadsheet/index.js";
-    import { cut, copy, paste, printer } from "../../../lib/icons/index.js";
+    import { cut, copy, paste, printer, undo as undoIcon, redo as redoIcon } from "../../../lib/icons/index.js";
     import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import ColorPicker from "./ColorPicker.svelte";
     import BorderPicker from "./BorderPicker.svelte";
     import AlignmentPicker from "./AlignmentPicker.svelte";
     import MenuDropdown from "./MenuDropdown.svelte";
     import CellTypeConfigurator from "./CellTypeConfigurator.svelte";
-    import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
-    import DataValidationPanel from "../DataValidationPanel.svelte";
     import PageSetupPanel from "../PageSetupPanel.svelte";
 
     // Font size options
@@ -410,9 +408,6 @@
         }));
     });
 
-    // Conditional formatting / Data validation panels
-    let showCFPanel = $state(false);
-    let showDVPanel = $state(false);
 
     // Clipboard handlers
     function handleCopy() {
@@ -448,52 +443,23 @@
     // Has selection (works for all selectionMode values)
     let hasSelection = $derived(selectionState.anchor !== null);
 
-    // Merge state — only valid for range mode
-    let canMerge = $derived.by(() => {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return false;
-        const eff = selectionState.effectiveRange(
-            sheetStore.rowCount,
-            sheetStore.colCount,
-        );
-        if (!eff) return false;
-        return eff.startRow !== eff.endRow || eff.startCol !== eff.endCol;
-    });
-
-    let isMergedCell = $derived.by(() => {
+    // Decimal adjustment for number formats
+    function adjustDecimals(delta) {
         const sheetStore = spreadsheetSession.activeSheetStore;
         const anchor = selectionState.anchor;
-        if (!sheetStore?.mergeEngine || !anchor) return false;
-        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
-    });
-
-    function toggleMerge() {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-
-        if (isMergedCell) {
-            // Unmerge
-            const anchor = selectionState.anchor;
-            if (anchor) {
-                sheetStore.unmergeCells(anchor.row, anchor.col);
-            }
-        } else if (canMerge) {
-            // Merge using the range selection only
-            const range = selectionState.range;
-            if (range) {
-                sheetStore.mergeCells(
-                    range.startRow,
-                    range.startCol,
-                    range.endRow,
-                    range.endCol,
-                );
-            }
-        }
+        if (!sheetStore || !anchor) return;
+        const cell = sheetStore.getCell(anchor.row, anchor.col);
+        const config = cell?.typeConfig ?? { type: "number", decimals: 2 };
+        const current = config.decimals ?? 2;
+        handleCellTypeChange({ ...config, type: config.type || "number", decimals: Math.max(0, current + delta) });
     }
+
+    function decreaseDecimals() { adjustDecimals(-1); }
+    function increaseDecimals() { adjustDecimals(1); }
 </script>
 
 <div class="formatting-toolbar">
-    <!-- Undo/Redo -->
+    <!-- Undo/Redo + Print -->
     <div class="toolbar-group">
         <button
             class="toolbar-btn"
@@ -502,7 +468,7 @@
             disabled={!spreadsheetSession.canUndo}
             title="Undo (Ctrl+Z)"
         >
-            ↶
+            {@html undoIcon}
         </button>
         <button
             class="toolbar-btn"
@@ -511,8 +477,61 @@
             disabled={!spreadsheetSession.canRedo}
             title="Redo (Ctrl+Shift+Z)"
         >
-            ↷
+            {@html redoIcon}
         </button>
+        <button
+            class="toolbar-btn"
+            class:active={showPageSetupPanel}
+            onclick={handlePrint}
+            title="Page Setup & Export PDF (Ctrl+P)"
+        >
+            {@html printer}
+        </button>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Number Format: $, %, −.0, +.0 + Cell Type -->
+    <div class="toolbar-group">
+        <button
+            class="toolbar-btn"
+            onclick={() => handleCellTypeChange({ type: "currency", decimals: 2, symbol: "$" })}
+            disabled={!hasSelection}
+            title="Format as currency"
+        >
+            <span class="fmt-label">$</span>
+        </button>
+        <button
+            class="toolbar-btn"
+            onclick={() => handleCellTypeChange({ type: "percent", decimals: 1 })}
+            disabled={!hasSelection}
+            title="Format as percent"
+        >
+            <span class="fmt-label">%</span>
+        </button>
+        <button
+            class="toolbar-btn"
+            onclick={decreaseDecimals}
+            disabled={!hasSelection}
+            title="Decrease decimal places"
+        >
+            <span class="fmt-label">.0←</span>
+        </button>
+        <button
+            class="toolbar-btn"
+            onclick={increaseDecimals}
+            disabled={!hasSelection}
+            title="Increase decimal places"
+        >
+            <span class="fmt-label">.0→</span>
+        </button>
+    </div>
+
+    <!-- Cell Type -->
+    <div class="toolbar-group">
+        <MenuDropdown icon="123" title="Cell Type">
+            <CellTypeConfigurator />
+        </MenuDropdown>
     </div>
 
     <div class="divider"></div>
@@ -625,11 +644,13 @@
     <div class="toolbar-group">
         <ColorPicker
             label="Text Color"
+            variant="text"
             value={selectedFormatting?.color || "#000000"}
             onchange={handleTextColorChange}
         />
         <ColorPicker
             label="Background Color"
+            variant="fill"
             value={selectedFormatting?.backgroundColor || "#ffffff"}
             onchange={handleBackgroundColorChange}
         />
@@ -640,7 +661,6 @@
     <!-- Borders -->
     <div class="toolbar-group">
         <BorderPicker
-            value={selectedFormatting?.border}
             onchange={handleBorderChange}
             selectionRange={borderSelectionRange}
         />
@@ -665,80 +685,8 @@
         />
     </div>
 
-    <div class="divider"></div>
-
-    <!-- Cell Type -->
-    <div class="toolbar-group">
-        <MenuDropdown icon="123" title="Cell Type">
-            <CellTypeConfigurator />
-        </MenuDropdown>
-    </div>
-
-    <div class="divider"></div>
-
-    <!-- Merge Cells -->
-    <div class="toolbar-group">
-        <button
-            class="toolbar-btn"
-            class:active={isMergedCell}
-            onclick={toggleMerge}
-            disabled={!canMerge && !isMergedCell}
-            title={isMergedCell ? "Unmerge Cells" : "Merge Cells"}
-        >
-            ⊞
-        </button>
-    </div>
-
-    <div class="divider"></div>
-
-    <!-- Conditional Formatting -->
-    <div class="toolbar-group cf-group">
-        <button
-            class="toolbar-btn"
-            class:active={showCFPanel}
-            onclick={() => { showCFPanel = !showCFPanel; showDVPanel = false; }}
-            title="Conditional Formatting (highlight cells based on rules)"
-        >
-            <span style="font-size:11px;line-height:1">CF</span>
-        </button>
-        {#if showCFPanel}
-            <div class="panel-anchor">
-                <ConditionalFormatPanel onclose={() => (showCFPanel = false)} />
-            </div>
-        {/if}
-    </div>
-
-    <!-- Data Validation -->
-    <div class="toolbar-group cf-group">
-        <button
-            class="toolbar-btn"
-            class:active={showDVPanel}
-            onclick={() => { showDVPanel = !showDVPanel; showCFPanel = false; }}
-            title="Data Validation (restrict cell input)"
-        >
-            <span style="font-size:11px;line-height:1">DV</span>
-        </button>
-        {#if showDVPanel}
-            <div class="panel-anchor">
-                <DataValidationPanel onclose={() => (showDVPanel = false)} />
-            </div>
-        {/if}
-    </div>
-
     <!-- Spacer -->
     <div class="spacer"></div>
-
-    <!-- Print / Page Setup -->
-    <div class="toolbar-group">
-        <button
-            class="toolbar-btn"
-            class:active={showPageSetupPanel}
-            onclick={handlePrint}
-            title="Page Setup & Export PDF (Ctrl+P)"
-        >
-            {@html printer}
-        </button>
-    </div>
 </div>
 
 {#if showPageSetupPanel}
@@ -752,8 +700,8 @@
         display: flex;
         align-items: center;
         gap: 2px;
-        padding: 4px 0;
-        height: 36px;
+        padding: 4px 0 4px 8px;
+        height: 40px;
     }
 
     .toolbar-group {
@@ -766,9 +714,9 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        min-width: 26px;
-        height: 26px;
-        padding: 0 5px;
+        min-width: 30px;
+        height: 30px;
+        padding: 0 6px;
         background: transparent;
         border: none;
         border-radius: 4px;
@@ -810,19 +758,15 @@
         flex: 1;
     }
 
-    .cf-group {
-        position: relative;
-    }
-
-    .panel-anchor {
-        position: absolute;
-        top: calc(100% + 4px);
-        left: 0;
-        z-index: 200;
+    .fmt-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: -0.01em;
     }
 
     .font-family-select {
-        height: 26px;
+        height: 30px;
         padding: 0 6px;
         font-size: 0.75rem;
         border: 1px solid transparent;
@@ -847,7 +791,7 @@
 
     .font-size-input {
         width: 36px;
-        height: 26px;
+        height: 30px;
         padding: 0 3px;
         font-size: 0.75rem;
         text-align: center;
@@ -892,8 +836,8 @@
             overflow-y: hidden;
             -webkit-overflow-scrolling: touch;
             scrollbar-width: none;
-            height: 44px;
-            padding: 0 4px;
+            height: 48px;
+            padding: 0 4px 0 8px;
             gap: 0px;
         }
         .formatting-toolbar::-webkit-scrollbar {

@@ -6,24 +6,32 @@
     import InstallPrompt from "./components/InstallPrompt.svelte";
     import MaintenanceOverlay from "./components/MaintenanceOverlay.svelte";
     import { authStore } from "./stores/authStore";
+    import storage from "./stores/storage.js";
 
     let initialized = $state(false);
     let loading = $state(true);
 
     let unsubscribeAuth = null;
 
-    // Initialize on mount: just auth — each workspace initializes itself
+    // Initialize on mount: auth + shared storage (all workspaces need this)
     onMount(() => {
         (async () => {
             try {
                 const isAuthenticated = await authStore.initOffline();
+
+                if (isAuthenticated) {
+                    await storage.init();
+                    storage.on('auth-error', () => authStore.logout());
+                }
+
                 initialized = isAuthenticated;
                 loading = false;
 
                 // React to login / logout after initial auth is resolved
-                unsubscribeAuth = authStore.subscribe((state) => {
+                unsubscribeAuth = authStore.subscribe(async (state) => {
                     if (loading) return;
                     if (state.user?.username && !initialized) {
+                        await storage.init();
                         initialized = true;
                     } else if (!state.user?.username) {
                         initialized = false;

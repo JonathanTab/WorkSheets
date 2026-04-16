@@ -4,6 +4,7 @@
     let {
         label = "",
         value = "#000000",
+        variant = "text", // "text" | "fill"
         onchange = undefined,
         presetColors = [
             "#000000",
@@ -147,8 +148,25 @@
         onclick={toggle}
         title={label}
     >
-        <div class="color-swatch" style="background-color: {value}"></div>
-        <span class="arrow">▾</span>
+        <div class="icon-stack">
+            {#if variant === "fill"}
+                <!-- Highlight/fill bucket icon -->
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">
+                    <path d="M2 12.5 7 3l5 9.5"/>
+                    <path d="M3.8 9.5h6.4"/>
+                    <circle cx="13.5" cy="12.5" r="1.5" fill="currentColor" stroke="none"/>
+                </svg>
+            {:else}
+                <!-- Text color "A" icon -->
+                <svg viewBox="0 0 16 16" fill="none" class="picker-icon">
+                    <text x="1" y="13" font-size="13" font-weight="700" font-family="Arial,sans-serif" fill="currentColor">A</text>
+                </svg>
+            {/if}
+            <div class="color-bar" style="background-color: {value}"></div>
+        </div>
+        <svg viewBox="0 0 8 5" class="chevron" fill="currentColor">
+            <path d="M0 0.5L4 4.5L8 0.5" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+        </svg>
     </button>
 
     {#if open}
@@ -186,16 +204,20 @@
     .color-button {
         display: flex;
         align-items: center;
-        gap: 3px;
-        padding: 3px 4px;
+        gap: 2px;
+        padding: 0 5px;
+        height: 30px;
         background: transparent;
         border: none;
         border-radius: 4px;
         cursor: pointer;
+        color: var(--color-text-secondary);
+        transition: background 0.08s, color 0.08s;
     }
 
     .color-button:hover {
         background: var(--color-fill);
+        color: var(--color-text);
     }
 
     .color-button:focus-visible {
@@ -203,17 +225,31 @@
         outline-offset: 1px;
     }
 
-    .color-swatch {
-        width: 16px;
-        height: 16px;
-        border: 1px solid var(--color-border);
-        border-radius: 3px;
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+    .icon-stack {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1px;
     }
 
-    .arrow {
-        font-size: 0.5rem;
-        opacity: 0.4;
+    .picker-icon {
+        width: 16px;
+        height: 14px;
+        flex-shrink: 0;
+    }
+
+    .color-bar {
+        width: 16px;
+        height: 3px;
+        border-radius: 1.5px;
+        flex-shrink: 0;
+    }
+
+    .chevron {
+        width: 7px;
+        height: 5px;
+        opacity: 0.45;
+        flex-shrink: 0;
     }
 
     .color-panel {
