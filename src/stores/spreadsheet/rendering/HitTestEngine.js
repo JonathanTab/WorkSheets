@@ -104,7 +104,7 @@ export class HitTestEngine {
             case 'colHeader':
             case 'rowHeader':
             case 'corner': return 'pointer';
-            case 'cell': return 'cell';
+            case 'cell': return 'default';
             default: return 'default';
         }
     }

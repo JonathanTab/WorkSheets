@@ -156,12 +156,17 @@ export class TableManager {
             rowArr.observeDeep(rebuildOnChange);
             this.#observers.push(() => rowArr.unobserveDeep(rebuildOnChange));
         }
-        // Observe filters Y.Map for filter changes that affect sortedFilteredRows.length
+        // Observe filters Y.Map for filter changes that affect sortedFilteredRows.length.
+        // Note: local (session-only) filters are handled via store._onFilterChange below.
         const filtersYMap = tableYMap.get("filters");
         if (filtersYMap) {
             filtersYMap.observeDeep(rebuildOnChange);
             this.#observers.push(() => filtersYMap.unobserveDeep(rebuildOnChange));
         }
+        // Wire local filter changes (not persisted in Yjs) so that setFilter /
+        // clearFilter / clearAllFilters trigger a row-index rebuild and canvas repaint.
+        store._onFilterChange = rebuildOnChange;
+        this.#observers.push(() => { store._onFilterChange = null; });
         // Also observe top-level for startRow/startCol changes
         // This fires after TableStore's top-level observer (same attachment order)
         tableYMap.observe(rebuildOnChange);

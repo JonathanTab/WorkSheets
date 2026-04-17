@@ -275,7 +275,8 @@
                     }}
                 />
             {/if}
-            <div class="workspace-container" class:mobile={mobileState.isMobile}>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="workspace-container" class:mobile={mobileState.isMobile} oncontextmenu={(e) => e.preventDefault()}>
                 <!-- Toolbar: desktop two-row vs mobile single-row -->
                 {#if mobileState.isMobile}
                     <MobileToolbar

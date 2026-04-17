@@ -616,7 +616,15 @@
             // Mobile: avoid forcing soft keyboard + viewport jump for date/time pickers.
             if (!mobileState.isMobile) {
                 inputEl.focus();
-                inputEl.select();
+                // Select all only for stored values (existing dates) so the user can
+                // overwrite with a fresh date.  For seed text (user typed a char to
+                // start editing) leave the cursor at the end so typing continues naturally.
+                if (_useStoredDisplay) {
+                    inputEl.select();
+                } else {
+                    const len = inputEl.value.length;
+                    inputEl.setSelectionRange(len, len);
+                }
             }
             // Always open the calendar immediately so the picker is ready for
             // keyboard interaction without requiring a click first.

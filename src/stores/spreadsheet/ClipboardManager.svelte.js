@@ -1270,9 +1270,26 @@ class ClipboardManager {
         const srcRowCount = data.rowCount || cells.length;
         const srcColCount = data.colCount || cells[0]?.length || 0;
 
-        const isSingleCell  = srcRowCount === 1 && srcColCount === 1;
         const destStartRow  = targetRange.startRow;
         const destStartCol  = targetRange.startCol;
+
+        // ── Table paste path ──────────────────────────────────────────────────
+        // If the target cell is inside a table, hand off to table.pasteRows()
+        // instead of writing values into sheet cells directly.
+        const tableManager = session?.renderContext?.tableManager;
+        if (tableManager) {
+            const info = tableManager.getCellInfo(destStartRow, destStartCol);
+            if (info?.table && (info.rowType === 'entry' || info.rowType === 'data')) {
+                const rows2D = cells.map(/** @param {any[]} row */ row =>
+                    row.map(/** @param {any} cell */ cell => String(cell?.displayValue ?? cell?.v ?? ''))
+                );
+                const startColOffset = Math.max(0, destStartCol - info.table.startCol);
+                info.table.pasteRows(rows2D, startColOffset);
+                return;
+            }
+        }
+
+        const isSingleCell  = srcRowCount === 1 && srcColCount === 1;
         const destEndRow    = isSingleCell ? targetRange.endRow : destStartRow + srcRowCount - 1;
         const destEndCol    = isSingleCell ? targetRange.endCol : destStartCol + srcColCount - 1;
 

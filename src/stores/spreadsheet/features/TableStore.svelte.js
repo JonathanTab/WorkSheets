@@ -248,7 +248,7 @@ export class TableStore {
     // ── Schema & data ────────────────────────────────────────────────────────
     /**
      * @type {Array<{
-     *   id: string, name: string, type: string, required: boolean,
+     *   id: string, name: string, type: string, typeConfig: Object|null, required: boolean,
      *   hAlign: 'left'|'center'|'right',
      *   textColor: string|null, bgColor: string|null,
      *   width: number|null,
@@ -815,9 +815,18 @@ export class TableStore {
         });
     }
 
+    /**
+     * Callback registered by TableManager to rebuild the row index when
+     * filters change. Filters are local state (not Yjs), so Yjs observers
+     * won't fire — we must call this manually.
+     * @type {(() => void) | null}
+     */
+    _onFilterChange = null;
+
     setFilter(colId, op, value) {
         this.filters = { ...this.filters, [colId]: { op, value } };
         this.#rebuildView();
+        this._onFilterChange?.();
     }
 
     clearFilter(colId) {
@@ -825,11 +834,13 @@ export class TableStore {
         delete f[colId];
         this.filters = f;
         this.#rebuildView();
+        this._onFilterChange?.();
     }
 
     clearAllFilters() {
         this.filters = {};
         this.#rebuildView();
+        this._onFilterChange?.();
     }
 
     // ─── Entry form ───────────────────────────────────────────────────────────
@@ -863,6 +874,101 @@ export class TableStore {
     clearEntry() {
         this.entryBuffer = {};
         this.entryErrors = {};
+    }
+
+    /**
+     * Paste external rows (from Excel / Google Sheets / CSV) into this table.
+     *
+     * Column mapping:
+     *  - Header detection: if the first row matches ≥ half the non-empty cells
+     *    against column names (case-insensitive), treat it as a header row and
+     *    map by name. Column order in the clipboard doesn't matter.
+     *  - Otherwise map positionally from startColOffset into the editable columns.
+     *
+     * Entirely blank rows are skipped. Required-field validation is not enforced
+     * (bulk import — user can clean up after). Empty cells in a row are omitted
+     * from the Y.Map so they don't overwrite existing values when updating.
+     *
+     * @param {string[][]} rows2D          2D array of raw string values
+     * @param {number}     [startColOffset] 0-based index into editable columns (default 0)
+     * @returns {{ inserted: number, skipped: number }}
+     */
+    pasteRows(rows2D, startColOffset = 0) {
+        if (!rows2D?.length) return { inserted: 0, skipped: 0 };
+
+        const entryCols = this.columns.filter(c => !c.isNonEntry);
+        if (!entryCols.length) return { inserted: 0, skipped: 0 };
+
+        // ── Column mapping ────────────────────────────────────────────────────
+        const firstRow  = rows2D[0].map(v => String(v ?? '').trim());
+        const colNames  = entryCols.map(c => c.name.toLowerCase().trim());
+        const nonBlank  = firstRow.filter(Boolean);
+        const nameHits  = nonBlank.filter(h => colNames.includes(h.toLowerCase())).length;
+        const hasHeaders = nonBlank.length > 0 && nameHits >= Math.ceil(nonBlank.length / 2);
+
+        // colMap[i] = colDef for source column i, or null if unmapped
+        let colMap;
+        if (hasHeaders) {
+            colMap = firstRow.map(h =>
+                entryCols.find(c => c.name.toLowerCase().trim() === h.toLowerCase()) ?? null
+            );
+        } else {
+            const offsetCols = entryCols.slice(startColOffset);
+            colMap = rows2D[0].map((_, i) => offsetCols[i] ?? null);
+        }
+
+        const dataRows = hasHeaders ? rows2D.slice(1) : rows2D;
+        const rowArr   = this.#tableYMap.get("rows");
+        if (!rowArr) return { inserted: 0, skipped: 0 };
+
+        let inserted = 0, skipped = 0;
+
+        this.#ydoc.transact(() => {
+            for (const srcRow of dataRows) {
+                // Skip entirely blank rows (common with Excel trailing selections)
+                if (srcRow.every(cell => !String(cell ?? '').trim())) {
+                    skipped++;
+                    continue;
+                }
+
+                const yRow = new Y.Map();
+                for (let i = 0; i < srcRow.length; i++) {
+                    const colDef = colMap[i];
+                    if (!colDef) continue;
+                    const raw = String(srcRow[i] ?? '').trim();
+                    if (!raw) continue; // leave cell absent rather than storing ""
+                    yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                }
+                rowArr.push([yRow]);
+                inserted++;
+            }
+        });
+
+        return { inserted, skipped };
+    }
+
+    /**
+     * Parse a raw string to a typed value suitable for storing in this column.
+     * @param {string} raw
+     * @param {string} type
+     * @returns {any}
+     */
+    #parseValueForType(raw, type) {
+        switch (type) {
+            case 'number':
+            case 'currency': {
+                const n = parseFloat(raw.replace(/[$,\s]/g, ''));
+                return isNaN(n) ? raw : n;
+            }
+            case 'checkbox':
+                return ['true', 'yes', '1', 'x', '✓', 'on'].includes(raw.toLowerCase());
+            case 'date': {
+                const d = new Date(raw);
+                return isNaN(d.getTime()) ? raw : d.toISOString().split('T')[0];
+            }
+            default:
+                return raw;
+        }
     }
 
     // ─── Query API ────────────────────────────────────────────────────────────

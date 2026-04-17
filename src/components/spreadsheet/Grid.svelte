@@ -4366,6 +4366,12 @@
         selectionType === "row" || selectionType === "column",
     );
 
+    let isTableSelection = $derived.by(() => {
+        if (!anchor) return false;
+        const info = spreadsheetSession.renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
+        return info?.rowType === 'entry' || info?.rowType === 'data';
+    });
+
     function clearContents() {
         if (!sheetStore || !selection) return;
         spreadsheetSession.ydoc?.transact(() => {
@@ -4395,13 +4401,13 @@
             disabled: !hasAnySelection,
         },
         {
-            label: "Paste",
+            label: isTableSelection ? "Paste Rows" : "Paste",
             icon: pasteIcon,
             isSvgIcon: true,
             shortcut: "Ctrl+V",
             action: () => pasteSelection("full"),
         },
-        ...(!isHeaderSelection
+        ...(!isHeaderSelection && !isTableSelection
             ? [
                   {
                       label: "Paste Special...",
@@ -4489,134 +4495,140 @@
                       },
                       disabled: !anchor,
                   },
-                  { divider: true },
-                  {
-                      label: "Merge Cells",
-                      icon: mergeIcon,
-                      isSvgIcon: true,
-                      action: () => {
-                          if (selection && sheetStore)
-                              sheetStore.mergeCells(
-                                  selection.startRow,
-                                  selection.startCol,
-                                  selection.endRow,
-                                  selection.endCol,
-                              );
-                      },
-                      disabled: !canMerge,
-                  },
-                  {
-                      label: "Unmerge Cells",
-                      icon: mergeIcon,
-                      isSvgIcon: true,
-                      action: () => {
-                          if (anchor && sheetStore)
-                              sheetStore.unmergeCells(anchor.row, anchor.col);
-                      },
-                      disabled: !isMergePrimary,
-                  },
-                  { divider: true },
-              ]
-            : []),
-        ...(selectionType === "row"
-            ? [
-                  {
-                      label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
-                      icon: arrowUp,
-                      isSvgIcon: true,
-                      action: insertRowAbove,
-                  },
-                  {
-                      label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
-                      icon: arrowDown,
-                      isSvgIcon: true,
-                      action: insertRowBelow,
-                  },
-                  { divider: true },
-                  {
-                      label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
-                      icon: trashIcon,
-                      isSvgIcon: true,
-                      action: deleteSelectedRows,
-                  },
-              ]
-            : selectionType === "column"
-              ? [
-                    {
-                        label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
-                        icon: arrowLeft,
-                        isSvgIcon: true,
-                        action: insertColumnLeft,
-                    },
-                    {
-                        label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
-                        icon: arrowRight,
-                        isSvgIcon: true,
-                        action: insertColumnRight,
-                    },
-                    { divider: true },
-                    {
-                        label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
-                        icon: trashIcon,
-                        isSvgIcon: true,
-                        action: deleteSelectedColumns,
-                    },
-                ]
-              : [
-                    {
-                        label: "Insert...",
-                        submenu: [
-                            {
-                                label: "Row Above",
-                                icon: arrowUp,
-                                isSvgIcon: true,
-                                action: insertRowAbove,
-                            },
-                            {
-                                label: "Row Below",
-                                icon: arrowDown,
-                                isSvgIcon: true,
-                                action: insertRowBelow,
-                            },
+                  ...(!tableCellInfo
+                      ? [
                             { divider: true },
                             {
-                                label: "Column Left",
-                                icon: arrowLeft,
+                                label: "Merge Cells",
+                                icon: mergeIcon,
                                 isSvgIcon: true,
-                                action: insertColumnLeft,
+                                action: () => {
+                                    if (selection && sheetStore)
+                                        sheetStore.mergeCells(
+                                            selection.startRow,
+                                            selection.startCol,
+                                            selection.endRow,
+                                            selection.endCol,
+                                        );
+                                },
+                                disabled: !canMerge,
                             },
                             {
-                                label: "Column Right",
-                                icon: arrowRight,
+                                label: "Unmerge Cells",
+                                icon: mergeIcon,
                                 isSvgIcon: true,
-                                action: insertColumnRight,
+                                action: () => {
+                                    if (anchor && sheetStore)
+                                        sheetStore.unmergeCells(anchor.row, anchor.col);
+                                },
+                                disabled: !isMergePrimary,
                             },
-                        ],
-                        disabled: !hasAnySelection,
-                    },
-                    {
-                        label: "Delete...",
-                        submenu: [
-                            {
-                                label: selectionType === "all"
-                                    ? `${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
-                                    : "Row",
-                                icon: trashIcon,
-                                isSvgIcon: true,
-                                action: deleteSelectedRows,
-                            },
-                            {
-                                label: selectionType === "all"
-                                    ? `${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
-                                    : "Column",
-                                icon: trashIcon,
-                                isSvgIcon: true,
-                                action: deleteSelectedColumns,
-                            },
-                        ],
-                        disabled: !hasAnySelection,
-                    },
-                ]),
+                            { divider: true },
+                        ]
+                      : []),
+              ]
+            : []),
+        ...(!tableCellInfo
+            ? selectionType === "row"
+                ? [
+                      {
+                          label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
+                          icon: arrowUp,
+                          isSvgIcon: true,
+                          action: insertRowAbove,
+                      },
+                      {
+                          label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
+                          icon: arrowDown,
+                          isSvgIcon: true,
+                          action: insertRowBelow,
+                      },
+                      { divider: true },
+                      {
+                          label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
+                          icon: trashIcon,
+                          isSvgIcon: true,
+                          action: deleteSelectedRows,
+                      },
+                  ]
+                : selectionType === "column"
+                  ? [
+                        {
+                            label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
+                            icon: arrowLeft,
+                            isSvgIcon: true,
+                            action: insertColumnLeft,
+                        },
+                        {
+                            label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
+                            icon: arrowRight,
+                            isSvgIcon: true,
+                            action: insertColumnRight,
+                        },
+                        { divider: true },
+                        {
+                            label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
+                            icon: trashIcon,
+                            isSvgIcon: true,
+                            action: deleteSelectedColumns,
+                        },
+                    ]
+                  : [
+                        {
+                            label: "Insert...",
+                            submenu: [
+                                {
+                                    label: "Row Above",
+                                    icon: arrowUp,
+                                    isSvgIcon: true,
+                                    action: insertRowAbove,
+                                },
+                                {
+                                    label: "Row Below",
+                                    icon: arrowDown,
+                                    isSvgIcon: true,
+                                    action: insertRowBelow,
+                                },
+                                { divider: true },
+                                {
+                                    label: "Column Left",
+                                    icon: arrowLeft,
+                                    isSvgIcon: true,
+                                    action: insertColumnLeft,
+                                },
+                                {
+                                    label: "Column Right",
+                                    icon: arrowRight,
+                                    isSvgIcon: true,
+                                    action: insertColumnRight,
+                                },
+                            ],
+                            disabled: !hasAnySelection,
+                        },
+                        {
+                            label: "Delete...",
+                            submenu: [
+                                {
+                                    label: selectionType === "all"
+                                        ? `${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
+                                        : "Row",
+                                    icon: trashIcon,
+                                    isSvgIcon: true,
+                                    action: deleteSelectedRows,
+                                },
+                                {
+                                    label: selectionType === "all"
+                                        ? `${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
+                                        : "Column",
+                                    icon: trashIcon,
+                                    isSvgIcon: true,
+                                    action: deleteSelectedColumns,
+                                },
+                            ],
+                            disabled: !hasAnySelection,
+                        },
+                    ]
+            : []),
         ...(tableCellInfo
             ? [
                   { divider: true },

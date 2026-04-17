@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0f172a">
+    <title>Ledger Entry</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root {
+            --bg:     #0f172a;
+            --card:   #111827;
+            --accent: #3b82f6;
+            --text:   #e5e7eb;
+            --muted:  #9ca3af;
+            --border: #374151;
+            --input:  #020617;
+            --error:  #ef4444;
+            --success:#22c55e;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        /* ── Auth screen ─────────────────────────────────────────── */
+        #auth-screen {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+
+        .auth-card {
+            width: 100%;
+            max-width: 360px;
+            background: var(--card);
+            padding: 32px 24px 24px;
+            border-radius: 14px;
+            box-shadow: 0 20px 40px rgba(0,0,0,.4);
+            text-align: center;
+        }
+
+        .auth-card h1 { margin: 0 0 6px; font-size: 1.6rem; }
+
+        .auth-card .subtitle { margin: 0 0 28px; color: var(--muted); font-size: 0.9rem; }
+
+        .btn-primary {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            border: none;
+            font-size: 1rem;
+            background: var(--accent);
+            color: white;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .btn-primary:disabled { opacity: 0.7; cursor: not-allowed; }
+
+        .auth-msg {
+            font-size: 0.85rem;
+            margin-top: 12px;
+            min-height: 1.2em;
+            color: var(--error);
+        }
+
+        .card-footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 0.75rem;
+            color: var(--muted);
+        }
+
+        .hidden { display: none !important; }
+
+        /* ── Main app screen ─────────────────────────────────────── */
+        #app-screen {
+            display: none;
+            position: fixed;
+            inset: 0;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .app-card {
+            background: var(--card);
+            border-radius: 14px;
+            box-shadow: 0 20px 40px rgba(0,0,0,.4);
+            padding: 20px;
+            max-width: 480px;
+            margin: 0 auto;
+        }
+
+        .app-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .app-header h1 {
+            margin: 0;
+            font-size: 1.4rem;
+        }
+
+        .user-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+            color: var(--muted);
+        }
+
+        .logout-btn {
+            font-size: 0.8rem;
+            color: var(--accent);
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: background 0.15s;
+        }
+
+        .logout-btn:hover { background: rgba(59,130,246,0.1); }
+
+        /* form fields */
+        .field { margin-bottom: 16px; }
+
+        .field label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+
+        .field input,
+        .field select,
+        .field textarea {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            border: 1.5px solid var(--border);
+            font-size: 1rem;
+            background: var(--input);
+            color: var(--text);
+            outline: none;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+
+        .field input:focus,
+        .field select:focus,
+        .field textarea:focus {
+            border-color: var(--accent);
+        }
+
+        .field textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+
+        .field select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
+
+        /* Amount row */
+        .amount-row {
+            display: flex;
+            border-radius: 10px;
+            border: 1.5px solid var(--border);
+            overflow: hidden;
+        }
+
+        .amount-row:focus-within { border-color: var(--accent); }
+
+        .sign-toggle {
+            width: 3rem;
+            flex-shrink: 0;
+            border: none;
+            font-size: 1.3rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+            color: white;
+        }
+
+        .sign-toggle.neg { background: #ef4444; }
+        .sign-toggle.pos { background: #10b981; }
+
+        .amount-input {
+            flex: 1;
+            padding: 12px;
+            border: none !important;
+            border-radius: 0 !important;
+            font-family: monospace;
+            font-size: 1.1rem;
+            background: var(--input);
+            color: var(--text);
+            outline: none;
+        }
+
+        /* Submit button */
+        .submit-btn {
+            width: 100%;
+            padding: 14px;
+            border-radius: 10px;
+            border: none;
+            font-size: 1rem;
+            font-weight: 600;
+            background: var(--accent);
+            color: white;
+            cursor: pointer;
+            margin-top: 4px;
+            transition: opacity 0.2s;
+            position: relative;
+        }
+
+        .submit-btn:disabled { opacity: 0.7; cursor: not-allowed; }
+
+        .submit-btn.loading { color: transparent; }
+
+        .submit-btn.loading::after {
+            content: "";
+            position: absolute;
+            width: 1.25rem;
+            height: 1.25rem;
+            top: 50%; left: 50%;
+            margin: -0.625rem 0 0 -0.625rem;
+            border: 3px solid white;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(80px);
+            background: #1f2937;
+            color: var(--text);
+            padding: 12px 20px;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            box-shadow: 0 8px 24px rgba(0,0,0,.4);
+            transition: transform 0.3s ease;
+            z-index: 1000;
+            white-space: nowrap;
+            max-width: calc(100vw - 32px);
+        }
+
+        .toast.show { transform: translateX(-50%) translateY(0); }
+        .toast.success { border-left: 4px solid var(--success); }
+        .toast.error   { border-left: 4px solid var(--error); }
+
+        /* Offline banner */
+        .offline-banner {
+            display: none;
+            background: #7f1d1d;
+            color: #fca5a5;
+            text-align: center;
+            padding: 8px;
+            font-size: 0.85rem;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        /* Schema loading state */
+        .schema-loading {
+            text-align: center;
+            padding: 40px 0;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+
+<!-- ─── Auth Screen ────────────────────────────────────────────────────── -->
+<div id="auth-screen">
+    <div class="auth-card">
+        <h1>Ledger Entry</h1>
+        <p class="subtitle">Access Instrumenta tools</p>
+        <button class="btn-primary" id="signin-btn">Sign In</button>
+        <div class="auth-msg" id="auth-msg"></div>
+        <div class="card-footer">Instrumenta.cf</div>
+    </div>
+</div>
+
+<!-- ─── App Screen ────────────────────────────────────────────────────── -->
+<div id="app-screen">
+    <div class="app-card">
+        <div class="app-header">
+            <h1>Ledger Entry</h1>
+            <div class="user-badge">
+                <span id="username-display"></span>
+                <button class="logout-btn" id="logout-btn">Sign out</button>
+            </div>
+        </div>
+
+        <div class="offline-banner" id="offline-banner">No internet connection</div>
+
+        <!-- Shown while schema loads -->
+        <div class="schema-loading" id="schema-loading">Loading form…</div>
+
+        <form id="entry-form" class="hidden">
+
+            <div class="field">
+                <label for="field-date">Date</label>
+                <input type="date" id="field-date" required>
+            </div>
+
+            <div class="field">
+                <label for="field-amount">Amount</label>
+                <div class="amount-row">
+                    <button type="button" class="sign-toggle neg" id="sign-toggle">−</button>
+                    <input type="text" class="amount-input" id="field-amount" placeholder="0.00"
+                           inputmode="decimal" pattern="[0-9]*\.?[0-9]*" required>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="field-fromto">From / To</label>
+                <input type="text" id="field-fromto" autocomplete="off" required>
+            </div>
+
+            <div class="field">
+                <label for="field-notes">Notes</label>
+                <textarea id="field-notes" rows="3"></textarea>
+            </div>
+
+            <div class="field">
+                <label for="field-account">Account</label>
+                <select id="field-account" required>
+                    <option value="">Select account…</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="field-project">Project Title</label>
+                <select id="field-project">
+                    <option value="">Select project…</option>
+                </select>
+            </div>
+
+            <button type="submit" class="submit-btn" id="submit-btn">Add Entry</button>
+        </form>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const AUTH_URL    = 'https://instrumenta.cf/api/auth.php';
+const API_BASE    = 'https://instrumenta.cf/api/sheets';
+const FILE_ID     = '00bc049ff4cd67c83313bc34';
+const SHEET_ID    = 'sheet-1';
+const TABLE_ID    = 'table-1774359687333-ovn2m';
+const SCHEMA_URL  = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/schema`;
+const ROWS_URL    = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/rows`;
+const TOKEN_KEY   = 'ledger_session_token';
+const USER_KEY    = 'ledger_username';
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+let sessionToken = localStorage.getItem(TOKEN_KEY) || null;
+let isNegative   = true;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function authHeaders(extra = {}) {
+    return { 'Authorization': `Bearer ${sessionToken}`, 'Content-Type': 'application/json', ...extra };
+}
+
+let toastTimer = null;
+function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = `toast ${type} show`;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+function todayISO() {
+    const d = new Date();
+    return d.getFullYear() + '-' +
+           String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+async function validateToken(token) {
+    if (!token) return null;
+    try {
+        const res = await fetch(`${AUTH_URL}?action=get_current_user`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+            const data = await res.json();
+            return data?.username || null;
+        }
+    } catch { /* offline */ }
+    return null;
+}
+
+function openLoginPopup() {
+    const popup = window.open(
+        'https://instrumenta.cf/mobilelogin.php',
+        'Login',
+        'width=400,height=580,scrollbars=yes,resizable=yes'
+    );
+    if (!popup) {
+        document.getElementById('auth-msg').textContent = 'Popup blocked — please allow popups for this site.';
+    }
+}
+
+// Listen for AUTH_SUCCESS from the mobilelogin.php popup
+window.addEventListener('message', async (event) => {
+    if (event.origin !== 'https://instrumenta.cf') return;
+    if (event.data?.type !== 'AUTH_SUCCESS') return;
+
+    const token = event.data.token || event.data.apikey;
+    if (!token) return;
+
+    sessionToken = token;
+    localStorage.setItem(TOKEN_KEY, token);
+
+    const username = await validateToken(token);
+    if (username) {
+        localStorage.setItem(USER_KEY, username);
+        showAppScreen(username);
+    } else {
+        document.getElementById('auth-msg').textContent = 'Sign-in failed — please try again.';
+    }
+});
+
+function doLogout() {
+    sessionToken = null;
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    showAuthScreen();
+
+    fetch(`${AUTH_URL}?action=logout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+}
+
+// ─── Schema / Dropdowns ──────────────────────────────────────────────────────
+
+async function loadSchema() {
+    const res = await fetch(SCHEMA_URL, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`Schema fetch failed: ${res.status}`);
+    return res.json();
+}
+
+function populateSelect(selectEl, options, allowEmpty = true) {
+    while (selectEl.options.length > 1) selectEl.remove(1);
+    for (const opt of options) {
+        const o = document.createElement('option');
+        o.value = opt;
+        o.textContent = opt;
+        selectEl.appendChild(o);
+    }
+}
+
+async function initForm() {
+    const loading  = document.getElementById('schema-loading');
+    const form     = document.getElementById('entry-form');
+    loading.classList.remove('hidden');
+    form.classList.add('hidden');
+
+    try {
+        const schema = await loadSchema();
+        const accountCol = schema.columns.find(c => c.name === 'Account');
+        const projectCol = schema.columns.find(c => c.name === 'Project Title');
+
+        if (accountCol?.options?.length) {
+            populateSelect(document.getElementById('field-account'), accountCol.options);
+        }
+        if (projectCol?.options?.length) {
+            populateSelect(document.getElementById('field-project'), projectCol.options);
+        }
+    } catch (err) {
+        console.error('Failed to load schema:', err);
+        showToast('Could not load form options — check connection', 'error');
+    }
+
+    // Set today's date default
+    document.getElementById('field-date').value = todayISO();
+
+    loading.classList.add('hidden');
+    form.classList.remove('hidden');
+}
+
+// ─── Screens ──────────────────────────────────────────────────────────────────
+
+function showAuthScreen() {
+    document.getElementById('auth-screen').style.display = 'flex';
+    document.getElementById('app-screen').style.display  = 'none';
+}
+
+function showAppScreen(username) {
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display  = 'block';
+    document.getElementById('username-display').textContent = username;
+    initForm();
+}
+
+// ─── Startup ─────────────────────────────────────────────────────────────────
+
+(async function init() {
+    const cachedUser = localStorage.getItem(USER_KEY);
+
+    // If we have a token, validate it
+    if (sessionToken) {
+        if (navigator.onLine) {
+            const username = await validateToken(sessionToken);
+            if (username) {
+                localStorage.setItem(USER_KEY, username);
+                showAppScreen(username);
+                return;
+            }
+            // Token expired — fall through to login
+            sessionToken = null;
+            localStorage.removeItem(TOKEN_KEY);
+        } else if (cachedUser) {
+            // Offline but we have a cached username — show the form optimistically
+            showAppScreen(cachedUser);
+            return;
+        }
+    }
+
+    showAuthScreen();
+})();
+
+// ─── Auth button wiring ───────────────────────────────────────────────────────
+
+document.getElementById('signin-btn').addEventListener('click', openLoginPopup);
+document.getElementById('logout-btn').addEventListener('click', doLogout);
+
+// ─── Amount toggle ────────────────────────────────────────────────────────────
+
+document.getElementById('sign-toggle').addEventListener('click', () => {
+    isNegative = !isNegative;
+    const btn = document.getElementById('sign-toggle');
+    btn.textContent = isNegative ? '−' : '+';
+    btn.className = `sign-toggle ${isNegative ? 'neg' : 'pos'}`;
+});
+
+// ─── Form submit ──────────────────────────────────────────────────────────────
+
+document.getElementById('entry-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const submitBtn = document.getElementById('submit-btn');
+    submitBtn.disabled = true;
+    submitBtn.classList.add('loading');
+
+    const rawAmount = parseFloat(document.getElementById('field-amount').value) || 0;
+    const amount    = isNegative ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+
+    const row = {
+        'Date':          document.getElementById('field-date').value,
+        'Amount':        amount,
+        'From/To':       document.getElementById('field-fromto').value.trim(),
+        'Notes':         document.getElementById('field-notes').value.trim(),
+        'Account':       document.getElementById('field-account').value,
+        'Project Title': document.getElementById('field-project').value,
+        'Mobile':        true,
+    };
+
+    try {
+        const res = await fetch(ROWS_URL, {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify(row)
+        });
+
+        if (res.ok) {
+            // Reset form
+            document.getElementById('entry-form').reset();
+            document.getElementById('field-date').value = todayISO();
+            isNegative = true;
+            const btn = document.getElementById('sign-toggle');
+            btn.textContent = '−';
+            btn.className = 'sign-toggle neg';
+            showToast('Entry added');
+        } else if (res.status === 401) {
+            showToast('Session expired — please sign in again', 'error');
+            doLogout();
+        } else {
+            const data = await res.json().catch(() => ({}));
+            showToast(data.error || `Error ${res.status}`, 'error');
+        }
+    } catch {
+        showToast('Network error — check your connection', 'error');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('loading');
+    }
+});
+
+// ─── Offline banner ───────────────────────────────────────────────────────────
+
+function updateOnlineStatus() {
+    const banner = document.getElementById('offline-banner');
+    banner.style.display = navigator.onLine ? 'none' : 'block';
+}
+
+window.addEventListener('online',  updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+updateOnlineStatus();
+</script>
+</body>
+</html>
