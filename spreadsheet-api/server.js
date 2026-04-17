@@ -29,6 +29,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { SpreadsheetClient } from '../src/cli/SpreadsheetClient.js';
+import { parseFormula } from '../src/formulas/parser.js';
+import { evaluate } from '../src/formulas/evaluator.js';
 
 // ─── Load .env ──────────────────────────────────────────────────────────────
 
@@ -126,11 +128,33 @@ function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
     const end   = parts[1] ? parseRef(parts[1]) : start;
     if (!start || !end) return [];
 
+    // Resolve a single cell's effective value, evaluating formulas if needed.
+    function getCellValue(r, c, visitedSheetId = sheetId) {
+        const cell = client.getCell(ydoc, visitedSheetId, r, c);
+        const v = cell?.v;
+        if (v == null || v === '') return null;
+        if (typeof v === 'string' && v.startsWith('=')) {
+            try {
+                const ast = parseFormula(v.slice(1));
+                return evaluate(
+                    ast,
+                    (row, col) => getCellValue(row, col, visitedSheetId),
+                    {},
+                    null,
+                    (sheetName, row, col) => {
+                        const entry = sheets.find(s => s.name === sheetName);
+                        return entry ? getCellValue(row, col, entry.id) : null;
+                    },
+                );
+            } catch { return null; }
+        }
+        return v;
+    }
+
     const opts = [];
     for (let r = start.row; r <= end.row; r++) {
         for (let c = start.col; c <= end.col; c++) {
-            const cell = client.getCell(ydoc, sheetId, r, c);
-            const v = cell?.v;
+            const v = getCellValue(r, c);
             if (v != null && v !== '') opts.push(String(v));
         }
     }
