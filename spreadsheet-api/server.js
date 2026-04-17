@@ -92,6 +92,51 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`spreadsheet-api listening on :${PORT}`));
 
+// ─── Range-backed dropdown resolver ──────────────────────────────────────────
+
+/**
+ * Resolve a range string (e.g. "A1:A20" or "'Options'!A1:A20") to an array
+ * of option strings by reading raw cell values from the Yjs doc.
+ * Formula cells store their last-computed result in the `v` property.
+ */
+function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
+    let sheetId  = defaultSheetId;
+    let cellRange = rangeStr.trim();
+
+    // Parse optional cross-sheet prefix: 'Sheet Name'!A1:A10  or  SheetName!A1:A10
+    const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
+    if (sheetRefMatch) {
+        const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
+        cellRange = sheetRefMatch[3];
+        const entry = sheets.find(s => s.name === sheetName);
+        if (entry) sheetId = entry.id;
+    }
+
+    // Parse A1-style references  →  0-based { row, col }
+    function parseRef(ref) {
+        const m = ref.trim().toUpperCase().match(/^([A-Z]+)(\d+)$/);
+        if (!m) return null;
+        let col = 0;
+        for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
+        return { row: parseInt(m[2]) - 1, col: col - 1 };
+    }
+
+    const parts = cellRange.trim().toUpperCase().split(':');
+    const start = parseRef(parts[0]);
+    const end   = parts[1] ? parseRef(parts[1]) : start;
+    if (!start || !end) return [];
+
+    const opts = [];
+    for (let r = start.row; r <= end.row; r++) {
+        for (let c = start.col; c <= end.col; c++) {
+            const cell = client.getCell(ydoc, sheetId, r, c);
+            const v = cell?.v;
+            if (v != null && v !== '') opts.push(String(v));
+        }
+    }
+    return opts;
+}
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 async function route(req, res) {
@@ -137,6 +182,7 @@ async function route(req, res) {
         const table  = tables.find(t => t.id === tableId);
         if (!table) return json(res, 404, { error: `Table "${tableId}" not found` });
 
+        const sheets = client.listSheets(ydoc);
         const columns = table.columns.map(col => {
             const base = {
                 id:        col.id,
@@ -148,7 +194,11 @@ async function route(req, res) {
             if (col.typeConfig) {
                 try {
                     const tc = typeof col.typeConfig === 'string' ? JSON.parse(col.typeConfig) : col.typeConfig;
-                    if (Array.isArray(tc.options)) base.options = tc.options;
+                    if (tc.source === 'range' && tc.range) {
+                        base.options = resolveRangeOptions(ydoc, sheetId, tc.range, sheets, client);
+                    } else if (Array.isArray(tc.options)) {
+                        base.options = tc.options;
+                    }
                     if (tc.allowCustom != null) base.allowCustom = tc.allowCustom;
                 } catch { /* malformed typeConfig — skip */ }
             }
