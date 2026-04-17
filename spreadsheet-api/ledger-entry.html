@@ -3,27 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#0f172a">
+    <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)">
     <title>Ledger Entry</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="manifest" href="manifest.json">
     <style>
         :root {
             --bg:     #0f172a;
             --card:   #111827;
             --accent: #3b82f6;
-            --text:   #e5e7eb;
-            --muted:  #9ca3af;
-            --border: #374151;
-            --input:  #020617;
-            --error:  #ef4444;
-            --success:#22c55e;
+            --text:   #f1f5f9;
+            --muted:  #94a3b8;
+            --border: #4b5563;
+            --input:  #0b1120;
+            --error:  #f87171;
+            --success:#4ade80;
+            --shadow: rgba(0,0,0,.5);
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg:     #e2e8f0;
+                --card:   #ffffff;
+                --accent: #1d4ed8;
+                --text:   #0f172a;
+                --muted:  #475569;
+                --border: #94a3b8;
+                --input:  #f8fafc;
+                --error:  #dc2626;
+                --success:#15803d;
+                --shadow: rgba(0,0,0,.14);
+            }
         }
 
         * { box-sizing: border-box; }
 
         html, body {
-            height: 100%;
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg);
@@ -45,12 +60,11 @@
             background: var(--card);
             padding: 32px 24px 24px;
             border-radius: 14px;
-            box-shadow: 0 20px 40px rgba(0,0,0,.4);
+            box-shadow: 0 20px 40px var(--shadow);
             text-align: center;
         }
 
         .auth-card h1 { margin: 0 0 6px; font-size: 1.6rem; }
-
         .auth-card .subtitle { margin: 0 0 28px; color: var(--muted); font-size: 0.9rem; }
 
         .btn-primary {
@@ -64,7 +78,6 @@
             cursor: pointer;
             transition: opacity 0.2s;
         }
-
         .btn-primary:disabled { opacity: 0.7; cursor: not-allowed; }
 
         .auth-msg {
@@ -86,18 +99,13 @@
         /* ── Main app screen ─────────────────────────────────────── */
         #app-screen {
             display: none;
-            position: fixed;
-            inset: 0;
-            overflow-y: auto;
-            padding: 16px;
         }
 
         .app-card {
             background: var(--card);
-            border-radius: 14px;
-            box-shadow: 0 20px 40px rgba(0,0,0,.4);
-            padding: 20px;
-            max-width: 480px;
+            padding: 16px 14px 24px;
+            min-height: 100vh;
+            max-width: 600px;
             margin: 0 auto;
         }
 
@@ -107,11 +115,7 @@
             align-items: center;
             margin-bottom: 20px;
         }
-
-        .app-header h1 {
-            margin: 0;
-            font-size: 1.4rem;
-        }
+        .app-header h1 { margin: 0; font-size: 1.4rem; }
 
         .user-badge {
             display: flex;
@@ -131,7 +135,6 @@
             border-radius: 6px;
             transition: background 0.15s;
         }
-
         .logout-btn:hover { background: rgba(59,130,246,0.1); }
 
         /* form fields */
@@ -139,67 +142,72 @@
 
         .field label {
             display: block;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             color: var(--muted);
-            margin-bottom: 6px;
+            margin-bottom: 7px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
         }
 
         .field input,
-        .field select,
         .field textarea {
             width: 100%;
-            padding: 12px;
+            padding: 15px 16px;
             border-radius: 10px;
-            border: 1.5px solid var(--border);
-            font-size: 1rem;
+            border: 2px solid var(--border);
+            font-size: 1.1rem;
             background: var(--input);
             color: var(--text);
             outline: none;
             appearance: none;
             -webkit-appearance: none;
+            font-family: inherit;
         }
-
         .field input:focus,
-        .field select:focus,
-        .field textarea:focus {
-            border-color: var(--accent);
-        }
+        .field textarea:focus { border-color: var(--accent); }
 
-        .field textarea { resize: vertical; min-height: 80px; font-family: inherit; }
-
-        .field select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
+        .field textarea { resize: vertical; min-height: 72px; }
 
         /* Amount row */
         .amount-row {
             display: flex;
             border-radius: 10px;
-            border: 1.5px solid var(--border);
+            border: 2px solid var(--border);
             overflow: hidden;
         }
-
         .amount-row:focus-within { border-color: var(--accent); }
 
         .sign-toggle {
-            width: 3rem;
+            width: 3.6rem;
             flex-shrink: 0;
+            align-self: stretch;
             border: none;
-            font-size: 1.3rem;
+            border-radius: 0;
+            font-size: 1.5rem;
             font-weight: bold;
             cursor: pointer;
             transition: background 0.2s;
             color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            line-height: 1;
+            appearance: none;
+            -webkit-appearance: none;
+            margin: -2px 0 -2px -2px;
         }
-
         .sign-toggle.neg { background: #ef4444; }
         .sign-toggle.pos { background: #10b981; }
 
         .amount-input {
             flex: 1;
-            padding: 12px;
+            padding: 15px 16px;
             border: none !important;
             border-radius: 0 !important;
             font-family: monospace;
-            font-size: 1.1rem;
+            font-size: 1.5rem;
             background: var(--input);
             color: var(--text);
             outline: none;
@@ -208,23 +216,21 @@
         /* Submit button */
         .submit-btn {
             width: 100%;
-            padding: 14px;
+            padding: 17px;
             border-radius: 10px;
             border: none;
-            font-size: 1rem;
-            font-weight: 600;
+            font-size: 1.15rem;
+            font-weight: 700;
             background: var(--accent);
             color: white;
             cursor: pointer;
-            margin-top: 4px;
+            margin-top: 8px;
             transition: opacity 0.2s;
             position: relative;
+            letter-spacing: 0.02em;
         }
-
         .submit-btn:disabled { opacity: 0.7; cursor: not-allowed; }
-
         .submit-btn.loading { color: transparent; }
-
         .submit-btn.loading::after {
             content: "";
             position: absolute;
@@ -237,7 +243,6 @@
             border-top-color: transparent;
             animation: spin 0.8s linear infinite;
         }
-
         @keyframes spin { to { transform: rotate(360deg); } }
 
         /* Toast */
@@ -246,21 +251,20 @@
             bottom: 24px;
             left: 50%;
             transform: translateX(-50%) translateY(80px);
-            background: #1f2937;
-            color: var(--text);
+            background: #1e293b;
+            color: #e5e7eb;
             padding: 12px 20px;
             border-radius: 10px;
             font-size: 0.95rem;
-            box-shadow: 0 8px 24px rgba(0,0,0,.4);
+            box-shadow: 0 8px 24px rgba(0,0,0,.35);
             transition: transform 0.3s ease;
             z-index: 1000;
             white-space: nowrap;
             max-width: calc(100vw - 32px);
         }
-
         .toast.show { transform: translateX(-50%) translateY(0); }
-        .toast.success { border-left: 4px solid var(--success); }
-        .toast.error   { border-left: 4px solid var(--error); }
+        .toast.success { border-left: 4px solid #22c55e; }
+        .toast.error   { border-left: 4px solid #ef4444; }
 
         /* Offline banner */
         .offline-banner {
@@ -271,7 +275,7 @@
             padding: 8px;
             font-size: 0.85rem;
             border-radius: 8px;
-            margin-bottom: 16px;
+            margin-bottom: 14px;
         }
 
         /* Schema loading state */
@@ -281,12 +285,228 @@
             color: var(--muted);
             font-size: 0.9rem;
         }
+
+        /* ── Custom searchable select ─────────────────────────────── */
+        .cs-wrap { position: relative; }
+
+        .cs-trigger {
+            width: 100%;
+            padding: 15px 46px 15px 16px;
+            border-radius: 10px;
+            border: 2px solid var(--border);
+            background: var(--input);
+            color: var(--text);
+            font-size: 1.1rem;
+            font-family: inherit;
+            text-align: left;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.15s;
+            min-height: 54px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            touch-action: manipulation;
+        }
+        .cs-trigger:focus,
+        .cs-wrap.open .cs-trigger { border-color: var(--accent); }
+
+        .cs-display.cs-placeholder { color: var(--muted); }
+
+        .cs-chevron {
+            position: absolute;
+            right: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 20px;
+            height: 20px;
+            color: var(--muted);
+            pointer-events: none;
+            transition: transform 0.2s;
+        }
+        .cs-wrap.open .cs-chevron { transform: translateY(-50%) rotate(180deg); }
+
+        .cs-panel {
+            position: absolute;
+            z-index: 200;
+            top: calc(100% + 4px);
+            left: -14px;
+            right: -14px;
+            background: var(--card);
+            border: 2px solid var(--accent);
+            border-radius: 10px;
+            box-shadow: 0 8px 28px var(--shadow);
+            overflow: hidden;
+        }
+        .cs-panel[hidden] { display: none; }
+
+        .cs-search-bar {
+            padding: 8px 8px 6px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .cs-search {
+            width: 100%;
+            padding: 12px 14px;
+            border-radius: 8px;
+            border: 2px solid var(--border);
+            background: var(--input);
+            color: var(--text);
+            font-size: 1.1rem;
+            font-family: inherit;
+            outline: none;
+        }
+        .cs-search:focus { border-color: var(--accent); }
+
+        .cs-list {
+            list-style: none;
+            margin: 0;
+            padding: 4px;
+            max-height: 220px;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .cs-option {
+            padding: 14px 16px;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 1.05rem;
+            transition: background 0.1s;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .cs-option:hover        { background: rgba(59,130,246,0.12); }
+        .cs-option.cs-focused   { background: rgba(59,130,246,0.15); }
+        .cs-option.cs-selected  { background: rgba(59,130,246,0.18); color: var(--accent); font-weight: 500; }
+
+        .cs-no-results {
+            padding: 14px;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        /* ── Section divider ─────────────────────────────────────── */
+        .section-divider {
+            height: 1px;
+            background: var(--border);
+            margin: 18px 0 16px;
+            opacity: 0.6;
+        }
+
+        /* ── Install Prompt Overlay ──────────────────────────────── */
+        .install-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 1);
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 16px;
+        }
+
+        .install-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            padding: 32px 24px;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            max-width: 360px;
+            width: 100%;
+        }
+
+        .install-header {
+            margin-bottom: 20px;
+        }
+
+        .app-icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 18px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            margin: 0 auto 16px;
+            display: block;
+            object-fit: contain;
+            background: rgba(59, 130, 246, 0.1);
+            padding: 8px;
+        }
+
+        .app-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 6px;
+            color: var(--text);
+            letter-spacing: -0.02em;
+        }
+
+        .app-description {
+            font-size: 0.9rem;
+            color: var(--muted);
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+
+        .instruction {
+            font-size: 0.85rem;
+            color: var(--muted);
+            margin-bottom: 24px;
+            line-height: 1.6;
+            background: rgba(59, 130, 246, 0.08);
+            padding: 14px 12px;
+            border-radius: 10px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .ios-share-icon {
+            display: inline-block;
+            margin: 0 4px;
+            vertical-align: middle;
+            width: 18px;
+            height: 18px;
+        }
+
+        .ios-share-icon svg {
+            width: 100%;
+            height: 100%;
+            color: var(--accent);
+        }
+
+        .install-overlay.hidden {
+            display: none;
+        }
+
+        @media (prefers-color-scheme: light) {
+            .install-overlay {
+                background: rgba(226, 232, 240, 1);
+            }
+
+            .app-icon {
+                background: rgba(29, 78, 216, 0.08);
+            }
+
+            .instruction {
+                background: rgba(29, 78, 216, 0.08);
+                border-left-color: var(--accent);
+            }
+
+            .install-close-btn:hover {
+                background: rgba(29, 78, 216, 0.1);
+            }
+        }
     </style>
 </head>
 <body>
 
 <!-- ─── Auth Screen ────────────────────────────────────────────────────── -->
-<div id="auth-screen">
+<!-- style="display:none" prevents flash before JS determines auth state -->
+<div id="auth-screen" style="display:none">
     <div class="auth-card">
         <h1>Ledger Entry</h1>
         <p class="subtitle">Access Instrumenta tools</p>
@@ -309,14 +529,15 @@
 
         <div class="offline-banner" id="offline-banner">No internet connection</div>
 
-        <!-- Shown while schema loads -->
         <div class="schema-loading" id="schema-loading">Loading form…</div>
 
         <form id="entry-form" class="hidden">
 
             <div class="field">
-                <label for="field-date">Date</label>
-                <input type="date" id="field-date" required>
+                <label>Account</label>
+                <div class="cs-wrap" id="cs-account">
+                    <input type="hidden" id="field-account">
+                </div>
             </div>
 
             <div class="field">
@@ -324,36 +545,49 @@
                 <div class="amount-row">
                     <button type="button" class="sign-toggle neg" id="sign-toggle">−</button>
                     <input type="text" class="amount-input" id="field-amount" placeholder="0.00"
-                           inputmode="decimal" pattern="[0-9]*\.?[0-9]*" required>
+                           inputmode="decimal" pattern="[0-9]*\.?[0-9]*" required autocomplete="off">
                 </div>
             </div>
 
             <div class="field">
+                <label>Project</label>
+                <div class="cs-wrap" id="cs-project">
+                    <input type="hidden" id="field-project">
+                </div>
+            </div>
+
+            <div class="section-divider"></div>
+
+            <div class="field">
                 <label for="field-fromto">From / To</label>
-                <input type="text" id="field-fromto" autocomplete="off" required>
+                <input type="text" id="field-fromto" autocomplete="off" list="fromto-suggestions" placeholder="Vendor or person">
+                <datalist id="fromto-suggestions"></datalist>
             </div>
 
             <div class="field">
                 <label for="field-notes">Notes</label>
-                <textarea id="field-notes" rows="3"></textarea>
+                <textarea id="field-notes" rows="2" placeholder="Optional"></textarea>
             </div>
 
             <div class="field">
-                <label for="field-account">Account</label>
-                <select id="field-account" required>
-                    <option value="">Select account…</option>
-                </select>
-            </div>
-
-            <div class="field">
-                <label for="field-project">Project Title</label>
-                <select id="field-project">
-                    <option value="">Select project…</option>
-                </select>
+                <label for="field-date">Date</label>
+                <input type="date" id="field-date" required>
             </div>
 
             <button type="submit" class="submit-btn" id="submit-btn">Add Entry</button>
         </form>
+    </div>
+</div>
+
+<!-- Install Prompt Overlay -->
+<div class="install-overlay hidden" id="install-overlay">
+    <div class="install-card">
+        <div class="install-header">
+            <img src="" alt="App Icon" class="app-icon" id="install-icon">
+            <div class="app-title" id="install-title">Ledger Entry</div>
+            <div class="app-description" id="install-description"></div>
+        </div>
+        <div class="instruction" id="install-instruction"></div>
     </div>
 </div>
 
@@ -363,20 +597,219 @@
 <script>
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const AUTH_URL    = 'https://instrumenta.cf/api/auth.php';
-const API_BASE    = 'https://instrumenta.cf/api/sheets';
-const FILE_ID     = '00bc049ff4cd67c83313bc34';
-const SHEET_ID    = 'sheet-1';
-const TABLE_ID    = 'table-1774359687333-ovn2m';
-const SCHEMA_URL  = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/schema`;
-const ROWS_URL    = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/rows`;
-const TOKEN_KEY   = 'ledger_session_token';
-const USER_KEY    = 'ledger_username';
+const AUTH_URL         = 'https://instrumenta.cf/api/auth.php';
+const API_BASE         = 'https://instrumenta.cf/api/sheets';
+const FILE_ID          = '00bc049ff4cd67c83313bc34';
+const SHEET_ID         = 'sheet-1';
+const TABLE_ID         = 'table-1774359687333-ovn2m';
+const SCHEMA_URL       = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/schema`;
+const ROWS_URL         = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/rows`;
+const TOKEN_KEY       = 'ledger_session_token';
+const USER_KEY        = 'ledger_username';
+const FROMTO_HIST_KEY = 'ledger_fromto_history';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let sessionToken = localStorage.getItem(TOKEN_KEY) || null;
 let isNegative   = true;
+let csAccount    = null;
+let csProject    = null;
+
+// ─── Custom searchable select ─────────────────────────────────────────────────
+
+let _openSelect = null;
+
+class CustomSelect {
+    constructor(wrapId, placeholder = 'Select…') {
+        this.wrap        = document.getElementById(wrapId);
+        this.placeholder = placeholder;
+        this.value       = '';
+        this.options     = [];
+        this.filtered    = [];
+        this.focusedIdx  = -1;
+        this.isOpen      = false;
+        this._build();
+        this._bind();
+    }
+
+    _build() {
+        this.hiddenInput = this.wrap.querySelector('input[type=hidden]');
+
+        this.trigger = document.createElement('button');
+        this.trigger.type = 'button';
+        this.trigger.className = 'cs-trigger';
+        this.trigger.setAttribute('aria-haspopup', 'listbox');
+        this.trigger.setAttribute('aria-expanded', 'false');
+
+        this.displayEl = document.createElement('span');
+        this.displayEl.className = 'cs-display cs-placeholder';
+        this.displayEl.textContent = this.placeholder;
+        this.trigger.appendChild(this.displayEl);
+
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'cs-chevron');
+        svg.setAttribute('viewBox', '0 0 20 20');
+        svg.setAttribute('fill', 'currentColor');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('fill-rule', 'evenodd');
+        path.setAttribute('clip-rule', 'evenodd');
+        path.setAttribute('d', 'M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z');
+        svg.appendChild(path);
+
+        this.panel = document.createElement('div');
+        this.panel.className = 'cs-panel';
+        this.panel.hidden = true;
+
+        const searchBar = document.createElement('div');
+        searchBar.className = 'cs-search-bar';
+
+        this.searchInput = document.createElement('input');
+        this.searchInput.type = 'text';
+        this.searchInput.className = 'cs-search';
+        this.searchInput.placeholder = 'Search…';
+        this.searchInput.setAttribute('autocomplete', 'off');
+        this.searchInput.setAttribute('autocorrect', 'off');
+        this.searchInput.setAttribute('autocapitalize', 'off');
+        this.searchInput.setAttribute('spellcheck', 'false');
+        searchBar.appendChild(this.searchInput);
+
+        this.list = document.createElement('ul');
+        this.list.className = 'cs-list';
+        this.list.setAttribute('role', 'listbox');
+
+        this.panel.appendChild(searchBar);
+        this.panel.appendChild(this.list);
+
+        this.wrap.appendChild(this.trigger);
+        this.wrap.appendChild(svg);
+        this.wrap.appendChild(this.panel);
+    }
+
+    _bind() {
+        this.trigger.addEventListener('click', () => this.isOpen ? this.close() : this.open());
+        this.trigger.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+                e.preventDefault();
+                this.open();
+            }
+        });
+        this.searchInput.addEventListener('input', () => this._filter());
+        this.searchInput.addEventListener('keydown', (e) => this._handleKeydown(e));
+        document.addEventListener('click', (e) => {
+            if (this.isOpen && !this.wrap.contains(e.target)) this.close();
+        });
+    }
+
+    setOptions(opts) {
+        this.options = opts;
+        this._filter();
+    }
+
+    _filter() {
+        const q = this.searchInput.value.toLowerCase();
+        this.filtered = q
+            ? this.options.filter(o => o.toLowerCase().includes(q))
+            : this.options.slice();
+        this.focusedIdx = -1;
+        this._renderList();
+    }
+
+    _renderList() {
+        this.list.innerHTML = '';
+        if (this.filtered.length === 0) {
+            const li = document.createElement('li');
+            li.className = 'cs-no-results';
+            li.textContent = 'No results';
+            this.list.appendChild(li);
+            return;
+        }
+        this.filtered.forEach((opt, i) => {
+            const li = document.createElement('li');
+            li.className = 'cs-option' + (opt === this.value ? ' cs-selected' : '');
+            li.setAttribute('role', 'option');
+            li.dataset.value = opt;
+            li.textContent = opt;
+            li.addEventListener('mousedown', (e) => { e.preventDefault(); this.select(opt); });
+            let _touchStartY = 0;
+            li.addEventListener('touchstart', (e) => { _touchStartY = e.touches[0].clientY; }, { passive: true });
+            li.addEventListener('touchend', (e) => {
+                if (Math.abs(e.changedTouches[0].clientY - _touchStartY) > 8) return; // scroll, not tap
+                e.preventDefault();
+                this.select(opt);
+            });
+            li.addEventListener('mouseover', () => { this.focusedIdx = i; this._updateFocus(); });
+            this.list.appendChild(li);
+        });
+    }
+
+    _updateFocus() {
+        const items = this.list.querySelectorAll('.cs-option');
+        items.forEach((li, i) => li.classList.toggle('cs-focused', i === this.focusedIdx));
+        if (this.focusedIdx >= 0 && items[this.focusedIdx]) {
+            items[this.focusedIdx].scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    _handleKeydown(e) {
+        const items = this.list.querySelectorAll('.cs-option');
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            this.focusedIdx = Math.min(this.focusedIdx + 1, items.length - 1);
+            this._updateFocus();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            this.focusedIdx = Math.max(this.focusedIdx - 1, 0);
+            this._updateFocus();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (this.focusedIdx >= 0 && items[this.focusedIdx]) {
+                this.select(items[this.focusedIdx].dataset.value);
+            }
+        } else if (e.key === 'Escape') {
+            this.close();
+            this.trigger.focus();
+        } else if (e.key === 'Tab') {
+            this.close();
+        }
+    }
+
+    select(val) {
+        this.value = val;
+        this.hiddenInput.value = val;
+        this.displayEl.textContent = val || this.placeholder;
+        this.displayEl.classList.toggle('cs-placeholder', !val);
+        this.close();
+        this.trigger.focus();
+        this.hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    open() {
+        if (_openSelect && _openSelect !== this) _openSelect.close();
+        _openSelect = this;
+        this.isOpen = true;
+        this.wrap.classList.add('open');
+        this.panel.hidden = false;
+        this.trigger.setAttribute('aria-expanded', 'true');
+        this.searchInput.value = '';
+        this._filter();
+        requestAnimationFrame(() => { this.searchInput.focus(); });
+    }
+
+    close() {
+        if (_openSelect === this) _openSelect = null;
+        this.isOpen = false;
+        this.wrap.classList.remove('open');
+        this.panel.hidden = true;
+        this.trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    reset() {
+        this.value = '';
+        this.hiddenInput.value = '';
+        this.displayEl.textContent = this.placeholder;
+        this.displayEl.classList.add('cs-placeholder');
+    }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -398,6 +831,31 @@ function todayISO() {
     return d.getFullYear() + '-' +
            String(d.getMonth() + 1).padStart(2, '0') + '-' +
            String(d.getDate()).padStart(2, '0');
+}
+
+// ─── From/To history ──────────────────────────────────────────────────────────
+
+function getFromToHistory() {
+    try { return JSON.parse(localStorage.getItem(FROMTO_HIST_KEY)) || []; }
+    catch { return []; }
+}
+
+function saveFromToHistory(val) {
+    if (!val) return;
+    let hist = getFromToHistory();
+    hist = [val, ...hist.filter(h => h !== val)].slice(0, 40);
+    localStorage.setItem(FROMTO_HIST_KEY, JSON.stringify(hist));
+    refreshFromToDatalist(hist);
+}
+
+function refreshFromToDatalist(hist) {
+    const dl = document.getElementById('fromto-suggestions');
+    dl.innerHTML = '';
+    hist.forEach(h => {
+        const opt = document.createElement('option');
+        opt.value = h;
+        dl.appendChild(opt);
+    });
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -427,17 +885,13 @@ function openLoginPopup() {
     }
 }
 
-// Listen for AUTH_SUCCESS from the mobilelogin.php popup
 window.addEventListener('message', async (event) => {
     if (event.origin !== 'https://instrumenta.cf') return;
     if (event.data?.type !== 'AUTH_SUCCESS') return;
-
     const token = event.data.token || event.data.apikey;
     if (!token) return;
-
     sessionToken = token;
     localStorage.setItem(TOKEN_KEY, token);
-
     const username = await validateToken(token);
     if (username) {
         localStorage.setItem(USER_KEY, username);
@@ -452,7 +906,6 @@ function doLogout() {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     showAuthScreen();
-
     fetch(`${AUTH_URL}?action=logout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
 }
 
@@ -464,43 +917,35 @@ async function loadSchema() {
     return res.json();
 }
 
-function populateSelect(selectEl, options, allowEmpty = true) {
-    while (selectEl.options.length > 1) selectEl.remove(1);
-    for (const opt of options) {
-        const o = document.createElement('option');
-        o.value = opt;
-        o.textContent = opt;
-        selectEl.appendChild(o);
-    }
-}
-
 async function initForm() {
-    const loading  = document.getElementById('schema-loading');
-    const form     = document.getElementById('entry-form');
+    const loading = document.getElementById('schema-loading');
+    const form    = document.getElementById('entry-form');
     loading.classList.remove('hidden');
     form.classList.add('hidden');
 
+    if (!csAccount) csAccount = new CustomSelect('cs-account', 'Select account…');
+    if (!csProject) csProject = new CustomSelect('cs-project', 'Select project…');
+
     try {
-        const schema = await loadSchema();
+        const schema     = await loadSchema();
         const accountCol = schema.columns.find(c => c.name === 'Account');
         const projectCol = schema.columns.find(c => c.name === 'Project Title');
 
-        if (accountCol?.options?.length) {
-            populateSelect(document.getElementById('field-account'), accountCol.options);
-        }
-        if (projectCol?.options?.length) {
-            populateSelect(document.getElementById('field-project'), projectCol.options);
-        }
+        if (accountCol?.options?.length) csAccount.setOptions(accountCol.options);
+        if (projectCol?.options?.length) csProject.setOptions(projectCol.options);
     } catch (err) {
         console.error('Failed to load schema:', err);
         showToast('Could not load form options — check connection', 'error');
     }
 
-    // Set today's date default
     document.getElementById('field-date').value = todayISO();
+    refreshFromToDatalist(getFromToHistory());
 
     loading.classList.add('hidden');
     form.classList.remove('hidden');
+
+    // Auto-focus amount for fast entry
+    requestAnimationFrame(() => document.getElementById('field-amount').focus());
 }
 
 // ─── Screens ──────────────────────────────────────────────────────────────────
@@ -515,14 +960,13 @@ function showAppScreen(username) {
     document.getElementById('app-screen').style.display  = 'block';
     document.getElementById('username-display').textContent = username;
     initForm();
+    initInstallPrompt();
 }
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
 (async function init() {
     const cachedUser = localStorage.getItem(USER_KEY);
-
-    // If we have a token, validate it
     if (sessionToken) {
         if (navigator.onLine) {
             const username = await validateToken(sessionToken);
@@ -531,16 +975,13 @@ function showAppScreen(username) {
                 showAppScreen(username);
                 return;
             }
-            // Token expired — fall through to login
             sessionToken = null;
             localStorage.removeItem(TOKEN_KEY);
         } else if (cachedUser) {
-            // Offline but we have a cached username — show the form optimistically
             showAppScreen(cachedUser);
             return;
         }
     }
-
     showAuthScreen();
 })();
 
@@ -558,10 +999,19 @@ document.getElementById('sign-toggle').addEventListener('click', () => {
     btn.className = `sign-toggle ${isNegative ? 'neg' : 'pos'}`;
 });
 
+// Select all on focus so typing immediately replaces the value
+document.getElementById('field-amount').addEventListener('focus', function() { this.select(); });
+
 // ─── Form submit ──────────────────────────────────────────────────────────────
 
 document.getElementById('entry-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+
+    if (!csAccount?.value) {
+        showToast('Please select an account', 'error');
+        csAccount?.trigger.focus();
+        return;
+    }
 
     const submitBtn = document.getElementById('submit-btn');
     submitBtn.disabled = true;
@@ -569,11 +1019,12 @@ document.getElementById('entry-form').addEventListener('submit', async (e) => {
 
     const rawAmount = parseFloat(document.getElementById('field-amount').value) || 0;
     const amount    = isNegative ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+    const fromto    = document.getElementById('field-fromto').value.trim();
 
     const row = {
         'Date':          document.getElementById('field-date').value,
         'Amount':        amount,
-        'From/To':       document.getElementById('field-fromto').value.trim(),
+        'From/To':       fromto,
         'Notes':         document.getElementById('field-notes').value.trim(),
         'Account':       document.getElementById('field-account').value,
         'Project Title': document.getElementById('field-project').value,
@@ -588,14 +1039,19 @@ document.getElementById('entry-form').addEventListener('submit', async (e) => {
         });
 
         if (res.ok) {
-            // Reset form
-            document.getElementById('entry-form').reset();
-            document.getElementById('field-date').value = todayISO();
+            if (fromto) saveFromToHistory(fromto);
+
+            // Partial reset: clear per-entry fields, keep account/project/date
+            document.getElementById('field-amount').value = '';
+            document.getElementById('field-fromto').value = '';
+            document.getElementById('field-notes').value  = '';
             isNegative = true;
             const btn = document.getElementById('sign-toggle');
             btn.textContent = '−';
             btn.className = 'sign-toggle neg';
+
             showToast('Entry added');
+            document.getElementById('field-amount').focus();
         } else if (res.status === 401) {
             showToast('Session expired — please sign in again', 'error');
             doLogout();
@@ -614,13 +1070,82 @@ document.getElementById('entry-form').addEventListener('submit', async (e) => {
 // ─── Offline banner ───────────────────────────────────────────────────────────
 
 function updateOnlineStatus() {
-    const banner = document.getElementById('offline-banner');
-    banner.style.display = navigator.onLine ? 'none' : 'block';
+    document.getElementById('offline-banner').style.display = navigator.onLine ? 'none' : 'block';
 }
-
 window.addEventListener('online',  updateOnlineStatus);
 window.addEventListener('offline', updateOnlineStatus);
 updateOnlineStatus();
+
+// ─── Install Prompt ──────────────────────────────────────────────────────────────
+
+let deferredPrompt = null;
+let isMobile = false;
+let isStandalone = false;
+
+function initInstallPrompt() {
+    // Check mobile & standalone status
+    isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+    // Skip for desktop/already installed
+    if (!isMobile || isStandalone) return;
+
+    // Show install prompt immediately
+    loadManifestAndShow();
+
+    // Listen for beforeinstallprompt (for capable browsers)
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+    });
+}
+
+async function loadManifestAndShow() {
+    try {
+        const manifestLink = document.querySelector('link[rel="manifest"]');
+        if (manifestLink) {
+            const manifest = await fetch(manifestLink.href).then(r => r.json());
+            showInstallPrompt(manifest);
+        } else {
+            showInstallPrompt({});
+        }
+    } catch (err) {
+        console.warn('Could not load manifest:', err);
+        showInstallPrompt({});
+    }
+}
+
+function showInstallPrompt(manifest) {
+    const overlay = document.getElementById('install-overlay');
+    const icon = document.getElementById('install-icon');
+    const title = document.getElementById('install-title');
+    const desc = document.getElementById('install-description');
+    const instr = document.getElementById('install-instruction');
+
+    // Set manifest data
+    title.textContent = manifest.name || 'Ledger Entry';
+    desc.textContent = manifest.description || 'Quick and easy expense tracking on the go.';
+    const iconUrl = manifest.icons?.find(i => i.sizes === '512x512')?.src || '/favicon.svg';
+    icon.src = iconUrl;
+    icon.onerror = () => { icon.style.display = 'none'; };
+
+    // Platform-specific instructions
+    if (/android/i.test(navigator.userAgent)) {
+        instr.innerHTML = 'Tap the <strong>⋮ menu</strong> in your browser and select <strong>Add to Home screen</strong> to install.';
+    } else if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
+        instr.innerHTML = `Tap the <strong>Share</strong> button <svg class="ios-share-icon" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><path d="M30.3 13.7L25 8.4l-5.3 5.3-1.4-1.4L25 5.6l6.7 6.7z"/><path d="M24 7h2v21h-2z"/><path d="M35 40H15c-1.7 0-3-1.3-3-3V19c0-1.7 1.3-3 3-3h7v2h-7c-.6 0-1 .4-1 1v18c0 .6.4 1 1 1h20c.6 0 1-.4 1-1V19c0-.6-.4-1-1-1h-7v-2h7c1.7 0 3 1.3 3 3v18c0 1.7-1.3 3-3 3z"/></svg> then tap <strong>Add to Home Screen</strong>.`;
+    } else {
+        instr.textContent = 'Use your browser\'s install option to add this app to your home screen.';
+    }
+
+    overlay.classList.remove('hidden');
+}
+
+function hideInstallPrompt() {
+    const overlay = document.getElementById('install-overlay');
+    overlay.classList.add('hidden');
+}
+
 </script>
 </body>
 </html>
