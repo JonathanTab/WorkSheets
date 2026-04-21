@@ -6,7 +6,7 @@
     /**
      * Controlled mode: when both props are provided the component reads/writes
      * through these instead of the spreadsheet store.
-     * @type {{ type: string, [key: string]: any } | null}
+     * @type {{ controlledConfig?: ({ type: string, [key: string]: any } | null), onControlledChange?: (((config: { type: string, [key: string]: any } | null) => void) | null) }}
      */
     let { controlledConfig = null, onControlledChange = null } = $props();
 

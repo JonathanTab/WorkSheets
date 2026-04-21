@@ -86,6 +86,9 @@ export class SheetStore {
     floatingImages = $state(new Map());
     floatingImagesVersion = $state(0);
 
+    // --- Conditional Formats Version ---
+    cfVersion = $state(0);
+
     // --- Merge Engine ---
     /** @type {MergeEngine} */
     mergeEngine = null;
@@ -228,9 +231,23 @@ export class SheetStore {
             }
         };
 
+        // Observe conditionalFormats Y.Array for remote changes
+        /** @type {import('yjs').Array<any>|null} */
+        let cfArray = null;
+        const cfHandler = () => { this.cfVersion++; };
+        const tryAttachCF = () => {
+            const arr = this.#sheet.get('conditionalFormats');
+            if (arr && arr !== cfArray) {
+                if (cfArray) cfArray.unobserve(cfHandler);
+                cfArray = arr;
+                arr.observe(cfHandler);
+            }
+        };
+
         // Attach to any maps that already exist (e.g. doc loaded with prior resizes).
         tryAttachRowMeta();
         tryAttachColMeta();
+        tryAttachCF();
 
         // 1. Observe Sheet Props (and detect first-time creation of meta maps)
         const sheetObserver = (event) => {
@@ -259,6 +276,10 @@ export class SheetStore {
                 tryAttachFloatingImages(); // eslint-disable-line no-use-before-define
                 this.#syncFloatingImages();
                 this.floatingImagesVersion++;
+            }
+            if (event.keysChanged.has('conditionalFormats')) {
+                tryAttachCF();
+                this.cfVersion++;
             }
         };
         this.#sheet.observe(sheetObserver);
@@ -1878,6 +1899,7 @@ export class SheetStore {
             }
             arr.push([rule]);
         });
+        this.cfVersion++;
     }
 
     /**
@@ -1895,6 +1917,7 @@ export class SheetStore {
             arr.delete(idx, 1);
             arr.insert(idx, [{ ...rules[idx], ...updates }]);
         });
+        this.cfVersion++;
     }
 
     /**
@@ -1909,6 +1932,7 @@ export class SheetStore {
             const idx = rules.findIndex(r => r.id === id);
             if (idx !== -1) arr.delete(idx, 1);
         });
+        this.cfVersion++;
     }
 
     // --- Data Validation ---

@@ -7,7 +7,6 @@
 
 // Color palette for cell references (distinct, accessible colors)
 const REFERENCE_COLORS = [
-    '#3b82f6', // blue
     '#ef4444', // red
     '#22c55e', // green
     '#f59e0b', // amber
@@ -207,18 +206,42 @@ export function extractReferences(formula) {
     // Remove the leading = if present
     const content = formula.startsWith('=') ? formula.slice(1) : formula;
 
+    // Find string literal ranges to exclude from ref matching
+    const stringRanges = [];
+    {
+        let i = 0;
+        while (i < content.length) {
+            if (content[i] === '"') {
+                const start = i++;
+                while (i < content.length) {
+                    if (content[i] === '"') { i++; if (content[i] === '"') { i++; } else { break; } }
+                    else { i++; }
+                }
+                stringRanges.push({ start, end: i });
+            } else { i++; }
+        }
+    }
+    const isInString = (idx) => stringRanges.some(r => idx >= r.start && idx < r.end);
+
     // Strip cross-sheet references entirely so their cell parts don't register
     // as same-sheet refs (e.g. Sheet2!A1 should not highlight A1 on this sheet).
     const crossSheetPattern = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
-    const strippedContent = content.replace(crossSheetPattern, '');
+    const strippedContent = content.replace(crossSheetPattern, (m, offset) => {
+        if (isInString(offset)) return m;
+        return ' '.repeat(m.length); // blank out preserving indices
+    });
 
     // Regex to match cell references (with optional $ for absolute refs)
     // Also matches ranges (A1:B5)
     const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
 
-    // First, find and remove ranges
-    const ranges = strippedContent.match(rangeRegex) || [];
+    // First, find and remove ranges (skip those inside string literals)
+    const ranges = [];
+    let m;
+    while ((m = rangeRegex.exec(strippedContent)) !== null) {
+        if (!isInString(m.index)) ranges.push(m[0]);
+    }
     let contentWithoutRanges = strippedContent;
 
     for (const range of ranges) {
@@ -245,10 +268,13 @@ export function extractReferences(formula) {
         }
     }
 
-    // Then find individual cell references
-    const cells = contentWithoutRanges.match(cellRegex) || [];
+    // Then find individual cell references (skip those inside string literals)
+    const cellMatches = [];
+    while ((m = cellRegex.exec(contentWithoutRanges)) !== null) {
+        if (!isInString(m.index)) cellMatches.push(m[0]);
+    }
 
-    for (const cellRef of cells) {
+    for (const cellRef of cellMatches) {
         const parsed = parseCellRef(cellRef);
         if (parsed) {
             refs.push({

@@ -3,22 +3,18 @@
      * TableColumnPanel - Column configuration panel.
      *
      * Covers table-specific column settings:
-     *   - Column type (cell type for this column)
-     *   - Alignment override
      *   - Computed (formula) column with full formula reference and live preview
      *   - Delete column
+     *
+     * Type, alignment, colors, borders, and font formatting are applied via the
+     * formatting toolbar when a table header or data cell is selected.
      */
 
     import {
         close,
         trash,
-        alignLeft,
-        alignCenter,
-        alignRight,
-        menu,
     } from "../../../lib/icons/index.js";
     import { onMount } from "svelte";
-    import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
 
@@ -32,7 +28,6 @@
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
 
-    let localHAlign = $state(null);
     let localIsFormula = $state(false);
     let localFormula = $state("");
     let formulaInputEl = $state(null);
@@ -40,33 +35,10 @@
 
     $effect(() => {
         if (col) {
-            localHAlign = col.hAlign ?? null;
             localIsFormula = col.isNonEntry ?? false;
             localFormula = col.formula ?? "";
         }
     });
-
-    /** Full type config for the controlled CellTypeConfigurator */
-    let colTypeConfig = $derived(
-        col ? (col.typeConfig ?? (col.type && col.type !== "text" ? { type: col.type } : null)) : null
-    );
-
-    function handleTypeConfigChange(config) {
-        if (!table || !colId) return;
-        table.updateColumnTypeConfig(colId, config);
-    }
-
-    const ALIGN_OPTIONS = [
-        { value: null, label: "Auto", icon: menu, isSvg: true },
-        { value: "left", label: "Left", icon: alignLeft, isSvg: true },
-        { value: "center", label: "Center", icon: alignCenter, isSvg: true },
-        { value: "right", label: "Right", icon: alignRight, isSvg: true },
-    ];
-
-    function applyAlign(val) {
-        localHAlign = val;
-        if (table && colId) table.updateColumnDef(colId, { hAlign: val });
-    }
 
     function applyFormula() {
         if (!table || !colId) return;
@@ -198,30 +170,6 @@
 
 {#snippet colPanelContent()}
     <div class="panel-body">
-        <!-- Type picker -->
-        <section class="section">
-            <div class="section-label">Type</div>
-            <CellTypeConfigurator
-                controlledConfig={colTypeConfig}
-                onControlledChange={handleTypeConfigChange}
-            />
-        </section>
-
-        <!-- Alignment -->
-        <section class="section section-row">
-            <div class="section-label" style="margin:0;">Alignment</div>
-            <div class="align-group">
-                {#each ALIGN_OPTIONS as opt}
-                    <button
-                        class="align-btn"
-                        class:active={localHAlign === opt.value}
-                        onclick={() => applyAlign(opt.value)}
-                        title={opt.label}
-                    >{#if opt.isSvg}{@html opt.icon}{:else}{opt.icon}{/if}</button>
-                {/each}
-            </div>
-        </section>
-
         <!-- Computed column -->
         <section class="section">
             <div class="section-row" style="margin-bottom:6px;">
@@ -439,25 +387,6 @@
         color: #94a3b8;
         margin-top: 1px;
     }
-
-    .align-group { display: flex; gap: 2px; }
-
-    .align-btn {
-        width: 26px;
-        height: 24px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 4px;
-        background: var(--cell-bg, #fff);
-        cursor: pointer;
-        font-size: 11px;
-        color: #64748b;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .align-btn:hover { background: var(--color-fill, #f1f5f9); }
-    .align-btn.active { background: #f1f5f9; border-color: #64748b; color: #1e293b; }
 
     .toggle-label {
         display: flex;
@@ -718,7 +647,6 @@
     @media (pointer: coarse), (max-width: 768px) {
         .section { padding: 12px 16px; }
         .section-label { font-size: 11px; margin-bottom: 8px; }
-        .align-btn { width: 40px; height: 36px; }
         .toggle-label { min-height: 44px; }
         .formula-input { font-size: 14px; padding: 8px; }
         .col-chip { font-size: 12px; padding: 6px 10px; }

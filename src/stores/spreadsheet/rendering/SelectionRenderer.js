@@ -6,15 +6,15 @@
  * range-drag repaint only this lightweight canvas (~0.3ms) instead of
  * triggering a full buildPaneData + paintPane cycle (~6ms).
  *
- * ## What it paints
- *   - Semi-transparent blue fill on selected cells
- *   - Colored stroke border on formula-reference-highlighted cells
- *
- * ## What it does NOT paint
- *   - Cell backgrounds, text, borders, gridlines — those stay on the data canvas
+ * ## Visual style (Google Sheets)
+ *   - Selected cells:   light blue fill, thin blue border around each range rect
+ *   - Primary cell:     no fill (white), 2px blue border inset
+ *   - Formula refs:     colored stroke border per cell
  */
 
-const SELECTION_FILL = 'rgba(59, 130, 246, 0.08)';
+const SELECTION_FILL        = 'rgba(26, 115, 232, 0.12)';
+const SELECTION_BORDER      = 'rgba(26, 115, 232, 0.8)';
+const PRIMARY_CELL_BORDER   = '#1a73e8';
 
 export class SelectionRenderer {
     /** @type {HTMLCanvasElement | null} */
@@ -26,20 +26,15 @@ export class SelectionRenderer {
     /** @type {number} */
     #dpr = 1;
 
-    /**
-     * @param {HTMLCanvasElement} canvas
-     */
+    /** @param {HTMLCanvasElement} canvas */
     constructor(canvas) {
         this.#canvas = canvas;
-        if (canvas) {
-            this.#ctx = canvas.getContext('2d');
-        }
+        if (canvas) this.#ctx = canvas.getContext('2d');
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     /**
-     * Resize the canvas backing store. Call on mount, container resize, or DPR change.
      * @param {number} cssWidth
      * @param {number} cssHeight
      * @param {number} [dpr]
@@ -47,21 +42,16 @@ export class SelectionRenderer {
     resize(cssWidth, cssHeight, dpr) {
         this.#dpr = dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1) ?? 1;
         if (!this.#canvas) return;
-
         const physW = Math.round(cssWidth * this.#dpr);
         const physH = Math.round(cssHeight * this.#dpr);
-        if (this.#canvas.width !== physW) this.#canvas.width = physW;
+        if (this.#canvas.width  !== physW) this.#canvas.width  = physW;
         if (this.#canvas.height !== physH) this.#canvas.height = physH;
-
         if (this.#canvas instanceof HTMLCanvasElement) {
-            this.#canvas.style.width = cssWidth + 'px';
+            this.#canvas.style.width  = cssWidth  + 'px';
             this.#canvas.style.height = cssHeight + 'px';
         }
     }
 
-    /**
-     * Clear the entire selection canvas (called once before painting all panes).
-     */
     clear() {
         if (!this.#ctx || !this.#canvas) return;
         this.#ctx.clearRect(0, 0, this.#canvas.width, this.#canvas.height);
@@ -75,9 +65,8 @@ export class SelectionRenderer {
     // ─── Pane painting ────────────────────────────────────────────────────────
 
     /**
-     * Paint selection fills and formula highlights for one grid pane.
-     * Much cheaper than a full buildPaneData + paintPane — no data lookups,
-     * just geometry + two canvas ops per selected cell.
+     * Paint selection fills, range borders, primary-cell border, and formula
+     * highlights for one grid pane.
      *
      * @param {Object} params
      * @param {{start:number, end:number, count:number}} params.rowRange
@@ -111,7 +100,6 @@ export class SelectionRenderer {
             rowMetrics, colMetrics,
             selectionState, formulaEditState,
             frozenRows, frozenCols,
-            frozenHeight, frozenWidth,
             scrollLeft, scrollTop,
             rowCount, colCount,
         } = params;
@@ -128,6 +116,7 @@ export class SelectionRenderer {
             ctx.rect(clipX, clipY, clipW, clipH);
             ctx.clip();
 
+            // ── 1. Per-cell fills (skip primary cell) and formula borders ────
             for (let r = rowRange.start; r <= rowRange.end; r++) {
                 const isFrozenRow = r < frozenRows;
                 const y = isFrozenRow
@@ -136,10 +125,9 @@ export class SelectionRenderer {
                 const h = rowMetrics.sizeOf(r);
 
                 for (let c = colRange.start; c <= colRange.end; c++) {
-                    // Check selection and formula highlight before computing x (early-exit
-                    // skips coordinate math for the common case of unselected empty cells).
-                    const selected = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
-                    const hlColor = formulaEditState?.getCellHighlightColor(r, c) ?? null;
+                    const selected  = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
+                    const isPrimary = selected && (selectionState?.isPrimaryCell(r, c) ?? false);
+                    const hlColor   = formulaEditState?.getCellHighlightColor(r, c) ?? null;
                     if (!selected && !hlColor) continue;
 
                     const isFrozenCol = c < frozenCols;
@@ -148,7 +136,7 @@ export class SelectionRenderer {
                         : colMetrics.offsetOf(c) - scrollLeft;
                     const w = colMetrics.sizeOf(c);
 
-                    if (selected) {
+                    if (selected && !isPrimary) {
                         ctx.fillStyle = SELECTION_FILL;
                         ctx.fillRect(x, y, w, h);
                     }
@@ -160,9 +148,83 @@ export class SelectionRenderer {
                     }
                 }
             }
+
+            // ── 2. Per-range border outlines ─────────────────────────────────
+            const allRanges = selectionState?.allRanges ?? [];
+            if (allRanges.length > 0) {
+                ctx.strokeStyle = SELECTION_BORDER;
+                ctx.lineWidth = 1;
+                for (const range of allRanges) {
+                    const rect = this.#rangePixelRect(
+                        range, rowMetrics, colMetrics,
+                        frozenRows, frozenCols, scrollTop, scrollLeft,
+                    );
+                    if (rect && rect.w > 0 && rect.h > 0) {
+                        ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+                    }
+                }
+            }
+
+            // ── 3. Primary-cell border (2px, no fill) ────────────────────────
+            const pc = selectionState?.primaryCell ?? selectionState?.anchor;
+            if (pc) {
+                const { row: pr, col: pc_ } = pc;
+                if (pr >= rowRange.start && pr <= rowRange.end &&
+                    pc_ >= colRange.start && pc_ <= colRange.end &&
+                    (selectionState?.isSelected(pr, pc_, rowCount, colCount) ?? false)) {
+
+                    const isFR = pr < frozenRows;
+                    const iFC  = pc_ < frozenCols;
+                    const x = iFC ? colMetrics.offsetOf(pc_) : colMetrics.offsetOf(pc_) - scrollLeft;
+                    const y = isFR ? rowMetrics.offsetOf(pr) : rowMetrics.offsetOf(pr) - scrollTop;
+                    const w = colMetrics.sizeOf(pc_) ?? 0;
+                    const h = rowMetrics.sizeOf(pr) ?? 0;
+                    if (w > 0 && h > 0) {
+                        // Clear fill so primary cell appears white
+                        ctx.clearRect(x, y, w, h);
+                        ctx.strokeStyle = PRIMARY_CELL_BORDER;
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+                    }
+                }
+            }
+
         } finally {
             ctx.restore();
         }
+    }
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Compute the pixel bounding rect for a cell range within this pane's
+     * coordinate system.  Handles frozen/scrolled rows and cols independently.
+     *
+     * @param {{ startRow:number, endRow:number, startCol:number, endCol:number }} range
+     * @param {any} rowMetrics
+     * @param {any} colMetrics
+     * @param {number} frozenRows
+     * @param {number} frozenCols
+     * @param {number} scrollTop
+     * @param {number} scrollLeft
+     * @returns {{ x:number, y:number, w:number, h:number } | null}
+     */
+    #rangePixelRect(range, rowMetrics, colMetrics, frozenRows, frozenCols, scrollTop, scrollLeft) {
+        const sc = range.startCol; const ec = range.endCol;
+        const sr = range.startRow; const er = range.endRow;
+        const x1 = sc < frozenCols
+            ? (colMetrics.offsetOf(sc) ?? 0)
+            : (colMetrics.offsetOf(sc) ?? 0) - scrollLeft;
+        const y1 = sr < frozenRows
+            ? (rowMetrics.offsetOf(sr) ?? 0)
+            : (rowMetrics.offsetOf(sr) ?? 0) - scrollTop;
+        const x2 = ec < frozenCols
+            ? (colMetrics.offsetOf(ec) ?? 0) + (colMetrics.sizeOf(ec) ?? 0)
+            : (colMetrics.offsetOf(ec) ?? 0) + (colMetrics.sizeOf(ec) ?? 0) - scrollLeft;
+        const y2 = er < frozenRows
+            ? (rowMetrics.offsetOf(er) ?? 0) + (rowMetrics.sizeOf(er) ?? 0)
+            : (rowMetrics.offsetOf(er) ?? 0) + (rowMetrics.sizeOf(er) ?? 0) - scrollTop;
+        return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
     }
 }
 

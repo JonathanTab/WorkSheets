@@ -95,42 +95,54 @@ class ClipboardManager {
     // ─── Copy ─────────────────────────────────────────────────────────────────
 
     copy(sheetStore, session) {
-        const range = getSelectionState()?.range;
-        if (!range || !sheetStore) return;
+        const sel = getSelectionState();
+        const allRanges = sel?.allRanges ?? [];
+        if (allRanges.length === 0 || !sheetStore) return;
 
-        const data = this.extractRangeData(sheetStore, session, range);
+        const rangeDataList = allRanges.map(range => ({
+            range: { ...range },
+            data: this.extractRangeData(sheetStore, session, range),
+        }));
         const fingerprint = this.#generateFingerprint();
+        const { range: firstRange, data: firstData } = rangeDataList[0];
 
-        this.clipboardData = { type: 'copy', range: { ...range }, data, fingerprint };
+        this.clipboardData = { type: 'copy', range: firstRange, data: firstData, ranges: rangeDataList, fingerprint };
         this.clipboardType = 'copy';
 
         // For keyboard copy: native copy event fires after keydown (no preventDefault),
         // and handleNativeCopyEvent() will consume this payload synchronously.
         // For context menu copy: the async write below is the primary path.
-        this._pendingCopyPayload = { data, range, fingerprint };
-        this.#writeAsyncClipboard(data, range, fingerprint).catch(() => {});
+        this._pendingCopyPayload = { data: firstData, range: firstRange, ranges: rangeDataList, fingerprint };
+        this.#writeAsyncClipboard(firstData, firstRange, fingerprint, rangeDataList).catch(() => {});
     }
 
     // ─── Cut ─────────────────────────────────────────────────────────────────
 
     cut(sheetStore, session, ydoc) {
-        const range = getSelectionState()?.range;
-        if (!range || !sheetStore) return;
+        const sel = getSelectionState();
+        const allRanges = sel?.allRanges ?? [];
+        if (allRanges.length === 0 || !sheetStore) return;
 
-        const data = this.extractRangeData(sheetStore, session, range);
+        const rangeDataList = allRanges.map(range => ({
+            range: { ...range },
+            data: this.extractRangeData(sheetStore, session, range),
+        }));
         const fingerprint = this.#generateFingerprint();
+        const { range: firstRange, data: firstData } = rangeDataList[0];
 
-        this.clipboardData = { type: 'cut', range: { ...range }, data, fingerprint };
+        this.clipboardData = { type: 'cut', range: firstRange, data: firstData, ranges: rangeDataList, fingerprint };
         this.clipboardType = 'cut';
 
-        this._pendingCopyPayload = { data, range, fingerprint };
-        this.#writeAsyncClipboard(data, range, fingerprint).catch(() => {});
+        this._pendingCopyPayload = { data: firstData, range: firstRange, ranges: rangeDataList, fingerprint };
+        this.#writeAsyncClipboard(firstData, firstRange, fingerprint, rangeDataList).catch(() => {});
 
-        // Clear source cells immediately
+        // Clear all source ranges immediately
         ydoc?.transact(() => {
-            for (let r = range.startRow; r <= range.endRow; r++) {
-                for (let c = range.startCol; c <= range.endCol; c++) {
-                    sheetStore.clearCellValue(r, c);
+            for (const { range } of rangeDataList) {
+                for (let r = range.startRow; r <= range.endRow; r++) {
+                    for (let c = range.startCol; c <= range.endCol; c++) {
+                        sheetStore.clearCellValue(r, c);
+                    }
                 }
             }
         });
@@ -159,10 +171,10 @@ class ClipboardManager {
 
         e.preventDefault();
 
-        const { data, range, fingerprint } = payload;
+        const { data, range, fingerprint, ranges } = payload;
         const tsv  = this.generateTSV(data);
         const html = this.generateHTMLTable(data, fingerprint);
-        const json = this.#serializeJSON(data, range, fingerprint);
+        const json = this.#serializeJSON(data, range, fingerprint, ranges?.length > 1 ? ranges : null);
 
         e.clipboardData.setData('text/plain', tsv);
         e.clipboardData.setData('text/html', html);
@@ -180,10 +192,10 @@ class ClipboardManager {
      * Used as a fallback when the native copy event is not available (context menu)
      * and to write the 'web ' prefixed custom type for Chrome 104+.
      */
-    async #writeAsyncClipboard(data, range, fingerprint) {
+    async #writeAsyncClipboard(data, range, fingerprint, rangeDataList = null) {
         const tsv  = this.generateTSV(data);
         const html = this.generateHTMLTable(data, fingerprint);
-        const json = this.#serializeJSON(data, range, fingerprint);
+        const json = this.#serializeJSON(data, range, fingerprint, rangeDataList?.length > 1 ? rangeDataList : null);
 
         /** @type {Record<string, Blob>} */
         const itemTypes = {
@@ -209,7 +221,34 @@ class ClipboardManager {
 
     // ─── JSON Serialization ───────────────────────────────────────────────────
 
-    #serializeJSON(data, range, fingerprint) {
+    #serializeJSON(data, range, fingerprint, rangeDataList = null) {
+        if (rangeDataList && rangeDataList.length > 1) {
+            return JSON.stringify({
+                version: 4,
+                source: 'plainTab',
+                fingerprint,
+                multiRange: true,
+                ranges: rangeDataList.map(({ range: r, data: d }) => ({
+                    range: { startRow: r.startRow, endRow: r.endRow, startCol: r.startCol, endCol: r.endCol },
+                    cells:              d.cells,
+                    borders:            d.borders,
+                    merges:             d.merges,
+                    dataValidations:    d.dataValidations,
+                    conditionalFormats: d.conditionalFormats,
+                    rowHeights:         d.rowHeights,
+                    colWidths:          d.colWidths,
+                })),
+                // Legacy compat: first range inline
+                range: { startRow: range.startRow, endRow: range.endRow, startCol: range.startCol, endCol: range.endCol },
+                cells:              data.cells,
+                borders:            data.borders,
+                merges:             data.merges,
+                dataValidations:    data.dataValidations,
+                conditionalFormats: data.conditionalFormats,
+                rowHeights:         data.rowHeights,
+                colWidths:          data.colWidths,
+            });
+        }
         return JSON.stringify({
             version: 3,
             source: 'plainTab',
@@ -228,12 +267,12 @@ class ClipboardManager {
         });
     }
 
-    /** @returns {{ cells, borders, merges, dataValidations, conditionalFormats, rowHeights, colWidths, rowCount, colCount, fingerprint } | null} */
+    /** @returns {{ cells, borders, merges, dataValidations, conditionalFormats, rowHeights, colWidths, rowCount, colCount, fingerprint, multiRange?, ranges? } | null} */
     #parseInternalJSON(jsonStr) {
         try {
             const json = JSON.parse(jsonStr);
             if (json.source !== 'plainTab' || !Array.isArray(json.cells)) return null;
-            return {
+            const base = {
                 cells:              json.cells,
                 borders:            json.borders            || [],
                 merges:             json.merges             || [],
@@ -245,6 +284,24 @@ class ClipboardManager {
                 colCount:           json.cells[0]?.length   || 0,
                 fingerprint:        json.fingerprint        || null,
             };
+            if (json.multiRange && Array.isArray(json.ranges)) {
+                base.multiRange = true;
+                base.ranges = json.ranges.map(item => ({
+                    range: item.range,
+                    data: {
+                        cells:              item.cells,
+                        borders:            item.borders            || [],
+                        merges:             item.merges             || [],
+                        dataValidations:    item.dataValidations    || [],
+                        conditionalFormats: item.conditionalFormats || [],
+                        rowHeights:         item.rowHeights         || null,
+                        colWidths:          item.colWidths          || null,
+                        rowCount:           item.cells.length,
+                        colCount:           item.cells[0]?.length   || 0,
+                    },
+                }));
+            }
+            return base;
         } catch (_) {
             return null;
         }
@@ -1019,7 +1076,8 @@ class ClipboardManager {
      * @param {'full'|'values'|'formulas'|'formatting'|'valuesFormat'|'formulasFormat'} [mode]
      */
     pasteFromEvent(clipboardData, sheetStore, session, ydoc, mode = 'full') {
-        const range = getSelectionState()?.range;
+        const anchor = getSelectionState()?.anchor;
+        const range  = getSelectionState()?.range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
         if (!range || !sheetStore) return;
 
         const plainTabJson     = clipboardData.getData(PLAINTAB_MIME);
@@ -1074,7 +1132,11 @@ class ClipboardManager {
         }
 
         ydoc?.transact(() => {
-            this.applyPaste(sheetStore, session, data, range, mode, isInternal);
+            if (data.multiRange && data.ranges?.length > 1) {
+                this.#applyMultiRangePaste(sheetStore, session, data.ranges, range, mode, isInternal);
+            } else {
+                this.applyPaste(sheetStore, session, data, range, mode, isInternal);
+            }
         });
 
         // Cut source was already cleared in cut(); nothing to do here.
@@ -1099,7 +1161,8 @@ class ClipboardManager {
      * @param {'full'|'values'|'formulas'|'formatting'|'valuesFormat'|'formulasFormat'} [mode]
      */
     async paste(sheetStore, session, ydoc, mode = 'full') {
-        const range = getSelectionState()?.range;
+        const anchor = getSelectionState()?.anchor;
+        const range  = getSelectionState()?.range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
         if (!range || !sheetStore) return;
 
         let data       = null;
@@ -1129,12 +1192,35 @@ class ClipboardManager {
         }
 
         ydoc?.transact(() => {
-            this.applyPaste(sheetStore, session, data, range, mode, isInternal);
+            if (data.multiRange && data.ranges?.length > 1) {
+                this.#applyMultiRangePaste(sheetStore, session, data.ranges, range, mode, isInternal);
+            } else {
+                this.applyPaste(sheetStore, session, data, range, mode, isInternal);
+            }
         });
 
         if (isInternal && this.clipboardType === 'cut') {
             this.clipboardData = null;
             this.clipboardType = null;
+        }
+    }
+
+    /**
+     * Paste multiple ranges relative to the paste target's top-left corner.
+     * Each source range is offset by (target.startRow - firstSrc.startRow, ...).
+     */
+    #applyMultiRangePaste(sheetStore, session, rangeDataList, targetRange, mode, isInternal) {
+        const firstSrc = rangeDataList[0].range;
+        const offsetRow = targetRange.startRow - firstSrc.startRow;
+        const offsetCol = targetRange.startCol - firstSrc.startCol;
+        for (const { range: srcRange, data } of rangeDataList) {
+            const destRange = {
+                startRow: srcRange.startRow + offsetRow,
+                endRow:   srcRange.endRow   + offsetRow,
+                startCol: srcRange.startCol + offsetCol,
+                endCol:   srcRange.endCol   + offsetCol,
+            };
+            this.applyPaste(sheetStore, session, data, destRange, mode, isInternal);
         }
     }
 
@@ -1274,17 +1360,28 @@ class ClipboardManager {
         const destStartCol  = targetRange.startCol;
 
         // ── Table paste path ──────────────────────────────────────────────────
-        // If the target cell is inside a table, hand off to table.pasteRows()
-        // instead of writing values into sheet cells directly.
+        // Entry row → insert clipboard rows as new table rows.
+        // Data row  → overwrite cells in place (append overflow rows at bottom).
         const tableManager = session?.renderContext?.tableManager;
         if (tableManager) {
             const info = tableManager.getCellInfo(destStartRow, destStartCol);
-            if (info?.table && (info.rowType === 'entry' || info.rowType === 'data')) {
+            if (info?.table) {
                 const rows2D = cells.map(/** @param {any[]} row */ row =>
                     row.map(/** @param {any} cell */ cell => String(cell?.displayValue ?? cell?.v ?? ''))
                 );
-                const startColOffset = Math.max(0, destStartCol - info.table.startCol);
-                info.table.pasteRows(rows2D, startColOffset);
+                const absColOffset = Math.max(0, destStartCol - info.table.startCol);
+                if (info.rowType === 'entry') {
+                    // pasteRows maps into entryCols[], so count only non-formula
+                    // columns before the clicked position as the start offset.
+                    const entryColOffset = info.table.columns
+                        .slice(0, absColOffset)
+                        .filter(/** @param {any} c */ c => !c.isNonEntry).length;
+                    info.table.pasteRows(rows2D, entryColOffset);
+                } else if (info.rowType === 'data') {
+                    // updateRows uses this.columns[] (all cols) internally,
+                    // so the absolute offset is correct.
+                    info.table.updateRows(rows2D, info.dataIndex, absColOffset);
+                }
                 return;
             }
         }

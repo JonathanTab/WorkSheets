@@ -432,14 +432,6 @@ export class CanvasRenderer {
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
             ctx.fillText(String(value), snap(x + 4), textY, width - 8);
-        } else {
-            // Column-name placeholder (italic + muted)
-            const placeholderFont = `italic 12px ${this.#theme.defaultFontFamily}`;
-            if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
-            ctx.fillStyle = this.#theme.entryPlaceholderText;
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'left';
-            ctx.fillText(col?.name ?? '', snap(x + 4), textY);
         }
     }
 

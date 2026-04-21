@@ -14,70 +14,62 @@
     // Get current selection - use effectiveRange to support all selection modes
     // (range, rows, cols, all) instead of just 'range' mode
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
+    // IMPORTANT: Explicitly read each piece of reactive state to establish dependency
+    // tracking. effectiveRange() / allRanges are plain getters — Svelte won't
+    // auto-track their internal reads, so we touch the state they depend on here.
     let selection = $derived.by(() => {
         const rowCount = sheetStore?.rowCount;
         const colCount = sheetStore?.colCount;
         if (!rowCount || !colCount) return null;
-
-        // IMPORTANT: Explicitly read reactive state to establish dependency tracking.
-        // effectiveRange() is a regular method, so Svelte won't auto-track its internal reads.
-        const mode = selectionState.selectionMode;
-        const anchor = selectionState.anchor;
-        const focus = selectionState.focus;
-        const range = selectionState.range;
-        const selectedRows = selectionState.selectedRows;
-        const selectedCols = selectionState.selectedCols;
-
-        // Now call effectiveRange - dependencies are tracked above
+        selectionState.selectionMode;
+        selectionState.anchor;
+        selectionState.focus;
+        selectionState.range;
+        selectionState.selectedRows;
+        selectionState.selectedCols;
+        selectionState.extraRanges;
+        selectionState.extraRowRanges;
+        selectionState.extraColRanges;
         return selectionState.effectiveRange(rowCount, colCount);
     });
 
-    // Calculate stats from selection
+    // Calculate stats from all selected ranges
     let stats = $derived.by(() => {
-        if (!selection || !sheetStore) {
-            return null;
-        }
+        if (!selection || !sheetStore) return null;
 
-        // Read cellsVersion to establish dependency on cell changes (regular cells)
+        // Establish dependency on cell / table data changes
         sheetStore.cellsVersion;
-        // Read tableVersion to establish dependency on table data changes
         spreadsheetSession.tableManager?.tableVersion;
 
-        const { startRow, endRow, startCol, endCol } = selection;
-        const numbers = [];
+        const rowCount = sheetStore.rowCount;
+        const colCount = sheetStore.colCount;
+        const mode = selectionState.selectionMode;
 
-        // Collect all numeric values from selection
-        for (let row = startRow; row <= endRow; row++) {
-            for (let col = startCol; col <= endCol; col++) {
-                const value = spreadsheetSession.renderContext?.getDisplayValue(
-                    row,
-                    col,
-                );
-                const numValue = parseDisplayValue(value);
-                if (!isNaN(numValue)) {
-                    numbers.push(numValue);
+        // Collect ranges to scan: for range mode use allRanges, otherwise single effectiveRange
+        const ranges = mode === 'range'
+            ? selectionState.allRanges
+            : [selectionState.effectiveRange(rowCount, colCount)];
+
+        const numbers = [];
+        for (const rng of ranges) {
+            if (!rng) continue;
+            const { startRow, endRow, startCol, endCol } = rng;
+            for (let row = startRow; row <= endRow; row++) {
+                for (let col = startCol; col <= endCol; col++) {
+                    const value = spreadsheetSession.renderContext?.getDisplayValue(row, col);
+                    const numValue = parseDisplayValue(value);
+                    if (!isNaN(numValue)) numbers.push(numValue);
                 }
             }
         }
 
         if (numbers.length === 0) {
-            return {
-                sum: 0,
-                average: 0,
-                min: 0,
-                max: 0,
-                count: 0,
-                hasNumbers: false,
-            };
+            return { sum: 0, average: 0, min: 0, max: 0, count: 0, hasNumbers: false };
         }
 
         const sum = numbers.reduce((a, b) => a + b, 0);
         const count = numbers.length;
-        const average = sum / count;
-        const min = Math.min(...numbers);
-        const max = Math.max(...numbers);
-
-        return { sum, average, min, max, count, hasNumbers: true };
+        return { sum, average: sum / count, min: Math.min(...numbers), max: Math.max(...numbers), count, hasNumbers: true };
     });
 
     // Has active selection

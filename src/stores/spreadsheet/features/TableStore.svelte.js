@@ -251,6 +251,8 @@ export class TableStore {
      *   id: string, name: string, type: string, typeConfig: Object|null, required: boolean,
      *   hAlign: 'left'|'center'|'right',
      *   textColor: string|null, bgColor: string|null,
+     *   bold: boolean|null, italic: boolean|null, underline: boolean|null,
+     *   fontSize: number|null, fontFamily: string|null,
      *   width: number|null,
      *   isNonEntry: boolean, formula: string|null,
      *   conditionalFormats: Array<{condition:string,value:any,style:{backgroundColor?:string,color?:string,bold?:boolean}}>
@@ -292,7 +294,9 @@ export class TableStore {
                     case "=":  return v == fv;
                     case "<>": return v != fv;
                     case ">": case "<": case ">=": case "<=": {
-                        const vd = Date.parse(v), fd = Date.parse(fv);
+                        const tryDate = typeof v === 'string' && typeof fv === 'string' && v.includes('-') && fv.includes('-');
+                        const vd = tryDate ? Date.parse(v) : NaN;
+                        const fd = tryDate ? Date.parse(fv) : NaN;
                         const lv = (!isNaN(vd) && !isNaN(fd)) ? vd : Number(v);
                         const lf = (!isNaN(vd) && !isNaN(fd)) ? fd : Number(fv);
                         if (f.op === ">")  return lv > lf;
@@ -436,6 +440,11 @@ export class TableStore {
                 textColor: raw.textColor ?? null,
                 bgColor: raw.bgColor ?? null,
                 width: raw.width ?? null,
+                bold: raw.bold ?? null,
+                italic: raw.italic ?? null,
+                underline: raw.underline ?? null,
+                fontSize: raw.fontSize ?? null,
+                fontFamily: raw.fontFamily ?? null,
                 isNonEntry: raw.isNonEntry ?? false,
                 formula: raw.formula ?? null,
                 conditionalFormats: Array.isArray(raw.conditionalFormats) ? raw.conditionalFormats : [],
@@ -577,17 +586,35 @@ export class TableStore {
      * @param {number} displayIndex
      */
     deleteRow(displayIndex) {
+        this.deleteRows([displayIndex]);
+    }
+
+    /**
+     * Delete multiple rows by their display indices (in sortedFilteredRows).
+     * All deletions happen in a single Yjs transaction.
+     * @param {number[]} displayIndices
+     */
+    deleteRows(displayIndices) {
         const rowArr = this.#tableYMap.get("rows");
-        if (!rowArr) return;
+        if (!rowArr || !displayIndices.length) return;
 
-        const sortedRow = this.sortedFilteredRows[displayIndex];
-        if (!sortedRow) return;
+        // Map display indices → raw row objects, then raw row objects → raw indices.
+        // Collecting objects first avoids index-shift problems when mapping back.
+        const rowObjects = displayIndices
+            .map((di) => this.sortedFilteredRows[di])
+            .filter(Boolean);
 
-        const rawIndex = this.rows.findIndex((r) => r === sortedRow);
-        if (rawIndex < 0) return;
+        const rawIndices = rowObjects
+            .map((r) => this.rows.findIndex((raw) => raw === r))
+            .filter((i) => i >= 0);
+
+        // Deduplicate and sort descending so each deletion doesn't shift later indices.
+        const sorted = [...new Set(rawIndices)].sort((a, b) => b - a);
 
         this.#ydoc.transact(() => {
-            rowArr.delete(rawIndex, 1);
+            for (const rawIndex of sorted) {
+                rowArr.delete(rawIndex, 1);
+            }
         });
     }
 
@@ -968,6 +995,67 @@ export class TableStore {
             }
             default:
                 return raw;
+        }
+    }
+
+    /**
+     * Paste into existing data rows, overwriting cells in place.
+     *
+     * Maps source columns positionally from startColOffset into ALL table columns
+     * (including formula columns). Formula columns map to null and are skipped,
+     * so pasting across a formula column naturally fills the next entry column.
+     * Rows that extend past the last data row are appended as new rows.
+     *
+     * Delegates per-cell updates to updateCell() so the code path is identical
+     * to keyboard editing (same Yjs mutation, same cumsum invalidation).
+     *
+     * @param {string[][]} rows2D
+     * @param {number}     startDisplayIndex  display index of the first target row
+     * @param {number}     [startColOffset]   absolute offset into this.columns (0 = first col)
+     */
+    updateRows(rows2D, startDisplayIndex, startColOffset = 0) {
+        if (!rows2D?.length) return;
+
+        // Build colMap using ALL columns (inc. formula) so positions align with
+        // what the user clicked. Formula columns resolve to null and are skipped.
+        const tableColsFromOffset = this.columns.slice(startColOffset);
+        const colMap = rows2D[0].map((_, i) => {
+            const col = tableColsFromOffset[i];
+            return (col && !col.isNonEntry) ? col : null;
+        });
+
+        const rowArr = this.#tableYMap.get("rows");
+        if (!rowArr) return;
+
+        for (let i = 0; i < rows2D.length; i++) {
+            const srcRow = rows2D[i];
+            if (srcRow.every(cell => !String(cell ?? '').trim())) continue;
+
+            const displayIndex = startDisplayIndex + i;
+
+            if (displayIndex < this.sortedFilteredRows.length) {
+                // Update existing row via updateCell — same path as keyboard editing
+                for (let j = 0; j < srcRow.length; j++) {
+                    const colDef = colMap[j];
+                    if (!colDef) continue;
+                    const raw = String(srcRow[j] ?? '').trim();
+                    if (!raw) continue;
+                    this.updateCell(displayIndex, colDef.id, this.#parseValueForType(raw, colDef.type));
+                }
+            } else {
+                // Overflow row — append as new
+                this.#ydoc.transact(() => {
+                    const yRow = new Y.Map();
+                    for (let j = 0; j < srcRow.length; j++) {
+                        const colDef = colMap[j];
+                        if (!colDef) continue;
+                        const raw = String(srcRow[j] ?? '').trim();
+                        if (!raw) continue;
+                        yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                    }
+                    rowArr.push([yRow]);
+                });
+            }
         }
     }
 

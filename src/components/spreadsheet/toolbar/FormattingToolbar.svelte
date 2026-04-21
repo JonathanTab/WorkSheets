@@ -72,9 +72,48 @@
         return { startRow, endRow, startCol, endCol };
     });
 
+    /**
+     * Returns { table, colId, colDef } when the anchor cell is inside a table,
+     * otherwise null.  Reads table.columns to establish reactivity so that
+     * selectedFormatting re-derives whenever any column property changes.
+     */
+    function getTableColContext() {
+        const renderContext = spreadsheetSession.renderContext;
+        const anchor = selectionState.anchor;
+        if (!anchor || !renderContext) return null;
+        const cellType = renderContext.getCellType(anchor.row, anchor.col);
+        if (
+            cellType !== CELL_TYPE.TABLE_HEADER &&
+            cellType !== CELL_TYPE.TABLE_DATA &&
+            cellType !== CELL_TYPE.TABLE_ENTRY
+        ) return null;
+        const info = renderContext.tableManager?.getCellInfo(anchor.row, anchor.col);
+        if (!info?.table || !info?.colDef) return null;
+        // Look up the live column object from table.columns so we track reactivity
+        const liveCol = info.table.columns.find(c => c.id === info.colDef.id) ?? info.colDef;
+        return { table: info.table, colId: liveCol.id, colDef: liveCol };
+    }
+
     let selectedFormatting = $derived.by(() => {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return null;
+
+        // Table column context: read formatting directly from colDef
+        const tcc = getTableColContext();
+        if (tcc) {
+            const cd = tcc.colDef;
+            return {
+                bold: cd.bold ?? null,
+                italic: cd.italic ?? null,
+                underline: cd.underline ?? null,
+                fontSize: cd.fontSize ?? null,
+                fontFamily: cd.fontFamily ?? null,
+                color: cd.textColor ?? null,
+                backgroundColor: cd.bgColor ?? null,
+                horizontalAlign: cd.hAlign ?? null,
+                verticalAlign: null,
+            };
+        }
 
         // Touch version counters so this derived re-runs on any meta change
         const _rowMetaVer = sheetStore.rowMetaVersion;
@@ -208,6 +247,24 @@
             }
         }
 
+        // Table column context: route all formatting to the column def
+        const tcc = getTableColContext();
+        if (tcc) {
+            const colPropMap = {
+                bold: 'bold',
+                italic: 'italic',
+                underline: 'underline',
+                fontSize: 'fontSize',
+                fontFamily: 'fontFamily',
+                color: 'textColor',
+                backgroundColor: 'bgColor',
+                horizontalAlign: 'hAlign',
+            };
+            const colProp = colPropMap[property];
+            if (colProp) tcc.table.updateColumnDef(tcc.colId, { [colProp]: value });
+            return;
+        }
+
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
 
@@ -215,43 +272,54 @@
         const rowCount = sheetStore.rowCount;
         const colCount = sheetStore.colCount;
 
-        if (mode === "rows" && selectionState.selectedRows) {
-            const { start, end } = selectionState.selectedRows;
+        if (mode === "rows") {
+            const rowRanges = selectionState.allRowRanges;
+            if (rowRanges.length === 0) return;
             spreadsheetSession.ydoc?.transact(() => {
-                for (let r = start; r <= end; r++) {
-                    sheetStore.setRowFormatting?.(r, { [property]: value });
+                for (const { start, end } of rowRanges) {
+                    for (let r = start; r <= end; r++) {
+                        sheetStore.setRowFormatting?.(r, { [property]: value });
+                    }
                 }
             });
             return;
         }
 
-        if (mode === "cols" && selectionState.selectedCols) {
-            const { start, end } = selectionState.selectedCols;
+        if (mode === "cols") {
+            const colRanges = selectionState.allColRanges;
+            if (colRanges.length === 0) return;
             spreadsheetSession.ydoc?.transact(() => {
-                for (let c = start; c <= end; c++) {
-                    sheetStore.setColFormatting?.(c, { [property]: value });
+                for (const { start, end } of colRanges) {
+                    for (let c = start; c <= end; c++) {
+                        sheetStore.setColFormatting?.(c, { [property]: value });
+                    }
                 }
             });
             return;
         }
 
-        // Range / all mode — iterate cells, skip table cells
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
+        // Range / all mode — iterate all selected ranges, skip table cells
+        const ranges = mode === 'all'
+            ? [selectionState.effectiveRange(rowCount, colCount)]
+            : selectionState.allRanges;
+        if (ranges.length === 0 || !ranges[0]) return;
 
         const renderContext = spreadsheetSession.renderContext;
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (
-                        ct === CELL_TYPE.TABLE_HEADER ||
-                        ct === CELL_TYPE.TABLE_ENTRY ||
-                        ct === CELL_TYPE.TABLE_DATA ||
-                        ct === CELL_TYPE.VIEWPORT_OCCUPIED
-                    )
-                        continue;
-                    sheetStore.setCellProperties(r, c, { [property]: value });
+            for (const eff of ranges) {
+                if (!eff) continue;
+                for (let r = eff.startRow; r <= eff.endRow; r++) {
+                    for (let c = eff.startCol; c <= eff.endCol; c++) {
+                        const ct = renderContext?.getCellType(r, c);
+                        if (
+                            ct === CELL_TYPE.TABLE_HEADER ||
+                            ct === CELL_TYPE.TABLE_ENTRY ||
+                            ct === CELL_TYPE.TABLE_DATA ||
+                            ct === CELL_TYPE.VIEWPORT_OCCUPIED
+                        )
+                            continue;
+                        sheetStore.setCellProperties(r, c, { [property]: value });
+                    }
                 }
             }
         });
@@ -337,6 +405,13 @@
     }
 
     function handleCellTypeChange(config) {
+        // Table column context: route type config to the column def
+        const tcc = getTableColContext();
+        if (tcc) {
+            tcc.table.updateColumnTypeConfig(tcc.colId, config);
+            return;
+        }
+
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
 
@@ -443,11 +518,27 @@
     // Has selection (works for all selectionMode values)
     let hasSelection = $derived(selectionState.anchor !== null);
 
+    // When a table column is selected, expose its typeConfig for the CellTypeConfigurator
+    let tableColTypeConfig = $derived.by(() => {
+        const tcc = getTableColContext();
+        if (!tcc) return null;
+        return tcc.colDef.typeConfig ?? (tcc.colDef.type ? { type: tcc.colDef.type } : null);
+    });
+
     // Decimal adjustment for number formats
     function adjustDecimals(delta) {
-        const sheetStore = spreadsheetSession.activeSheetStore;
         const anchor = selectionState.anchor;
-        if (!sheetStore || !anchor) return;
+        if (!anchor) return;
+        // Table column: read config from colDef
+        const tcc = getTableColContext();
+        if (tcc) {
+            const config = tcc.colDef.typeConfig ?? { type: "number", decimals: 2 };
+            const current = config.decimals ?? 2;
+            handleCellTypeChange({ ...config, type: config.type || "number", decimals: Math.max(0, current + delta) });
+            return;
+        }
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
         const cell = sheetStore.getCell(anchor.row, anchor.col);
         const config = cell?.typeConfig ?? { type: "number", decimals: 2 };
         const current = config.decimals ?? 2;
@@ -530,7 +621,10 @@
     <!-- Cell Type -->
     <div class="toolbar-group">
         <MenuDropdown icon="123" title="Cell Type">
-            <CellTypeConfigurator />
+            <CellTypeConfigurator
+                controlledConfig={tableColTypeConfig}
+                onControlledChange={tableColTypeConfig !== null ? handleCellTypeChange : null}
+            />
         </MenuDropdown>
     </div>
 

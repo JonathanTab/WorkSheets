@@ -434,11 +434,35 @@ export function buildPaneData(params) {
                     item.tableHeaderInfo = {
                         filterActive: !!(colDef?.id && tableCellInfo.table.filters?.[colDef.id]),
                     };
+                    // Column-level formatting overrides for header
+                    if (colDef?.bgColor) item.bgColor = colDef.bgColor;
+                    if (colDef?.textColor) item.textColor = colDef.textColor;
+                    // @ts-ignore — new colDef fields not in JSDoc Object type
+                    if (colDef?.bold === false) item.bold = false;
+                    // @ts-ignore
+                    if (colDef?.italic) item.italic = true;
+                    // @ts-ignore
+                    if (colDef?.underline) item.underline = true;
+                    // @ts-ignore
+                    if (colDef?.fontSize) item.fontSize = colDef.fontSize;
+                    // @ts-ignore
+                    if (colDef?.fontFamily) item.fontFamily = colDef.fontFamily;
+                    if (colDef?.hAlign) item.hAlign = colDef.hAlign;
 
                 } else if (cellType === CELL_TYPE.TABLE_DATA) {
                     // Column-level color overrides (lower priority than sheet formatting applied below)
                     if (colDef?.bgColor) item.bgColor = colDef.bgColor;
                     if (colDef?.textColor) item.textColor = colDef.textColor;
+                    // @ts-ignore — new colDef fields not in JSDoc Object type
+                    if (colDef?.bold) item.bold = true;
+                    // @ts-ignore
+                    if (colDef?.italic) item.italic = true;
+                    // @ts-ignore
+                    if (colDef?.underline) item.underline = true;
+                    // @ts-ignore
+                    if (colDef?.fontSize) item.fontSize = colDef.fontSize;
+                    // @ts-ignore
+                    if (colDef?.fontFamily) item.fontFamily = colDef.fontFamily;
                     if (colDef?.isNonEntry) item.isFormulaCol = true;
                     // Subtle zebra striping — only when no explicit bg set
                     if (tableCellInfo.dataIndex % 2 === 0 && !item.bgColor) item.zebraRow = true;
@@ -463,11 +487,20 @@ export function buildPaneData(params) {
                         item.renderType = 'text';
                         item.placeholderText = 'fx';
                         item.isFormulaCol = true;
-                    } else if (!item.displayValue && !item.rawValue) {
-                        // Empty entry cell — show column name as placeholder hint
-                        item.placeholderText = colDef?.name ?? '';
                     }
-                    // Column-level alignment override (overrides type default, overridden by sheet formatting below)
+                    // Column-level formatting overrides
+                    if (colDef?.bgColor) item.bgColor = colDef.bgColor;
+                    if (colDef?.textColor) item.textColor = colDef.textColor;
+                    // @ts-ignore — new colDef fields not in JSDoc Object type
+                    if (colDef?.bold) item.bold = true;
+                    // @ts-ignore
+                    if (colDef?.italic) item.italic = true;
+                    // @ts-ignore
+                    if (colDef?.underline) item.underline = true;
+                    // @ts-ignore
+                    if (colDef?.fontSize) item.fontSize = colDef.fontSize;
+                    // @ts-ignore
+                    if (colDef?.fontFamily) item.fontFamily = colDef.fontFamily;
                     // @ts-ignore — hAlign is in CellPaintItem typedef; TS JSDoc checker false positive
                     if (colDef?.hAlign) item.hAlign = colDef.hAlign;
                 }

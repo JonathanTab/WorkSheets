@@ -468,6 +468,35 @@
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
     let renderContext = $derived(spreadsheetSession.renderContext);
     let renderPlan = $derived(virtualizer ? virtualizer.renderPlan : null);
+
+    /**
+     * Map from grid row → Y offset within the sticky table header band.
+     * A row appears here when its table's header has scrolled past the frozen band
+     * but the table still has data rows in view. Used by cellContainerTop() so
+     * that the anchor border, editor, and dropdown overlays render at the correct
+     * sticky position rather than off-screen.
+     *   row → 0             header row (top of sticky band)
+     *   row → headerHeightPx  entry row (just below header in sticky band)
+     */
+    let stickyRowPositions = $derived.by(() => {
+        const result = new Map();
+        if (!renderContext || !virtualizer || !renderPlan) return result;
+        // Track table structure changes so we recompute when tables are added/removed
+        const _tableVer = renderContext?.tableManager?.tableVersion;
+        const headers = renderContext.getStickyTableHeaders(
+            virtualizer.scrollTop,
+            renderPlan.frozenHeight,
+            virtualizer.rowMetrics,
+            virtualizer.colMetrics,
+        );
+        for (const h of headers) {
+            result.set(h.table.startRow, 0);
+            if (h.showEntry) {
+                result.set(h.table.startRow + 1, h.headerHeightPx);
+            }
+        }
+        return result;
+    });
     let selection = $derived(selectionState.range);
     let anchor = $derived(selectionState.anchor);
     let isFormulaEditMode = $derived(editSessionState.isFormulaMode);
@@ -593,6 +622,58 @@
         if (virtualizer) hitTestEngine.setVirtualizer(virtualizer);
     });
 
+    /**
+     * Hit-test with sticky table header awareness.
+     * When the click coordinates land in the sticky table header/entry overlay
+     * (painted at the top of the scrollable body area when those rows have scrolled
+     * past), remap the result to the actual table row so all interaction logic
+     * (sort, filter, entry editing) works correctly.
+     */
+    function doHitTest(localX, localY) {
+        if (renderContext && virtualizer && renderPlan) {
+            const contentX = localX - HEADER_WIDTH;
+            const contentY = localY - HEADER_HEIGHT;
+            const frozenH = renderPlan.frozenHeight;
+
+            // Sticky area starts right at the bottom edge of the frozen band
+            if (contentY >= frozenH) {
+                const stickyHeaders = renderContext.getStickyTableHeaders(
+                    virtualizer.scrollTop,
+                    frozenH,
+                    virtualizer.rowMetrics,
+                    virtualizer.colMetrics,
+                );
+
+                for (const h of stickyHeaders) {
+                    const stickyH = h.headerHeightPx + (h.showEntry ? h.entryHeightPx : 0);
+                    if (contentY >= frozenH + stickyH) continue;
+
+                    const tableLeft = h.leftPx - virtualizer.scrollLeft;
+                    if (contentX < tableLeft || contentX >= tableLeft + h.widthPx) continue;
+
+                    // Determine row: header or entry
+                    const row = (contentY < frozenH + h.headerHeightPx)
+                        ? h.table.startRow
+                        : h.table.startRow + 1;
+
+                    // Determine column from per-column widths
+                    let col = h.table.endCol;
+                    let xCursor = tableLeft;
+                    for (let i = 0; i < h.colWidths.length; i++) {
+                        if (contentX < xCursor + h.colWidths[i]) {
+                            col = h.table.startCol + i;
+                            break;
+                        }
+                        xCursor += h.colWidths[i];
+                    }
+
+                    return { row, col, region: 'cell', pane: 'sticky' };
+                }
+            }
+        }
+        return hitTestEngine.hitTest(localX, localY);
+    }
+
     // ─── Canvas setup & resize ─────────────────────────────────────────────────
     $effect(() => {
         if (!canvasEl || !virtualizer) return;
@@ -658,6 +739,7 @@
         const _borders = sheetStore?.bordersVersion;
         const _rowMetaVer = sheetStore?.rowMetaVersion;
         const _colMetaVer = sheetStore?.colMetaVersion;
+        const _cfVer = sheetStore?.cfVersion;
         const _mergeVer = renderContext?.mergeEngine?.version;
         const _tableVer = renderContext?.tableManager?.tableVersion;
         const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
@@ -1218,6 +1300,13 @@
         if (row < virtualizer.frozenRows) {
             return HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(row);
         }
+        // If this row is currently in the sticky table header overlay, return its
+        // position within the sticky band so that editor/anchor/dropdown overlays
+        // appear at the correct on-screen location instead of off-screen.
+        const sp = stickyRowPositions;
+        if (sp.has(row)) {
+            return HEADER_HEIGHT + renderPlan.frozenHeight + sp.get(row);
+        }
         return (
             HEADER_HEIGHT +
             virtualizer.rowMetrics.offsetOf(row) -
@@ -1598,14 +1687,10 @@
                     newRow = Math.max(0, Math.min(rowCount - 1, newRow));
                     newCol = Math.max(0, Math.min(colCount - 1, newCol));
                     const snapped = snapToMergePrimary(newRow, newCol);
-                    selectionState.anchor = {
-                        row: snapped.row,
-                        col: snapped.col,
-                    };
-                    selectionState.focus = {
-                        row: snapped.row,
-                        col: snapped.col,
-                    };
+                    selectionState.extraRanges = [];
+                    selectionState.primaryCell = null;
+                    selectionState.anchor = { row: snapped.row, col: snapped.col };
+                    selectionState.focus  = { row: snapped.row, col: snapped.col };
                     return;
                 }
             }
@@ -1655,7 +1740,7 @@
         if (touchHandled) return; // suppress synthetic mouse events after touch
         if (e.button !== 0) return;
         const { localX, localY } = getLocalCoords(e);
-        const hit = hitTestEngine.hitTest(localX, localY);
+        const hit = doHitTest(localX, localY);
 
         switch (hit.region) {
             case "corner":
@@ -1684,7 +1769,7 @@
     function handleEventLayerMouseMove(e) {
         if (touchHandled) return;
         const { localX, localY } = getLocalCoords(e);
-        const hit = hitTestEngine.hitTest(localX, localY);
+        const hit = doHitTest(localX, localY);
         currentCursor = hitTestEngine.getCursor(hit);
 
         if (isFormulaEditMode && isSelectingRange && hit.region === "cell") {
@@ -1713,7 +1798,7 @@
 
     function handleEventLayerDblClick(e) {
         const { localX, localY } = getLocalCoords(e);
-        const hit = hitTestEngine.hitTest(localX, localY);
+        const hit = doHitTest(localX, localY);
         if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
             handleCellDoubleClick(hit.row, hit.col);
         }
@@ -1721,7 +1806,7 @@
 
     function handleEventLayerContextMenu(e) {
         const { localX, localY } = getLocalCoords(e);
-        const hit = hitTestEngine.hitTest(localX, localY);
+        const hit = doHitTest(localX, localY);
         if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
             handleCellContextMenu(hit.row, hit.col, e);
         } else if (hit.region === "rowHeader") {
@@ -1771,7 +1856,7 @@
                 clientX: savedClientX,
                 clientY: savedClientY,
             });
-            const hit = hitTestEngine.hitTest(localX, localY);
+            const hit = doHitTest(localX, localY);
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
                 const snappedHit = snapToMergePrimary(hit.row, hit.col);
                 if (!isSelected(snappedHit.row, snappedHit.col)) {
@@ -1794,7 +1879,7 @@
         // If in long-press-drag mode, extend selection instead of scrolling
         if (isLongPressDragging) {
             const { localX, localY } = getTouchLocalCoords(touch);
-            const hit = hitTestEngine.hitTest(localX, localY);
+            const hit = doHitTest(localX, localY);
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
                 selectionState.extendSelection(hit.row, hit.col);
             }
@@ -1852,7 +1937,7 @@
             return;
 
         const { localX, localY } = getTouchLocalCoords(touch);
-        const hit = hitTestEngine.hitTest(localX, localY);
+        const hit = doHitTest(localX, localY);
 
         // Double-tap detection
         const now = Date.now();
@@ -1926,16 +2011,22 @@
     }
 
     function handleRowHeaderMouseDown(row, e) {
+        const isCtrl = e?.ctrlKey || e?.metaKey;
         if (e?.shiftKey && selectionState.selectionMode === "rows") {
             selectionState.extendRowSelection(row);
+        } else if (isCtrl && selectionState.selectionMode === "rows") {
+            selectionState.addRowSelection(row);
         } else {
             selectionState.startRowDrag(row);
         }
     }
 
     function handleColHeaderMouseDown(col, e) {
+        const isCtrl = e?.ctrlKey || e?.metaKey;
         if (e?.shiftKey && selectionState.selectionMode === "cols") {
             selectionState.extendColSelection(col);
+        } else if (isCtrl && selectionState.selectionMode === "cols") {
+            selectionState.addColSelection(col);
         } else {
             selectionState.startColDrag(col);
         }
@@ -2115,10 +2206,15 @@
         }
 
         // ── Regular cell ──────────────────────────────────────────────────────
+        const isCtrl = e.ctrlKey || e.metaKey;
         if (e.shiftKey && anchor) {
             // Snap shift-click to merge boundary too (extend to the primary cell)
             const snapped = snapToMergePrimary(row, col);
             selectionState.extendSelection(snapped.row, snapped.col);
+        } else if (isCtrl) {
+            // Ctrl+click: add a new non-contiguous range
+            const snapped = snapToMergePrimary(row, col);
+            selectionState.startAdditionalSelection(snapped.row, snapped.col);
         } else {
             // Handle special cell type clicks (checkbox toggle, rating)
             if (handleRegularCellClick(row, col, e)) return;
@@ -3374,6 +3470,14 @@
             scrollEl.scrollLeft = scrollLeft;
     }
 
+    function scrollToPrimaryCell() {
+        const pc = selectionState.primaryCell ?? selectionState.anchor;
+        if (!scrollEl || !pc || !virtualizer) return;
+        const { scrollTop, scrollLeft } = virtualizer.scrollToCell(pc.row, pc.col);
+        if (scrollEl.scrollTop !== scrollTop) scrollEl.scrollTop = scrollTop;
+        if (scrollEl.scrollLeft !== scrollLeft) scrollEl.scrollLeft = scrollLeft;
+    }
+
     function scrollToFocus() {
         if (!scrollEl || !virtualizer) return;
         const focus = selectionState.focus;
@@ -3775,8 +3879,13 @@
             }
             case "Tab":
                 focusedDropdownCell = null;
-                moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
-                scrollToAnchor();
+                if (selectionState.hasTabSelection) {
+                    e.shiftKey ? selectionState.tabPrev() : selectionState.tabNext();
+                    scrollToPrimaryCell();
+                } else {
+                    moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
+                    scrollToAnchor();
+                }
                 e.preventDefault();
                 break;
             case "Enter":
@@ -4164,7 +4273,7 @@
 
         // Table data cell: update via table store
         const cellType = renderContext?.getCellType(anchor.row, anchor.col);
-        if (cellType === CELL_TYPE.TABLE_DATA) {
+        if (cellType === CELL_TYPE.TABLE_DATA || cellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(
                 anchor.row,
                 anchor.col,
@@ -4176,8 +4285,12 @@
                     colType === "date"
                         ? `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`
                         : displayStr;
-                info.table.updateCell(info.dataIndex, info.colDef.id, val);
-                untrack(() => renderScheduler?.invalidateAll());
+                if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                    info.table.setEntryValue(info.colDef.id, val);
+                } else {
+                    info.table.updateCell(info.dataIndex, info.colDef.id, val);
+                    untrack(() => renderScheduler?.invalidateAll());
+                }
             }
             return;
         }
@@ -4236,17 +4349,35 @@
 
     function deleteSelectedRows() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        for (let row = eff.endRow; row >= eff.startRow; row--)
-            sheetStore.deleteRowAt(row);
+        const mode = selectionState.selectionMode;
+        // Collect all unique row indices across all selected ranges, then delete
+        // highest-to-lowest so indices don't shift as rows are removed.
+        const rows = new Set();
+        if (mode === 'rows') {
+            for (const r of selectionState.allRowRanges)
+                for (let i = r.start; i <= r.end; i++) rows.add(i);
+        } else {
+            const eff = selectionState.effectiveRange(rowCount, colCount);
+            if (!eff) return;
+            for (let i = eff.startRow; i <= eff.endRow; i++) rows.add(i);
+        }
+        const sorted = [...rows].sort((a, b) => b - a);
+        for (const row of sorted) sheetStore.deleteRowAt(row);
     }
     function deleteSelectedColumns() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        for (let col = eff.endCol; col >= eff.startCol; col--)
-            sheetStore.deleteColumnAt(col);
+        const mode = selectionState.selectionMode;
+        const cols = new Set();
+        if (mode === 'cols') {
+            for (const c of selectionState.allColRanges)
+                for (let i = c.start; i <= c.end; i++) cols.add(i);
+        } else {
+            const eff = selectionState.effectiveRange(rowCount, colCount);
+            if (!eff) return;
+            for (let i = eff.startCol; i <= eff.endCol; i++) cols.add(i);
+        }
+        const sorted = [...cols].sort((a, b) => b - a);
+        for (const col of sorted) sheetStore.deleteColumnAt(col);
     }
 
     // ─── Merge ────────────────────────────────────────────────────────────────
@@ -4276,13 +4407,42 @@
         );
     });
 
+    // Display indices of all table data rows covered by the current selection,
+    // including all non-contiguous ranges in a multi-selection.
+    let tableSelectedDataRows = $derived.by(() => {
+        if (!tableCellInfo || tableCellInfo.rowType !== "data" || !spreadsheetSession.tableManager) return [];
+        const table = tableCellInfo.table;
+        const mode = selectionState.selectionMode;
+        const indices = new Set();
+
+        // Collect row spans to scan from all active ranges
+        /** @type {{ startRow: number, endRow: number }[]} */
+        const spans = [];
+        if (mode === 'range') {
+            for (const rng of selectionState.allRanges) spans.push(rng);
+        } else if (mode === 'rows') {
+            for (const r of selectionState.allRowRanges) spans.push({ startRow: r.start, endRow: r.end });
+        } else {
+            const eff = selectionState.effectiveRange(rowCount, colCount);
+            if (eff) spans.push(eff);
+        }
+
+        for (const span of spans) {
+            for (let r = span.startRow; r <= span.endRow; r++) {
+                const info = spreadsheetSession.tableManager.getCellInfo(r, table.startCol);
+                if (info?.table === table && info.rowType === "data") indices.add(info.dataIndex);
+            }
+        }
+        return indices.size > 0 ? [...indices] : [tableCellInfo.dataIndex];
+    });
+
     function tableInsertRow() {
         if (tableCellInfo?.rowType === "data")
             tableCellInfo.table.insertRow({});
     }
     function tableDeleteRow() {
         if (tableCellInfo?.rowType === "data")
-            tableCellInfo.table.deleteRow(tableCellInfo.dataIndex);
+            tableCellInfo.table.deleteRows(tableSelectedDataRows);
     }
     function tableSortAsc() {
         if (tableCellInfo?.colDef)
@@ -4334,42 +4494,37 @@
         return "range";
     });
 
-    // Row/col counts for context menu labels (works for all modes)
+    // Row/col counts for context menu labels — sums across all selected ranges
     let effSelRowCount = $derived.by(() => {
-        if (
-            selectionState.selectionMode === "rows" &&
-            selectionState.selectedRows
-        )
-            return (
-                selectionState.selectedRows.end -
-                selectionState.selectedRows.start +
-                1
-            );
+        if (selectionState.selectionMode === "rows") {
+            return selectionState.allRowRanges.reduce((n, r) => n + r.end - r.start + 1, 0) || 1;
+        }
         if (selectionState.selectionMode === "all") return rowCount;
-        return selection ? selection.endRow - selection.startRow + 1 : 1;
+        // range mode: sum unique rows across all ranges
+        const rows = new Set();
+        for (const rng of selectionState.allRanges)
+            for (let r = rng.startRow; r <= rng.endRow; r++) rows.add(r);
+        return rows.size || (selection ? selection.endRow - selection.startRow + 1 : 1);
     });
     let effSelColCount = $derived.by(() => {
-        if (
-            selectionState.selectionMode === "cols" &&
-            selectionState.selectedCols
-        )
-            return (
-                selectionState.selectedCols.end -
-                selectionState.selectedCols.start +
-                1
-            );
+        if (selectionState.selectionMode === "cols") {
+            return selectionState.allColRanges.reduce((n, c) => n + c.end - c.start + 1, 0) || 1;
+        }
         if (selectionState.selectionMode === "all") return colCount;
-        return selection ? selection.endCol - selection.startCol + 1 : 1;
+        const cols = new Set();
+        for (const rng of selectionState.allRanges)
+            for (let c = rng.startCol; c <= rng.endCol; c++) cols.add(c);
+        return cols.size || (selection ? selection.endCol - selection.startCol + 1 : 1);
     });
 
     let isHeaderSelection = $derived(
         selectionType === "row" || selectionType === "column",
     );
 
-    let isTableSelection = $derived.by(() => {
-        if (!anchor) return false;
+    let tableSelectionRowType = $derived.by(() => {
+        if (!anchor) return null;
         const info = spreadsheetSession.renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
-        return info?.rowType === 'entry' || info?.rowType === 'data';
+        return (info?.rowType === 'entry' || info?.rowType === 'data') ? info.rowType : null;
     });
 
     function clearContents() {
@@ -4401,13 +4556,13 @@
             disabled: !hasAnySelection,
         },
         {
-            label: isTableSelection ? "Paste Rows" : "Paste",
+            label: tableSelectionRowType === 'entry' ? "Paste Rows" : "Paste",
             icon: pasteIcon,
             isSvgIcon: true,
             shortcut: "Ctrl+V",
             action: () => pasteSelection("full"),
         },
-        ...(!isHeaderSelection && !isTableSelection
+        ...(!isHeaderSelection && !tableSelectionRowType
             ? [
                   {
                       label: "Paste Special...",
@@ -4640,7 +4795,9 @@
                   ...(tableCellInfo.rowType === "data"
                       ? [
                             {
-                                label: "Delete This Row",
+                                label: tableSelectedDataRows.length > 1
+                                    ? `Delete ${tableSelectedDataRows.length} Rows`
+                                    : "Delete This Row",
                                 icon: trashIcon,
                                 isSvgIcon: true,
                                 action: tableDeleteRow,

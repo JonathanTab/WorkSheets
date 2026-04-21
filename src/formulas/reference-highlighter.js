@@ -7,7 +7,6 @@
 
 // Color palette for cell references (must match FormulaEditState)
 const REFERENCE_COLORS = [
-    //'#3b82f6', // blue
     '#ef4444', // red
     '#22c55e', // green
     '#f59e0b', // amber
@@ -32,6 +31,35 @@ const TokenType = {
     OPERATOR: 'OPERATOR',
     WHITESPACE: 'WHITESPACE'
 };
+
+/**
+ * Get character ranges occupied by double-quoted string literals in a formula.
+ * Handles "" as an escaped quote inside a string.
+ * @param {string} content
+ * @returns {Array<{start: number, end: number}>}
+ */
+function getStringLiteralRanges(content) {
+    const ranges = [];
+    let i = 0;
+    while (i < content.length) {
+        if (content[i] === '"') {
+            const start = i++;
+            while (i < content.length) {
+                if (content[i] === '"') {
+                    i++;
+                    if (content[i] === '"') { i++; } // escaped ""
+                    else { break; }
+                } else {
+                    i++;
+                }
+            }
+            ranges.push({ start, end: i });
+        } else {
+            i++;
+        }
+    }
+    return ranges;
+}
 
 /**
  * Segment a formula string into colored parts
@@ -60,6 +88,10 @@ export function segmentFormula(formula) {
 
     let pos = 0;
 
+    // Find string literal ranges so we can exclude token matches inside them
+    const stringRanges = getStringLiteralRanges(content);
+    const isInString = (idx) => stringRanges.some(r => idx >= r.start && idx < r.end);
+
     // Regex patterns — cross-sheet refs must be matched before plain refs
     // Quoted:   'Sheet Name'!A1  or  'Sheet Name'!A1:B5  (also handles '' escape for single quotes in names)
     // Unquoted: Sheet1!A1        or  Sheet1!A1:B5
@@ -74,14 +106,15 @@ export function segmentFormula(formula) {
     const crossSheetRanges = [];
     let match;
     while ((match = crossSheetRangePattern.exec(content)) !== null) {
-        crossSheetRanges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+        if (!isInString(match.index))
+            crossSheetRanges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
     }
 
     // Find cross-sheet cells (not inside a cross-sheet range)
     const crossSheetCells = [];
     while ((match = crossSheetCellPattern.exec(content)) !== null) {
         const inCrossRange = crossSheetRanges.some(r => match.index >= r.start && match.index < r.end);
-        if (!inCrossRange) {
+        if (!inCrossRange && !isInString(match.index)) {
             crossSheetCells.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
         }
     }
@@ -91,19 +124,19 @@ export function segmentFormula(formula) {
 
     const isInCrossSheet = (idx) => crossSheetPositions.some(r => idx >= r.start && idx < r.end);
 
-    // Find all plain ranges not part of a cross-sheet ref
+    // Find all plain ranges not part of a cross-sheet ref or string literal
     const ranges = [];
     while ((match = rangePattern.exec(content)) !== null) {
-        if (!isInCrossSheet(match.index)) {
+        if (!isInCrossSheet(match.index) && !isInString(match.index)) {
             ranges.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
         }
     }
 
-    // Find all individual cell refs not inside a range or cross-sheet ref
+    // Find all individual cell refs not inside a range, cross-sheet ref, or string literal
     const cells = [];
     while ((match = cellPattern.exec(content)) !== null) {
         const inRange = ranges.some(r => match.index >= r.start && match.index < r.end);
-        if (!inRange && !isInCrossSheet(match.index)) {
+        if (!inRange && !isInCrossSheet(match.index) && !isInString(match.index)) {
             cells.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
         }
     }
@@ -111,7 +144,7 @@ export function segmentFormula(formula) {
     // Find functions (skip those that are actually cross-sheet identifiers)
     const functions = [];
     while ((match = functionPattern.exec(content)) !== null) {
-        if (!isInCrossSheet(match.index)) {
+        if (!isInCrossSheet(match.index) && !isInString(match.index)) {
             functions.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
         }
     }

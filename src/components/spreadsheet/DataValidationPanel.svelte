@@ -224,6 +224,10 @@
 
 <style>
     .panel {
+        position: fixed;
+        top: 80px;
+        right: 16px;
+        z-index: 500;
         width: 320px;
         background: white;
         border: 1px solid #e2e8f0;
@@ -232,6 +236,8 @@
         font-size: 0.8125rem;
         display: flex;
         flex-direction: column;
+        max-height: calc(100vh - 96px);
+        overflow-y: auto;
     }
     .panel-header {
         display: flex; align-items: center; justify-content: space-between;
@@ -279,6 +285,10 @@
 
     /* Picking overlay — compact indicator while user selects range on grid */
     .picking-overlay {
+        position: fixed;
+        top: 80px;
+        right: 16px;
+        z-index: 500;
         background: white;
         border: 2px solid #3b82f6;
         border-radius: 6px;
