@@ -9,7 +9,6 @@
  * The editor component is 'file-picker' (FileEditor.svelte).
  */
 
-import { loadImage } from '../../rendering/ImageCache.js';
 import storage from '../../../storage.js';
 
 // ─── File category helpers ─────────────────────────────────────────────────
@@ -83,8 +82,12 @@ export const fileType = {
     paintCell(ctx, blobId, cellItem, rect, style, theme) {
         const { x, y, width, height } = rect;
         const ct = cellItem?.ctConfig ?? {};
-        const mimeType = ct.mimeType ?? '';
-        const filename  = ct.filename  ?? '';
+
+        // Fall back to the file registry descriptor when ctConfig lacks metadata
+        // (table cells store only { type:'file' } in the column config)
+        const descriptor = blobId && !ct.mimeType ? (storage.app.get(blobId) ?? null) : null;
+        const mimeType = ct.mimeType ?? descriptor?.mimeType ?? '';
+        const filename  = ct.filename  ?? descriptor?.filename  ?? '';
         const category  = getFileCategory(mimeType);
         const color     = CATEGORY_COLORS[category] ?? CATEGORY_COLORS.other;
 
@@ -93,52 +96,11 @@ export const fileType = {
             return;
         }
 
-        // Image MIME types: render the actual image
-        if (category === 'image') {
-            const url   = storage.app.getBlobUrl(blobId);
-            const entry = loadImage(blobId, url);
-
-            if (entry.status === 'loaded' && entry.img) {
-                const fit = ct.fit ?? 'contain';
-                _drawFittedImage(ctx, entry.img, x + 3, y + 3, width - 6, height - 6, fit);
-                return;
-            } else if (entry.status === 'loading') {
-                _drawLoadingState(ctx, x, y, width, height, color, filename);
-                return;
-            }
-            // fall through to document icon on error
-        }
-
         _drawFileCell(ctx, x, y, width, height, color, filename, theme);
     },
 };
 
 // ─── Private draw helpers ─────────────────────────────────────────────────
-
-function _drawFittedImage(ctx, img, x, y, w, h, fit) {
-    if (w <= 0 || h <= 0) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, y, w, h);
-    ctx.clip();
-
-    const imgW = img.naturalWidth  || img.width;
-    const imgH = img.naturalHeight || img.height;
-
-    if (fit === 'fill') {
-        ctx.drawImage(img, x, y, w, h);
-    } else if (fit === 'none') {
-        ctx.drawImage(img, Math.round(x + (w - imgW) / 2), Math.round(y + (h - imgH) / 2), imgW, imgH);
-    } else {
-        const scaleW = w / imgW;
-        const scaleH = h / imgH;
-        const scale  = fit === 'cover' ? Math.max(scaleW, scaleH) : Math.min(scaleW, scaleH);
-        const dw = Math.round(imgW * scale);
-        const dh = Math.round(imgH * scale);
-        ctx.drawImage(img, Math.round(x + (w - dw) / 2), Math.round(y + (h - dh) / 2), dw, dh);
-    }
-    ctx.restore();
-}
 
 function _drawFileCell(ctx, x, y, w, h, color, filename, theme) {
     const pad      = 6;
@@ -217,18 +179,6 @@ function _drawDocumentIcon(ctx, x, y, size, color) {
         ctx.stroke();
     }
 
-    ctx.restore();
-}
-
-function _drawLoadingState(ctx, x, y, w, h, color, _filename) {
-    ctx.save();
-    ctx.fillStyle = color + '11';
-    ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '11px system-ui';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Loading…', x + w / 2, y + h / 2);
     ctx.restore();
 }
 

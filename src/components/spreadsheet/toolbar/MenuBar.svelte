@@ -32,11 +32,24 @@
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
     import DataValidationPanel from "../DataValidationPanel.svelte";
     import FormulaDocsPanel from "../FormulaDocsPanel.svelte";
+    import PageSetupPanel from "../PageSetupPanel.svelte";
+    import MakeCopyModal from "../../modals/MakeCopyModal.svelte";
+    import MoveFileModal from "../../modals/MoveFileModal.svelte";
+    import RenameDocumentModal from "../../modals/RenameDocumentModal.svelte";
+    import ShareFileModal from "../../modals/ShareFileModal.svelte";
+    import VersionHistoryModal from "../../modals/VersionHistoryModal.svelte";
+    import ConfirmModal from "../../modals/ConfirmModal.svelte";
+    import { storage } from "../../../stores/storage.js";
+    import {
+        deleteDocument,
+        renameDocument,
+    } from "../../../stores/spreadsheet/SpreadsheetSession.svelte.js";
 
     let isExportingPDF = $state(false);
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
     let showFormulaDocs = $state(false);
+    let showPageSetup = $state(false);
 
     // Helper to show alert modal
     function showAlert(title, message, type = "info") {
@@ -127,6 +140,113 @@
     let showCreateRepeaterDialog = $state(false);
 
     // ─── FILE MENU ────────────────────────────────────────────────────────────
+
+    function openMakeCopyModal() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        const file = storage.drive.getFile(docId);
+        if (!file) return;
+        openModal(MakeCopyModal, { file });
+    }
+
+    function openShareModal() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        const file = storage.drive.getFile(docId);
+        if (!file) return;
+        openModal(ShareFileModal, { file });
+    }
+
+    function openMoveModal() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        const file = storage.drive.getFile(docId);
+        if (!file) return;
+        openModal(MoveFileModal, {
+            file,
+            onConfirm: async (/** @type {string|null} */ targetFolderId) => {
+                await storage.drive.moveFile(docId, targetFolderId);
+            },
+        });
+    }
+
+    function openRenameModal() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        openModal(RenameDocumentModal, {
+            currentTitle: spreadsheetSession.docTitle || "Untitled",
+            onConfirm: async (/** @type {string} */ newTitle) => {
+                await renameDocument(docId, newTitle);
+            },
+        });
+    }
+
+    function openDeleteConfirm() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        openModal(ConfirmModal, {
+            title: "Delete document",
+            message: `Delete "${spreadsheetSession.docTitle || "Untitled"}"? It will be moved to trash.`,
+            onConfirm: async () => {
+                await deleteDocument(docId);
+                window.location.hash = "/";
+            },
+        });
+    }
+
+    function openVersionHistory() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        const file = storage.drive.getFile(docId);
+        if (!file) return;
+        openModal(VersionHistoryModal, { registry: storage, file });
+    }
+
+    function exportTSV() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
+        let tsv = "";
+        for (let r = 0; r < sheetStore.rowCount; r++) {
+            const row = [];
+            for (let c = 0; c < sheetStore.colCount; c++) {
+                const cell = sheetStore.getCell(r, c);
+                let val = String(cell?.v ?? "").replace(/\t/g, " ");
+                row.push(val);
+            }
+            tsv += row.join("\t") + "\n";
+        }
+        const blob = new Blob([tsv], { type: "text/tab-separated-values" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${spreadsheetSession.docTitle || "sheet"}.tsv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function exportHTML() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return;
+        let rows = "";
+        for (let r = 0; r < sheetStore.rowCount; r++) {
+            let cells = "";
+            for (let c = 0; c < sheetStore.colCount; c++) {
+                const cell = sheetStore.getCell(r, c);
+                const val = String(cell?.v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                cells += r === 0 ? `<th>${val}</th>` : `<td>${val}</td>`;
+            }
+            rows += `<tr>${cells}</tr>\n`;
+        }
+        const html = `<!DOCTYPE html><html><body><table border="1">\n${rows}</table></body></html>`;
+        const blob = new Blob([html], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${spreadsheetSession.docTitle || "sheet"}.html`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
     const fileItems = [
         {
             label: "New",
@@ -138,7 +258,19 @@
             action: () => (window.location.hash = "/"),
             shortcut: "Ctrl+O",
         },
+        {
+            label: "Import",
+            action: () => showAlert("Import", "Import from CSV or Excel coming soon.", "info"),
+        },
+        {
+            label: "Make a copy",
+            action: openMakeCopyModal,
+        },
         { divider: true },
+        {
+            label: "Share",
+            action: openShareModal,
+        },
         {
             label: "Download",
             submenu: [
@@ -149,12 +281,42 @@
                     action: exportPDF,
                 },
                 {
+                    label: "Web Page (.html)",
+                    action: exportHTML,
+                },
+                {
                     label: "CSV (.csv)",
                     action: () => exportCSV(),
+                },
+                {
+                    label: "TSV (.tsv)",
+                    action: exportTSV,
                 },
             ],
         },
         { divider: true },
+        {
+            label: "Rename",
+            action: openRenameModal,
+        },
+        {
+            label: "Move",
+            action: openMoveModal,
+        },
+        {
+            label: "Delete",
+            action: openDeleteConfirm,
+        },
+        { divider: true },
+        {
+            label: "See version history",
+            action: openVersionHistory,
+        },
+        { divider: true },
+        {
+            label: "Page setup",
+            action: () => (showPageSetup = true),
+        },
         {
             label: isExportingPDF ? "Printing…" : "Print",
             icon: printer,
@@ -837,6 +999,10 @@ Ctrl+/ - Show keyboard shortcuts`;
 
 {#if showFormulaDocs}
     <FormulaDocsPanel onclose={() => (showFormulaDocs = false)} />
+{/if}
+
+{#if showPageSetup}
+    <PageSetupPanel onclose={() => (showPageSetup = false)} />
 {/if}
 
 <style>

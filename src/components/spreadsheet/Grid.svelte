@@ -4990,9 +4990,18 @@
         }
     }
 
+    let _stopStorageFilesWatch = null;
+
     onMount(() => {
         // Trigger a canvas repaint when any image finishes loading
         setOnLoadCallback(() => {
+            renderScheduler?.invalidateAll();
+        });
+
+        // Repaint when file descriptors arrive via sync — file cells in tables
+        // look up mimeType from the registry synchronously at paint time, so we
+        // need a repaint once newly synced descriptors are available.
+        _stopStorageFilesWatch = storage.app.files.subscribe(() => {
             renderScheduler?.invalidateAll();
         });
 
@@ -5130,6 +5139,7 @@
         selectionScheduler?.destroy();
         selectionRenderer?.destroy();
         setOnLoadCallback(null);
+        _stopStorageFilesWatch?.();
         window.removeEventListener("image-fit-change", handleImageFitChange);
         window.removeEventListener("file-meta-change", handleFileMetaChange);
         window.removeEventListener("show-file-viewer", handleShowFileViewer);

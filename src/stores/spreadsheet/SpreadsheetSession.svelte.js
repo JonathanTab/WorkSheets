@@ -363,8 +363,8 @@ export class SpreadsheetSession {
         };
 
         // Observe the sheetOrder array and sheets map
-        const sheetOrder = this.root.get('sheetOrder');
-        const sheetsMap = this.root.get('sheets');
+        let sheetOrder = this.root.get('sheetOrder');
+        let sheetsMap = this.root.get('sheets');
 
         sheetOrder?.observe(structureObserver);
         sheetsMap?.observeDeep(structureObserver);
@@ -372,6 +372,31 @@ export class SpreadsheetSession {
         // Observe metadata map
         const metadataMap = this.root.get('metadata');
         metadataMap?.observe(metadataObserver);
+
+        // Guard against the new-doc race: if the doc was empty at load time (WebSocket
+        // hasn't delivered the server's initialized content yet), sheetOrder/sheetsMap
+        // above are null, so their observers are no-ops. Observe root directly so we
+        // can attach sub-observers and initialize the active sheet when data arrives.
+        const rootObserver = () => {
+            const newSheets = this.root?.get('sheets');
+            if (!newSheets || this.activeSheetStore) return;
+
+            // Attach sub-observers that couldn't be set up before
+            const newSheetOrder = this.root?.get('sheetOrder');
+            if (!sheetsMap) {
+                sheetsMap = newSheets;
+                sheetsMap.observeDeep(structureObserver);
+            }
+            if (!sheetOrder && newSheetOrder) {
+                sheetOrder = newSheetOrder;
+                sheetOrder.observe(structureObserver);
+            }
+            this.#updateSheetsList();
+            const firstId = newSheetOrder?.get(0) || this.activeSheetId || 'sheet-1';
+            this.activeSheetId = firstId;
+            this.setActiveSheet(firstId);
+        };
+        this.root.observe(rootObserver);
 
         // Initial sync
         this.#updateSheetsList();
@@ -381,6 +406,7 @@ export class SpreadsheetSession {
             sheetOrder?.unobserve(structureObserver);
             sheetsMap?.unobserveDeep(structureObserver);
             metadataMap?.unobserve(metadataObserver);
+            this.root?.unobserve(rootObserver);
         };
     }
 

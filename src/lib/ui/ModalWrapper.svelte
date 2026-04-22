@@ -104,7 +104,7 @@
 
         /* Sizing */
         min-width: 360px;
-        max-width: 520px;
+        max-width: 680px;
         max-height: 85vh;
 
         /* Layout */

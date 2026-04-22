@@ -193,6 +193,8 @@ export class SpreadsheetClient {
             title:    opts.title,
             mimeType: opts.mimeType ?? 'application/octet-stream',
             size:     opts.size     ?? null,
+            filename: opts.filename ?? opts.title ?? null,
+            parentId: opts.parentId ?? null,
             scope:    opts.scope    ?? 'app',
             app:      opts.app      ?? 'worksheets',
         });

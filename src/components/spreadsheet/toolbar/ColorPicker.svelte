@@ -150,16 +150,17 @@
     >
         <div class="icon-stack">
             {#if variant === "fill"}
-                <!-- Highlight/fill bucket icon -->
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">
-                    <path d="M2 12.5 7 3l5 9.5"/>
-                    <path d="M3.8 9.5h6.4"/>
-                    <circle cx="13.5" cy="12.5" r="1.5" fill="currentColor" stroke="none"/>
+                <!-- Paint bucket icon: wider at top (standard bucket shape) -->
+                <svg viewBox="0 0 16 16" fill="none" class="picker-icon">
+                    <path d="M2 5.5 L4 13 H12 L14 5.5 Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="currentColor" fill-opacity="0.13"/>
+                    <line x1="2" y1="5.5" x2="14" y2="5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                    <path d="M5.5 5.5 Q8 1.5 10.5 5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>
                 </svg>
             {:else}
                 <!-- Text color "A" icon -->
-                <svg viewBox="0 0 16 16" fill="none" class="picker-icon">
-                    <text x="1" y="13" font-size="13" font-weight="700" font-family="Arial,sans-serif" fill="currentColor">A</text>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">
+                    <path d="M2.5 13.5 8 2 13.5 13.5"/>
+                    <path d="M4.8 9.5h6.4"/>
                 </svg>
             {/if}
             <div class="color-bar" style="background-color: {value}"></div>

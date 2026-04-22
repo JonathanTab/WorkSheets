@@ -76,7 +76,7 @@ const server = http.createServer(async (req, res) => {
 
     res.setHeader('Access-Control-Allow-Origin', allowOrigin || 'null');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Filename');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Filename, X-Parent-Id');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -286,15 +286,16 @@ async function route(req, res) {
         return json(res, 200, { ok: true });
     }
 
-    // POST /blobs  (raw binary body; Content-Type and X-Filename headers)
+    // POST /blobs  (raw binary body; Content-Type, X-Filename, X-Parent-Id headers)
     if (method === 'POST' && p === '/blobs') {
         const mimeType = req.headers['content-type'] ?? 'application/octet-stream';
         const filename = req.headers['x-filename']   ?? 'upload';
+        const parentId = req.headers['x-parent-id']  ?? null;
         const chunks   = [];
         for await (const chunk of req) chunks.push(chunk);
         const buf  = Buffer.concat(chunks);
         const blob = await client.uploadBlob(
-            { title: filename, mimeType, size: buf.length },
+            { title: filename, filename, mimeType, size: buf.length, parentId },
             buf,
         );
         return json(res, 200, { blobId: blob.id, url: blob.url, filename, mimeType, size: buf.length });

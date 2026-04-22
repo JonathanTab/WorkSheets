@@ -500,6 +500,70 @@
                 background: rgba(29, 78, 216, 0.1);
             }
         }
+
+        /* ── Image picker ────────────────────────────────────────── */
+        .img-pick-btn {
+            width: 100%;
+            padding: 18px 16px;
+            border-radius: 10px;
+            border: 2px dashed var(--border);
+            background: var(--input);
+            color: var(--muted);
+            font-size: 0.95rem;
+            font-family: inherit;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: border-color 0.15s, color 0.15s;
+            touch-action: manipulation;
+        }
+        .img-pick-btn:hover, .img-pick-btn:focus {
+            border-color: var(--accent);
+            color: var(--text);
+            outline: none;
+        }
+        .img-pick-btn svg { flex-shrink: 0; }
+
+        .img-preview-wrap {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+        .img-preview {
+            width: 100%;
+            max-height: 200px;
+            object-fit: cover;
+            border-radius: 10px;
+            display: block;
+            border: 2px solid var(--border);
+        }
+        .img-remove-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(0,0,0,0.65);
+            color: white;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+        .img-upload-status {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 6px;
+            text-align: center;
+            min-height: 1.2em;
+        }
     </style>
 </head>
 <body>
@@ -570,6 +634,23 @@
             </div>
 
             <div class="field">
+                <label>Receipt / Photo</label>
+                <input type="file" id="field-image-input" accept="image/*" capture="environment" style="display:none">
+                <button type="button" class="img-pick-btn" id="img-pick-btn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                        <circle cx="12" cy="13" r="4"/>
+                    </svg>
+                    Take photo or choose image
+                </button>
+                <div class="img-preview-wrap" id="img-preview-wrap" style="display:none">
+                    <img class="img-preview" id="img-preview" src="" alt="Receipt preview">
+                    <button type="button" class="img-remove-btn" id="img-remove-btn" aria-label="Remove image">✕</button>
+                </div>
+                <div class="img-upload-status" id="img-upload-status"></div>
+            </div>
+
+            <div class="field">
                 <label for="field-date">Date</label>
                 <input type="date" id="field-date" required>
             </div>
@@ -604,16 +685,21 @@ const SHEET_ID         = 'sheet-1';
 const TABLE_ID         = 'table-1774359687333-ovn2m';
 const SCHEMA_URL       = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/schema`;
 const ROWS_URL         = `${API_BASE}/file/${FILE_ID}/sheet/${SHEET_ID}/table/${TABLE_ID}/rows`;
+const BLOBS_URL        = `${API_BASE}/blobs`;
 const TOKEN_KEY       = 'ledger_session_token';
 const USER_KEY        = 'ledger_username';
 const FROMTO_HIST_KEY = 'ledger_fromto_history';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let sessionToken = localStorage.getItem(TOKEN_KEY) || null;
-let isNegative   = true;
-let csAccount    = null;
-let csProject    = null;
+let sessionToken   = localStorage.getItem(TOKEN_KEY) || null;
+let isNegative     = true;
+let csAccount      = null;
+let csProject      = null;
+let deferredPrompt = null;
+let isMobile       = false;
+let isStandalone   = false;
+let selectedImage  = null;
 
 // ─── Custom searchable select ─────────────────────────────────────────────────
 
@@ -960,7 +1046,6 @@ function showAppScreen(username) {
     document.getElementById('app-screen').style.display  = 'block';
     document.getElementById('username-display').textContent = username;
     initForm();
-    initInstallPrompt();
 }
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
@@ -983,6 +1068,7 @@ function showAppScreen(username) {
         }
     }
     showAuthScreen();
+    initInstallPrompt();
 })();
 
 // ─── Auth button wiring ───────────────────────────────────────────────────────
@@ -1001,6 +1087,94 @@ document.getElementById('sign-toggle').addEventListener('click', () => {
 
 // Select all on focus so typing immediately replaces the value
 document.getElementById('field-amount').addEventListener('focus', function() { this.select(); });
+
+// ─── Image picker ─────────────────────────────────────────────────────────────
+
+document.getElementById('img-pick-btn').addEventListener('click', () => {
+    document.getElementById('field-image-input').click();
+});
+
+document.getElementById('field-image-input').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    document.getElementById('img-upload-status').textContent = 'Processing…';
+    selectedImage = await compressImage(file);
+    const url = URL.createObjectURL(selectedImage);
+    const preview = document.getElementById('img-preview');
+    preview.src = url;
+    document.getElementById('img-pick-btn').style.display = 'none';
+    document.getElementById('img-preview-wrap').style.display = 'inline-block';
+    const kb = Math.round(selectedImage.size / 1024);
+    document.getElementById('img-upload-status').textContent = `${kb} KB`;
+});
+
+document.getElementById('img-remove-btn').addEventListener('click', () => {
+    clearImageField();
+});
+
+function clearImageField() {
+    selectedImage = null;
+    const input = document.getElementById('field-image-input');
+    input.value = '';
+    const preview = document.getElementById('img-preview');
+    if (preview.src.startsWith('blob:')) URL.revokeObjectURL(preview.src);
+    preview.src = '';
+    document.getElementById('img-preview-wrap').style.display = 'none';
+    document.getElementById('img-pick-btn').style.display = 'flex';
+    document.getElementById('img-upload-status').textContent = '';
+}
+
+function compressImage(file) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        const blobUrl = URL.createObjectURL(file);
+        img.onload = () => {
+            URL.revokeObjectURL(blobUrl);
+            const MAX = 1600;
+            let { naturalWidth: w, naturalHeight: h } = img;
+            if (w > MAX || h > MAX) {
+                if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+                else        { w = Math.round(w * MAX / h); h = MAX; }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width  = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+
+            // Grayscale + contrast boost for document readability
+            const id   = ctx.getImageData(0, 0, w, h);
+            const data = id.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                const v    = Math.min(255, Math.max(0, (gray - 128) * 1.25 + 128));
+                data[i] = data[i + 1] = data[i + 2] = v;
+            }
+            ctx.putImageData(id, 0, 0);
+
+            canvas.toBlob(resolve, 'image/jpeg', 0.82);
+        };
+        img.src = blobUrl;
+    });
+}
+
+async function uploadImage(file) {
+    document.getElementById('img-upload-status').textContent = 'Uploading…';
+    const res = await fetch(BLOBS_URL, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${sessionToken}`,
+            'Content-Type': file.type || 'image/jpeg',
+            'X-Filename': file.name || 'receipt.jpg',
+            'X-Parent-Id': FILE_ID,
+        },
+        body: file,
+    });
+    if (!res.ok) throw new Error(`Image upload failed: ${res.status}`);
+    const data = await res.json();
+    document.getElementById('img-upload-status').textContent = '';
+    return data;
+}
 
 // ─── Form submit ──────────────────────────────────────────────────────────────
 
@@ -1032,6 +1206,11 @@ document.getElementById('entry-form').addEventListener('submit', async (e) => {
     };
 
     try {
+        if (selectedImage) {
+            const blob = await uploadImage(selectedImage);
+            row['Image'] = blob.blobId;
+        }
+
         const res = await fetch(ROWS_URL, {
             method: 'POST',
             headers: authHeaders(),
@@ -1049,6 +1228,7 @@ document.getElementById('entry-form').addEventListener('submit', async (e) => {
             const btn = document.getElementById('sign-toggle');
             btn.textContent = '−';
             btn.className = 'sign-toggle neg';
+            clearImageField();
 
             showToast('Entry added');
             document.getElementById('field-amount').focus();
@@ -1077,10 +1257,6 @@ window.addEventListener('offline', updateOnlineStatus);
 updateOnlineStatus();
 
 // ─── Install Prompt ──────────────────────────────────────────────────────────────
-
-let deferredPrompt = null;
-let isMobile = false;
-let isStandalone = false;
 
 function initInstallPrompt() {
     // Check mobile & standalone status

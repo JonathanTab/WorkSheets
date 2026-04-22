@@ -17,8 +17,8 @@
      * Props:
      *   value    - current blob file ID (or null/empty)
      *   docId    - parent document ID (parentId when creating blob files)
-     *   ctConfig - current cell type config { type:'file', mimeType, filename, size, fit? }
-     *   onCommit - callback(blobId, { mimeType, filename, size, fit? })
+     *   ctConfig - current cell type config { type:'file', mimeType, filename, size }
+     *   onCommit - callback(blobId, { mimeType, filename, size })
      *   onCancel - callback()
      */
     import { onMount, untrack } from 'svelte';
@@ -37,29 +37,26 @@
     const originalBlobId = value || null;
 
     let pendingBlobId   = $state(value || null);
-    let pendingMeta     = $state({
-        mimeType: ctConfig?.mimeType ?? '',
-        filename:  ctConfig?.filename  ?? '',
-        size:      ctConfig?.size      ?? null,
-        fit:       ctConfig?.fit       ?? 'contain',
-    });
 
-    // Populate metadata from the file registry when ctConfig doesn't have it.
-    // This handles table file cells where metadata isn't stored in cell type config,
-    // and works offline since the registry is local.
-    $effect(() => {
-        const blobId = pendingBlobId;
-        if (!blobId || pendingMeta.mimeType) return;
-        const descriptor = storage.app.get(blobId);
-        if (descriptor) {
-            pendingMeta = {
-                ...pendingMeta,
-                mimeType: descriptor.mimeType || '',
-                filename: pendingMeta.filename || descriptor.filename || '',
-                size:     pendingMeta.size     ?? descriptor.size     ?? null,
+    // For table file cells, ctConfig has only { type:'file' } — no per-cell metadata.
+    // Fall back to the file registry descriptor synchronously so the editor is
+    // immediately populated on open.
+    function _resolveMeta(blobId, config) {
+        const mimeType = config?.mimeType ?? '';
+        const filename = config?.filename ?? '';
+        const size     = config?.size     ?? null;
+        if (blobId && (!mimeType || !filename)) {
+            const d = storage.app.get(blobId);
+            if (d) return {
+                mimeType: mimeType || d.mimeType || '',
+                filename:  filename  || d.filename  || '',
+                size:      size      ?? d.size      ?? null,
             };
         }
-    });
+        return { mimeType, filename, size };
+    }
+
+    let pendingMeta = $state(_resolveMeta(value || null, ctConfig));
 
     let isDragging    = $state(false);
     let isUploading   = $state(false);
@@ -147,7 +144,6 @@
                 mimeType: file.type || '',
                 filename:  file.name,
                 size:      file.size,
-                fit:       'contain',
             };
         } catch (err) {
             uploadError = err?.message ?? 'Upload failed';
@@ -199,7 +195,7 @@
 
     function handleRemove() {
         pendingBlobId = null;
-        pendingMeta   = { mimeType: '', filename: '', size: null, fit: 'contain' };
+        pendingMeta   = { mimeType: '', filename: '', size: null };
     }
 
     function handleCancel() {
@@ -348,22 +344,6 @@
 
         {#if uploadError}
             <div class="fe__error">{uploadError}</div>
-        {/if}
-
-        <!-- Image fit selector (only for image files) -->
-        {#if pendingBlobId && category === 'image' && !isUploading}
-            <div class="fe__fit-row">
-                <span class="fe__fit-label">Fit:</span>
-                <div class="fe__fit-options">
-                    {#each ['contain', 'cover', 'fill', 'none'] as option}
-                        <button
-                            class="fe__fit-btn"
-                            class:fe__fit-btn--active={pendingMeta.fit === option}
-                            onclick={() => { pendingMeta = { ...pendingMeta, fit: option }; }}
-                        >{option}</button>
-                    {/each}
-                </div>
-            </div>
         {/if}
 
         <!-- Footer actions -->
@@ -649,45 +629,6 @@
         background: #fef2f2;
         border-radius: 4px;
         padding: 4px 8px;
-    }
-
-    /* ── Image fit row ─────────────────────────────────────────────────────── */
-
-    .fe__fit-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    .fe__fit-label {
-        font-size: 0.75rem;
-        color: #64748b;
-        white-space: nowrap;
-    }
-
-    .fe__fit-options {
-        display: flex;
-        gap: 4px;
-        flex-wrap: wrap;
-    }
-
-    .fe__fit-btn {
-        padding: 2px 8px;
-        font-size: 0.7rem;
-        border-radius: 4px;
-        border: 1px solid #e2e8f0;
-        background: #f8fafc;
-        color: #475569;
-        cursor: pointer;
-        transition: background 0.1s, border-color 0.1s;
-        text-transform: capitalize;
-    }
-
-    .fe__fit-btn--active {
-        background: #eff6ff;
-        border-color: #93c5fd;
-        color: #1d4ed8;
-        font-weight: 600;
     }
 
     /* ── Footer ────────────────────────────────────────────────────────────── */

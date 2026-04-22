@@ -3,17 +3,19 @@
     import { closeTopModal } from "../../lib/ui/modalStore.svelte.js";
     import Button from "../../lib/ui/Button.svelte";
     import ModalHeader from "../../lib/ui/ModalHeader.svelte";
+    import Textbox from "../../lib/ui/Textbox.svelte";
+    import { router } from "../../lib/router.svelte.js";
     import {
         folder,
         home,
         chevronRight,
-        chevronDown,
         check,
     } from "../../lib/icons/index.js";
 
-    /** @type {{ file: import('../../lib/FileRegistry/FileRegistry.js').FileDescriptor, onConfirm: (folderId: string|null) => void }} */
-    let { file, onConfirm } = $props();
+    /** @type {{ file: import('../../lib/FileRegistry/FileRegistry.js').FileDescriptor }} */
+    let { file } = $props();
 
+    let copyTitle = $state(`Copy of ${file.title ?? "Untitled"}`);
     let allFolders = $state(/** @type {any[]} */ ([]));
     let allFiles = $state(/** @type {any[]} */ ([]));
     let browseFolderId = $state(file.folderId ?? null);
@@ -26,7 +28,6 @@
         return () => { unsubFolders(); unsubFiles(); };
     });
 
-    // Breadcrumb for current browse location
     let breadcrumb = $derived.by(() => {
         const crumbs = [];
         let id = browseFolderId;
@@ -40,7 +41,7 @@
     });
 
     let currentSubFolders = $derived(allFolders.filter((f) => f.parentId === browseFolderId));
-    let currentFiles = $derived(allFiles.filter((f) => (f.folderId ?? null) === browseFolderId && f.id !== file.id));
+    let currentFiles = $derived(allFiles.filter((f) => (f.folderId ?? null) === browseFolderId));
 
     function selectFolder(id) {
         selectedFolderId = id;
@@ -55,117 +56,126 @@
         browseFolderId = id;
     }
 
-    async function confirm() {
-        saving = true;
-        try {
-            await onConfirm(selectedFolderId);
-        } finally {
-            saving = false;
-        }
-    }
-
     function folderName(id) {
         if (id === null) return "My Drive";
         return allFolders.find((f) => f.id === id)?.name ?? "Unknown folder";
     }
 
-    // Check if folder has children
+    async function makeCopy(andOpen = false) {
+        if (saving) return;
+        saving = true;
+        try {
+            const newFile = await storage.drive.duplicateFile(file.id, {
+                title: copyTitle.trim() || `Copy of ${file.title ?? "Untitled"}`,
+                folderId: selectedFolderId,
+            });
+            closeTopModal();
+            if (andOpen) {
+                router.openFile(newFile);
+            }
+        } finally {
+            saving = false;
+        }
+    }
 </script>
 
-<ModalHeader title="Move to folder" />
+<ModalHeader title="Make a copy" />
 
-<div class="move-modal">
-    <div class="file-info">
-        <span class="file-label">Moving:</span>
-        <span class="file-name">{file.title || "Untitled"}</span>
+<div class="copy-modal">
+    <div class="field">
+        <label class="field-label">Name</label>
+        <Textbox bind:value={copyTitle} placeholder="Copy name" />
     </div>
 
-    <div class="folder-panel">
-        <div class="breadcrumb">
-            <button
-                class="crumb root"
-                class:active={browseFolderId === null}
-                onclick={() => navigateTo(null)}
-            >
-                <span class="crumb-icon">{@html home}</span>
-                <span>My Drive</span>
-            </button>
-            {#each breadcrumb as crumb, i}
-                <span class="crumb-sep">{@html chevronRight}</span>
+    <div class="field">
+        <label class="field-label">Location</label>
+        <div class="folder-panel">
+            <div class="breadcrumb">
                 <button
-                    class="crumb"
-                    class:active={i === breadcrumb.length - 1}
-                    onclick={() => navigateTo(crumb.id)}
+                    class="crumb root"
+                    class:active={browseFolderId === null}
+                    onclick={() => navigateTo(null)}
                 >
-                    {crumb.name}
+                    <span class="crumb-icon">{@html home}</span>
+                    <span>My Drive</span>
                 </button>
-            {/each}
-        </div>
-
-        <div class="folder-list">
-            {#if browseFolderId === null}
-                <button
-                    class="folder-item"
-                    class:selected={selectedFolderId === null}
-                    onclick={() => selectFolder(null)}
-                    ondblclick={() => confirm()}
-                >
-                    <span class="folder-icon root-icon">{@html home}</span>
-                    <span class="folder-name">My Drive (root)</span>
-                    {#if selectedFolderId === null}
-                        <span class="check-icon">{@html check}</span>
-                    {/if}
-                </button>
-            {:else}
-                <button
-                    class="folder-item parent-folder"
-                    onclick={() =>
-                        navigateTo(
-                            breadcrumb.length > 0
-                                ? (breadcrumb[breadcrumb.length - 1].parentId ?? null)
-                                : null,
-                        )}
-                >
-                    <span class="folder-icon up">{@html chevronRight}</span>
-                    <span class="folder-name">..</span>
-                </button>
-            {/if}
-
-            {#each currentSubFolders as fld (fld.id)}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                    class="folder-item"
-                    class:selected={selectedFolderId === fld.id}
-                    onclick={() => selectFolder(fld.id)}
-                    ondblclick={() => navigateInto(fld.id)}
-                    role="button"
-                    tabindex="0"
-                    onkeydown={(e) => e.key === 'Enter' && selectFolder(fld.id)}
-                >
-                    <span class="folder-icon">{@html folder}</span>
-                    <span class="folder-name">{fld.name}</span>
-                    {#if selectedFolderId === fld.id}
-                        <span class="check-icon">{@html check}</span>
-                    {/if}
+                {#each breadcrumb as crumb, i}
+                    <span class="crumb-sep">{@html chevronRight}</span>
                     <button
-                        class="into-btn"
-                        onclick={(e) => { e.stopPropagation(); navigateInto(fld.id); }}
-                        tabindex="-1"
+                        class="crumb"
+                        class:active={i === breadcrumb.length - 1}
+                        onclick={() => navigateTo(crumb.id)}
                     >
-                        {@html chevronRight}
+                        {crumb.name}
                     </button>
-                </div>
-            {/each}
+                {/each}
+            </div>
 
-            {#each currentFiles as f (f.id)}
-                <div class="file-row">
-                    <span class="file-row-name">{f.title || "Untitled"}</span>
-                </div>
-            {/each}
+            <div class="folder-list">
+                {#if browseFolderId === null}
+                    <button
+                        class="folder-item"
+                        class:selected={selectedFolderId === null}
+                        onclick={() => selectFolder(null)}
+                        ondblclick={() => makeCopy(false)}
+                    >
+                        <span class="folder-icon root-icon">{@html home}</span>
+                        <span class="folder-name">My Drive (root)</span>
+                        {#if selectedFolderId === null}
+                            <span class="check-icon">{@html check}</span>
+                        {/if}
+                    </button>
+                {:else}
+                    <button
+                        class="folder-item parent-folder"
+                        onclick={() =>
+                            navigateTo(
+                                breadcrumb.length > 0
+                                    ? (breadcrumb[breadcrumb.length - 1].parentId ?? null)
+                                    : null,
+                            )}
+                    >
+                        <span class="folder-icon up">{@html chevronRight}</span>
+                        <span class="folder-name">..</span>
+                    </button>
+                {/if}
 
-            {#if currentSubFolders.length === 0 && currentFiles.length === 0 && browseFolderId !== null}
-                <p class="empty-hint">Empty folder</p>
-            {/if}
+                {#each currentSubFolders as fld (fld.id)}
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div
+                        class="folder-item"
+                        class:selected={selectedFolderId === fld.id}
+                        onclick={() => selectFolder(fld.id)}
+                        ondblclick={() => navigateInto(fld.id)}
+                        role="button"
+                        tabindex="0"
+                        onkeydown={(e) => e.key === 'Enter' && selectFolder(fld.id)}
+                    >
+                        <span class="folder-icon">{@html folder}</span>
+                        <span class="folder-name">{fld.name}</span>
+                        {#if selectedFolderId === fld.id}
+                            <span class="check-icon">{@html check}</span>
+                        {/if}
+                        <button
+                            class="into-btn"
+                            onclick={(e) => { e.stopPropagation(); navigateInto(fld.id); }}
+                            tabindex="-1"
+                        >
+                            {@html chevronRight}
+                        </button>
+                    </div>
+                {/each}
+
+                {#each currentFiles as f (f.id)}
+                    <div class="file-row">
+                        <span class="file-row-name">{f.title || "Untitled"}</span>
+                    </div>
+                {/each}
+
+                {#if currentSubFolders.length === 0 && currentFiles.length === 0 && browseFolderId !== null}
+                    <p class="empty-hint">Empty folder</p>
+                {/if}
+            </div>
         </div>
     </div>
 
@@ -176,18 +186,17 @@
 
     <div class="dialog-footer">
         <Button variant="secondary" onclick={closeTopModal}>Cancel</Button>
-        <Button
-            loading={saving}
-            onclick={confirm}
-            disabled={selectedFolderId === (file.folderId ?? null)}
-        >
-            Move here
+        <Button variant="secondary" loading={saving} onclick={() => makeCopy(false)}>
+            Make a copy
+        </Button>
+        <Button loading={saving} onclick={() => makeCopy(true)}>
+            Make a copy & open
         </Button>
     </div>
 </div>
 
 <style>
-    .move-modal {
+    .copy-modal {
         padding: 12px 16px 16px;
         display: flex;
         flex-direction: column;
@@ -196,26 +205,21 @@
         max-width: 90vw;
     }
 
-    .file-info {
+    .field {
         display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 0.75rem;
-        background: var(--color-fill);
-        border-radius: 6px;
-        font-size: 0.8125rem;
+        flex-direction: column;
+        gap: 6px;
     }
 
-    .file-label {
+    .field-label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
         color: var(--color-text-muted);
+        margin: 0;
     }
 
-    .file-name {
-        font-weight: 500;
-        color: var(--color-text);
-    }
-
-    /* Folder Panel */
     .folder-panel {
         border: 1px solid var(--color-border);
         border-radius: 8px;
@@ -223,7 +227,6 @@
         background: var(--color-surface);
     }
 
-    /* Breadcrumb */
     .breadcrumb {
         display: flex;
         align-items: center;
@@ -287,14 +290,13 @@
         height: 10px;
     }
 
-    /* Folder list */
     .folder-list {
         display: flex;
         flex-direction: column;
         gap: 2px;
         padding: 8px;
-        min-height: 200px;
-        max-height: 280px;
+        min-height: 160px;
+        max-height: 220px;
         overflow-y: auto;
     }
 

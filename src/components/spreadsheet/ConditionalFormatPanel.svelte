@@ -58,20 +58,38 @@
         return s;
     };
 
+    const colFromStr = (s) => s.split('').reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0) - 1;
+
     function rangeToStr(r) {
+        if (r.wholeCol) return `${colLabel(r.startCol)}:${colLabel(r.endCol)}`;
+        if (r.wholeRow) return `${r.startRow + 1}:${r.endRow + 1}`;
         return `${colLabel(r.startCol)}${r.startRow + 1}:${colLabel(r.endCol)}${r.endRow + 1}`;
     }
 
-    /** Parse "A1:B3" → { startRow, startCol, endRow, endCol } or null */
+    /**
+     * Parse range string into rule coords. Supports:
+     *   "A1:B3"  → cell range
+     *   "B:B"    → whole column (wholeCol: true)
+     *   "1:3"    → whole rows   (wholeRow: true)
+     */
     function parseRange(str) {
-        const m = str.trim().toUpperCase().match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+        const s = str.trim().toUpperCase();
+        // Whole-column: "B:D"
+        const colOnly = s.match(/^([A-Z]+):([A-Z]+)$/);
+        if (colOnly) {
+            return { startCol: colFromStr(colOnly[1]), endCol: colFromStr(colOnly[2]), startRow: 0, endRow: 0, wholeCol: true };
+        }
+        // Whole-row: "2:5"
+        const rowOnly = s.match(/^(\d+):(\d+)$/);
+        if (rowOnly) {
+            return { startRow: parseInt(rowOnly[1], 10) - 1, endRow: parseInt(rowOnly[2], 10) - 1, startCol: 0, endCol: 0, wholeRow: true };
+        }
+        // Normal cell range: "A1:B3"
+        const m = s.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
         if (!m) return null;
-        const colFromStr = (s) => s.split('').reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0) - 1;
         return {
-            startCol: colFromStr(m[1]),
-            startRow: parseInt(m[2], 10) - 1,
-            endCol: colFromStr(m[3]),
-            endRow: parseInt(m[4], 10) - 1,
+            startCol: colFromStr(m[1]), startRow: parseInt(m[2], 10) - 1,
+            endCol: colFromStr(m[3]),   endRow: parseInt(m[4], 10) - 1,
         };
     }
 
@@ -81,8 +99,13 @@
     let rangeInputError = $state(false);
     let pickingRange = $state(false);
 
+    function getEffectiveSel() {
+        const store = spreadsheetSession.activeSheetStore;
+        return selectionState.effectiveRange(store?.rowCount ?? 1000, store?.colCount ?? 26);
+    }
+
     function makeDraft() {
-        const sel = selectionState.range;
+        const sel = getEffectiveSel();
         return {
             condition: 'gt',
             threshold: '',
@@ -105,7 +128,7 @@
     // While picking, mirror selection into draft
     $effect(() => {
         if (!pickingRange) return;
-        const sel = selectionState.range;
+        const sel = getEffectiveSel();
         if (sel) {
             draft.startRow = sel.startRow;
             draft.startCol = sel.startCol;
@@ -133,7 +156,7 @@
     }
 
     function useSelection() {
-        const sel = selectionState.range;
+        const sel = getEffectiveSel();
         if (!sel) return;
         draft.startRow = sel.startRow;
         draft.startCol = sel.startCol;

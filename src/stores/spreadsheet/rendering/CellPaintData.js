@@ -598,8 +598,8 @@ export function buildPaneData(params) {
             if (cfRules?.length) {
                 const cfVal = dispV ?? sheetCell?.v;
                 for (const rule of cfRules) {
-                    if (r < rule.startRow || r > rule.endRow) continue;
-                    if (c < rule.startCol || c > rule.endCol) continue;
+                    if (!rule.wholeCol && (r < rule.startRow || r > rule.endRow)) continue;
+                    if (!rule.wholeRow && (c < rule.startCol || c > rule.endCol)) continue;
                     if (matchesCondition(cfVal, rule.condition, rule.threshold)) {
                         if (rule.style?.backgroundColor) item.bgColor = rule.style.backgroundColor;
                         if (rule.style?.color) item.textColor = rule.style.color;
