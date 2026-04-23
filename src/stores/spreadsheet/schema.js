@@ -269,14 +269,17 @@ export function createNamedRangeYMap(range) {
 }
 
 /**
- * Initialize a new spreadsheet document
+ * Initialize a new spreadsheet document.
+ * Idempotent: does nothing if the document already has a 'sheets' structure.
  * @param {Y.Doc} ydoc
  * @param {Object} [metadata] - Optional initial metadata
  */
 export function initializeDocument(ydoc, metadata = {}) {
-    ydoc.transact(() => {
-        const root = ydoc.getMap('spreadsheet');
+    const root = ydoc.getMap('spreadsheet');
+    // Already initialized — do not overwrite existing content.
+    if (root.get('sheets')) return;
 
+    ydoc.transact(() => {
         // Initialize metadata Y.Map
         // Note: Title is stored in DocManager, not in Yjs metadata
         const metadataMap = new Y.Map();
@@ -317,12 +320,18 @@ export const spreadsheetSchema = {
         const root = ydoc.getMap('spreadsheet');
         const sheets = root.get('sheets');
 
-        // If no sheets structure exists, the doc either hasn't synced yet or is
-        // a truly new doc. Do NOT call initializeDocument here — creating local
-        // Y.Maps races with incoming server content and can overwrite server data
-        // via CRDT conflict resolution. New documents are initialized at creation
-        // time via createAndInitializeFile → initializeDocument.
-        if (!sheets) return;
+        // If no sheets structure exists, initialize it now. This function is called
+        // from SpreadsheetSession.load() after loadDoc() returns — meaning either
+        // IndexedDB had local data or the WebSocket sync completed (or timed out).
+        // An absent 'sheets' at this point means the doc is genuinely uninitialised
+        // (e.g. created via createFile() without an initializer, or init didn't
+        // persist before a reload). initializeDocument() is idempotent so it is
+        // safe to call here even on docs that were already initialized via the
+        // creation path — it will no-op if 'sheets' already exists.
+        if (!sheets) {
+            initializeDocument(ydoc);
+            return;
+        }
 
         // Migrate existing sheets to add sub-fields introduced in schema v3+.
         // These writes are CRDT-safe: they only touch keys that are genuinely

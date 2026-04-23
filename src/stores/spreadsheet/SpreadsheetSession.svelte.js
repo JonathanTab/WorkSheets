@@ -373,10 +373,10 @@ export class SpreadsheetSession {
         const metadataMap = this.root.get('metadata');
         metadataMap?.observe(metadataObserver);
 
-        // Guard against the new-doc race: if the doc was empty at load time (WebSocket
-        // hasn't delivered the server's initialized content yet), sheetOrder/sheetsMap
-        // above are null, so their observers are no-ops. Observe root directly so we
-        // can attach sub-observers and initialize the active sheet when data arrives.
+        // Fallback for an extreme edge case: if the WS sync timed out and we
+        // initialized locally, then WS later delivers the server state that replaces
+        // root keys, the sub-observer closures above become stale. Observing root
+        // lets us re-attach and re-activate the active sheet.
         const rootObserver = () => {
             const newSheets = this.root?.get('sheets');
             if (!newSheets || this.activeSheetStore) return;

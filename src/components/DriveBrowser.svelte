@@ -57,6 +57,7 @@
         icons,
     } from "../lib/icons/index.js";
     import { router } from "../lib/router.svelte.js";
+    import { initializeDocument as initializeSpreadsheet } from "../stores/spreadsheet/schema.js";
     import {
         APP_SHEETS,
         APP_DOCS,
@@ -514,10 +515,11 @@
             appType: APP_SHEETS,
             onConfirm: async (title) => {
                 try {
-                    const doc = await registry.drive.createFile({
+                    const doc = await registry.drive.createAndInitializeFile({
                         title,
                         app: APP_SHEETS,
                         folderId: tab === "drive" ? currentFolderId : null,
+                        initializer: (ydoc) => initializeSpreadsheet(ydoc),
                     });
                     closeTopModal();
                     router.openSheet(doc.id);
