@@ -222,6 +222,63 @@ class AppView {
     /** Returns the authenticated URL for downloading a blob. @param {string} id @returns {string} */
     getBlobUrl(id) { return this._r._api.getBlobUrl(id); }
 
+    /**
+     * Return the descriptor for a blob, fetching metadata from the server via
+     * GET request (headers only) if the file is not in the local registry.
+     * Deduplicates concurrent calls. Permanently skips blobs that fail so callers
+     * in render loops don't cause infinite retries.
+     * @param {string} id
+     * @returns {Promise<import('./FileRegistry').FileDescriptor|null>}
+     */
+    async resolveBlob(id) {
+        const cached = this.get(id);
+        if (cached) return cached;
+
+        // Deduplicate concurrent resolves for the same id.
+        if (this._resolveCache) {
+            if (this._resolveCache.failed.has(id)) return null;
+            if (this._resolveCache.pending.has(id)) return this._resolveCache.pending.get(id);
+        } else {
+            this._resolveCache = { pending: new Map(), failed: new Set() };
+        }
+
+        const promise = this._r._api.fetchBlobInfo(id)
+            .catch(() => null)
+            .then(info => {
+                this._resolveCache.pending.delete(id);
+                if (!info) { this._resolveCache.failed.add(id); return null; }
+                const now = new Date().toISOString();
+                const descriptor = {
+                    id,
+                    owner:        this._r._options.getUsername?.() ?? 'anonymous',
+                    app:          this._appName,
+                    title:        info.filename || id,
+                    type:         'blob',
+                    scope:        'app',
+                    folderId:     null,
+                    parentId:     null,
+                    roomId:       null,
+                    blobKey:      id,
+                    mimeType:     info.mimeType || null,
+                    size:         info.size     ?? null,
+                    filename:     info.filename || null,
+                    publicRead:   false,
+                    publicWrite:  false,
+                    deleted:      false,
+                    birthtime:    now,
+                    mtime:        now,
+                    ctime:        now,
+                    sharedWith:   [],
+                    thumbnailKey: null,
+                };
+                this._r._upsertFile(descriptor);
+                return descriptor;
+            });
+
+        this._resolveCache.pending.set(id, promise);
+        return promise;
+    }
+
     /** Fetch and cache a blob. Returns cached copy if still fresh. @param {string} id @returns {Promise<Blob>} */
     async fetchBlob(id) {
         const pending = await this._r._getPendingBlob(id);

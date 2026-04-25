@@ -22,7 +22,7 @@ const DEFAULT_THEME = {
     gridline: '#e2e8f0',
     cellBg: '#ffffff',
     defaultText: '#1e293b',
-    defaultFontSize: 13,
+    defaultFontSize: 12,
     defaultFontFamily: 'system-ui, -apple-system, sans-serif',
     tableHeaderBg: '#f1f5f9',
     tableHeaderText: '#334155',

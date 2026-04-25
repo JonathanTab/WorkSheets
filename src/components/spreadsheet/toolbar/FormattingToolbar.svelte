@@ -924,7 +924,7 @@
     }
 
     /* ── Mobile: scrollable toolbar with bigger tap targets ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .formatting-toolbar {
             overflow-x: auto;
             overflow-y: hidden;

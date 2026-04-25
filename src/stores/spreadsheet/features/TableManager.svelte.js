@@ -397,21 +397,26 @@ export class TableManager {
         });
     }
 
+    // ─── Table lookup ─────────────────────────────────────────────────────────
+
+    getTableByName(name) {
+        const upper = String(name).toUpperCase();
+        for (const t of this.stores.values()) {
+            if (t.name.toUpperCase() === upper) return t;
+        }
+        return null;
+    }
+
     // ─── Formula function registration ────────────────────────────────────────
 
     /**
      * Register TABLE_* formula functions into a FormulaEngine.
      * Functions look up the first table by name or use the "active" table heuristic.
      * @param {import('../../../formulas/FormulaEngine.svelte.js').FormulaEngine} formulaEngine
+     * @param {any} [session] SpreadsheetSession — used for cross-sheet table fallback
      */
-    registerFunctions(formulaEngine) {
-        const byName = (name) => {
-            const upper = String(name).toUpperCase();
-            for (const t of this.stores.values()) {
-                if (t.name.toUpperCase() === upper) return t;
-            }
-            return null;
-        };
+    registerFunctions(formulaEngine, session) {
+        const byName = (name) => this.getTableByName(name) ?? session?.getCrossSheetTable(name) ?? null;
 
         // ── Single-cell access ─────────────────────────────────────────────────
         // TABLE_GET(tableName, rowIndex, colId) → value at display index

@@ -241,7 +241,7 @@ export class SheetRenderContext {
                 return info?.colDef?.name ?? '';
             }
             if (cellType === CELL_TYPE.TABLE_DATA) {
-                return this.tableManager.getCellDisplayValue(row, col);
+                return this.#session.getCellDisplayValue(row, col);
             }
             if (cellType === CELL_TYPE.TABLE_ENTRY) {
                 const info = this.tableManager.getCellInfo(row, col);

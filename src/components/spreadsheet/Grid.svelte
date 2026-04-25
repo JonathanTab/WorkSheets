@@ -2493,6 +2493,8 @@
                 let ddOptions = [];
                 if (ct.source === "range" && ct.range) {
                     ddOptions = resolveRangeOptions(ct.range);
+                } else if (ct.source === "table" && ct.tableName && ct.columnId) {
+                    ddOptions = resolveTableColumnOptions(ct.tableName, ct.columnId);
                 } else if (Array.isArray(ct.options)) {
                     ddOptions = ct.options;
                 }
@@ -2563,6 +2565,8 @@
             let ddOptions = [];
             if (ct.source === "range" && ct.range) {
                 ddOptions = resolveRangeOptions(ct.range);
+            } else if (ct.source === "table" && ct.tableName && ct.columnId) {
+                ddOptions = resolveTableColumnOptions(ct.tableName, ct.columnId);
             } else if (Array.isArray(ct.options)) {
                 ddOptions = ct.options;
             }
@@ -2670,11 +2674,18 @@
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const parsed = CellTypeRegistry.parseInput(
-                    { type: info.colDef.type },
-                    value,
-                );
-                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                if (typeof value === 'string' && value.startsWith('=')) {
+                    info.table.updateCell(info.dataIndex, info.colDef.id, value);
+                    spreadsheetSession.formulaEngine?.setFormula(row, col, value);
+                    spreadsheetSession.formulaEngine?.recalculateDirty();
+                } else {
+                    const parsed = CellTypeRegistry.parseInput(
+                        { type: info.colDef.type },
+                        value,
+                    );
+                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                    spreadsheetSession.formulaEngine?.clearFormula(row, col);
+                }
                 untrack(() => renderScheduler?.invalidateAll());
             }
             return;
@@ -4227,6 +4238,17 @@
         return opts;
     }
 
+    function resolveTableColumnOptions(tableName, columnId) {
+        const t = renderContext?.tableManager?.getTableByName(tableName);
+        if (t) {
+            return t.getColumn(t.resolveColId(String(columnId)))
+                .filter(v => v != null && v !== "")
+                .map(String);
+        }
+        // Table is on a different sheet — read raw Yjs values via the session
+        return spreadsheetSession.getTableColumnValues(tableName, columnId);
+    }
+
     // ─── Fill Down / Right ────────────────────────────────────────────────────
     function fillDown() {
         if (!sheetStore) return;
@@ -5653,9 +5675,6 @@
 {#if fileViewerProps}
     <FileViewer
         blobId={fileViewerProps.blobId}
-        mimeType={fileViewerProps.mimeType}
-        filename={fileViewerProps.filename}
-        size={fileViewerProps.size}
         onClose={() => (fileViewerProps = null)}
     />
 {/if}

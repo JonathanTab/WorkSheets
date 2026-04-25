@@ -9,27 +9,38 @@
      *   - Other      → download link
      *
      * Props:
-     *   blobId   - blob file ID
-     *   mimeType - MIME type string
-     *   filename - original filename
-     *   onClose  - callback()
+     *   blobId  - blob file ID (all metadata comes from the storage registry)
+     *   onClose - callback()
      */
+    import { onDestroy } from 'svelte';
     import storage from '../../../stores/storage.js';
     import { getFileCategory, formatFileSize } from '../../../stores/spreadsheet/cellTypes/types/file.js';
 
     let {
-        blobId   = null,
-        mimeType = '',
-        filename = '',
-        size     = null,
-        onClose  = null,
+        blobId  = null,
+        onClose = null,
     } = $props();
 
-    // For table file cells ctConfig has no per-cell metadata — look up from registry.
-    const _descriptor = blobId && !mimeType ? (storage.app.get(blobId) ?? null) : null;
-    const resolvedMimeType = mimeType || _descriptor?.mimeType || '';
-    const resolvedFilename = filename || _descriptor?.filename || '';
-    const resolvedSize     = size     ?? _descriptor?.size     ?? null;
+    // Reactive storage revision — re-derives metadata when registry syncs.
+    let _storageRev = $state(0);
+    const _unsubStorage = storage.app.files.subscribe(() => { _storageRev++; });
+    onDestroy(_unsubStorage);
+
+    $effect(() => {
+        void _storageRev;
+        if (blobId && !storage.app.get(blobId)) {
+            storage.app.resolveBlob(blobId).catch(() => {});
+        }
+    });
+
+    let _descriptor = $derived.by(() => {
+        void _storageRev;
+        return blobId ? storage.app.get(blobId) : null;
+    });
+
+    let resolvedMimeType = $derived(_descriptor?.mimeType || '');
+    let resolvedFilename = $derived(_descriptor?.filename || '');
+    let resolvedSize     = $derived(_descriptor?.size     ?? null);
 
     let category  = $derived(getFileCategory(resolvedMimeType));
     let blobUrl   = $derived(blobId ? storage.app.getBlobUrl(blobId) : null);

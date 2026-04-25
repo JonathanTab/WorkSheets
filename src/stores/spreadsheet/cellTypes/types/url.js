@@ -26,7 +26,7 @@ export const urlType = {
         if (!text) return;
 
         const color = theme?.urlColor ?? '#1a73e8';
-        const fontSize = style?.fontSize ?? theme?.defaultFontSize ?? 13;
+        const fontSize = style?.fontSize ?? theme?.defaultFontSize ?? 12;
         const fontFamily = style?.fontFamily ?? theme?.defaultFontFamily ?? 'system-ui, -apple-system, sans-serif';
 
         ctx.font = `normal normal ${fontSize}px ${fontFamily}`;

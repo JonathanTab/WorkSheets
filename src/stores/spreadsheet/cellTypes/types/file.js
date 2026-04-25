@@ -13,15 +13,6 @@ import storage from '../../../storage.js';
 
 // ─── File category helpers ─────────────────────────────────────────────────
 
-const CATEGORY_COLORS = {
-    image: '#10b981',
-    pdf:   '#ef4444',
-    text:  '#3b82f6',
-    video: '#8b5cf6',
-    audio: '#f59e0b',
-    other: '#64748b',
-};
-
 /**
  * Classify a MIME type into a broad category.
  * @param {string} mimeType
@@ -49,6 +40,7 @@ export function formatFileSize(bytes) {
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
+
 
 // ─── Cell type descriptor ──────────────────────────────────────────────────
 
@@ -81,28 +73,23 @@ export const fileType = {
      */
     paintCell(ctx, blobId, cellItem, rect, style, theme) {
         const { x, y, width, height } = rect;
-        const ct = cellItem?.ctConfig ?? {};
-
-        // Fall back to the file registry descriptor when ctConfig lacks metadata
-        // (table cells store only { type:'file' } in the column config)
-        const descriptor = blobId && !ct.mimeType ? (storage.app.get(blobId) ?? null) : null;
-        const mimeType = ct.mimeType ?? descriptor?.mimeType ?? '';
-        const filename  = ct.filename  ?? descriptor?.filename  ?? '';
-        const category  = getFileCategory(mimeType);
-        const color     = CATEGORY_COLORS[category] ?? CATEGORY_COLORS.other;
 
         if (!blobId) {
             _drawEmptyPlaceholder(ctx, x, y, width, height);
             return;
         }
 
-        _drawFileCell(ctx, x, y, width, height, color, filename, theme);
+        const descriptor = storage.app.get(blobId);
+        if (!descriptor) storage.app.resolveBlob(blobId).catch(() => {});
+        const filename = descriptor?.filename ?? '';
+        _drawFileCell(ctx, x, y, width, height, filename, theme);
     },
 };
 
 // ─── Private draw helpers ─────────────────────────────────────────────────
 
-function _drawFileCell(ctx, x, y, w, h, color, filename, theme) {
+function _drawFileCell(ctx, x, y, w, h, filename, theme) {
+    const color = '#64748b';
     const pad      = 6;
     const iconSize = Math.min(h - pad * 2, 22);
     const iconX    = x + pad;

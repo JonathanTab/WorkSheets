@@ -437,7 +437,7 @@
     }
 
     /* Mobile adjustments */
-    @media (max-width: 768px) {
+    @media (max-width: 600px) {
         .avatar {
             width: 30px;
             height: 30px;

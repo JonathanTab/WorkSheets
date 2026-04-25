@@ -207,6 +207,20 @@
         applyToSelection(config);
     }
 
+    function updateDropdownTable(tableName, columnId) {
+        options.tableName = tableName;
+        options.columnId = columnId;
+        const config = { type: currentType, ...options };
+        applyToSelection(config);
+    }
+
+    let availableTables = $derived(() => spreadsheetSession.getAllTableDescriptors());
+
+    let selectedTableColumns = $derived(() => {
+        const t = availableTables().find(t => t.tableName === options.tableName);
+        return t ? t.columns : [];
+    });
+
     function useSelectionAsRange() {
         const sel = selectionState.range;
         if (!sel) return;
@@ -382,7 +396,7 @@
                 <div class="source-toggle">
                     <button
                         class="source-btn"
-                        class:active={!(options.source === 'range')}
+                        class:active={options.source === 'list' || !options.source}
                         onclick={() => setDropdownSource('list')}
                     >List</button>
                     <button
@@ -390,6 +404,11 @@
                         class:active={options.source === 'range'}
                         onclick={() => setDropdownSource('range')}
                     >Range</button>
+                    <button
+                        class="source-btn"
+                        class:active={options.source === 'table'}
+                        onclick={() => setDropdownSource('table')}
+                    >Table</button>
                 </div>
             </div>
 
@@ -409,6 +428,33 @@
                         <span class="hint-text">Select cells on the sheet, then:</span>
                         <button class="use-sel-btn" onclick={useSelectionAsRange}>Use selection</button>
                     </div>
+                </div>
+            {:else if options.source === 'table'}
+                <div class="option-row">
+                    <label for="dd-table-name">Table</label>
+                    <select
+                        id="dd-table-name"
+                        value={options.tableName ?? ''}
+                        onchange={(e) => updateDropdownTable(/** @type {HTMLSelectElement} */(e.target).value, options.columnId ?? '')}
+                    >
+                        <option value="">— select —</option>
+                        {#each availableTables() as t}
+                            <option value={t.tableName}>{t.tableName}{t.sheetName ? ` (${t.sheetName})` : ''}</option>
+                        {/each}
+                    </select>
+                </div>
+                <div class="option-row">
+                    <label for="dd-table-col">Column</label>
+                    <select
+                        id="dd-table-col"
+                        value={options.columnId ?? ''}
+                        onchange={(e) => updateDropdownTable(options.tableName ?? '', /** @type {HTMLSelectElement} */(e.target).value)}
+                    >
+                        <option value="">— select —</option>
+                        {#each selectedTableColumns() as col}
+                            <option value={col.name}>{col.name}</option>
+                        {/each}
+                    </select>
                 </div>
             {:else}
                 <div class="dropdown-list-label">Options</div>

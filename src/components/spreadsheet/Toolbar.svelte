@@ -154,7 +154,7 @@
     }
 
     /* ── Mobile: tighter rows ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .toolbar-row {
             min-height: 38px;
             padding: 0 6px;

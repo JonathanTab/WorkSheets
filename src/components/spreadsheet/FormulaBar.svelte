@@ -762,7 +762,7 @@
     }
 
     /* ── Mobile: taller touch targets ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .formula-bar-row {
             min-height: 44px;
             padding: 0.25rem 0.5rem;

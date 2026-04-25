@@ -644,7 +644,7 @@
     .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* Mobile: larger controls inside BottomSheet */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .section { padding: 12px 16px; }
         .section-label { font-size: 11px; margin-bottom: 8px; }
         .toggle-label { min-height: 44px; }

@@ -16,7 +16,7 @@ class MobileState {
         if (typeof window === "undefined") return;
 
         // Match the same query used in component CSS
-        const mq = window.matchMedia("(pointer: coarse), (max-width: 768px)");
+        const mq = window.matchMedia("(max-width: 600px)");
         this.isMobile = mq.matches;
         mq.addEventListener("change", (e) => {
             this.isMobile = e.matches;

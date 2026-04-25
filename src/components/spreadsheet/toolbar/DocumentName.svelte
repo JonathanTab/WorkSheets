@@ -235,7 +235,7 @@
     }
 
     /* ── Mobile ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .name-display {
             max-width: 120px;
             font-size: 0.8125rem;

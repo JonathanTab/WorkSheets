@@ -3776,7 +3776,7 @@
     }
 
     /* Mobile Styles */
-    @media (max-width: 768px) {
+    @media (max-width: 600px) {
         .sidebar-overlay {
             display: block;
         }

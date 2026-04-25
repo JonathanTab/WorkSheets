@@ -2,33 +2,20 @@
     /**
      * FileEditor - File cell editor overlay.
      *
-     * Displayed when a cell with type 'file' is opened for editing.
-     * Allows the user to:
-     *   - Upload any file (drag-drop or browse)
-     *   - Preview/view the current file
-     *   - Replace the file
-     *   - Remove the file
-     *   - Download the current file
-     *
-     * Blob lifecycle:
-     *   - On commit:   delete old blob if replaced; clean up intermediate uploads
-     *   - On cancel:   delete any blobs uploaded during this session
-     *
      * Props:
      *   value    - current blob file ID (or null/empty)
      *   docId    - parent document ID (parentId when creating blob files)
-     *   ctConfig - current cell type config { type:'file', mimeType, filename, size }
-     *   onCommit - callback(blobId, { mimeType, filename, size })
+     *   ctConfig - current cell type config { type:'file' } — no per-cell metadata stored
+     *   onCommit - callback(blobId)
      *   onCancel - callback()
      */
-    import { onMount, untrack } from 'svelte';
+    import { onMount, onDestroy, untrack } from 'svelte';
     import storage from '../../../stores/storage.js';
     import { getFileCategory, formatFileSize } from '../../../stores/spreadsheet/cellTypes/types/file.js';
 
     let {
         value    = '',
         docId    = null,
-        ctConfig = null,
         onCommit = null,
         onCancel = null,
     } = $props();
@@ -36,27 +23,36 @@
     // Original blob from before edit opened
     const originalBlobId = value || null;
 
-    let pendingBlobId   = $state(value || null);
+    let pendingBlobId = $state(value || null);
 
-    // For table file cells, ctConfig has only { type:'file' } — no per-cell metadata.
-    // Fall back to the file registry descriptor synchronously so the editor is
-    // immediately populated on open.
-    function _resolveMeta(blobId, config) {
-        const mimeType = config?.mimeType ?? '';
-        const filename = config?.filename ?? '';
-        const size     = config?.size     ?? null;
-        if (blobId && (!mimeType || !filename)) {
-            const d = storage.app.get(blobId);
-            if (d) return {
-                mimeType: mimeType || d.mimeType || '',
-                filename:  filename  || d.filename  || '',
-                size:      size      ?? d.size      ?? null,
-            };
+    // Storage revision counter — increments whenever the registry fires 'change',
+    // which makes $derived below re-run and pick up newly synced descriptors.
+    let _storageRev = $state(0);
+    const _unsubStorage = storage.app.files.subscribe(() => { _storageRev++; });
+    onDestroy(_unsubStorage);
+
+    // Side-effect: when the descriptor is missing, kick off a lazy GET-headers resolve.
+    // resolveBlob deduplicates concurrent/repeated calls internally.
+    $effect(() => {
+        const blobId = pendingBlobId;
+        void _storageRev;
+        if (blobId && !storage.app.get(blobId)) {
+            storage.app.resolveBlob(blobId).catch(() => {});
         }
-        return { mimeType, filename, size };
-    }
+    });
 
-    let pendingMeta = $state(_resolveMeta(value || null, ctConfig));
+    // Pure derivation — reads from registry, re-runs when _storageRev changes.
+    let pendingMeta = $derived.by(() => {
+        void _storageRev;
+        const blobId = pendingBlobId;
+        if (!blobId) return { mimeType: '', filename: '', size: null };
+        const d = storage.app.get(blobId);
+        return {
+            mimeType: d?.mimeType || '',
+            filename:  d?.filename  || '',
+            size:      d?.size      ?? null,
+        };
+    });
 
     let isDragging    = $state(false);
     let isUploading   = $state(false);
@@ -74,9 +70,9 @@
             },
         }));
     }
-    let innerEl       = $state(null);
-    let rootEl        = $state(null);
-    let panelShift    = $state({ x: 0, y: 0 });
+    let innerEl    = $state(null);
+    let rootEl     = $state(null);
+    let panelShift = $state({ x: 0, y: 0 });
 
     // Clamp the panel to the viewport after mount
     $effect(() => {
@@ -127,8 +123,8 @@
             return;
         }
 
-        uploadError  = null;
-        isUploading  = true;
+        uploadError = null;
+        isUploading = true;
 
         try {
             const descriptor = await storage.app.createBlob({
@@ -137,14 +133,10 @@
                 filename: file.name,
                 parentId: docId ?? null,
             });
-
+            // _upsertFile is called inside createBlob, so storage.app.get(descriptor.id)
+            // works immediately; pendingMeta $derived re-runs when pendingBlobId changes.
             sessionUploads = [...sessionUploads, descriptor.id];
             pendingBlobId  = descriptor.id;
-            pendingMeta    = {
-                mimeType: file.type || '',
-                filename:  file.name,
-                size:      file.size,
-            };
         } catch (err) {
             uploadError = err?.message ?? 'Upload failed';
             console.error('File upload error:', err);
@@ -190,12 +182,11 @@
                 storage.app.delete(id).catch(() => {});
             }
         }
-        onCommit?.(pendingBlobId, { ...pendingMeta });
+        onCommit?.(pendingBlobId);
     }
 
     function handleRemove() {
         pendingBlobId = null;
-        pendingMeta   = { mimeType: '', filename: '', size: null };
     }
 
     function handleCancel() {

@@ -282,14 +282,19 @@ export class StorageAPI {
             ? new URL(this.blobUrl)
             : new URL(this.blobUrl, window.location.origin);
         url.searchParams.set('id', fileId);
+        const filename = file.name ?? '';
+        const headers = {
+            'Content-Type': file.type || 'application/octet-stream',
+            ...this._authHeaders(),
+        };
+        if (filename) {
+            headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}"`;
+        }
         const res = await fetch(url.toString(), {
-            method:  'PUT',
-            body:    file,
+            method: 'PUT',
+            body:   file,
             credentials: 'same-origin',
-            headers: {
-                'Content-Type': file.type || 'application/octet-stream',
-                ...this._authHeaders(),
-            },
+            headers,
         });
         if (!res.ok) throw new Error(`Blob upload failed: ${res.status}`);
     }
@@ -310,6 +315,35 @@ export class StorageAPI {
         const key = this.getApiKey();
         if (key) url.searchParams.set('apikey', key); // needed for img/video src
         return url.toString();
+    }
+
+    /**
+     * Fetch mimeType and filename for a blob by inspecting its HTTP response headers.
+     * Used as a fallback when the file descriptor is not in the local registry.
+     * @param {string} fileId
+     * @returns {Promise<{mimeType:string, filename:string}|null>}
+     */
+    async fetchBlobInfo(fileId) {
+        try {
+            const url = this.blobUrl.startsWith('http')
+                ? new URL(this.blobUrl)
+                : new URL(this.blobUrl, window.location.origin);
+            url.searchParams.set('id', fileId);
+            url.searchParams.set('action', 'info');
+            const key = this.getApiKey();
+            if (key) url.searchParams.set('apikey', key);
+            const res = await fetch(url.toString(), { credentials: 'same-origin', headers: this._authHeaders() });
+            if (!res.ok) return null;
+            const data = await res.json();
+            if (!data) return null;
+            return {
+                mimeType: data.mime_type  ?? '',
+                filename: data.filename   ?? '',
+                size:     data.size       ?? null,
+            };
+        } catch {
+            return null;
+        }
     }
 
     // -------------------------------------------------------

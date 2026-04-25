@@ -746,7 +746,7 @@
     .delete-btn:hover { background: #fef2f2; }
 
     /* Mobile: larger touch targets inside BottomSheet */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .panel-body { padding: 10px 14px; gap: 8px; }
         .col-item { padding: 8px; min-height: 44px; }
         .col-section-label { font-size: 11px; }

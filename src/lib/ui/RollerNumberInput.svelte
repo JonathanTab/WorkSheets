@@ -125,7 +125,7 @@
         gap: 8px;
     }
 
-    @media (min-width: 768px) {
+    @media (min-width: 600px) {
         .desktop-controls {
             display: flex;
         }

@@ -559,6 +559,23 @@ try {
                                 WHERE fc.descendant_id = f.folder_id AND fsh.username = :user AND fsh.can_read = 1
                             )
                         ))
+                        OR (f.parent_id IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM files p
+                            WHERE p.id = f.parent_id AND p.deleted = 0 AND (
+                                p.owner = :user
+                                OR p.public_read = 1
+                                OR EXISTS (SELECT 1 FROM file_shares WHERE file_id = p.id AND username = :user AND can_read = 1)
+                                OR (p.folder_id IS NOT NULL AND (
+                                    EXISTS (SELECT 1 FROM folders WHERE id = p.folder_id AND owner = :user)
+                                    OR EXISTS (SELECT 1 FROM folders WHERE id = p.folder_id AND public_read = 1)
+                                    OR EXISTS (
+                                        SELECT 1 FROM folder_closure fc
+                                        JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
+                                        WHERE fc.descendant_id = p.folder_id AND fsh.username = :user AND fsh.can_read = 1
+                                    )
+                                ))
+                            )
+                        ))
                     )
                     GROUP BY f.id
                     ORDER BY f.updated_at DESC

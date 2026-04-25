@@ -310,7 +310,7 @@
         margin: 6px 10px;
     }
 
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .context-menu {
             min-width: 220px;
         }

@@ -433,7 +433,7 @@
     }
 
     /* ── Mobile: bigger touch targets ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .sheet-tabs {
             min-height: 44px;
         }

@@ -373,7 +373,7 @@ if ($pathInfo && $pathInfo !== '/') {
 
 // If no action specified, infer from method
 if (!$action) {
-    $action = strtolower($method) === 'get' ? 'download' : 'upload';
+    $action = (strtolower($method) === 'get' || strtolower($method) === 'head') ? 'download' : 'upload';
 }
 
 // Validate document ID

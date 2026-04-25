@@ -474,7 +474,7 @@ export class SpreadsheetSession {
 
         // Register TABLE_* functions immediately so they are available when existing
         // formulas are evaluated below (prevents #NAME? on first load).
-        tableManager?.registerFunctions(this.formulaEngine);
+        tableManager?.registerFunctions(this.formulaEngine, this);
 
         // Register IMPORTRANGE as a custom function, closing over the manager.
         const extMgr = this.#externalDocManager;
@@ -486,12 +486,18 @@ export class SpreadsheetSession {
 
         // Set up cell value getter - returns raw cell values from Yjs
         this.formulaEngine.setCellValueGetter((row, col) => {
+            // Check table cells first — they store data in TableStore rows, not sheet cells
+            if (this.tableManager) {
+                const info = this.tableManager.getCellInfo(row, col);
+                if (info?.table && info.rowType === 'data' && info.colDef) {
+                    const rawVal = info.table.sortedFilteredRows[info.dataIndex]?.[info.colDef?.['id']];
+                    if (typeof rawVal === 'string' && rawVal.startsWith('=')) return null;
+                    return rawVal ?? null;
+                }
+            }
             const cell = this.activeSheetStore?.getCell(row, col);
             if (!cell || !cell.exists) return null;
-            // Return the raw value (could be a formula string or actual value)
             const v = cell.v;
-            // If it's a formula, we should NOT return the formula string for dependency evaluation
-            // The formula engine handles this internally
             if (typeof v === 'string' && v.startsWith('=')) {
                 return null; // Formula cells have no "raw" value
             }
@@ -616,6 +622,24 @@ export class SpreadsheetSession {
             // Third pass: recalculate all formula cells in topological (dependency) order
             // so that chains like A1=10, B1=A1+5, C1=B1*2 all resolve correctly.
             // graph.setFormula marks every cell dirty, so recalculateDirty covers them all.
+            this.formulaEngine.recalculateDirty();
+        }
+
+        // Scan table cells for formula values stored in table row data
+        if (tableManager) {
+            for (const table of tableManager.stores.values()) {
+                const dataStart = table.startRow + 2;
+                const rows = table.sortedFilteredRows;
+                for (let i = 0; i < rows.length; i++) {
+                    table.columns.forEach((colDef, colIdx) => {
+                        if (colDef.isNonEntry) return;
+                        const val = rows[i]?.[colDef.id];
+                        if (typeof val === 'string' && val.startsWith('=')) {
+                            this.formulaEngine.setFormula(dataStart + i, table.startCol + colIdx, val);
+                        }
+                    });
+                }
+            }
             this.formulaEngine.recalculateDirty();
         }
 
@@ -1062,6 +1086,127 @@ export class SpreadsheetSession {
      */
     getSheetName(sheetId) {
         return this.sheets.find(s => s.id === sheetId)?.name ?? sheetId;
+    }
+
+    /**
+     * Return metadata for all tables across all sheets: name, sheetId, sheetName, columns[].
+     * Reads directly from Yjs — no reactive TableStore instantiation.
+     */
+    getAllTableDescriptors() {
+        if (!this.root) return /** @type {{ tableName: string, sheetId: string, sheetName: string, columns: { id: string, name: string }[] }[]} */ ([]);
+        const sheetsMap = this.root.get('sheets');
+        /** @type {{ tableName: string, sheetId: string, sheetName: string, columns: { id: string, name: string }[] }[]} */
+        const result = [];
+        for (const { id: sheetId, name: sheetName } of this.sheets) {
+            const sheetYMap = sheetsMap?.get(sheetId);
+            const tablesMap = sheetYMap?.get('tables');
+            if (!tablesMap) continue;
+            tablesMap.forEach((/** @type {import('yjs').Map<any>} */ tableYMap) => {
+                const tableName = tableYMap.get('name') ?? 'Table';
+                const defsMap = tableYMap.get('columnDefs');
+                const orderArr = tableYMap.get('columnOrder');
+                /** @type {{ id: string, name: string }[]} */
+                const columns = [];
+                if (defsMap && orderArr) {
+                    for (const colId of orderArr.toArray()) {
+                        const c = defsMap.get(colId);
+                        if (c) columns.push({ id: colId, name: c.get?.('name') ?? colId });
+                    }
+                }
+                result.push({ tableName, sheetId, sheetName, columns });
+            });
+        }
+        return result;
+    }
+
+    /**
+     * Read raw column values for a named table across all sheets.
+     * Accepts column name or column ID (case-insensitive match).
+     * @param {string} tableName
+     * @param {string} columnId  column name or id
+     * @returns {string[]}
+     */
+    getTableColumnValues(tableName, columnId) {
+        if (!this.root) return [];
+        const nameUpper = tableName.toUpperCase();
+        const colUpper = columnId.toUpperCase();
+        const sheetsMap = this.root.get('sheets');
+        for (const { id: sheetId } of this.sheets) {
+            const sheetYMap = sheetsMap?.get(sheetId);
+            const tablesMap = sheetYMap?.get('tables');
+            if (!tablesMap) continue;
+            for (const [, tableYMap] of tablesMap) {
+                if ((tableYMap.get('name') ?? '').toUpperCase() !== nameUpper) continue;
+                // Resolve column id (accept name or id)
+                const defsMap = tableYMap.get('columnDefs');
+                const orderArr = tableYMap.get('columnOrder');
+                let resolvedColId = null;
+                if (defsMap && orderArr) {
+                    for (const cId of orderArr.toArray()) {
+                        const c = defsMap.get(cId);
+                        const cName = c?.get?.('name') ?? '';
+                        if (cId.toUpperCase() === colUpper || cName.toUpperCase() === colUpper) {
+                            resolvedColId = cId;
+                            break;
+                        }
+                    }
+                }
+                if (!resolvedColId) return [];
+                const rowArr = tableYMap.get('rows');
+                if (!rowArr) return [];
+                const values = [];
+                for (const rowYMap of rowArr.toArray()) {
+                    const v = rowYMap.get ? rowYMap.get(resolvedColId) : rowYMap[resolvedColId];
+                    if (v != null && v !== '') values.push(String(v));
+                }
+                return values;
+            }
+        }
+        return [];
+    }
+
+    /**
+     * Return a lightweight table proxy for any named table across all sheets.
+     * Used by formula functions that need cross-sheet table access.
+     * Returns null if not found.
+     * The proxy provides: sortedFilteredRows (plain array), resolveColId(nameOrId)
+     * @param {string} tableName
+     * @returns {{ sortedFilteredRows: object[], resolveColId: (s: string) => string } | null}
+     */
+    getCrossSheetTable(tableName) {
+        if (!this.root) return null;
+        const nameUpper = tableName.toUpperCase();
+        const sheetsMap = this.root.get('sheets');
+        for (const { id: sheetId } of this.sheets) {
+            const sheetYMap = sheetsMap?.get(sheetId);
+            const tablesMap = sheetYMap?.get('tables');
+            if (!tablesMap) continue;
+            for (const [, tableYMap] of tablesMap) {
+                if ((tableYMap.get('name') ?? '').toUpperCase() !== nameUpper) continue;
+                // Build column id↔name map
+                const defsMap = tableYMap.get('columnDefs');
+                const orderArr = tableYMap.get('columnOrder');
+                /** @type {Map<string, string>} colId → colName (lowercase) */
+                const nameToId = new Map();
+                if (defsMap && orderArr) {
+                    for (const colId of orderArr.toArray()) {
+                        const c = defsMap.get(colId);
+                        const colName = (c?.get?.('name') ?? '').toLowerCase();
+                        if (colName) nameToId.set(colName, colId);
+                        nameToId.set(colId.toLowerCase(), colId);
+                    }
+                }
+                const resolveColId = (/** @type {string} */ s) => nameToId.get(s.toLowerCase()) ?? s;
+                // Read raw rows
+                const rowArr = tableYMap.get('rows');
+                /** @type {object[]} */
+                const sortedFilteredRows = rowArr
+                    ? rowArr.toArray().map((/** @type {any} */ r) => r.toJSON ? r.toJSON() : { ...r })
+                    : [];
+                return { sortedFilteredRows, resolveColId };
+            }
+        }
+        return null;
     }
 
     /**

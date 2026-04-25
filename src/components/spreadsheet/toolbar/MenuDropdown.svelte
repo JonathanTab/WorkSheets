@@ -508,7 +508,7 @@
     }
 
     /* ── Mobile: bigger touch targets ── */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .menu-button {
             padding: 8px 10px;
             font-size: 0.875rem;

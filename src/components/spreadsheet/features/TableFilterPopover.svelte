@@ -366,7 +366,7 @@
     .btn-done:hover { background: #334155; border-color: #334155; }
 
     /* Mobile: larger controls inside BottomSheet */
-    @media (pointer: coarse), (max-width: 768px) {
+    @media (max-width: 600px) {
         .filter-body { padding: 12px 16px; gap: 10px; }
         .value-input  { height: 44px; font-size: 16px; padding: 0 12px; }
         .operator-select { height: 40px; font-size: 14px; padding: 0 10px; }

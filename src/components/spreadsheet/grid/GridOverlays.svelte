@@ -402,19 +402,7 @@
                 <FileEditor
                     value={editValue}
                     {docId}
-                    ctConfig={cellCtConfig}
-                    onCommit={(blobId, meta) => {
-                        // Save metadata directly before committing (cell is still in editSessionState)
-                        const cell = editSessionState.cell;
-                        if (cell && meta) {
-                            const sheetStore = spreadsheetSession?.activeSheetStore;
-                            if (sheetStore) {
-                                const ct = sheetStore.getCellTypeConfig(cell.row, cell.col);
-                                if (ct?.type === 'file') {
-                                    sheetStore.setCellTypeConfig(cell.row, cell.col, { ...ct, ...meta });
-                                }
-                            }
-                        }
+                    onCommit={(blobId) => {
                         onCommitEdit?.(blobId ?? '');
                     }}
                     onCancel={onCancelEdit}
