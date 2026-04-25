@@ -5392,6 +5392,7 @@
                         <TableEditPanel
                             table={activeEditPanel.store}
                             tableManager={spreadsheetSession.tableManager}
+                            session={spreadsheetSession}
                             onClose={() => (activeEditPanel = null)}
                         />
                     {/if}

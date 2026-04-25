@@ -9,6 +9,7 @@
 
 import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
+import { TableFormulaEvaluator } from '../stores/spreadsheet/features/tableFormulaEval.js';
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
@@ -381,6 +382,72 @@ export function getTableRows(ydoc, sheetId, tableId) {
     const rowArr = table.get('rows');
     if (!rowArr) return [];
     return rowArr.toArray().map(r => r.toJSON ? r.toJSON() : { ...r });
+}
+
+/**
+ * Get all rows for a table with formula (computed) columns evaluated.
+ * Unlike getTableRows(), this applies the table's sort config and evaluates
+ * any isNonEntry/formula columns using TableFormulaEvaluator — the same logic
+ * the browser uses — so the result is consistent between the app and the API.
+ *
+ * @param {Y.Doc} ydoc
+ * @param {string} sheetId
+ * @param {string} tableId
+ * @returns {object[]}  rows sorted newest-first (same default display order as the app)
+ */
+export function getTableRowsWithFormulas(ydoc, sheetId, tableId) {
+    const table = _getTable(ydoc, sheetId, tableId);
+    const rowArr = table.get('rows');
+    if (!rowArr) return [];
+
+    // Raw rows in insertion order
+    const rawRows = rowArr.toArray().map(r => r.toJSON ? r.toJSON() : { ...r });
+
+    // Column definitions
+    const colMaps = _getOrderedColMaps(table);
+    const columns = colMaps.map(c => {
+        const raw = c.toJSON ? c.toJSON() : { ...c };
+        let typeConfig = null;
+        if (typeof raw.typeConfig === 'string') {
+            try { typeConfig = JSON.parse(raw.typeConfig); } catch { typeConfig = null; }
+        }
+        return {
+            id:         raw.id ?? '',
+            name:       raw.name ?? '',
+            type:       typeConfig?.type ?? raw.type ?? 'text',
+            typeConfig,
+            isNonEntry: raw.isNonEntry ?? false,
+            formula:    raw.formula ?? null,
+        };
+    });
+
+    // Apply sort (mirror TableStore.#rebuildView sort logic)
+    const sortColId = table.get('sortColId') ?? null;
+    const sortDir   = table.get('sortDir') ?? 'asc';
+    let sortedRows = [...rawRows].reverse(); // default: newest-first
+    if (sortColId) {
+        const dir = sortDir === 'desc' ? -1 : 1;
+        sortedRows = sortedRows.slice().sort((a, b) => {
+            const av = a[sortColId], bv = b[sortColId];
+            if (av == null && bv == null) return 0;
+            if (av == null) return dir;
+            if (bv == null) return -dir;
+            if (typeof av === 'number' && typeof bv === 'number') return dir * (av - bv);
+            return dir * String(av).localeCompare(String(bv));
+        });
+    }
+
+    // Evaluate formula columns
+    const cumReverse = sortColId === null || sortDir === 'desc';
+    const evaluator = new TableFormulaEvaluator(sortedRows, columns, cumReverse);
+
+    return sortedRows.map((_, i) => {
+        const row = {};
+        for (const col of columns) {
+            row[col.id] = evaluator.getValue(i, col.id);
+        }
+        return row;
+    });
 }
 
 /**

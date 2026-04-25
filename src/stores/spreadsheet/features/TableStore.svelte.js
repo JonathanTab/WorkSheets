@@ -68,130 +68,19 @@
  */
 
 import * as Y from "yjs";
-import { parseFormula } from '../../../formulas/parser.js';
-import { evaluate } from '../../../formulas/evaluator.js';
-
-// ─── Formula evaluation helpers (module-level) ─────────────────────────────
+import { TableFormulaEvaluator } from './tableFormulaEval.js';
 
 /**
- * Find the index of the closing ')' that matches the '(' at openPos.
- * Handles nested parens and quoted strings.
+ * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
+ * "view" of the source table — reading rows and column definitions from the
+ * source while keeping its own position and visibleColumns list.
+ *
+ * Data flows:
+ *   Reads:  source rows + columns (filtered by view's visibleColumns)
+ *   Writes: insertRow / updateCell / deleteRow → source rows Y.Array
+ *   Own Y.Map stores: id, name, mode, startRow, startCol,
+ *                     sourceSheetId, sourceTableId, visibleColumns (Y.Array)
  */
-function findCloseParen(str, openPos) {
-    let depth = 0;
-    let inStr = false;
-    let strChar = null;
-    for (let i = openPos; i < str.length; i++) {
-        const ch = str[i];
-        if (inStr) {
-            if (ch === strChar) inStr = false;
-        } else if (ch === '"' || ch === "'") {
-            inStr = true; strChar = ch;
-        } else if (ch === '(') {
-            depth++;
-        } else if (ch === ')') {
-            depth--;
-            if (depth === 0) return i;
-        }
-    }
-    return -1;
-}
-
-/**
- * Split a comma-separated argument string, respecting quoted strings and nested parens.
- * e.g. 'amount, account, "=", "Chase"' → ['amount', 'account', '"="', '"Chase"']
- */
-function splitArgs(str) {
-    const args = [];
-    let current = '';
-    let depth = 0;
-    let inStr = false;
-    let strChar = null;
-    for (const ch of str) {
-        if (inStr) {
-            current += ch;
-            if (ch === strChar) inStr = false;
-        } else if (ch === '"' || ch === "'") {
-            inStr = true; strChar = ch; current += ch;
-        } else if (ch === '(') {
-            depth++; current += ch;
-        } else if (ch === ')') {
-            depth--; current += ch;
-        } else if (ch === ',' && depth === 0) {
-            args.push(current.trim());
-            current = '';
-        } else {
-            current += ch;
-        }
-    }
-    if (current.trim()) args.push(current.trim());
-    return args;
-}
-
-/**
- * Convert a result value to an expression string safe for embedding in a formula.
- */
-function resultToExpr(val) {
-    if (val === null || val === undefined) return '0';
-    if (typeof val === 'number') return isNaN(val) ? '0' : String(val);
-    if (typeof val === 'string') return JSON.stringify(val);
-    if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
-    return '0';
-}
-
-/**
- * Match a row value against a filter condition.
- * Supports date-aware ISO string comparisons, numeric comparisons, and string ops.
- */
-function matchCondition(rowVal, op, filterVal) {
-    const rv = rowVal;
-    const fv = filterVal;
-
-    // Date-aware comparison: if both values look like ISO date strings
-    if (typeof rv === 'string' && typeof fv === 'string' &&
-        rv.includes('-') && fv.includes('-')) {
-        const rvDate = Date.parse(rv);
-        const fvDate = Date.parse(fv);
-        if (!isNaN(rvDate) && !isNaN(fvDate)) {
-            switch (op) {
-                case '=': case '==': return rvDate === fvDate;
-                case '<>': case '!=': return rvDate !== fvDate;
-                case '>': return rvDate > fvDate;
-                case '<': return rvDate < fvDate;
-                case '>=': return rvDate >= fvDate;
-                case '<=': return rvDate <= fvDate;
-            }
-        }
-    }
-
-    // Numeric comparison for ordered operators
-    if (['>', '<', '>=', '<='].includes(op)) {
-        const rvNum = Number(rv);
-        const fvNum = Number(fv);
-        if (!isNaN(rvNum) && !isNaN(fvNum)) {
-            switch (op) {
-                case '>': return rvNum > fvNum;
-                case '<': return rvNum < fvNum;
-                case '>=': return rvNum >= fvNum;
-                case '<=': return rvNum <= fvNum;
-            }
-        }
-    }
-
-    // String / equality comparison
-    switch (op) {
-        case '=': case '==': return String(rv ?? '') === String(fv ?? '');
-        case '<>': case '!=': return String(rv ?? '') !== String(fv ?? '');
-        case '>': return String(rv ?? '') > String(fv ?? '');
-        case '<': return String(rv ?? '') < String(fv ?? '');
-        case '>=': return String(rv ?? '') >= String(fv ?? '');
-        case '<=': return String(rv ?? '') <= String(fv ?? '');
-        case 'contains': return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        case 'startswith': return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
-        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        default: return false;
-    }
-}
 
 /** Accent color palette (cycles by table count) */
 export const TABLE_ACCENT_COLORS = [
@@ -224,6 +113,13 @@ export class TableStore {
 
     /** @type {import('yjs').Doc} */
     #ydoc;
+
+    /**
+     * For view tables: the Y.Map of the source table.
+     * Null for regular tables.
+     * @type {import('yjs').Map<any> | null}
+     */
+    #sourceYMap = null;
 
     /** @type {Function[]} cleanup callbacks */
     #observers = [];
@@ -329,32 +225,31 @@ export class TableStore {
             });
         }
 
-        this.#cumCache.clear();
-        this.#cumDirtyFrom.clear();
-        this.#runningIfCache.clear();
-        this.#runningIfDirtyFrom.clear();
-
         this.sortedFilteredRows = result;
+        this.#eval = new TableFormulaEvaluator(
+            result,
+            this.columns,
+            this.sortColId === null || this.sortDir === 'desc',
+        );
     }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
     entryBuffer = $state({});
     entryErrors = $state({});
 
-    // ── Cumulative sum cache ──────────────────────────────────────────────────
-    #cumCache = new Map();     // colId → Float64Array
-    #cumDirtyFrom = new Map(); // colId → first dirty index
-
-    #runningIfCache = new Map();     // key → Float64Array (keyed by sumCol|filterCol|op|filterVal)
-    #runningIfDirtyFrom = new Map(); // key → first dirty index
+    // ── Formula evaluator (recreated on every #rebuildView) ───────────────────
+    /** @type {TableFormulaEvaluator|null} */
+    #eval = null;
 
     /**
-     * @param {import('yjs').Map} tableYMap
+     * @param {import('yjs').Map<any>} tableYMap
      * @param {import('yjs').Doc} ydoc
+     * @param {import('yjs').Map<any> | null} [sourceTableYMap]  Provide for view tables.
      */
-    constructor(tableYMap, ydoc) {
+    constructor(tableYMap, ydoc, sourceTableYMap = null) {
         this.#tableYMap = tableYMap;
         this.#ydoc = ydoc;
+        this.#sourceYMap = sourceTableYMap;
         this.#migrateColumnsIfNeeded();
         this.#syncFromYjs();
         this.#observeYjs();
@@ -391,20 +286,23 @@ export class TableStore {
 
     #syncFromYjs() {
         const m = this.#tableYMap;
+        // For views, sort config comes from the source table so both views and their
+        // source always show data in the same order (prevents confusing divergence).
+        const sortSrc = this.#sourceYMap ?? m;
         this.id = m.get("id") ?? "";
         this.name = m.get("name") ?? "Table";
         this.mode = m.get("mode") ?? "inline";
-        this.accentColor = m.get("accentColor") ?? "#3b82f6";
+        this.accentColor = (this.#sourceYMap ?? m).get("accentColor") ?? "#3b82f6";
         this.startRow = m.get("startRow") ?? 0;
         this.startCol = m.get("startCol") ?? 0;
         this.vpStartRow = m.get("vpStartRow") ?? 0;
         this.vpStartCol = m.get("vpStartCol") ?? 0;
         this.vpEndRow = m.get("vpEndRow") ?? 0;
         this.vpEndCol = m.get("vpEndCol") ?? 0;
-        this.sortColId = m.get("sortColId") ?? null;
-        this.sortDir = m.get("sortDir") ?? "asc";
-        this.insertSortColId = m.get("insertSortColId") ?? null;
-        this.insertSortDir = m.get("insertSortDir") ?? "asc";
+        this.sortColId = sortSrc.get("sortColId") ?? null;
+        this.sortDir = sortSrc.get("sortDir") ?? "asc";
+        this.insertSortColId = sortSrc.get("insertSortColId") ?? null;
+        this.insertSortDir = sortSrc.get("insertSortDir") ?? "asc";
         this.#syncColumns();
         this.#syncRows();
         // Recompute endCol from columns
@@ -413,13 +311,23 @@ export class TableStore {
     }
 
     #syncColumns() {
-        const defsMap = this.#tableYMap.get("columnDefs");
-        const orderArr = this.#tableYMap.get("columnOrder");
+        // Views read column definitions from the source table, then filter to
+        // only the columns listed in visibleColumns (in that order).
+        const colSrc = this.#sourceYMap ?? this.#tableYMap;
+        const defsMap = colSrc.get("columnDefs");
+        const orderArr = colSrc.get("columnOrder");
         if (!defsMap || !orderArr) {
             this.columns = [];
             return;
         }
-        this.columns = orderArr.toArray().flatMap((colId) => {
+
+        // For view tables, respect the visibleColumns ordering/subset.
+        const visibleArr = this.#sourceYMap ? this.#tableYMap.get("visibleColumns") : null;
+        const orderedIds = visibleArr && visibleArr.length > 0
+            ? visibleArr.toArray()
+            : orderArr.toArray();
+
+        this.columns = orderedIds.flatMap((/** @type {string} */ colId) => {
             const c = defsMap.get(colId);
             if (!c) return [];
             const raw = c.toJSON ? c.toJSON() : { ...c };
@@ -454,7 +362,9 @@ export class TableStore {
     }
 
     #syncRows() {
-        const arr = this.#tableYMap.get("rows");
+        // Views read rows from the source table, not their own Y.Map.
+        const rowSrc = this.#sourceYMap ?? this.#tableYMap;
+        const arr = rowSrc.get("rows");
         if (!arr) {
             this.rows = [];
             this.#rebuildView();
@@ -466,50 +376,91 @@ export class TableStore {
 
     #observeYjs() {
         const m = this.#tableYMap;
+        const src = this.#sourceYMap; // non-null for view tables
 
-        // Top-level map observer (id, name, mode, position, sort fields, accentColor)
+        // Top-level map observer for own Y.Map (id, name, mode, position)
         const topObs = () => {
             this.id = m.get("id") ?? this.id;
             this.name = m.get("name") ?? this.name;
             this.mode = m.get("mode") ?? this.mode;
-            this.accentColor = m.get("accentColor") ?? this.accentColor;
             this.startRow = m.get("startRow") ?? this.startRow;
             this.startCol = m.get("startCol") ?? this.startCol;
             this.vpStartRow = m.get("vpStartRow") ?? this.vpStartRow;
             this.vpStartCol = m.get("vpStartCol") ?? this.vpStartCol;
             this.vpEndRow = m.get("vpEndRow") ?? this.vpEndRow;
             this.vpEndCol = m.get("vpEndCol") ?? this.vpEndCol;
-            const prevSort = this.sortColId + this.sortDir;
-            this.sortColId = m.get("sortColId") ?? null;
-            this.sortDir = m.get("sortDir") ?? "asc";
-            this.insertSortColId = m.get("insertSortColId") ?? null;
-            this.insertSortDir = m.get("insertSortDir") ?? "asc";
-            if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
+            if (!src) {
+                // Only regular tables store sort/accentColor on their own map
+                this.accentColor = m.get("accentColor") ?? this.accentColor;
+                const prevSort = this.sortColId + this.sortDir;
+                this.sortColId = m.get("sortColId") ?? null;
+                this.sortDir = m.get("sortDir") ?? "asc";
+                this.insertSortColId = m.get("insertSortColId") ?? null;
+                this.insertSortDir = m.get("insertSortDir") ?? "asc";
+                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
+            } else {
+                // Views: re-sync visible-columns ordering when own map changes
+                this.#syncColumns();
+            }
         };
         m.observe(topObs);
         this.#observers.push(() => m.unobserve(topObs));
 
-        // Columns observer — watch both the defs map (deep) and the order array
-        const defsMap = m.get("columnDefs");
-        const orderArr = m.get("columnOrder");
-        if (defsMap && orderArr) {
-            const colObs = () => this.#syncColumns();
-            defsMap.observeDeep(colObs);
-            orderArr.observe(colObs);
-            this.#observers.push(() => {
-                defsMap.unobserveDeep(colObs);
-                orderArr.unobserve(colObs);
-            });
-        }
+        if (src) {
+            // View table: observe source for sort/accentColor/column/row changes
+            const srcTopObs = () => {
+                this.accentColor = src.get("accentColor") ?? this.accentColor;
+                const prevSort = this.sortColId + this.sortDir;
+                this.sortColId = src.get("sortColId") ?? null;
+                this.sortDir = src.get("sortDir") ?? "asc";
+                this.insertSortColId = src.get("insertSortColId") ?? null;
+                this.insertSortDir = src.get("insertSortDir") ?? "asc";
+                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
+            };
+            src.observe(srcTopObs);
+            this.#observers.push(() => src.unobserve(srcTopObs));
 
-        // Rows observer (deep – catches cell-level edits too)
-        const rowArr = m.get("rows");
-        if (rowArr) {
-            const rowObs = () => this.#syncRows();
-            rowArr.observeDeep(rowObs);
-            this.#observers.push(() => rowArr.unobserveDeep(rowObs));
-        }
+            // Observe source columns
+            const srcDefsMap = src.get("columnDefs");
+            const srcOrderArr = src.get("columnOrder");
+            if (srcDefsMap && srcOrderArr) {
+                const colObs = () => this.#syncColumns();
+                srcDefsMap.observeDeep(colObs);
+                srcOrderArr.observe(colObs);
+                this.#observers.push(() => {
+                    srcDefsMap.unobserveDeep(colObs);
+                    srcOrderArr.unobserve(colObs);
+                });
+            }
 
+            // Observe source rows
+            const srcRowArr = src.get("rows");
+            if (srcRowArr) {
+                const rowObs = () => this.#syncRows();
+                srcRowArr.observeDeep(rowObs);
+                this.#observers.push(() => srcRowArr.unobserveDeep(rowObs));
+            }
+        } else {
+            // Regular table: observe own columns and rows
+            const defsMap = m.get("columnDefs");
+            const orderArr = m.get("columnOrder");
+            if (defsMap && orderArr) {
+                const colObs = () => this.#syncColumns();
+                defsMap.observeDeep(colObs);
+                orderArr.observe(colObs);
+                this.#observers.push(() => {
+                    defsMap.unobserveDeep(colObs);
+                    orderArr.unobserve(colObs);
+                });
+            }
+
+            const rowArr = m.get("rows");
+            if (rowArr) {
+                const rowObs = () => this.#syncRows();
+                rowArr.observeDeep(rowObs);
+                this.#observers.push(() => rowArr.unobserveDeep(rowObs));
+            }
+        }
     }
 
     // ─── Mutation API ─────────────────────────────────────────────────────────
@@ -522,7 +473,8 @@ export class TableStore {
      * @param {Object} rowData  colId → value
      */
     insertRow(rowData) {
-        const rowArr = this.#tableYMap.get("rows");
+        // Views write back to the source table's rows
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
         this.#ydoc.transact(() => {
@@ -574,10 +526,6 @@ export class TableStore {
             } else {
                 rowArr.push([yRow]);
             }
-            // Mark cum cache dirty
-            for (const c of this.columns) {
-                this.#markCumDirty(c.id, Math.max(0, rowArr.length - 2));
-            }
         });
     }
 
@@ -595,7 +543,7 @@ export class TableStore {
      * @param {number[]} displayIndices
      */
     deleteRows(displayIndices) {
-        const rowArr = this.#tableYMap.get("rows");
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr || !displayIndices.length) return;
 
         // Map display indices → raw row objects, then raw row objects → raw indices.
@@ -625,7 +573,7 @@ export class TableStore {
      * @param {any} value
      */
     updateCell(displayIndex, colId, value) {
-        const rowArr = this.#tableYMap.get("rows");
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
         // Block updates to formula columns
@@ -642,7 +590,6 @@ export class TableStore {
             const yRow = rowArr.get(rawIndex);
             if (yRow) {
                 yRow.set(colId, value);
-                this.#markCumDirty(colId, displayIndex);
             }
         });
     }
@@ -945,7 +892,7 @@ export class TableStore {
         }
 
         const dataRows = hasHeaders ? rows2D.slice(1) : rows2D;
-        const rowArr   = this.#tableYMap.get("rows");
+        const rowArr   = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return { inserted: 0, skipped: 0 };
 
         let inserted = 0, skipped = 0;
@@ -1024,7 +971,7 @@ export class TableStore {
             return (col && !col.isNonEntry) ? col : null;
         });
 
-        const rowArr = this.#tableYMap.get("rows");
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
         for (let i = 0; i < rows2D.length; i++) {
@@ -1061,19 +1008,10 @@ export class TableStore {
 
     // ─── Query API ────────────────────────────────────────────────────────────
 
-    /**
-     * Get value at display index for a column.
-     * For formula columns, evaluates the formula.
-     * @param {number} displayIndex
-     * @param {string} colId
-     * @returns {any}
-     */
     getValue(displayIndex, colId) {
-        const colDef = this.columns.find(c => c.id === colId);
-        if (colDef?.isNonEntry && colDef.formula) {
-            return this.#evaluateFormula(colDef.formula, displayIndex);
-        }
-        return this.sortedFilteredRows[displayIndex]?.[colId];
+        return this.#eval
+            ? this.#eval.getValue(displayIndex, colId)
+            : this.sortedFilteredRows[displayIndex]?.[colId];
     }
 
     getColumn(colId) {
@@ -1084,435 +1022,17 @@ export class TableStore {
         return this.sortedFilteredRows.length;
     }
 
-    /**
-     * Cumulative sum of colId values from index 0 up to upToDisplayIndex (inclusive).
-     * Uses a lazy Float64Array cache, rebuilt from the first dirty index.
-     */
     getCumulativeSum(colId, upToDisplayIndex) {
-        const rows = this.sortedFilteredRows;
-        const n = rows.length;
-        if (n === 0) return 0;
-
-        const clampedIdx = Math.min(upToDisplayIndex, n - 1);
-
-        if (this.cumReverse) {
-            // Suffix sum: display is newest-first, so row 0 is newest and row n-1
-            // is oldest. cache[i] = sum of rows[i..n-1] = "this row + all older rows".
-            // Newest row (i=0) shows the grand total; oldest row (i=n-1) shows just itself.
-            let cache = this.#cumCache.get(colId);
-            if (!cache || cache.length < n) {
-                cache = new Float64Array(n);
-                let running = 0;
-                for (let i = n - 1; i >= 0; i--) {
-                    running += Number(rows[i]?.[colId]) || 0;
-                    cache[i] = running;
-                }
-                this.#cumCache.set(colId, cache);
-            }
-            return cache[clampedIdx] ?? 0;
-        }
-
-        // Prefix sum: display is oldest-first (asc sort). cache[i] = sum of rows[0..i].
-        let cache = this.#cumCache.get(colId);
-        const dirtyFrom = this.#cumDirtyFrom.get(colId) ?? 0;
-
-        if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
-            if (!cache || cache.length < n) {
-                cache = new Float64Array(n);
-            }
-            const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
-            let running = startVal;
-            for (let i = dirtyFrom; i < n; i++) {
-                running += Number(rows[i]?.[colId]) || 0;
-                cache[i] = running;
-            }
-            this.#cumCache.set(colId, cache);
-            this.#cumDirtyFrom.set(colId, n);
-        }
-
-        return cache[clampedIdx] ?? 0;
+        return this.#eval ? this.#eval.getCumulativeSum(colId, upToDisplayIndex) : 0;
     }
 
-    // ─── Formula evaluation ───────────────────────────────────────────────────
-
-    /**
-     * Resolve a column reference to its internal ID.
-     * Accepts either an exact column ID or a column name (case-insensitive).
-     * This lets formulas use human-readable column names like CUMSUM(amount)
-     * instead of internal IDs like CUMSUM(col1712345678).
-     * @param {string} nameOrId
-     * @returns {string} resolved column ID
-     */
-    #resolveColId(nameOrId) {
-        if (!nameOrId) return nameOrId;
-        const s = String(nameOrId);
-        // Exact ID match — fastest path
-        if (this.columns.some(c => c.id === s)) return s;
-        // Case-insensitive name match
-        const col = this.columns.find(c => c.name.toLowerCase() === s.toLowerCase());
-        return col ? col.id : s;
-    }
-
-    /**
-     * Public wrapper for column ID resolution — used by TableManager cross-table functions.
-     * Accepts either an exact column ID or a column name (case-insensitive).
-     * @param {string} nameOrId
-     * @returns {string}
-     */
-    resolveColId(nameOrId) {
-        return this.#resolveColId(nameOrId);
-    }
-
-    /**
-     * Public wrapper for formula evaluation — used for live preview in UI.
-     * @param {string} formula
-     * @param {number} rowIndex  display index
-     * @returns {any}
-     */
+    // kept for callers that do `store.evaluateFormula(formula, rowIndex)` directly
     evaluateFormula(formula, rowIndex) {
-        return this.#evaluateFormula(formula, rowIndex);
+        return this.#eval ? this.#eval.evaluateFormula(formula, rowIndex) : null;
     }
 
-    /**
-     * Evaluate a column formula for a specific row.
-     *
-     * Pipeline:
-     *   1. Substitute ROW / ROW1 / COUNT tokens (meta-tokens first, before cell values are injected)
-     *   2. Substitute {colId} references with the current row's values
-     *   3. Substitute table-specific function calls (CUMSUM, RUNNINGIF, etc.)
-     *   4. Evaluate the remaining expression with the formula parser/evaluator
-     *
-     * Column references accept either the internal column ID or the human-readable
-     * column name (case-insensitive), in both {ref} syntax and function arguments.
-     *
-     * See the class-level docstring for the full list of supported formulas.
-     *
-     * @param {string} formula
-     * @param {number} rowIndex  display index
-     * @returns {any}
-     */
-    #evaluateFormula(formula, rowIndex) {
-        try {
-            let expr = formula.trim();
-
-            // Step 1: substitute meta-tokens BEFORE injecting cell string values,
-            // so cell values containing "ROW" or "COUNT" text are never misinterpreted.
-            expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
-            expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
-            // COUNT (but not COUNTIF) → total row count
-            expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount()));
-
-            // Step 2: substitute {colRef} with current row values (accepts name or ID)
-            expr = this.#substituteColRefs(expr, rowIndex);
-
-            // Step 3: substitute table-specific function calls
-            expr = this.#substituteTableFuncs(expr, rowIndex);
-
-            // Step 4: evaluate the remaining expression
-            return this.#evalExpression(expr);
-        } catch {
-            return null;
-        }
-    }
-
-    /**
-     * Substitute {colRef} references with the current row's values.
-     * colRef may be a column ID or a human-readable column name.
-     * Strings are JSON-escaped; numbers become numeric literals.
-     */
-    #substituteColRefs(expr, rowIndex) {
-        return expr.replace(/\{([^}]+)\}/g, (_match, rawRef) => {
-            const colId = this.#resolveColId(rawRef.trim());
-            const val = this.sortedFilteredRows[rowIndex]?.[colId];
-            if (val === null || val === undefined || val === '') return '""';
-            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
-            if (typeof val === 'string') return JSON.stringify(val);
-            const num = Number(val);
-            return !isNaN(num) ? String(num) : JSON.stringify(String(val));
-        });
-    }
-
-    /**
-     * Replace table-specific function calls in the expression with their computed values.
-     * Processes multiple calls and handles them left-to-right (non-nested).
-     */
-    #substituteTableFuncs(expr, rowIndex) {
-        const KNOWN = ['RUNNINGIFS', 'RUNNINGIF', 'SUMIFS', 'SUMIF',
-                       'AVGIF', 'MINIF', 'MAXIF', 'COUNTIF',
-                       'CUMSUM', 'AVG', 'MIN', 'MAX', 'SUM'];
-
-        // Make up to 20 passes to replace all occurrences
-        for (let pass = 0; pass < 20; pass++) {
-            let replaced = false;
-            for (const fn of KNOWN) {
-                const re = new RegExp(`\\b${fn}\\s*\\(`, 'i');
-                const m = re.exec(expr);
-                if (!m) continue;
-                replaced = true;
-                const openIdx = m.index + m[0].length - 1;
-                const closeIdx = findCloseParen(expr, openIdx);
-                if (closeIdx === -1) continue;
-
-                const argsStr = expr.slice(openIdx + 1, closeIdx);
-                const rawArgs = splitArgs(argsStr);
-                const result = this.#callTableFunc(fn.toUpperCase(), rawArgs, rowIndex);
-
-                expr = expr.slice(0, m.index) + resultToExpr(result) + expr.slice(closeIdx + 1);
-                break; // restart loop after replacement
-            }
-            if (!replaced) break;
-        }
-        return expr;
-    }
-
-    /**
-     * Dispatch to the appropriate table aggregate function.
-     * Column arguments are resolved by name or ID via #resolveColId.
-     */
-    #callTableFunc(fn, rawArgs, rowIndex) {
-        const args = rawArgs.map(a => this.#evalArg(a.trim()));
-        // Helper: resolve first n positional column arguments
-        const col = (i) => this.#resolveColId(String(args[i] ?? ''));
-        switch (fn) {
-            case 'CUMSUM':
-                return this.getCumulativeSum(col(0), rowIndex);
-            case 'SUM': {
-                const vals = this.getColumn(col(0));
-                return vals.reduce((a, v) => a + (Number(v) || 0), 0);
-            }
-            case 'AVG': {
-                const vals = this.getColumn(col(0));
-                const nums = vals.map(Number).filter(v => !isNaN(v));
-                return nums.length ? nums.reduce((a, v) => a + v, 0) / nums.length : 0;
-            }
-            case 'MIN': {
-                const vals = this.getColumn(col(0));
-                const nums = vals.map(Number).filter(v => !isNaN(v));
-                return nums.length ? Math.min(...nums) : 0;
-            }
-            case 'MAX': {
-                const vals = this.getColumn(col(0));
-                const nums = vals.map(Number).filter(v => !isNaN(v));
-                return nums.length ? Math.max(...nums) : 0;
-            }
-            case 'RUNNINGIF':
-                if (args.length >= 4)
-                    return this.#getRunningIf(col(0), col(1), String(args[2]), args[3], rowIndex);
-                return 0;
-            case 'RUNNINGIFS': {
-                if (args.length < 4) return 0;
-                const [, ...rest] = args;
-                const conds = [];
-                for (let i = 0; i + 2 < rest.length; i += 3)
-                    conds.push({ col: this.#resolveColId(String(rest[i])), op: String(rest[i + 1]), val: rest[i + 2] });
-                return this.#getRunningIfs(col(0), conds, rowIndex);
-            }
-            case 'SUMIF':
-                if (args.length >= 4)
-                    return this.#getSumIf(col(0), col(1), String(args[2]), args[3]);
-                return 0;
-            case 'SUMIFS': {
-                if (args.length < 4) return 0;
-                const [, ...rest] = args;
-                const conds = [];
-                for (let i = 0; i + 2 < rest.length; i += 3)
-                    conds.push({ col: this.#resolveColId(String(rest[i])), op: String(rest[i + 1]), val: rest[i + 2] });
-                return this.#getSumIfs(col(0), conds);
-            }
-            case 'COUNTIF':
-                if (args.length >= 3)
-                    return this.#getCountIf(col(0), String(args[1]), args[2]);
-                return 0;
-            case 'AVGIF':
-                if (args.length >= 4)
-                    return this.#getAvgIf(col(0), col(1), String(args[2]), args[3]);
-                return 0;
-            case 'MINIF':
-                if (args.length >= 4)
-                    return this.#getMinIf(col(0), col(1), String(args[2]), args[3]);
-                return 0;
-            case 'MAXIF':
-                if (args.length >= 4)
-                    return this.#getMaxIf(col(0), col(1), String(args[2]), args[3]);
-                return 0;
-            default:
-                return 0;
-        }
-    }
-
-    /**
-     * Parse a raw argument string to its JavaScript value.
-     * Quoted strings are unquoted; numeric strings become numbers; bare identifiers stay as strings.
-     */
-    #evalArg(arg) {
-        if ((arg.startsWith('"') && arg.endsWith('"')) ||
-            (arg.startsWith("'") && arg.endsWith("'"))) {
-            return arg.slice(1, -1);
-        }
-        const num = Number(arg);
-        if (arg !== '' && !isNaN(num)) return num;
-        return arg; // bare column ID or other identifier
-    }
-
-    /**
-     * Evaluate the final expression (after all substitutions) using the formula parser.
-     * Falls back to simple numeric parse for plain numbers.
-     */
-    #evalExpression(expr) {
-        const trimmed = expr.trim();
-        if (!trimmed || trimmed === '""') return null;
-
-        // Fast path for plain numbers
-        const num = Number(trimmed);
-        if (trimmed !== '' && !isNaN(num)) return num;
-
-        // Use the formula parser/evaluator for everything else (IF, AND, arithmetic, etc.)
-        try {
-            const ast = parseFormula('=' + trimmed);
-            const result = evaluate(ast, () => null, {});
-            return result;
-        } catch {
-            return null;
-        }
-    }
-
-    // ─── Position-aware aggregates (cached running sums) ─────────────────────
-
-    /**
-     * Running conditional sum: sum of `sumCol` for rows where `filterCol op filterVal`,
-     * from row 0 up to `upToIndex` (inclusive). Cached per condition key.
-     */
-    #getRunningIf(sumCol, filterCol, op, filterVal, upToIndex) {
-        const key = `${sumCol}|${filterCol}|${op}|${String(filterVal)}`;
-        const rows = this.sortedFilteredRows;
-        const n = rows.length;
-        if (n === 0) return 0;
-
-        const clampedIdx = Math.min(upToIndex, n - 1);
-
-        if (this.cumReverse) {
-            let cache = this.#runningIfCache.get(key);
-            if (!cache || cache.length < n) {
-                cache = new Float64Array(n);
-                let running = 0;
-                for (let i = n - 1; i >= 0; i--) {
-                    running += matchCondition(rows[i][filterCol], op, filterVal) ? (Number(rows[i][sumCol]) || 0) : 0;
-                    cache[i] = running;
-                }
-                this.#runningIfCache.set(key, cache);
-            }
-            return cache[clampedIdx] ?? 0;
-        }
-
-        let cache = this.#runningIfCache.get(key);
-        const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
-
-        if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
-            if (!cache || cache.length < n) cache = new Float64Array(n);
-            const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
-            let running = startVal;
-            for (let i = dirtyFrom; i < n; i++) {
-                const row = rows[i];
-                running += matchCondition(row[filterCol], op, filterVal) ? (Number(row[sumCol]) || 0) : 0;
-                cache[i] = running;
-            }
-            this.#runningIfCache.set(key, cache);
-            this.#runningIfDirtyFrom.set(key, n);
-        }
-
-        return cache[clampedIdx] ?? 0;
-    }
-
-    /**
-     * Running conditional sum with multiple conditions (all must match).
-     */
-    #getRunningIfs(sumCol, conditions, upToIndex) {
-        const key = `${sumCol}||${conditions.map(c => `${c.col}|${c.op}|${String(c.val)}`).join('||')}`;
-        const rows = this.sortedFilteredRows;
-        const n = rows.length;
-        if (n === 0) return 0;
-
-        const clampedIdx = Math.min(upToIndex, n - 1);
-
-        if (this.cumReverse) {
-            let cache = this.#runningIfCache.get(key);
-            if (!cache || cache.length < n) {
-                cache = new Float64Array(n);
-                let running = 0;
-                for (let i = n - 1; i >= 0; i--) {
-                    const row = rows[i];
-                    const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
-                    running += allMatch ? (Number(row[sumCol]) || 0) : 0;
-                    cache[i] = running;
-                }
-                this.#runningIfCache.set(key, cache);
-            }
-            return cache[clampedIdx] ?? 0;
-        }
-
-        let cache = this.#runningIfCache.get(key);
-        const dirtyFrom = this.#runningIfDirtyFrom.get(key) ?? 0;
-
-        if (!cache || cache.length < n || dirtyFrom <= clampedIdx) {
-            if (!cache || cache.length < n) cache = new Float64Array(n);
-            const startVal = dirtyFrom > 0 ? cache[dirtyFrom - 1] : 0;
-            let running = startVal;
-            for (let i = dirtyFrom; i < n; i++) {
-                const row = rows[i];
-                const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
-                running += allMatch ? (Number(row[sumCol]) || 0) : 0;
-                cache[i] = running;
-            }
-            this.#runningIfCache.set(key, cache);
-            this.#runningIfDirtyFrom.set(key, n);
-        }
-
-        return cache[clampedIdx] ?? 0;
-    }
-
-    // ─── Total conditional aggregates ─────────────────────────────────────────
-
-    #getSumIf(sumCol, filterCol, op, filterVal) {
-        return this.sortedFilteredRows.reduce((acc, row) =>
-            acc + (matchCondition(row[filterCol], op, filterVal) ? (Number(row[sumCol]) || 0) : 0), 0);
-    }
-
-    #getSumIfs(sumCol, conditions) {
-        return this.sortedFilteredRows.reduce((acc, row) => {
-            const allMatch = conditions.every(c => matchCondition(row[c.col], c.op, c.val));
-            return acc + (allMatch ? (Number(row[sumCol]) || 0) : 0);
-        }, 0);
-    }
-
-    #getCountIf(filterCol, op, filterVal) {
-        return this.sortedFilteredRows.filter(row =>
-            matchCondition(row[filterCol], op, filterVal)).length;
-    }
-
-    #getAvgIf(sumCol, filterCol, op, filterVal) {
-        const matching = this.sortedFilteredRows.filter(row =>
-            matchCondition(row[filterCol], op, filterVal));
-        if (!matching.length) return 0;
-        return matching.reduce((acc, row) => acc + (Number(row[sumCol]) || 0), 0) / matching.length;
-    }
-
-    #getMinIf(colId, filterCol, op, filterVal) {
-        const vals = this.sortedFilteredRows
-            .filter(row => matchCondition(row[filterCol], op, filterVal))
-            .map(row => Number(row[colId])).filter(v => !isNaN(v));
-        return vals.length ? Math.min(...vals) : 0;
-    }
-
-    #getMaxIf(colId, filterCol, op, filterVal) {
-        const vals = this.sortedFilteredRows
-            .filter(row => matchCondition(row[filterCol], op, filterVal))
-            .map(row => Number(row[colId])).filter(v => !isNaN(v));
-        return vals.length ? Math.max(...vals) : 0;
-    }
-
-    #markCumDirty(colId, fromIndex) {
-        const current = this.#cumDirtyFrom.get(colId) ?? Infinity;
-        this.#cumDirtyFrom.set(colId, Math.min(fromIndex, current));
+    resolveColId(/** @type {string} */ nameOrId) {
+        return this.#eval ? this.#eval.resolveColId(nameOrId) : String(nameOrId ?? '');
     }
 
     // ─── Utilities ────────────────────────────────────────────────────────────
@@ -1527,6 +1047,9 @@ export class TableStore {
         const idx = sheetCol - this.startCol;
         return this.columns[idx] ?? null;
     }
+
+    /** True when this store is a view of another table. */
+    get isView() { return this.#sourceYMap !== null; }
 
     /**
      * Export table data as a CSV string.
@@ -1543,8 +1066,9 @@ export class TableStore {
             return s;
         };
         const header = cols.map(c => escape(c.name)).join(',');
-        const body = rows.map(r =>
-            cols.map(c => escape(this.getValue(rows.indexOf(r), c.id))).join(',')
+        // Use index directly to avoid O(n²) indexOf calls
+        const body = rows.map((_, i) =>
+            cols.map(c => escape(this.getValue(i, c.id))).join(',')
         ).join('\n');
         return header + '\n' + body;
     }

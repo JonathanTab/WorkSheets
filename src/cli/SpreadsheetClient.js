@@ -173,6 +173,8 @@ export class SpreadsheetClient {
     findTableByName(ydoc, sheetId, name)               { return ops.findTableByName(ydoc, sheetId, name); }
     resolveColumnNames(ydoc, sheetId, tableId, data)   { return ops.resolveColumnNames(ydoc, sheetId, tableId, data); }
     getTableRows(ydoc, sheetId, tableId)               { return ops.getTableRows(ydoc, sheetId, tableId); }
+    /** Like getTableRows() but also evaluates formula/computed columns. */
+    getTableRowsWithFormulas(ydoc, sheetId, tableId)   { return ops.getTableRowsWithFormulas(ydoc, sheetId, tableId); }
     findTableRows(ydoc, sheetId, tableId, where)       { return ops.findTableRows(ydoc, sheetId, tableId, where); }
     insertTableRow(ydoc, sheetId, tableId, rowData)    { return ops.insertTableRow(ydoc, sheetId, tableId, rowData); }
     updateTableRow(ydoc, sheetId, tableId, idx, data)  { return ops.updateTableRow(ydoc, sheetId, tableId, idx, data); }

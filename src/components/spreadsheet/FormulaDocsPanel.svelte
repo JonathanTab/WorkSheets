@@ -129,7 +129,7 @@
             cat: "logic",
             name: "IF",
             syntax: "IF(condition, value_if_true, value_if_false)",
-            desc: "Returns one value if a condition is true and another value if it is false. Conditions use comparison operators: =, <>, >, <, >=, <=.",
+            desc: "Returns one value if a condition is true and another value if it is false. Conditions use comparison operators: =, <>, >, <, >=, <=, contains.",
             example:
                 '=IF(A1 > 0, "Positive", "Non-positive")\n=IF(B1 = "done", 1, 0)',
         },

@@ -7,7 +7,7 @@
  * - Ranges (A1:B10)
  * - Numbers and strings
  * - Arithmetic operators (+, -, *, /, ^, %)
- * - Comparison operators (=, <>, <, >, <=, >=)
+ * - Comparison operators (=, <>, <, >, <=, >=, CONTAINS)
  * - Function calls (SUM, AVERAGE, IF, etc.)
  * - Parentheses for grouping
  */
@@ -109,6 +109,12 @@ class Tokenizer {
         while (this.currentChar && /[a-zA-Z0-9_$]/.test(this.currentChar)) {
             result += this.currentChar;
             this.advance();
+        }
+
+        // Keyword comparison operators (case-insensitive)
+        const keyword = result.toLowerCase();
+        if (keyword === 'contains') {
+            return { type: TokenType.OPERATOR, value: keyword };
         }
 
         // Check if it's a function (followed by parenthesis)
@@ -309,7 +315,7 @@ export class Parser {
         let left = this.parseAdditive();
 
         while (this.currentToken?.type === TokenType.OPERATOR &&
-            ['=', '<>', '<', '>', '<=', '>='].includes(this.currentToken.value)) {
+            ['=', '<>', '<', '>', '<=', '>=', 'contains'].includes(this.currentToken.value)) {
             const op = this.currentToken.value;
             this.advance();
             const right = this.parseAdditive();

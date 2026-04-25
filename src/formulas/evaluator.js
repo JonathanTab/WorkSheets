@@ -274,6 +274,9 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             }
             return FormulaError.VALUE;
 
+        case 'contains':
+            return String(left ?? '').toLowerCase().includes(String(right ?? '').toLowerCase());
+
         default:
             return FormulaError.VALUE;
     }

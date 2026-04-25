@@ -20,66 +20,14 @@
 
 import * as Y from "yjs";
 import { TableStore, TABLE_ACCENT_COLORS } from "./TableStore.svelte.js";
+import { matchCondition } from "./tableFormulaEval.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 
 /** Extra buffer rows below the last data row so the table feels "infinite" */
 const BUFFER_ROWS = 10;
 
-/**
- * Match a row field value against a filter condition.
- * Supports date-aware ISO string comparison, numeric comparison, and string ops.
- */
-function matchCond(rowVal, op, filterVal) {
-    const rv = rowVal;
-    const fv = filterVal;
-
-    // Date-aware comparison
-    if (typeof rv === 'string' && typeof fv === 'string' &&
-        rv.includes('-') && fv.includes('-')) {
-        const rvDate = Date.parse(rv);
-        const fvDate = Date.parse(fv);
-        if (!isNaN(rvDate) && !isNaN(fvDate)) {
-            switch (op) {
-                case '=': return rvDate === fvDate;
-                case '<>': case '!=': return rvDate !== fvDate;
-                case '>': return rvDate > fvDate;
-                case '<': return rvDate < fvDate;
-                case '>=': return rvDate >= fvDate;
-                case '<=': return rvDate <= fvDate;
-            }
-        }
-    }
-
-    // Numeric comparison
-    if (['>', '<', '>=', '<='].includes(op)) {
-        const rvNum = Number(rv);
-        const fvNum = Number(fv);
-        if (!isNaN(rvNum) && !isNaN(fvNum)) {
-            switch (op) {
-                case '>': return rvNum > fvNum;
-                case '<': return rvNum < fvNum;
-                case '>=': return rvNum >= fvNum;
-                case '<=': return rvNum <= fvNum;
-            }
-        }
-    }
-
-    switch (op) {
-        case '=': case '==': return String(rv ?? '') === String(fv ?? '');
-        case '<>': case '!=': return String(rv ?? '') !== String(fv ?? '');
-        case '>': return String(rv ?? '') > String(fv ?? '');
-        case '<': return String(rv ?? '') < String(fv ?? '');
-        case '>=': return String(rv ?? '') >= String(fv ?? '');
-        case '<=': return String(rv ?? '') <= String(fv ?? '');
-        case 'contains': return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        case 'startswith': return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
-        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        default: return false;
-    }
-}
-
 export class TableManager {
-    /** @type {import('yjs').Map} tablesYMap from sheet */
+    /** @type {import('yjs').Map<any>} tablesYMap from sheet */
     #tablesYMap;
 
     /** @type {import('yjs').Doc} */
@@ -87,6 +35,20 @@ export class TableManager {
 
     /** @type {Function[]} */
     #observers = [];
+
+    /**
+     * Optional document-level registry. When provided, TableManager borrows
+     * stores from it instead of creating new ones — one TableStore per table.
+     * @type {import('./DocumentTableRegistry.svelte.js').DocumentTableRegistry | null}
+     */
+    #registry = null;
+
+    /**
+     * tableIds for which THIS manager created the store (not from registry).
+     * Only these are destroyed in destroy().
+     * @type {Set<string>}
+     */
+    #ownedStores = new Set();
 
     /** tableId → TableStore */
     stores = new Map();
@@ -106,8 +68,14 @@ export class TableManager {
      */
     #rowIndex = new Map();
 
-    constructor(sheet, ydoc) {
+    /**
+     * @param {import('yjs').Map<any>} sheet
+     * @param {import('yjs').Doc} ydoc
+     * @param {import('./DocumentTableRegistry.svelte.js').DocumentTableRegistry | null} [registry]
+     */
+    constructor(sheet, ydoc, registry = null) {
         this.#ydoc = ydoc;
+        this.#registry = registry;
         this.#tablesYMap = sheet.get("tables");
 
         if (!this.#tablesYMap) {
@@ -142,7 +110,12 @@ export class TableManager {
 
     #addTableStore(tableId, tableYMap) {
         if (this.stores.has(tableId)) return;
-        const store = new TableStore(tableYMap, this.#ydoc);
+        // Borrow from registry when available; fall back to creating a new store.
+        let store = this.#registry?.getById(tableId) ?? null;
+        if (!store) {
+            store = new TableStore(tableYMap, this.#ydoc);
+            this.#ownedStores.add(tableId);
+        }
         this.stores.set(tableId, store);
         this.tableList = [...this.tableList, tableId];
         // Rebuild index when this table's row count changes.
@@ -190,7 +163,11 @@ export class TableManager {
     #removeTableStore(tableId) {
         const store = this.stores.get(tableId);
         if (store) {
-            store.destroy();
+            // Only destroy if we created the store (not borrowed from registry)
+            if (this.#ownedStores.has(tableId)) {
+                store.destroy();
+                this.#ownedStores.delete(tableId);
+            }
             this.stores.delete(tableId);
             this.tableList = this.tableList.filter((id) => id !== tableId);
         }
@@ -397,6 +374,45 @@ export class TableManager {
         });
     }
 
+    /**
+     * Create a view of an existing table on this sheet.
+     * The view shares the source table's rows and column definitions but can show
+     * a different subset/ordering of columns and sits at its own grid position.
+     *
+     * @param {{
+     *   sourceSheetId: string,
+     *   sourceTableId: string,
+     *   name?: string,
+     *   startRow: number,
+     *   startCol: number,
+     *   visibleColumns?: string[]  ordered subset of source column IDs; all if omitted
+     * }} opts
+     * @returns {string} new view's tableId
+     */
+    createTableView(opts) {
+        if (!this.#tablesYMap) return "";
+        const viewId = `view-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+        this.#ydoc.transact(() => {
+            const vm = new Y.Map();
+            vm.set("id", viewId);
+            vm.set("name", opts.name ?? "View");
+            vm.set("mode", "inline");
+            vm.set("startRow", opts.startRow);
+            vm.set("startCol", opts.startCol);
+            vm.set("sortColId", null);
+            vm.set("sortDir", "asc");
+            vm.set("sourceSheetId", opts.sourceSheetId);
+            vm.set("sourceTableId", opts.sourceTableId);
+            const visArr = new Y.Array();
+            if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
+            vm.set("visibleColumns", visArr);
+            this.#tablesYMap.set(viewId, vm);
+        });
+
+        return viewId;
+    }
+
     // ─── Table lookup ─────────────────────────────────────────────────────────
 
     getTableByName(name) {
@@ -482,14 +498,22 @@ export class TableManager {
         });
 
         // ── Conditional aggregates ────────────────────────────────────────────
+        // All conditional functions use t.getValue(i, colId) so that computed
+        // (formula) columns are correctly evaluated rather than returning null.
+
         // TABLE_SUMIF(tableName, sumColId, filterColId, op, filterValue) → conditional sum
         formulaEngine.registerFunction("TABLE_SUMIF", (tableName, sumColId, filterColId, op, filterValue) => {
             const t = byName(tableName);
             if (!t) return 0;
             const sId = t.resolveColId(String(sumColId));
             const fId = t.resolveColId(String(filterColId));
-            return t.sortedFilteredRows.reduce((acc, row) =>
-                acc + (matchCond(row[fId], String(op), filterValue) ? (Number(row[sId]) || 0) : 0), 0);
+            const n = t.getRowCount();
+            let sum = 0;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue))
+                    sum += Number(t.getValue(i, sId)) || 0;
+            }
+            return sum;
         });
 
         // TABLE_SUMIFS(tableName, sumColId, col1, op1, val1, ...) → multi-condition sum
@@ -500,10 +524,13 @@ export class TableManager {
             const conds = [];
             for (let i = 0; i + 2 < triplets.length; i += 3)
                 conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            return t.sortedFilteredRows.reduce((acc, row) => {
-                const allMatch = conds.every(c => matchCond(row[c.col], c.op, c.val));
-                return acc + (allMatch ? (Number(row[sId]) || 0) : 0);
-            }, 0);
+            const n = t.getRowCount();
+            let sum = 0;
+            for (let i = 0; i < n; i++) {
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val)))
+                    sum += Number(t.getValue(i, sId)) || 0;
+            }
+            return sum;
         });
 
         // TABLE_COUNTIF(tableName, filterColId, op, filterValue) → conditional count
@@ -511,8 +538,12 @@ export class TableManager {
             const t = byName(tableName);
             if (!t) return 0;
             const fId = t.resolveColId(String(filterColId));
-            return t.sortedFilteredRows.filter(row =>
-                matchCond(row[fId], String(op), filterValue)).length;
+            const n = t.getRowCount();
+            let count = 0;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) count++;
+            }
+            return count;
         });
 
         // TABLE_COUNTIFS(tableName, col1, op1, val1, ...) → multi-condition count
@@ -522,8 +553,12 @@ export class TableManager {
             const conds = [];
             for (let i = 0; i + 2 < triplets.length; i += 3)
                 conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            return t.sortedFilteredRows.filter(row =>
-                conds.every(c => matchCond(row[c.col], c.op, c.val))).length;
+            const n = t.getRowCount();
+            let count = 0;
+            for (let i = 0; i < n; i++) {
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) count++;
+            }
+            return count;
         });
 
         // TABLE_AVGIF(tableName, sumColId, filterColId, op, filterValue) → conditional average
@@ -532,10 +567,15 @@ export class TableManager {
             if (!t) return 0;
             const sId = t.resolveColId(String(sumColId));
             const fId = t.resolveColId(String(filterColId));
-            const matching = t.sortedFilteredRows.filter(row =>
-                matchCond(row[fId], String(op), filterValue));
-            if (!matching.length) return 0;
-            return matching.reduce((acc, row) => acc + (Number(row[sId]) || 0), 0) / matching.length;
+            const n = t.getRowCount();
+            let sum = 0, count = 0;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
+                    sum += Number(t.getValue(i, sId)) || 0;
+                    count++;
+                }
+            }
+            return count ? sum / count : 0;
         });
 
         // TABLE_MINIF(tableName, colId, filterColId, op, filterValue) → conditional min
@@ -544,10 +584,15 @@ export class TableManager {
             if (!t) return 0;
             const cId = t.resolveColId(String(colId));
             const fId = t.resolveColId(String(filterColId));
-            const vals = t.sortedFilteredRows
-                .filter(row => matchCond(row[fId], String(op), filterValue))
-                .map(row => Number(row[cId])).filter(v => !isNaN(v));
-            return vals.length ? Math.min(...vals) : 0;
+            const n = t.getRowCount();
+            let min = Infinity;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
+                    const v = Number(t.getValue(i, cId));
+                    if (!isNaN(v) && v < min) min = v;
+                }
+            }
+            return isFinite(min) ? min : 0;
         });
 
         // TABLE_MAXIF(tableName, colId, filterColId, op, filterValue) → conditional max
@@ -556,10 +601,15 @@ export class TableManager {
             if (!t) return 0;
             const cId = t.resolveColId(String(colId));
             const fId = t.resolveColId(String(filterColId));
-            const vals = t.sortedFilteredRows
-                .filter(row => matchCond(row[fId], String(op), filterValue))
-                .map(row => Number(row[cId])).filter(v => !isNaN(v));
-            return vals.length ? Math.max(...vals) : 0;
+            const n = t.getRowCount();
+            let max = -Infinity;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
+                    const v = Number(t.getValue(i, cId));
+                    if (!isNaN(v) && v > max) max = v;
+                }
+            }
+            return isFinite(max) ? max : 0;
         });
 
         // TABLE_FILTER (legacy — use TABLE_COUNTIF instead)
@@ -568,24 +618,31 @@ export class TableManager {
             const t = byName(tableName);
             if (!t) return 0;
             const cId = t.resolveColId(String(colId));
-            return t.sortedFilteredRows.filter(row =>
-                matchCond(row[cId], String(op), value)).length;
+            const n = t.getRowCount();
+            let count = 0;
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, cId), String(op), value)) count++;
+            }
+            return count;
         });
 
         // ── Array-returning queries ────────────────────────────────────────────
 
         // TABLE_FILTERCOL(tableName, colId, filterColId, op, filterValue)
         // → flat array of values from colId for rows matching the condition.
-        // The result can be passed to SUM, AVERAGE, COUNT, MAX, etc.
         // Example: =SUM(TABLE_FILTERCOL("Sales", "amount", "region", "=", "West"))
         formulaEngine.registerFunction("TABLE_FILTERCOL", (tableName, colId, filterColId, op, filterValue) => {
             const t = byName(tableName);
             if (!t) return [];
             const cId = t.resolveColId(String(colId));
             const fId = t.resolveColId(String(filterColId));
-            return t.sortedFilteredRows
-                .filter(row => matchCond(row[fId], String(op), filterValue))
-                .map(row => row[cId] ?? null);
+            const n = t.getRowCount();
+            const result = [];
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue))
+                    result.push(t.getValue(i, cId) ?? null);
+            }
+            return result;
         });
 
         // TABLE_FILTERCOLIFS(tableName, colId, col1, op1, val1, col2, op2, val2, ...)
@@ -598,25 +655,33 @@ export class TableManager {
             const conds = [];
             for (let i = 0; i + 2 < triplets.length; i += 3)
                 conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            return t.sortedFilteredRows
-                .filter(row => conds.every(c => matchCond(row[c.col], c.op, c.val)))
-                .map(row => row[cId] ?? null);
+            const n = t.getRowCount();
+            const result = [];
+            for (let i = 0; i < n; i++) {
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val)))
+                    result.push(t.getValue(i, cId) ?? null);
+            }
+            return result;
         });
 
         // TABLE_LOOKUP(tableName, lookupColId, lookupValue, returnColId)
         // → value from returnColId in the first row where lookupColId equals lookupValue.
-        // Returns #N/A if no match. Case-insensitive string comparison.
+        // Returns #N/A if no match.
         // Example: =TABLE_LOOKUP("Products", "sku", A1, "price")
         formulaEngine.registerFunction("TABLE_LOOKUP", (tableName, lookupColId, lookupValue, returnColId) => {
             const t = byName(tableName);
             if (!t) return '#N/A';
             const lId = t.resolveColId(String(lookupColId));
             const rId = t.resolveColId(String(returnColId));
-            const row = t.sortedFilteredRows.find(r => matchCond(r[lId], '=', lookupValue));
-            return row ? (row[rId] ?? null) : '#N/A';
+            const n = t.getRowCount();
+            for (let i = 0; i < n; i++) {
+                if (matchCondition(t.getValue(i, lId), '=', lookupValue))
+                    return t.getValue(i, rId) ?? null;
+            }
+            return '#N/A';
         });
 
-        // TABLE_AVGIFS(tableName, sumColId, col1, op1, val1, ...) → conditional average (multiple conditions)
+        // TABLE_AVGIFS(tableName, sumColId, col1, op1, val1, ...) → conditional average
         // Example: =TABLE_AVGIFS("Sales", "amount", "region", "=", "West", "year", "=", 2024)
         formulaEngine.registerFunction("TABLE_AVGIFS", (tableName, sumColId, ...triplets) => {
             const t = byName(tableName);
@@ -625,9 +690,15 @@ export class TableManager {
             const conds = [];
             for (let i = 0; i + 2 < triplets.length; i += 3)
                 conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            const matching = t.sortedFilteredRows.filter(row => conds.every(c => matchCond(row[c.col], c.op, c.val)));
-            if (!matching.length) return 0;
-            return matching.reduce((acc, row) => acc + (Number(row[sId]) || 0), 0) / matching.length;
+            const n = t.getRowCount();
+            let sum = 0, count = 0;
+            for (let i = 0; i < n; i++) {
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) {
+                    sum += Number(t.getValue(i, sId)) || 0;
+                    count++;
+                }
+            }
+            return count ? sum / count : 0;
         });
     }
 
@@ -636,8 +707,11 @@ export class TableManager {
     destroy() {
         for (const cleanup of this.#observers) cleanup();
         this.#observers = [];
-        for (const store of this.stores.values()) store.destroy();
+        for (const [tableId, store] of this.stores) {
+            if (this.#ownedStores.has(tableId)) store.destroy();
+        }
         this.stores.clear();
+        this.#ownedStores.clear();
         this.tableList = [];
     }
 }

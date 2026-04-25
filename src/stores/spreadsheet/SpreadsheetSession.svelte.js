@@ -26,6 +26,7 @@ import { FormulaError } from '../../formulas/functions.js';
 import { ExternalDocManager } from './ExternalDocManager.js';
 import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
 import { TableManager } from './features/TableManager.svelte.js';
+import { DocumentTableRegistry } from './features/DocumentTableRegistry.svelte.js';
 import { RepeaterEngine } from './features/RepeaterEngine.svelte.js';
 
 /**
@@ -81,6 +82,13 @@ export class SpreadsheetSession {
 
     /** @type {TableManager | null} */
     tableManager = $state.raw(null);
+
+    /**
+     * Document-level live cache of all table stores across all sheets.
+     * Created once per document load. TableManager borrows stores from here.
+     * @type {DocumentTableRegistry | null}
+     */
+    tableRegistry = $state.raw(null);
 
     /** @type {RepeaterEngine | null} */
     repeaterEngine = $state.raw(null);
@@ -215,9 +223,17 @@ export class SpreadsheetSession {
                     this.#setupUndoObserver();
                 }
 
+                // Create document-wide table registry before TableManager so the
+                // manager can borrow stores instead of creating duplicates.
+                this.tableRegistry = new DocumentTableRegistry(root, ydoc);
+                // When any table (any sheet) changes → recalculate TABLE_* formula cells.
+                this.tableRegistry.onTableChange = () => {
+                    this.formulaEngine?.recalculateTableDependents();
+                };
+
                 // Create TableManager before formula engine so TABLE_* functions are
                 // registered before formulas are evaluated on first load.
-                this.tableManager = new TableManager(activeSheet, ydoc);
+                this.tableManager = new TableManager(activeSheet, ydoc, this.tableRegistry);
 
                 // Initialize formula engine for the active sheet (registers tableManager functions first)
                 this.#initializeFormulaEngine(activeSheet, this.tableManager);
@@ -300,6 +316,12 @@ export class SpreadsheetSession {
         if (this.tableManager) {
             this.tableManager.destroy();
             this.tableManager = null;
+        }
+
+        // Cleanup TableRegistry (after TableManager so borrowed stores are released first)
+        if (this.tableRegistry) {
+            this.tableRegistry.destroy();
+            this.tableRegistry = null;
         }
 
         // Cleanup RepeaterEngine
@@ -731,25 +753,11 @@ export class SpreadsheetSession {
 
             cells.observeDeep(observer);
 
-            // TABLE_* functions (TABLE_SUMIF, TABLE_SUM, etc.) are custom functions
-            // registered at eval time — they are NOT in the cell dependency graph, so
-            // editing table rows never marks those formula cells dirty.  Watch the
-            // tables Yjs map and force a full recalc whenever any table data changes.
-            // This observer is attached AFTER TableStore + TableManager observers, so
-            // sortedFilteredRows is already up-to-date by the time recalculateAll runs.
-            const tablesYMap = sheet.get('tables');
-            const tablesObserver = tablesYMap ? () => {
-                this.formulaEngine?.recalculateTableDependents();
-            } : null;
-            if (tablesYMap && tablesObserver) {
-                tablesYMap.observeDeep(tablesObserver);
-            }
+            // TABLE_* reactivity is now handled by DocumentTableRegistry.onTableChange,
+            // which covers all sheets (not just the active one). No per-sheet observer needed.
 
             this.#cleanupFormulaObserver = () => {
                 cells.unobserveDeep(observer);
-                if (tablesYMap && tablesObserver) {
-                    tablesYMap.unobserveDeep(tablesObserver);
-                }
             };
         }
     }
@@ -821,7 +829,7 @@ export class SpreadsheetSession {
 
             // Create TableManager before formula engine so TABLE_* functions are
             // registered before formulas are evaluated on sheet switch.
-            this.tableManager = new TableManager(sheet, this.ydoc);
+            this.tableManager = new TableManager(sheet, this.ydoc, this.tableRegistry);
             this.#initializeFormulaEngine(sheet, this.tableManager);
 
             this.renderContext = new SheetRenderContext(this.activeSheetStore, this.ydoc, this);
@@ -1102,6 +1110,9 @@ export class SpreadsheetSession {
             const tablesMap = sheetYMap?.get('tables');
             if (!tablesMap) continue;
             tablesMap.forEach((/** @type {import('yjs').Map<any>} */ tableYMap) => {
+                // Skip view tables — they have no own column defs and shouldn't appear as
+                // independent table sources in the configurator.
+                if (tableYMap.get('sourceTableId')) return;
                 const tableName = tableYMap.get('name') ?? 'Table';
                 const defsMap = tableYMap.get('columnDefs');
                 const orderArr = tableYMap.get('columnOrder');
@@ -1127,86 +1138,77 @@ export class SpreadsheetSession {
      * @returns {string[]}
      */
     getTableColumnValues(tableName, columnId) {
-        if (!this.root) return [];
-        const nameUpper = tableName.toUpperCase();
-        const colUpper = columnId.toUpperCase();
-        const sheetsMap = this.root.get('sheets');
-        for (const { id: sheetId } of this.sheets) {
-            const sheetYMap = sheetsMap?.get(sheetId);
-            const tablesMap = sheetYMap?.get('tables');
-            if (!tablesMap) continue;
-            for (const [, tableYMap] of tablesMap) {
-                if ((tableYMap.get('name') ?? '').toUpperCase() !== nameUpper) continue;
-                // Resolve column id (accept name or id)
-                const defsMap = tableYMap.get('columnDefs');
-                const orderArr = tableYMap.get('columnOrder');
-                let resolvedColId = null;
-                if (defsMap && orderArr) {
-                    for (const cId of orderArr.toArray()) {
-                        const c = defsMap.get(cId);
-                        const cName = c?.get?.('name') ?? '';
-                        if (cId.toUpperCase() === colUpper || cName.toUpperCase() === colUpper) {
-                            resolvedColId = cId;
-                            break;
-                        }
-                    }
-                }
-                if (!resolvedColId) return [];
-                const rowArr = tableYMap.get('rows');
-                if (!rowArr) return [];
-                const values = [];
-                for (const rowYMap of rowArr.toArray()) {
-                    const v = rowYMap.get ? rowYMap.get(resolvedColId) : rowYMap[resolvedColId];
-                    if (v != null && v !== '') values.push(String(v));
-                }
-                return values;
-            }
-        }
-        return [];
+        const store = this.getCrossSheetTable(tableName);
+        if (!store) return [];
+        const colId = store.resolveColId(String(columnId));
+        // Use getColumn so formula columns are evaluated; deduplicate for dropdown use
+        const seen = new Set();
+        return store.getColumn(colId)
+            .filter(v => v != null && v !== '')
+            .map(String)
+            .filter(v => { if (seen.has(v)) return false; seen.add(v); return true; });
     }
 
     /**
-     * Return a lightweight table proxy for any named table across all sheets.
-     * Used by formula functions that need cross-sheet table access.
-     * Returns null if not found.
-     * The proxy provides: sortedFilteredRows (plain array), resolveColId(nameOrId)
+     * Return a live TableStore for any named table across all sheets.
+     * Uses DocumentTableRegistry when available — no create/destroy per call.
      * @param {string} tableName
-     * @returns {{ sortedFilteredRows: object[], resolveColId: (s: string) => string } | null}
+     * @returns {import('./features/TableStore.svelte.js').TableStore | null}
      */
     getCrossSheetTable(tableName) {
-        if (!this.root) return null;
-        const nameUpper = tableName.toUpperCase();
-        const sheetsMap = this.root.get('sheets');
-        for (const { id: sheetId } of this.sheets) {
-            const sheetYMap = sheetsMap?.get(sheetId);
-            const tablesMap = sheetYMap?.get('tables');
-            if (!tablesMap) continue;
-            for (const [, tableYMap] of tablesMap) {
-                if ((tableYMap.get('name') ?? '').toUpperCase() !== nameUpper) continue;
-                // Build column id↔name map
-                const defsMap = tableYMap.get('columnDefs');
-                const orderArr = tableYMap.get('columnOrder');
-                /** @type {Map<string, string>} colId → colName (lowercase) */
-                const nameToId = new Map();
-                if (defsMap && orderArr) {
-                    for (const colId of orderArr.toArray()) {
-                        const c = defsMap.get(colId);
-                        const colName = (c?.get?.('name') ?? '').toLowerCase();
-                        if (colName) nameToId.set(colName, colId);
-                        nameToId.set(colId.toLowerCase(), colId);
-                    }
-                }
-                const resolveColId = (/** @type {string} */ s) => nameToId.get(s.toLowerCase()) ?? s;
-                // Read raw rows
-                const rowArr = tableYMap.get('rows');
-                /** @type {object[]} */
-                const sortedFilteredRows = rowArr
-                    ? rowArr.toArray().map((/** @type {any} */ r) => r.toJSON ? r.toJSON() : { ...r })
-                    : [];
-                return { sortedFilteredRows, resolveColId };
-            }
+        // Fast path: registry provides a live, reactive store — no snapshot needed.
+        if (this.tableRegistry) {
+            return this.tableRegistry.getByName(tableName);
         }
         return null;
+    }
+
+    /**
+     * Create a view of a source table on a target sheet.
+     * The view is a new table entry that reads rows/columns from the source
+     * but can show a different column subset and lives at its own grid position.
+     *
+     * @param {{
+     *   sourceSheetId: string,
+     *   sourceTableId: string,
+     *   targetSheetId: string,
+     *   name?: string,
+     *   startRow?: number,
+     *   startCol?: number,
+     *   visibleColumns?: string[]
+     * }} opts
+     * @returns {string} new view tableId, or "" on failure
+     */
+    createTableViewOnSheet(opts) {
+        if (!this.root || !this.ydoc) return "";
+        const sheetsMap = this.root.get('sheets');
+        const targetSheet = sheetsMap?.get(opts.targetSheetId);
+        if (!targetSheet) return "";
+
+        let tablesMap = targetSheet.get('tables');
+        if (!tablesMap) {
+            tablesMap = new Y.Map();
+            targetSheet.set('tables', tablesMap);
+        }
+
+        const viewId = `view-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        this.ydoc.transact(() => {
+            const vm = new Y.Map();
+            vm.set('id', viewId);
+            vm.set('name', opts.name ?? 'View');
+            vm.set('mode', 'inline');
+            vm.set('startRow', opts.startRow ?? 0);
+            vm.set('startCol', opts.startCol ?? 0);
+            vm.set('sortColId', null);
+            vm.set('sortDir', 'asc');
+            vm.set('sourceSheetId', opts.sourceSheetId);
+            vm.set('sourceTableId', opts.sourceTableId);
+            const visArr = new Y.Array();
+            if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
+            vm.set('visibleColumns', visArr);
+            tablesMap.set(viewId, vm);
+        });
+        return viewId;
     }
 
     /**

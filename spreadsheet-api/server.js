@@ -94,6 +94,41 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`spreadsheet-api listening on :${PORT}`));
 
+// ─── Table-column dropdown resolver ──────────────────────────────────────────
+
+/**
+ * Resolve a table-column dropdown source to a deduplicated array of option strings.
+ * Evaluates formula/computed columns via getTableRowsWithFormulas so the server
+ * returns the same values the browser would show.
+ */
+function resolveTableColumnOptions(ydoc, tableName, columnId, client) {
+    const sheets  = client.listSheets(ydoc);
+    const nameUp  = tableName.toUpperCase();
+    const colUp   = columnId.toUpperCase();
+
+    for (const sheet of sheets) {
+        const tables = client.listTables(ydoc, sheet.id);
+        const table  = tables.find(t => (t.name ?? '').toUpperCase() === nameUp);
+        if (!table) continue;
+
+        const col = table.columns.find(c =>
+            (c.id   ?? '').toUpperCase() === colUp ||
+            (c.name ?? '').toUpperCase() === colUp
+        );
+        if (!col) return [];
+
+        // Use formula-aware rows so computed columns return real values
+        const rows = client.getTableRowsWithFormulas(ydoc, sheet.id, table.id);
+        const seen = new Set();
+        return rows
+            .map(row => row[col.id])
+            .filter(v => v != null && v !== '')
+            .map(String)
+            .filter(v => { if (seen.has(v)) return false; seen.add(v); return true; });
+    }
+    return [];
+}
+
 // ─── Range-backed dropdown resolver ──────────────────────────────────────────
 
 /**
@@ -220,6 +255,8 @@ async function route(req, res) {
                     const tc = typeof col.typeConfig === 'string' ? JSON.parse(col.typeConfig) : col.typeConfig;
                     if (tc.source === 'range' && tc.range) {
                         base.options = resolveRangeOptions(ydoc, sheetId, tc.range, sheets, client);
+                    } else if (tc.source === 'table' && tc.tableName && tc.columnId) {
+                        base.options = resolveTableColumnOptions(ydoc, tc.tableName, tc.columnId, client);
                     } else if (Array.isArray(tc.options)) {
                         base.options = tc.options;
                     }
@@ -231,12 +268,17 @@ async function route(req, res) {
         return json(res, 200, { id: table.id, name: table.name, columns });
     }
 
-    // GET /file/:fileId/sheet/:sheetId/table/:tableId/rows[?colNames=1]
+    // GET /file/:fileId/sheet/:sheetId/table/:tableId/rows[?colNames=1&formulas=1]
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
         const [, fileId, sheetId, tableId] = m;
-        const useNames = url.searchParams.get('colNames') === '1';
+        const useNames    = url.searchParams.get('colNames') === '1';
+        const withFormulas = url.searchParams.get('formulas') !== '0'; // default on
         const ydoc = await openDoc(client, fileId);
-        let rows = client.getTableRows(ydoc, sheetId, tableId);
+
+        // Use formula-aware rows by default; fall back to raw on explicit ?formulas=0
+        let rows = withFormulas
+            ? client.getTableRowsWithFormulas(ydoc, sheetId, tableId)
+            : client.getTableRows(ydoc, sheetId, tableId);
 
         if (useNames) {
             const tables  = client.listTables(ydoc, sheetId);

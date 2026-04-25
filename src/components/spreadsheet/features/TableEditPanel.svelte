@@ -31,6 +31,7 @@
     let {
         table,
         tableManager,
+        session,
         onClose,
     } = $props();
     let panelEl = $state(null);
@@ -199,6 +200,57 @@
         return icons[col.type] ?? "A";
     }
 
+    // ── Create View ────────────────────────────────────────────────────────────
+
+    let showCreateView = $state(false);
+    let viewTargetSheetId = $state("");
+    let viewName = $state("");
+    let viewColIds = $state(/** @type {string[]} */ ([]));
+
+    // Sheets available as view targets (all sheets except the one this table is on).
+    // We derive the current sheet by finding which sheet contains this table.
+    let otherSheets = $derived((() => {
+        if (!session) return [];
+        const allSheets = session.sheets ?? [];
+        if (!table) return allSheets;
+        // Try to identify current sheet from the tableManager's tablesYMap parentage;
+        // fall back to showing all sheets (user can pick same sheet if desired).
+        return allSheets;
+    })());
+
+    function openCreateView() {
+        if (!session || !table) return;
+        viewName = `${table.name} View`;
+        viewColIds = table.columns.map(c => c.id);
+        viewTargetSheetId = session.sheets?.find(s => s.id !== session.activeSheetId)?.id
+            ?? session.activeSheetId ?? "";
+        showCreateView = true;
+    }
+
+    function toggleViewCol(colId) {
+        if (viewColIds.includes(colId)) {
+            viewColIds = viewColIds.filter(id => id !== colId);
+        } else {
+            viewColIds = [...viewColIds, colId];
+        }
+    }
+
+    function commitCreateView() {
+        if (!session || !table || !viewTargetSheetId) return;
+        // Find which sheet the source table lives on
+        const sourceSheetId = session.activeSheetId ?? "";
+        session.createTableViewOnSheet({
+            sourceSheetId,
+            sourceTableId: table.id,
+            targetSheetId: viewTargetSheetId,
+            name: viewName.trim() || `${table.name} View`,
+            startRow: 0,
+            startCol: 0,
+            visibleColumns: viewColIds.length < table.columns.length ? viewColIds : [],
+        });
+        showCreateView = false;
+    }
+
     onMount(() => {
         if (!mobileState.isMobile) panelEl?.focus();
     });
@@ -338,6 +390,50 @@
             </div>
         {/if}
     </div>
+
+    <!-- Create View -->
+    {#if session && !table?.isView}
+        <div class="section-divider"></div>
+        {#if showCreateView}
+            <div class="create-view-form">
+                <div class="col-section-label">Create View On Sheet</div>
+                <input
+                    class="view-name-input"
+                    type="text"
+                    placeholder="View name"
+                    bind:value={viewName}
+                />
+                <select class="sort-col-select" bind:value={viewTargetSheetId}>
+                    {#each otherSheets as s}
+                        <option value={s.id}>{s.name}</option>
+                    {/each}
+                </select>
+                <div class="col-section-label" style="margin-top:6px">Columns to include</div>
+                <div class="view-cols-list">
+                    {#each table?.columns ?? [] as col}
+                        <label class="view-col-check">
+                            <input
+                                type="checkbox"
+                                checked={viewColIds.includes(col.id)}
+                                onchange={() => toggleViewCol(col.id)}
+                            />
+                            {col.name}
+                        </label>
+                    {/each}
+                </div>
+                <div class="view-form-actions">
+                    <button class="view-create-btn" onclick={commitCreateView}>Create</button>
+                    <button class="pos-cancel-btn" onclick={() => showCreateView = false}>{@html close}</button>
+                </div>
+            </div>
+        {:else}
+            <div class="panel-body" style="padding-top:0;padding-bottom:6px;">
+                <button class="add-col-btn" onclick={openCreateView}>
+                    + Create view on another sheet
+                </button>
+            </div>
+        {/if}
+    {/if}
 
     <!-- Footer -->
     <div class="panel-footer">
@@ -744,6 +840,65 @@
     }
 
     .delete-btn:hover { background: #fef2f2; }
+
+    .create-view-form {
+        padding: 6px 10px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .view-name-input {
+        height: 26px;
+        font-size: 11px;
+        border: 1px solid var(--border-color, #e2e8f0);
+        border-radius: 4px;
+        padding: 0 6px;
+        background: var(--cell-bg, #fff);
+        color: var(--text-color, #1e293b);
+        outline: none;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .view-cols-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        max-height: 120px;
+        overflow-y: auto;
+    }
+
+    .view-col-check {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--text-color, #1e293b);
+        cursor: pointer;
+        padding: 2px 0;
+    }
+
+    .view-form-actions {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        margin-top: 2px;
+    }
+
+    .view-create-btn {
+        flex: 1;
+        height: 26px;
+        font-size: 11px;
+        border: 1px solid #3b82f6;
+        border-radius: 4px;
+        background: #3b82f6;
+        color: #fff;
+        cursor: pointer;
+        font-weight: 500;
+    }
+
+    .view-create-btn:hover { background: #2563eb; border-color: #2563eb; }
 
     /* Mobile: larger touch targets inside BottomSheet */
     @media (max-width: 600px) {
