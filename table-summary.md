@@ -115,7 +115,9 @@ When `TableStore` is constructed with a `sourceTableYMap`:
 
 ### Formula evaluation
 
-`#rebuildView()` creates a new `TableFormulaEvaluator(sortedRows, columns, cumReverse)` on every rebuild. The evaluator is stateless across rebuilds (fresh caches each time). `getValue(i, colId)` delegates to the evaluator for `isNonEntry` columns.
+`#rebuildView()` creates a new `TableFormulaEvaluator(sortedRows, columns, cumReverse, tableResolver)` on every rebuild. The evaluator is stateless across rebuilds (fresh caches each time). `getValue(i, colId)` delegates to the evaluator for `isNonEntry` columns.
+
+`setTableResolver(fn)` stores a callback `(name) => TableStore | null` that the evaluator uses to resolve cross-table `TABLE_*` functions. Called by `DocumentTableRegistry` immediately after construction. Triggers a rebuild if an evaluator already exists.
 
 ### Lifecycle
 
@@ -135,9 +137,13 @@ constructor → #migrateColumnsIfNeeded → #syncFromYjs → #observeYjs
 
 Pure JS, no Svelte runes. Importable in Node.js (used by both browser and API server).
 
-**Input:** snapshot of sorted/filtered rows, column defs, `cumReverse` flag.
+**Input:** snapshot of sorted/filtered rows, column defs, `cumReverse` flag, optional `tableResolver`.
 
-**Formula DSL:**
+**Constructor:** `TableFormulaEvaluator(rows, columns, cumReverse, tableResolver = null)`
+
+`tableResolver` is a `(name: string) => TableStore | null` callback. When provided, the evaluator builds a `customFunctions` Map of all `TABLE_*` functions and passes it to the formula engine, enabling cross-table lookups inside computed column formulas.
+
+**Formula DSL (same-table, substituted before formula eval):**
 
 | Token / function | Meaning |
 |---|---|
@@ -152,7 +158,11 @@ Pure JS, no Svelte runes. Importable in Node.js (used by both browser and API se
 | `RUNNINGIF(sum, filter, op, val)` | Running conditional sum |
 | `RUNNINGIFS(...)` | Running multi-condition sum |
 
-After DSL substitution, arithmetic and `IF(...)` are handled by the sheet formula parser/evaluator.
+**Cross-table functions (available when `tableResolver` is set):**
+
+All `TABLE_*` functions registered in `TableManager` are also available in computed column formulas with identical signatures. They are passed as `customFunctions` to the sheet formula engine, so they compose with standard functions (e.g. `ROUND(TABLE_SUM('Ledger','Amount'), 2)`). A leading `=` on the stored formula string is stripped automatically.
+
+After DSL substitution, the expression — including any `TABLE_*` calls and standard sheet functions — is evaluated by the sheet formula parser/evaluator with the full `customFunctions` map.
 
 `getCumulativeSum` uses a lazy `Float64Array` cache, direction-aware via `cumReverse`.
 
@@ -170,6 +180,7 @@ After DSL substitution, arithmetic and `IF(...)` are handled by the sheet formul
 - Tracks view membership: `getViewsForTable(sourceId)` → `[{viewId, sheetId, store, isLegacy}]`.
 - `getSourceTables()` → all source tables (new-style `isSourceOnly` + legacy combined).
 - Fires `onTableChange()` when any table's row data changes → wired to `formulaEngine.recalculateTableDependents()`.
+- Calls `store.setTableResolver(name => this.getByName(name))` on each new store so computed column formulas can reference other tables via `TABLE_*` functions.
 
 ### Ownership
 

@@ -1656,6 +1656,33 @@
     }
 
     /**
+     * Check whether a pointer event landed inside the rendered checkbox square.
+     * Checkbox rendering is centered and sized to min(16, cellHeight-4, cellWidth-4).
+     */
+    function isCheckboxClick(row, col, e) {
+        if (!containerEl || !virtualizer) return false;
+        const { localX, localY } = getLocalCoords(e);
+        const cellLeft = cellContainerLeft(col);
+        const cellTop = cellContainerTop(row);
+        const cellWidth = virtualizer.getColWidth(col);
+        const cellHeight = virtualizer.getRowHeight(row);
+        const size = Math.min(16, cellHeight - 4, cellWidth - 4);
+        if (size <= 0) return false;
+
+        const checkboxLeft = cellLeft + (cellWidth - size) / 2;
+        const checkboxTop = cellTop + (cellHeight - size) / 2;
+        const checkboxRight = checkboxLeft + size;
+        const checkboxBottom = checkboxTop + size;
+
+        return (
+            localX >= checkboxLeft &&
+            localX <= checkboxRight &&
+            localY >= checkboxTop &&
+            localY <= checkboxBottom
+        );
+    }
+
+    /**
      * Move selection with merge awareness.
      * - When the anchor is inside a merge, the move jumps from the merge's edge
      *   rather than from the anchor's individual cell.
@@ -2125,11 +2152,13 @@
             if (info?.table) {
                 // Checkbox in entry row: toggle entryBuffer value on click
                 if (info.colDef?.type === "checkbox") {
-                    const cur = info.table.entryBuffer?.[info.colDef.id];
-                    info.table.setEntryValue(info.colDef.id, !cur);
+                    if (isCheckboxClick(row, col, e)) {
+                        const cur = info.table.entryBuffer?.[info.colDef.id];
+                        info.table.setEntryValue(info.colDef.id, !cur);
+                        untrack(() => renderScheduler?.invalidateAll());
+                    }
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
-                    untrack(() => renderScheduler?.invalidateAll());
                     return;
                 }
                 // Rating in entry row: click to set value
@@ -2169,13 +2198,15 @@
             if (info?.table && info.colDef) {
                 const colType = info.colDef.type;
                 if (colType === "checkbox") {
-                    const cur = info.table.getValue(
-                        info.dataIndex,
-                        info.colDef.id,
-                    );
-                    info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
-                    // Force canvas repaint for table cell data changes
-                    untrack(() => renderScheduler?.invalidateAll());
+                    if (isCheckboxClick(row, col, e)) {
+                        const cur = info.table.getValue(
+                            info.dataIndex,
+                            info.colDef.id,
+                        );
+                        info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
+                        // Force canvas repaint for table cell data changes
+                        untrack(() => renderScheduler?.invalidateAll());
+                    }
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
                     return;
@@ -2236,6 +2267,7 @@
         if (!ct) return false;
 
         if (ct.type === "checkbox") {
+            if (!isCheckboxClick(row, col, e)) return false;
             const cell = sheetStore?.getCell(row, col);
             sheetStore?.setCellValue(row, col, !cell?.v);
             selectionState.startSelection(row, col);
