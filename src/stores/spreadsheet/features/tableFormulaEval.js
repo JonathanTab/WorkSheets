@@ -109,12 +109,20 @@ export class TableFormulaEvaluator {
     /** @type {object[]} */ #cols;
     /** @type {boolean}  */ #cumReverse;
     /** @type {Map<string,string>} lowercase name/id → canonical id */ #nameToId;
+    /** @type {Map<string,Function>|null} */ #customFunctions = null;
     #cumCache        = new Map();
     #cumDirtyFrom    = new Map();
     #runningIfCache  = new Map();
     #runningIfDirty  = new Map();
 
-    constructor(rows, columns, cumReverse = false) {
+    /**
+     * @param {object[]} rows         Sorted/filtered rows (plain objects, colId → value).
+     * @param {object[]} columns      Column defs: [{id, name, isNonEntry, formula, ...}].
+     * @param {boolean}  cumReverse   True when display is newest-first.
+     * @param {((name: string) => {getValue,getRowCount,resolveColId,getColumn}|null)|null} tableResolver
+     *   Optional: resolves another table by name for TABLE_* cross-table functions.
+     */
+    constructor(rows, columns, cumReverse = false, tableResolver = null) {
         this.#rows       = rows;
         this.#cols       = columns;
         this.#cumReverse = cumReverse;
@@ -123,6 +131,7 @@ export class TableFormulaEvaluator {
             this.#nameToId.set(col.id.toLowerCase(), col.id);
             if (col.name) this.#nameToId.set(col.name.toLowerCase(), col.id);
         }
+        if (tableResolver) this.#buildCustomFunctions(tableResolver);
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
@@ -175,6 +184,7 @@ export class TableFormulaEvaluator {
     evaluateFormula(formula, rowIndex) {
         try {
             let expr = formula.trim();
+            if (expr.startsWith('=')) expr = expr.slice(1).trimStart();
             expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
             expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
             expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount()));
@@ -261,7 +271,180 @@ export class TableFormulaEvaluator {
         if (!t || t === '""') return null;
         const num = Number(t);
         if (t !== '' && !isNaN(num)) return num;
-        try { return evaluate(parseFormula('=' + t), () => null, {}); } catch { return null; }
+        try { return evaluate(parseFormula('=' + t), () => null, {}, this.#customFunctions); } catch { return null; }
+    }
+
+    #buildCustomFunctions(tableResolver) {
+        const fns = new Map();
+        const tbl = (name) => tableResolver(String(name ?? ''));
+
+        fns.set('TABLE_GET', (tableName, rowIndex, colId) => {
+            const t = tbl(tableName); if (!t) return null;
+            return t.getValue(Number(rowIndex), t.resolveColId(String(colId))) ?? null;
+        });
+
+        fns.set('TABLE_COL', (tableName, colId) => {
+            const t = tbl(tableName); if (!t) return [];
+            return t.getColumn(t.resolveColId(String(colId)));
+        });
+
+        fns.set('TABLE_COUNT', (tableName) => {
+            const t = tbl(tableName); return t ? t.getRowCount() : 0;
+        });
+
+        fns.set('TABLE_SUM', (tableName, colId) => {
+            const t = tbl(tableName); if (!t) return 0;
+            return t.getColumn(t.resolveColId(String(colId))).reduce((acc, v) => acc + (Number(v) || 0), 0);
+        });
+
+        fns.set('TABLE_AVG', (tableName, colId) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+            return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : 0;
+        });
+
+        fns.set('TABLE_MIN', (tableName, colId) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+            return vals.length ? Math.min(...vals) : 0;
+        });
+
+        fns.set('TABLE_MAX', (tableName, colId) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+            return vals.length ? Math.max(...vals) : 0;
+        });
+
+        fns.set('TABLE_CUMSUM', (tableName, colId, upToIndex) => {
+            const t = tbl(tableName); if (!t) return 0;
+            return t.getCumulativeSum(t.resolveColId(String(colId)), Number(upToIndex));
+        });
+
+        fns.set('TABLE_SUMIF', (tableName, sumColId, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const sId = t.resolveColId(String(sumColId)), fId = t.resolveColId(String(filterColId));
+            let sum = 0;
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue))
+                    sum += Number(t.getValue(i, sId)) || 0;
+            return sum;
+        });
+
+        fns.set('TABLE_SUMIFS', (tableName, sumColId, ...triplets) => {
+            const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
+            const sId = t.resolveColId(String(sumColId));
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            let sum = 0;
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val)))
+                    sum += Number(t.getValue(i, sId)) || 0;
+            return sum;
+        });
+
+        fns.set('TABLE_COUNTIF', (tableName, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const fId = t.resolveColId(String(filterColId));
+            let count = 0;
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) count++;
+            return count;
+        });
+
+        fns.set('TABLE_COUNTIFS', (tableName, ...triplets) => {
+            const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            let count = 0;
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) count++;
+            return count;
+        });
+
+        fns.set('TABLE_AVGIF', (tableName, sumColId, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const sId = t.resolveColId(String(sumColId)), fId = t.resolveColId(String(filterColId));
+            let sum = 0, count = 0;
+            for (let i = 0; i < t.getRowCount(); i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) { sum += Number(t.getValue(i, sId)) || 0; count++; }
+            }
+            return count ? sum / count : 0;
+        });
+
+        fns.set('TABLE_AVGIFS', (tableName, sumColId, ...triplets) => {
+            const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
+            const sId = t.resolveColId(String(sumColId));
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            let sum = 0, count = 0;
+            for (let i = 0; i < t.getRowCount(); i++) {
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) { sum += Number(t.getValue(i, sId)) || 0; count++; }
+            }
+            return count ? sum / count : 0;
+        });
+
+        fns.set('TABLE_MINIF', (tableName, colId, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+            let min = Infinity;
+            for (let i = 0; i < t.getRowCount(); i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) { const v = Number(t.getValue(i, cId)); if (!isNaN(v) && v < min) min = v; }
+            }
+            return isFinite(min) ? min : 0;
+        });
+
+        fns.set('TABLE_MAXIF', (tableName, colId, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+            let max = -Infinity;
+            for (let i = 0; i < t.getRowCount(); i++) {
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) { const v = Number(t.getValue(i, cId)); if (!isNaN(v) && v > max) max = v; }
+            }
+            return isFinite(max) ? max : 0;
+        });
+
+        fns.set('TABLE_FILTERCOL', (tableName, colId, filterColId, op, filterValue) => {
+            const t = tbl(tableName); if (!t) return [];
+            const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+            const result = [];
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) result.push(t.getValue(i, cId) ?? null);
+            return result;
+        });
+
+        fns.set('TABLE_FILTERCOLIFS', (tableName, colId, ...triplets) => {
+            const t = tbl(tableName); if (!t || triplets.length < 3) return [];
+            const cId = t.resolveColId(String(colId));
+            const conds = [];
+            for (let i = 0; i + 2 < triplets.length; i += 3)
+                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+            const result = [];
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) result.push(t.getValue(i, cId) ?? null);
+            return result;
+        });
+
+        fns.set('TABLE_LOOKUP', (tableName, lookupColId, lookupValue, returnColId) => {
+            const t = tbl(tableName); if (!t) return '#N/A';
+            const lId = t.resolveColId(String(lookupColId)), rId = t.resolveColId(String(returnColId));
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (matchCondition(t.getValue(i, lId), '=', lookupValue)) return t.getValue(i, rId) ?? null;
+            return '#N/A';
+        });
+
+        fns.set('TABLE_FILTER', (tableName, colId, op, value) => {
+            const t = tbl(tableName); if (!t) return 0;
+            const cId = t.resolveColId(String(colId));
+            let count = 0;
+            for (let i = 0; i < t.getRowCount(); i++)
+                if (matchCondition(t.getValue(i, cId), String(op), value)) count++;
+            return count;
+        });
+
+        this.#customFunctions = fns;
     }
 
     #getRunningIf(sumCol, filterCol, op, filterVal, upToIndex) {

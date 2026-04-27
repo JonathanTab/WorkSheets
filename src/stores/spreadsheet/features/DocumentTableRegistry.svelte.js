@@ -136,6 +136,7 @@ export class DocumentTableRegistry {
             : null;
 
         const store = new TableStore(tableYMap, this.#ydoc, sourceTableYMap);
+        store.setTableResolver(name => this.getByName(name));
         this.#stores.set(tableId, store);
         this.#sheetOf.set(tableId, sheetId);
         this.#nameIndex.set((store.name ?? '').toUpperCase(), tableId);

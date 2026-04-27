@@ -254,6 +254,7 @@ export class TableStore {
             result,
             this.columns,
             this.sortColId === null || this.sortDir === 'desc',
+            this.#tableResolver,
         );
     }
 
@@ -268,6 +269,9 @@ export class TableStore {
      * @type {((formula: string) => any) | null}
      */
     #sheetFormulaEval = null;
+
+    /** @type {((name: string) => import('./TableStore.svelte.js').TableStore|null)|null} */
+    #tableResolver = null;
 
     // ── Formula evaluator (recreated on every #rebuildView) ───────────────────
     /** @type {TableFormulaEvaluator|null} */
@@ -1168,6 +1172,17 @@ export class TableStore {
      */
     setSheetFormulaEvaluator(fn) {
         this.#sheetFormulaEval = fn;
+    }
+
+    /**
+     * Provide a callback that resolves another table by name.
+     * Enables TABLE_* cross-table functions in computed column formulas.
+     * Called by DocumentTableRegistry after the store is created.
+     * @param {((name: string) => any) | null} fn
+     */
+    setTableResolver(fn) {
+        this.#tableResolver = fn;
+        if (this.#eval) this.#rebuildView();
     }
 
     /**
