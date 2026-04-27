@@ -160,7 +160,22 @@ export class TableStore {
     // ── Sort / filter ─────────────────────────────────────────────────────────
     sortColId = $state(null);
     sortDir = $state("asc");
-    filters = $state({}); // colId → { op: '='|'>'|'<'|'contains'|..., value }
+
+    /**
+     * Ad-hoc session filters (not persisted). Applied on top of any view definition
+     * filters. Controlled by the filter popover / TableFilterPopover UI.
+     * colId → { op, value }
+     */
+    filters = $state({});
+
+    /**
+     * View definition filters (views only). Persisted in the view's `persistedFilters`
+     * Y.Map. Applied transparently — the user sees only the matching rows without
+     * any explicit "filter active" indicator for these.
+     * Managed through DocumentTablesPanel, not the ad-hoc filter UI.
+     * colId → { op, value }
+     */
+    viewDefinitionFilters = $state({});
 
     // ── Insert sort (sort inserted rows by a column on entry) ─────────────────
     insertSortColId = $state(null);
@@ -182,32 +197,41 @@ export class TableStore {
     #rebuildView() {
         let result = [...this.rows].reverse();
 
-        for (const [colId, f] of Object.entries(this.filters)) {
-            result = result.filter((row) => {
-                const v = row[colId];
-                const fv = f.value;
-                switch (f.op) {
-                    case "=":  return v == fv;
-                    case "<>": return v != fv;
-                    case ">": case "<": case ">=": case "<=": {
-                        const tryDate = typeof v === 'string' && typeof fv === 'string' && v.includes('-') && fv.includes('-');
-                        const vd = tryDate ? Date.parse(v) : NaN;
-                        const fd = tryDate ? Date.parse(fv) : NaN;
-                        const lv = (!isNaN(vd) && !isNaN(fd)) ? vd : Number(v);
-                        const lf = (!isNaN(vd) && !isNaN(fd)) ? fd : Number(fv);
-                        if (f.op === ">")  return lv > lf;
-                        if (f.op === "<")  return lv < lf;
-                        if (f.op === ">=") return lv >= lf;
-                        return lv <= lf;
-                    }
-                    case "contains":    return String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
-                    case "notcontains": return !String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
-                    case "startswith":  return String(v ?? "").toLowerCase().startsWith(String(fv).toLowerCase());
-                    case "empty":    return v == null || v === "" || v === false;
-                    case "notempty": return v != null && v !== "" && v !== false;
-                    default: return true;
+        // ── Helper: apply a single filter entry ─────────────────────────────────
+        const applyFilter = (rows, colId, f) => rows.filter((row) => {
+            const v  = row[colId];
+            const fv = f.value;
+            switch (f.op) {
+                case "=":  return v == fv;
+                case "<>": return v != fv;
+                case ">": case "<": case ">=": case "<=": {
+                    const tryDate = typeof v === 'string' && typeof fv === 'string' && v.includes('-') && fv.includes('-');
+                    const vd = tryDate ? Date.parse(v) : NaN;
+                    const fd = tryDate ? Date.parse(fv) : NaN;
+                    const lv = (!isNaN(vd) && !isNaN(fd)) ? vd : Number(v);
+                    const lf = (!isNaN(vd) && !isNaN(fd)) ? fd : Number(fv);
+                    if (f.op === ">")  return lv > lf;
+                    if (f.op === "<")  return lv < lf;
+                    if (f.op === ">=") return lv >= lf;
+                    return lv <= lf;
                 }
-            });
+                case "contains":    return String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
+                case "notcontains": return !String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
+                case "startswith":  return String(v ?? "").toLowerCase().startsWith(String(fv).toLowerCase());
+                case "empty":    return v == null || v === "" || v === false;
+                case "notempty": return v != null && v !== "" && v !== false;
+                default: return true;
+            }
+        });
+
+        // 1. Apply transparent view-definition filters (views only, from persistedFilters)
+        for (const [colId, f] of Object.entries(this.viewDefinitionFilters)) {
+            result = applyFilter(result, colId, f);
+        }
+
+        // 2. Apply ad-hoc session filters on top
+        for (const [colId, f] of Object.entries(this.filters)) {
+            result = applyFilter(result, colId, f);
         }
 
         if (this.sortColId) {
@@ -236,6 +260,14 @@ export class TableStore {
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
     entryBuffer = $state({});
     entryErrors = $state({});
+
+    /**
+     * Optional callback provided by SpreadsheetSession to evaluate spreadsheet
+     * formulas stored as cell values (e.g. "=10*15" → 150).
+     * Set via setSheetFormulaEvaluator() after the formula engine is ready.
+     * @type {((formula: string) => any) | null}
+     */
+    #sheetFormulaEval = null;
 
     // ── Formula evaluator (recreated on every #rebuildView) ───────────────────
     /** @type {TableFormulaEvaluator|null} */
@@ -286,8 +318,7 @@ export class TableStore {
 
     #syncFromYjs() {
         const m = this.#tableYMap;
-        // For views, sort config comes from the source table so both views and their
-        // source always show data in the same order (prevents confusing divergence).
+        // Views inherit sort config from source so both show data in the same order.
         const sortSrc = this.#sourceYMap ?? m;
         this.id = m.get("id") ?? "";
         this.name = m.get("name") ?? "Table";
@@ -303,11 +334,42 @@ export class TableStore {
         this.sortDir = sortSrc.get("sortDir") ?? "asc";
         this.insertSortColId = sortSrc.get("insertSortColId") ?? null;
         this.insertSortDir = sortSrc.get("insertSortDir") ?? "asc";
+        // Views load persisted filters from their own Y.Map
+        if (this.#sourceYMap) this.#loadPersistedFilters();
         this.#syncColumns();
         this.#syncRows();
         // Recompute endCol from columns
         const cols = this.columns;
         this.endCol = cols.length > 0 ? this.startCol + cols.length - 1 : this.startCol;
+    }
+
+    /**
+     * Read persisted view-definition filters from the view's persistedFilters Y.Map
+     * into this.viewDefinitionFilters (NOT into this.filters — keep them separate).
+     */
+    #loadPersistedFilters() {
+        const pf = this.#tableYMap.get("persistedFilters");
+        if (!pf) return;
+        /** @type {Record<string,{op:string,value:any}>} */
+        const loaded = {};
+        pf.forEach((/** @type {string} */ jsonStr, /** @type {string} */ colId) => {
+            try { loaded[colId] = JSON.parse(jsonStr); } catch { /* ignore */ }
+        });
+        this.viewDefinitionFilters = loaded;
+    }
+
+    /**
+     * Ensure the view's persistedFilters Y.Map exists; create it if absent.
+     * Only call for view tables (#sourceYMap is set).
+     * @returns {import('yjs').Map<any>}
+     */
+    #getOrCreatePersistedFilters() {
+        let pf = this.#tableYMap.get("persistedFilters");
+        if (!pf) {
+            pf = new Y.Map();
+            this.#ydoc.transact(() => { this.#tableYMap.set("persistedFilters", pf); });
+        }
+        return pf;
     }
 
     #syncColumns() {
@@ -407,6 +469,20 @@ export class TableStore {
         this.#observers.push(() => m.unobserve(topObs));
 
         if (src) {
+            // View table: observe persistedFilters Y.Map so filter changes from other
+            // sessions (or undo/redo) are picked up and applied to the live view.
+            const existingPf = m.get("persistedFilters");
+            if (existingPf) {
+                const pfObs = () => {
+                    // Reload view definition filters into viewDefinitionFilters
+                    this.#loadPersistedFilters();
+                    this.#rebuildView();
+                    this._onFilterChange?.();
+                };
+                existingPf.observe(pfObs);
+                this.#observers.push(() => existingPf.unobserve(pfObs));
+            }
+
             // View table: observe source for sort/accentColor/column/row changes
             const srcTopObs = () => {
                 this.accentColor = src.get("accentColor") ?? this.accentColor;
@@ -797,6 +873,8 @@ export class TableStore {
      */
     _onFilterChange = null;
 
+    // ── Ad-hoc session filters (not persisted) ───────────────────────────────
+
     setFilter(colId, op, value) {
         this.filters = { ...this.filters, [colId]: { op, value } };
         this.#rebuildView();
@@ -813,6 +891,52 @@ export class TableStore {
 
     clearAllFilters() {
         this.filters = {};
+        this.#rebuildView();
+        this._onFilterChange?.();
+    }
+
+    // ── View definition filters (views only, persisted in Yjs) ───────────────
+    // These are transparent — the view always shows only matching rows.
+    // Managed from DocumentTablesPanel, not the ad-hoc filter UI.
+
+    /**
+     * Set a view definition filter. Persisted in Yjs. No-op for non-view tables.
+     * @param {string} colId
+     * @param {string} op
+     * @param {any} value
+     */
+    setViewFilter(colId, op, value) {
+        if (!this.#sourceYMap) return;
+        const pf = this.#getOrCreatePersistedFilters();
+        this.#ydoc.transact(() => { pf.set(colId, JSON.stringify({ op, value })); });
+        this.viewDefinitionFilters = { ...this.viewDefinitionFilters, [colId]: { op, value } };
+        this.#rebuildView();
+        this._onFilterChange?.();
+    }
+
+    /**
+     * Clear a single view definition filter.
+     * @param {string} colId
+     */
+    clearViewFilter(colId) {
+        if (!this.#sourceYMap) return;
+        const pf = this.#tableYMap.get("persistedFilters");
+        if (pf) this.#ydoc.transact(() => { pf.delete(colId); });
+        const vdf = { ...this.viewDefinitionFilters };
+        delete vdf[colId];
+        this.viewDefinitionFilters = vdf;
+        this.#rebuildView();
+        this._onFilterChange?.();
+    }
+
+    /** Clear all view definition filters. */
+    clearAllViewFilters() {
+        if (!this.#sourceYMap) return;
+        const pf = this.#tableYMap.get("persistedFilters");
+        if (pf) this.#ydoc.transact(() => {
+            for (const k of [...pf.keys()]) pf.delete(k);
+        });
+        this.viewDefinitionFilters = {};
         this.#rebuildView();
         this._onFilterChange?.();
     }
@@ -1009,9 +1133,14 @@ export class TableStore {
     // ─── Query API ────────────────────────────────────────────────────────────
 
     getValue(displayIndex, colId) {
-        return this.#eval
+        const raw = this.#eval
             ? this.#eval.getValue(displayIndex, colId)
             : this.sortedFilteredRows[displayIndex]?.[colId];
+        if (typeof raw === 'string' && raw.startsWith('=') && this.#sheetFormulaEval) {
+            const result = this.#sheetFormulaEval(raw);
+            return result ?? raw;
+        }
+        return raw;
     }
 
     getColumn(colId) {
@@ -1029,6 +1158,29 @@ export class TableStore {
     // kept for callers that do `store.evaluateFormula(formula, rowIndex)` directly
     evaluateFormula(formula, rowIndex) {
         return this.#eval ? this.#eval.evaluateFormula(formula, rowIndex) : null;
+    }
+
+    /**
+     * Provide a callback that evaluates spreadsheet formula strings stored as
+     * cell values (e.g. "=10*15" → 150, "=A1+B1" → sum of those cells).
+     * Called by SpreadsheetSession after the formula engine is initialised.
+     * @param {((formula: string) => any) | null} fn
+     */
+    setSheetFormulaEvaluator(fn) {
+        this.#sheetFormulaEval = fn;
+    }
+
+    /**
+     * Return the raw stored value for a cell without evaluating formula strings.
+     * Used by editors so they receive "=10*15" rather than 150.
+     * @param {number} displayIndex
+     * @param {string} colId
+     * @returns {any}
+     */
+    getRawValue(displayIndex, colId) {
+        const def = this.columns.find(c => c.id === colId);
+        if (def?.isNonEntry && def.formula) return null; // computed column has no editable value
+        return this.sortedFilteredRows[displayIndex]?.[colId] ?? null;
     }
 
     resolveColId(/** @type {string} */ nameOrId) {
@@ -1050,6 +1202,27 @@ export class TableStore {
 
     /** True when this store is a view of another table. */
     get isView() { return this.#sourceYMap !== null; }
+
+    /**
+     * True when this is a source-only table (data + schema, not displayed on grid).
+     * Source-only tables are skipped in the row index and never rendered as grid cells.
+     */
+    get isSourceOnly() { return this.#tableYMap.get('isSourceOnly') === true; }
+
+    /**
+     * Set the visible columns for a view (replaces the visibleColumns Y.Array).
+     * No-op for non-view tables.
+     * @param {string[]} colIds  Ordered list of column IDs to show.
+     */
+    setVisibleColumns(colIds) {
+        if (!this.#sourceYMap) return;
+        const arr = this.#tableYMap.get("visibleColumns");
+        if (!arr) return;
+        this.#ydoc.transact(() => {
+            if (arr.length > 0) arr.delete(0, arr.length);
+            if (colIds.length > 0) arr.push(colIds);
+        });
+    }
 
     /**
      * Export table data as a CSV string.

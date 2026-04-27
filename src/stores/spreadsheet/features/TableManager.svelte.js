@@ -68,6 +68,9 @@ export class TableManager {
      */
     #rowIndex = new Map();
 
+    /** @type {((formula: string) => any) | null} */
+    #sheetFormulaEval = null;
+
     /**
      * @param {import('yjs').Map<any>} sheet
      * @param {import('yjs').Doc} ydoc
@@ -116,6 +119,7 @@ export class TableManager {
             store = new TableStore(tableYMap, this.#ydoc);
             this.#ownedStores.add(tableId);
         }
+        if (this.#sheetFormulaEval) store.setSheetFormulaEvaluator(this.#sheetFormulaEval);
         this.stores.set(tableId, store);
         this.tableList = [...this.tableList, tableId];
         // Rebuild index when this table's row count changes.
@@ -176,6 +180,9 @@ export class TableManager {
     #rebuildRowIndex() {
         this.#rowIndex.clear();
         for (const table of this.stores.values()) {
+            // Source-only tables (isSourceOnly = true) hold data + schema but are not
+            // displayed on the grid — skip them in the row index.
+            if (table.isSourceOnly) continue;
             const headerRow = table.startRow;
             const entryRow = table.startRow + 1;
             const dataStart = table.startRow + 2;
@@ -207,6 +214,18 @@ export class TableManager {
             }
         }
         this.tableVersion++;
+    }
+
+    /**
+     * Provide a formula evaluator to all table stores (current and future).
+     * Called by SpreadsheetSession after the formula engine is ready.
+     * @param {((formula: string) => any) | null} fn
+     */
+    setSheetFormulaEvaluator(fn) {
+        this.#sheetFormulaEval = fn;
+        for (const store of this.stores.values()) {
+            store.setSheetFormulaEvaluator(fn);
+        }
     }
 
     // ─── SheetRenderContext API ───────────────────────────────────────────────
@@ -292,6 +311,7 @@ export class TableManager {
      */
     isTableShadowCell(row, col) {
         for (const table of this.stores.values()) {
+            if (table.isSourceOnly) continue;
             if (col < table.startCol || col > table.endCol) continue;
             const lastDataRow = table.startRow + 1 + table.sortedFilteredRows.length;
             const bufferEnd = lastDataRow + BUFFER_ROWS;
@@ -306,6 +326,7 @@ export class TableManager {
     get maxInlineTableRow() {
         let max = 0;
         for (const table of this.stores.values()) {
+            if (table.isSourceOnly) continue;
             const last = table.startRow + 2 + table.sortedFilteredRows.length + BUFFER_ROWS;
             if (last > max) max = last;
         }
@@ -315,28 +336,35 @@ export class TableManager {
     // ─── Table CRUD ───────────────────────────────────────────────────────────
 
     /**
-     * Create a new inline table.
-     * @param {{ name?: string, accentColor?: string, startRow: number, startCol: number, columns: Array<{id:string, name:string, type?:string, required?:boolean, hAlign?:string, isNonEntry?:boolean, formula?:string}> }} opts
-     * @returns {string} tableId
+     * Create a new table: a source-only entity (schema + data) plus a default view
+     * positioned on the grid. The view has `visibleColumns = []` which means "show
+     * all source columns" — new columns added later automatically appear.
+     *
+     * @param {{ name?: string, accentColor?: string, startRow: number, startCol: number,
+     *           columns: Array<{id:string, name:string, type?:string, required?:boolean,
+     *                           hAlign?:string, isNonEntry?:boolean, formula?:string}>,
+     *           sheetId?: string }} opts
+     * @returns {{ sourceId: string, viewId: string }}
      */
     createTable(opts) {
-        if (!this.#tablesYMap) return "";
-        const tableId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        if (!this.#tablesYMap) return { sourceId: '', viewId: '' };
+        const sourceId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const viewId   = `view-${Date.now() + 1}-${Math.random().toString(36).slice(2, 7)}`;
 
-        // Auto-assign accent color from palette based on current table count
         const accentColor = opts.accentColor ??
             TABLE_ACCENT_COLORS[this.tableList.length % TABLE_ACCENT_COLORS.length];
 
         this.#ydoc.transact(() => {
-            const tm = new Y.Map();
-            tm.set("id", tableId);
-            tm.set("name", opts.name ?? "Table");
-            tm.set("mode", "inline");
-            tm.set("startRow", opts.startRow);
-            tm.set("startCol", opts.startCol);
-            tm.set("sortColId", null);
-            tm.set("sortDir", "asc");
-            tm.set("accentColor", accentColor);
+            // ── Source table (data + schema, not rendered on grid) ────────────────
+            const src = new Y.Map();
+            src.set("id", sourceId);
+            src.set("name", opts.name ?? "Table");
+            src.set("isSourceOnly", true);
+            src.set("accentColor", accentColor);
+            src.set("sortColId", null);
+            src.set("sortDir", "asc");
+            src.set("insertSortColId", null);
+            src.set("insertSortDir", "asc");
 
             const defsMap = new Y.Map();
             const orderArr = new Y.Array();
@@ -346,21 +374,34 @@ export class TableManager {
                 cm.set("name", c.name);
                 cm.set("type", c.type ?? "text");
                 cm.set("required", c.required ?? false);
-                if (c.hAlign) cm.set("hAlign", c.hAlign);
-                if (c.isNonEntry) cm.set("isNonEntry", true);
-                if (c.formula) cm.set("formula", c.formula);
+                if (c.hAlign)      cm.set("hAlign", c.hAlign);
+                if (c.isNonEntry)  cm.set("isNonEntry", true);
+                if (c.formula)     cm.set("formula", c.formula);
                 defsMap.set(c.id, cm);
                 orderArr.push([c.id]);
             }
-            tm.set("columnDefs", defsMap);
-            tm.set("columnOrder", orderArr);
-            tm.set("rows", new Y.Array());
-            tm.set("filters", new Y.Map());
+            src.set("columnDefs", defsMap);
+            src.set("columnOrder", orderArr);
+            src.set("rows", new Y.Array());
+            src.set("filters", new Y.Map());
+            this.#tablesYMap.set(sourceId, src);
 
-            this.#tablesYMap.set(tableId, tm);
+            // ── Default view (positioned on grid, shows all columns) ──────────────
+            const vm = new Y.Map();
+            vm.set("id", viewId);
+            vm.set("name", opts.name ?? "Table");
+            vm.set("mode", "inline");
+            vm.set("startRow", opts.startRow);
+            vm.set("startCol", opts.startCol);
+            vm.set("sortColId", null);
+            vm.set("sortDir", "asc");
+            vm.set("sourceTableId", sourceId);
+            vm.set("sourceSheetId", opts.sheetId ?? "");
+            vm.set("visibleColumns", new Y.Array()); // [] = show all columns
+            this.#tablesYMap.set(viewId, vm);
         });
 
-        return tableId;
+        return { sourceId, viewId };
     }
 
     /**

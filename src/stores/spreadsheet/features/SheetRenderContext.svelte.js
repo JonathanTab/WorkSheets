@@ -194,7 +194,7 @@ export class SheetRenderContext {
                 const info = this.tableManager.getCellInfo(row, col);
                 rawValue = info?.colDef?.name ?? '';
             } else if (type === CELL_TYPE.TABLE_DATA) {
-                rawValue = this.tableManager.getCellDisplayValue(row, col);
+                rawValue = this.#session.getCellDisplayValue(row, col);
             } else if (type === CELL_TYPE.TABLE_ENTRY) {
                 const info = this.tableManager.getCellInfo(row, col);
                 rawValue = (info?.colDef && !info.colDef.isNonEntry)

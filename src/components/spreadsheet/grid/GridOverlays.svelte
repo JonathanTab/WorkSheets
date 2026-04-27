@@ -74,12 +74,16 @@
         return "date";
     });
 
-    // Use contenteditable for all non-formula, non-picker, non-image, non-file text cells
+    // Only use contenteditable when the cell actually contains rich text.
+    // Plain text and formula cells always use the stable <input> element so that
+    // typing or deleting "=" doesn't swap DOM elements, fire spurious blur events,
+    // and accidentally commit the edit.
+    let isRichContent = $derived(isRichText(editSessionState.richTextValue ?? ''));
     let isContentEditable = $derived(
         isEditing &&
             editSessionState.surface === "grid" &&
             !pickerMode &&
-            !isFormulaMode,
+            isRichContent,
     );
     let formulaSegments = $derived(
         isFormulaMode ? segmentFormula(editValue ?? "") : [],
@@ -424,7 +428,22 @@
                     on:cancel={onCancelEdit}
                     on:blur={handleEditBlur}
                 />
-            {:else if isFormulaMode}
+            {:else if isContentEditable}
+                <div
+                    role="textbox"
+                    tabindex="-1"
+                    class="cell-rich-edit"
+                    style={richEditStyle}
+                    contenteditable="true"
+                    bind:this={richEditEl}
+                    onblur={handleRichBlur}
+                    onkeydown={handleRichKeydown}
+                    oninput={handleRichInput}
+                ></div>
+            {:else}
+                <!-- Single stable <input> for all plain-text and formula editing.
+                     Keeping one element avoids DOM swaps when "=" is added/removed,
+                     which would fire a spurious blur and commit the draft. -->
                 <input
                     type="text"
                     class="cell-edit-input"
@@ -445,18 +464,10 @@
                     onblur={handleEditBlur}
                     onkeydown={handleEditKeydown}
                 />
-                <div class="formula-overlay" aria-hidden="true"><span class="formula-overlay-text">{#each formulaSegments as segment}{#if segment.color}<span style="color:{segment.color}; font-weight:600;">{segment.text}</span>{:else if segment.type === "FUNCTION"}<span class="formula-function">{segment.text}</span>{:else}<span>{segment.text}</span>{/if}{/each}</span></div>
-                <FormulaValuePopup formula={editValue} visible={true} />
-            {:else}
-                <div
-                    class="cell-rich-edit"
-                    style={richEditStyle}
-                    contenteditable="true"
-                    bind:this={richEditEl}
-                    onblur={handleRichBlur}
-                    onkeydown={handleRichKeydown}
-                    oninput={handleRichInput}
-                ></div>
+                {#if isFormulaMode}
+                    <div class="formula-overlay" aria-hidden="true"><span class="formula-overlay-text">{#each formulaSegments as segment}{#if segment.color}<span style="color:{segment.color}; font-weight:600;">{segment.text}</span>{:else if segment.type === "FUNCTION"}<span class="formula-function">{segment.text}</span>{:else}<span>{segment.text}</span>{/if}{/each}</span></div>
+                    <FormulaValuePopup formula={editValue} visible={true} />
+                {/if}
             {/if}
         </div>
     {/if}

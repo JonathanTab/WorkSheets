@@ -45,6 +45,8 @@
         renameDocument,
     } from "../../../stores/spreadsheet/SpreadsheetSession.svelte.js";
 
+    let { showTablesPanel = false, onShowTablesPanel = undefined } = $props();
+
     let isExportingPDF = $state(false);
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
@@ -232,7 +234,10 @@
             let cells = "";
             for (let c = 0; c < sheetStore.colCount; c++) {
                 const cell = sheetStore.getCell(r, c);
-                const val = String(cell?.v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                const val = String(cell?.v ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
                 cells += r === 0 ? `<th>${val}</th>` : `<td>${val}</td>`;
             }
             rows += `<tr>${cells}</tr>\n`;
@@ -260,7 +265,12 @@
         },
         {
             label: "Import",
-            action: () => showAlert("Import", "Import from CSV or Excel coming soon.", "info"),
+            action: () =>
+                showAlert(
+                    "Import",
+                    "Import from CSV or Excel coming soon.",
+                    "info",
+                ),
         },
         {
             label: "Make a copy",
@@ -624,6 +634,13 @@
 
     // ─── DATA MENU ────────────────────────────────────────────────────────────
     const dataItems = [
+        {
+            label: "Tables",
+            icon: table,
+            isSvgIcon: true,
+            action: () => onShowTablesPanel?.(),
+        },
+        { divider: true },
         {
             label: "Data Validation",
             icon: functionIcon,

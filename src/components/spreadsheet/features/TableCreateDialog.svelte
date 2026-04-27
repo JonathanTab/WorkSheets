@@ -128,6 +128,7 @@
             startRow: startRow,
             startCol: startCol,
             columns: columns,
+            sheetId: spreadsheetSession.activeSheetId ?? '',
         });
 
         onClose();

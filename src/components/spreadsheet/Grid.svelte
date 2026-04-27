@@ -63,6 +63,8 @@
     import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
     import TableEditPanel from "./features/TableEditPanel.svelte";
     import TableColumnPanel from "./features/TableColumnPanel.svelte";
+    import ViewPlacementOverlay from "./features/ViewPlacementOverlay.svelte";
+    import { viewPlacementStore } from "../../stores/spreadsheet/viewPlacementStore.svelte.js";
     import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
     import FloatingImages from "./FloatingImages.svelte";
     import ImageEditor from "./cellTypes/ImageEditor.svelte";
@@ -81,6 +83,7 @@
         showPageBreaks = false,
         printSettings = null,
         requestMobileKeyboardFocus = null,
+        onShowTablesPanel = undefined,
     } = $props();
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
@@ -2308,7 +2311,7 @@
         if (resolvedCellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                return info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+                return info.table.getRawValue(info.dataIndex, info.colDef.id) ?? "";
             }
         }
         if (resolvedCellType === CELL_TYPE.TABLE_ENTRY) {
@@ -2474,12 +2477,14 @@
 
             if (info.colDef?.isNonEntry) return; // Formula columns not editable
 
-            // Get initial value from the right source (entry buffer or table data)
+            // Get initial value from the right source (entry buffer or table data).
+            // Use getRawValue for data cells so a formula like "=10*15" opens in
+            // the editor as the formula string, not the evaluated result.
             let initialValue;
             if (tblCellType === CELL_TYPE.TABLE_ENTRY) {
                 initialValue = info.table.entryBuffer?.[info.colDef?.id] ?? "";
             } else {
-                initialValue = info.table.getValue(info.dataIndex, info.colDef.id) ?? "";
+                initialValue = info.table.getRawValue(info.dataIndex, info.colDef.id) ?? "";
             }
 
             // Use unified cell type config (column typeConfig → column type → sheet override)
@@ -2674,18 +2679,16 @@
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                if (typeof value === 'string' && value.startsWith('=')) {
-                    info.table.updateCell(info.dataIndex, info.colDef.id, value);
-                    spreadsheetSession.formulaEngine?.setFormula(row, col, value);
-                    spreadsheetSession.formulaEngine?.recalculateDirty();
-                } else {
-                    const parsed = CellTypeRegistry.parseInput(
-                        { type: info.colDef.type },
-                        value,
-                    );
-                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                    spreadsheetSession.formulaEngine?.clearFormula(row, col);
-                }
+                // Store formula strings as-is; they are evaluated on-demand via the
+                // table store's injected sheet evaluator.  For non-formula values,
+                // parse according to the column type.
+                const parsed = typeof value === 'string' && value.startsWith('=')
+                    ? value
+                    : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                // Notify dependent sheet formulas that this cell's value changed.
+                spreadsheetSession.formulaEngine?.cellValueChanged(row, col);
+                spreadsheetSession.formulaEngine?.recalculateDirty();
                 untrack(() => renderScheduler?.invalidateAll());
             }
             return;
@@ -5394,6 +5397,7 @@
                             tableManager={spreadsheetSession.tableManager}
                             session={spreadsheetSession}
                             onClose={() => (activeEditPanel = null)}
+                            onOpenTablesPanel={onShowTablesPanel}
                         />
                     {/if}
                 </div>
@@ -5642,6 +5646,11 @@
                 {/if}
             </svg>
         {/if}
+    {/if}
+
+    <!-- ── View placement overlay ── -->
+    {#if viewPlacementStore.active && virtualizer}
+        <ViewPlacementOverlay {virtualizer} />
     {/if}
 </div>
 

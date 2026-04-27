@@ -25,9 +25,7 @@
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                return (
-                    info.table.getValue(info.dataIndex, info.colDef.id) ?? ""
-                );
+                return info.table.getRawValue(info.dataIndex, info.colDef.id) ?? "";
             }
         }
         if (cellType === CELL_TYPE.TABLE_ENTRY) {

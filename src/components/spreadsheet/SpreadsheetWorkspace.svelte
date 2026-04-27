@@ -6,6 +6,7 @@
     import Toolbar from "./Toolbar.svelte";
     import MobileToolbar from "./MobileToolbar.svelte";
     import HistoryPanel from "../HistoryPanel.svelte";
+    import DocumentTablesPanel from "./features/DocumentTablesPanel.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import {
@@ -26,6 +27,7 @@
     let isLoading = $state(true);
     let error = $state(null);
     let showHistory = $state(false);
+    let showTablesPanel = $state(false);
     let formulaBarRef = $state(null);
 
     // ── Awareness / presence ───────────────────────────────────────────────────
@@ -270,13 +272,19 @@
                     fileId={docId}
                     currentDoc={spreadsheetSession.ydoc ?? null}
                     diffFn={computeSpreadsheetDiff}
-                    onClose={() => {
-                        showHistory = false;
-                    }}
+                    onClose={() => { showHistory = false; }}
                 />
             {/if}
+
+            {#if showTablesPanel && !mobileState.isMobile}
+                <DocumentTablesPanel
+                    session={spreadsheetSession}
+                    onClose={() => { showTablesPanel = false; }}
+                />
+            {/if}
+
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="workspace-container" class:mobile={mobileState.isMobile} oncontextmenu={(e) => e.preventDefault()}>
+            <div class="workspace-container" class:mobile={mobileState.isMobile} oncontextmenu={(e) => e.preventDefault()}>
                 <!-- Toolbar: desktop two-row vs mobile single-row -->
                 {#if mobileState.isMobile}
                     <MobileToolbar
@@ -289,11 +297,9 @@
                         onClose={handleCloseDocument}
                         {awareness}
                         {currentUser}
-                        onShowHistory={registry
-                            ? () => {
-                                  showHistory = true;
-                              }
-                            : undefined}
+                        onShowHistory={registry ? () => { showHistory = true; } : undefined}
+                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; }}
+                        tablesPanelOpen={showTablesPanel}
                         {registry}
                     />
                 {/if}
@@ -413,6 +419,7 @@
                         printSettings={pageBreakPrintSettings ??
                             spreadsheetSession.activeSheetStore?.getPrintSettings() ??
                             null}
+                        onShowTablesPanel={() => { showTablesPanel = true; }}
                     />
                     {#if isCrossSheetFormulaEdit}
                         <div class="cross-sheet-indicator">

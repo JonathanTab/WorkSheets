@@ -1,917 +1,411 @@
 <script>
     /**
-     * TableEditPanel - Floating panel for a table's settings.
+     * TableEditPanel — lightweight quick-access popup shown when clicking a
+     * table/view header in the grid.
      *
-     * Features:
-     *   - Editable table name
-     *   - Column list with type indicators, drag-to-reorder
-     *   - Add column
-     *   - Sort on Insert
-     *   - Position (move table)
-     *   - Export CSV / Delete table
+     * All schema editing (columns, types, formulas) and view management lives in
+     * DocumentTablesPanel. This panel provides just enough context to understand
+     * what you're looking at and a fast path to the Tables panel.
+     *
+     * Shows:
+     *   - View/table name + "view" badge if applicable
+     *   - Row count, filter summary
+     *   - Ad-hoc filter clear button (clears session filters, not view definition filters)
+     *   - "Open Tables Panel" button → full management
+     *   - Delete view / delete table
+     *   - Position (move)
      */
 
-    import { onMount } from "svelte";
-    import TableColumnPanel from "./TableColumnPanel.svelte";
-    import BottomSheet from "../../ui/BottomSheet.svelte";
-    import { mobileState } from "../../../stores/mobileState.svelte.js";
-    import {
-        close,
-        check,
-        filter,
-        trash,
-        download,
-        grip,
-        grid,
-        functionIcon,
-        sortAsc,
-        sortDesc,
-    } from "../../../lib/icons/index.js";
+    import { onMount } from 'svelte';
+    import BottomSheet from '../../ui/BottomSheet.svelte';
+    import { mobileState } from '../../../stores/mobileState.svelte.js';
+    import { close, filter, trash, table as tableIcon } from '../../../lib/icons/index.js';
+    import { viewPlacementStore } from '../../../stores/spreadsheet/viewPlacementStore.svelte.js';
 
     let {
         table,
         tableManager,
         session,
         onClose,
+        onOpenTablesPanel,
     } = $props();
+
     let panelEl = $state(null);
 
-    let columns = $derived(table?.columns ?? []);
-    let rowCount = $derived(table?.sortedFilteredRows?.length ?? 0);
-    let totalRows = $derived(table?.rows?.length ?? 0);
-    let filterCount = $derived(Object.keys(table?.filters ?? {}).length);
-    let isSorted = $derived(!!table?.sortColId);
+    // ── Derived ────────────────────────────────────────────────────────────────
+    let isView          = $derived(table?.isView ?? false);
+    let rowCount        = $derived(table?.sortedFilteredRows?.length ?? 0);
+    let totalRows       = $derived(table?.rows?.length ?? 0);
+    let adHocFilters    = $derived(Object.entries(table?.filters ?? {}));
+    let defFilterCount  = $derived(Object.keys(table?.viewDefinitionFilters ?? {}).length);
 
-    let insertSortColId = $derived(table?.insertSortColId ?? null);
-    let insertSortDir = $derived(table?.insertSortDir ?? "asc");
-
-    function handleInsertSortColChange(e) {
-        const colId = e.currentTarget.value;
-        if (!colId) {
-            table?.clearInsertSort();
-        } else {
-            table?.setInsertSort(colId, insertSortDir);
+    // Name of the source table (for views)
+    let sourceName = $derived.by(() => {
+        if (!isView || !session?.tableRegistry) return null;
+        for (const { store } of session.tableRegistry.getSourceTables()) {
+            const views = session.tableRegistry.getViewsForTable(store.id ?? '');
+            if (views.some((/** @type {any} */ v) => v.store === table)) return store.name;
         }
-    }
+        return null;
+    });
 
-    function handleInsertSortDirToggle() {
-        if (!insertSortColId) return;
-        table?.setInsertSort(insertSortColId, insertSortDir === "asc" ? "desc" : "asc");
-    }
-
-    let editingPosition = $state(false);
-    let posRow = $state(0);
-    let posCol = $state(0);
-
-    function startPositionEdit() {
-        posRow = table?.startRow ?? 0;
-        posCol = table?.startCol ?? 0;
-        editingPosition = true;
-    }
-
-    function commitPosition() {
-        const r = parseInt(String(posRow), 10);
-        const c = parseInt(String(posCol), 10);
-        if (!isNaN(r) && !isNaN(c) && r >= 0 && c >= 0) {
-            table?.moveTo(r, c);
-        }
-        editingPosition = false;
-    }
-
-    function cancelPosition() {
-        editingPosition = false;
-    }
-
+    // ── Rename ─────────────────────────────────────────────────────────────────
     let editingName = $state(false);
-    let editingNameValue = $state("");
+    let editNameVal = $state('');
 
-    function startNameEdit() {
-        editingNameValue = table?.name ?? "";
-        editingName = true;
-    }
-
-    function commitNameEdit() {
-        const name = editingNameValue.trim();
-        if (name && table) table.rename(name);
+    function startRename() { editNameVal = table?.name ?? ''; editingName = true; }
+    function commitRename() {
+        if (editNameVal.trim() && table) table.rename(editNameVal.trim());
         editingName = false;
     }
 
-    function cancelNameEdit() {
-        editingName = false;
-    }
-
-    let editingColId = $state(null);
-    let editingColName = $state("");
-
-    function startEditColName(col) {
-        editingColId = col.id;
-        editingColName = col.name;
-    }
-
-    function commitColRename() {
-        if (!editingColId || !table) return;
-        const name = editingColName.trim();
-        if (name) table.renameColumn(editingColId, name);
-        editingColId = null;
-    }
-
-    function cancelColRename() {
-        editingColId = null;
-    }
-
-    let configColId = $state(null);
-
-    function openColConfig(colId) {
-        configColId = configColId === colId ? null : colId;
-    }
-
-    function handleAddColumn() {
+    // ── Position — delegates to placement overlay on the grid ─────────────────
+    function startMove() {
         if (!table) return;
-        const newIdx = table.columns.length;
-        const newId = `col${Date.now()}`;
-        table.insertColumn(newIdx, { id: newId, name: `Column ${newIdx + 1}`, type: "text" });
-        configColId = newId;
+        const reg = session?.tableRegistry;
+        const sheetId = reg?.getSheetId(table.id) ?? session?.activeSheetId;
+        if (sheetId && sheetId !== session?.activeSheetId) session?.setActiveSheet(sheetId);
+        onClose?.(); // close popup so the grid is accessible
+        viewPlacementStore.activate(table.name ?? 'View', (row, col) => {
+            table?.moveTo(row, col);
+        });
     }
 
+    // ── Delete ─────────────────────────────────────────────────────────────────
     function handleDelete() {
-        if (tableManager && table) {
+        if (isView) {
+            const reg = session?.tableRegistry;
+            if (!reg || !table || !session?.ydoc || !session?.root) return;
+            const sheetId = reg.getSheetId(table.id);
+            const tablesMap = session.root.get('sheets')?.get(sheetId)?.get('tables');
+            if (tablesMap) session.ydoc.transact(() => tablesMap.delete(table.id));
+        } else if (tableManager && table) {
             tableManager.deleteTable(table.id);
         }
         onClose?.();
     }
 
-    function handleExportCSV() {
-        if (!table) return;
-        const csv = table.exportCSV();
-        const blob = new Blob([csv], { type: "text/csv" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${table.name ?? "table"}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    let dragFromIndex = $state(-1);
-    let dragOverIndex = $state(-1);
-
-    function handleDragStart(e, index) {
-        dragFromIndex = index;
-        e.dataTransfer?.setData("text/plain", String(index));
-    }
-
-    function handleDragOver(e, index) {
-        e.preventDefault();
-        dragOverIndex = index;
-    }
-
-    function handleDrop(e, index) {
-        e.preventDefault();
-        if (dragFromIndex >= 0 && dragFromIndex !== index) {
-            table?.reorderColumns(dragFromIndex, index);
-        }
-        dragFromIndex = -1;
-        dragOverIndex = -1;
-    }
-
-    function handleDragEnd() {
-        dragFromIndex = -1;
-        dragOverIndex = -1;
-    }
-
-    function handleKeydown(e) {
-        if (e.key === "Escape") {
+    function handleKeydown(/** @type {KeyboardEvent} */ e) {
+        if (e.key === 'Escape') {
             e.stopPropagation();
-            if (configColId) {
-                configColId = null;
-            } else if (editingColId) {
-                cancelColRename();
-            } else if (editingName) {
-                cancelNameEdit();
-            } else {
-                onClose?.();
-            }
+            if (editingName) { editingName = false; }
+            else { onClose?.(); }
         }
     }
 
-    function colTypeIcon(col) {
-        if (col.isNonEntry) return "fx";
-        const icons = { text: "A", number: "#", currency: "$", percent: "%", date: "D", checkbox: "✓", rating: "★", url: "↗", dropdown: "▾" };
-        return icons[col.type] ?? "A";
-    }
-
-    // ── Create View ────────────────────────────────────────────────────────────
-
-    let showCreateView = $state(false);
-    let viewTargetSheetId = $state("");
-    let viewName = $state("");
-    let viewColIds = $state(/** @type {string[]} */ ([]));
-
-    // Sheets available as view targets (all sheets except the one this table is on).
-    // We derive the current sheet by finding which sheet contains this table.
-    let otherSheets = $derived((() => {
-        if (!session) return [];
-        const allSheets = session.sheets ?? [];
-        if (!table) return allSheets;
-        // Try to identify current sheet from the tableManager's tablesYMap parentage;
-        // fall back to showing all sheets (user can pick same sheet if desired).
-        return allSheets;
-    })());
-
-    function openCreateView() {
-        if (!session || !table) return;
-        viewName = `${table.name} View`;
-        viewColIds = table.columns.map(c => c.id);
-        viewTargetSheetId = session.sheets?.find(s => s.id !== session.activeSheetId)?.id
-            ?? session.activeSheetId ?? "";
-        showCreateView = true;
-    }
-
-    function toggleViewCol(colId) {
-        if (viewColIds.includes(colId)) {
-            viewColIds = viewColIds.filter(id => id !== colId);
-        } else {
-            viewColIds = [...viewColIds, colId];
-        }
-    }
-
-    function commitCreateView() {
-        if (!session || !table || !viewTargetSheetId) return;
-        // Find which sheet the source table lives on
-        const sourceSheetId = session.activeSheetId ?? "";
-        session.createTableViewOnSheet({
-            sourceSheetId,
-            sourceTableId: table.id,
-            targetSheetId: viewTargetSheetId,
-            name: viewName.trim() || `${table.name} View`,
-            startRow: 0,
-            startCol: 0,
-            visibleColumns: viewColIds.length < table.columns.length ? viewColIds : [],
-        });
-        showCreateView = false;
-    }
-
-    onMount(() => {
-        if (!mobileState.isMobile) panelEl?.focus();
-    });
+    onMount(() => { if (!mobileState.isMobile) panelEl?.focus(); });
 </script>
 
 {#snippet panelContent()}
-    <!-- Active filters/sort indicator -->
-    {#if filterCount > 0 || isSorted}
-        <div class="stats-bar">
-            {#if filterCount > 0}
-                <span class="stat-pill">
-                    {@html filter}
-                    {filterCount} filter{filterCount > 1 ? "s" : ""}
-                </span>
-            {/if}
-            {#if isSorted}
-                <span class="stat-pill">
-                    {@html table?.sortDir === "asc" ? sortAsc : sortDesc}
-                    {table?.columns?.find((c) => c.id === table.sortColId)?.name ?? ""}
-                </span>
-            {/if}
-            {#if totalRows !== rowCount}
-                <span class="stat-pill muted">{totalRows} total</span>
-            {/if}
-        </div>
-    {/if}
+    <div class="popup-body">
 
-    <!-- Body -->
-    <div class="panel-body">
-        <div class="col-section-label">Columns</div>
-        <div class="col-list">
-            {#each columns as col, idx (col.id)}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                    class="col-item"
-                    class:dragging={dragFromIndex === idx}
-                    class:drag-over={dragOverIndex === idx && dragFromIndex !== idx}
-                    draggable="true"
-                    ondragstart={(e) => handleDragStart(e, idx)}
-                    ondragover={(e) => handleDragOver(e, idx)}
-                    ondrop={(e) => handleDrop(e, idx)}
-                    ondragend={handleDragEnd}
-                >
-                    <span class="drag-handle" title="Drag to reorder">{@html grip}</span>
+        <!-- View definition filters notice (transparent, always applied) -->
+        {#if defFilterCount > 0 && isView}
+            <div class="def-filter-notice">
+                {@html filter}
+                <span>{defFilterCount} definition filter{defFilterCount > 1 ? 's' : ''} active</span>
+                <span class="dfn-hint">(managed in Tables panel)</span>
+            </div>
+        {/if}
 
-                    <button
-                        class="type-badge"
-                        class:formula-badge={col.isNonEntry}
-                        onclick={() => openColConfig(col.id)}
-                        title="Configure column"
-                    >
-                        {colTypeIcon(col)}
-                    </button>
-
-                    {#if editingColId === col.id}
-                        <input
-                            type="text"
-                            class="col-name-input"
-                            bind:value={editingColName}
-                            onblur={commitColRename}
-                            onkeydown={(e) => {
-                                if (e.key === "Enter") { e.stopPropagation(); commitColRename(); }
-                                else if (e.key === "Escape") { e.stopPropagation(); cancelColRename(); }
-                            }}
-                            autofocus
-                        />
-                    {:else}
-                        <span
-                            class="col-name"
-                            role="button"
-                            tabindex="0"
-                            title="Double-click to rename"
-                            ondblclick={() => startEditColName(col)}
-                            onkeydown={(e) => { if (e.key === "Enter") startEditColName(col); }}
-                        >
-                            {col.name}
-                        </span>
-                    {/if}
-                </div>
-
-                {#if configColId === col.id}
-                    <div class="col-config-inline">
-                        <TableColumnPanel
-                            {table}
-                            colId={col.id}
-                            inline={true}
-                            onClose={() => (configColId = null)}
-                        />
+        <!-- Ad-hoc session filters -->
+        {#if adHocFilters.length > 0}
+            <div class="adhoc-section">
+                <span class="adhoc-label">Session filters</span>
+                {#each adHocFilters as [colId, f]}
+                    {@const col = table?.columns?.find((/** @type {any} */ c) => c.id === colId)}
+                    <div class="adhoc-row">
+                        <span class="adhoc-desc">{col?.name ?? colId} {f.op} {f.value ?? ''}</span>
+                        <button class="icon-btn sm" onclick={() => table?.clearFilter(colId)} aria-label="Remove filter">{@html close}</button>
                     </div>
-                {/if}
-            {/each}
-
-            {#if columns.length === 0}
-                <span class="muted-note">No columns</span>
-            {/if}
-        </div>
-
-        <button class="add-col-btn" onclick={handleAddColumn}>+ Add column</button>
-
-        <!-- Sort on insert -->
-        <div class="section-divider"></div>
-        <div class="col-section-label">Sort on Insert</div>
-        <div class="insert-sort-row">
-            <select
-                class="sort-col-select"
-                value={insertSortColId ?? ""}
-                onchange={handleInsertSortColChange}
-            >
-                <option value="">— none —</option>
-                {#each columns.filter((c) => !c.isNonEntry) as col}
-                    <option value={col.id}>{col.name}</option>
                 {/each}
-            </select>
-            {#if insertSortColId}
-                <button class="sort-dir-btn" onclick={handleInsertSortDirToggle} title="Toggle direction">
-                    {@html insertSortDir === "asc" ? sortAsc : sortDesc}
-                </button>
-            {/if}
-        </div>
+                <button class="clear-adhoc-btn" onclick={() => table?.clearAllFilters()}>Clear all</button>
+            </div>
+        {/if}
 
         <!-- Position -->
-        <div class="section-divider"></div>
-        <div class="col-section-label">Position</div>
-        {#if editingPosition}
-            <div class="position-edit-row">
-                <label class="pos-label">Row</label>
-                <input type="number" class="pos-input" bind:value={posRow} min="0" />
-                <label class="pos-label">Col</label>
-                <input type="number" class="pos-input" bind:value={posCol} min="0" />
-                <button class="pos-ok-btn" onclick={commitPosition}>{@html check}</button>
-                <button class="pos-cancel-btn" onclick={cancelPosition}>{@html close}</button>
-            </div>
-        {:else}
-            <div class="position-display-row">
-                <span class="pos-value">Row {table?.startRow ?? 0}, Col {table?.startCol ?? 0}</span>
-                <button class="pos-edit-btn" onclick={startPositionEdit} title="Move table">Move…</button>
-            </div>
+        <div class="pos-display">
+            <span class="pos-text">
+                {#if table}
+                    {@const col = table.startCol + 1}
+                    {@const colStr = (() => { let s = '', c = col; while (c > 0) { s = String.fromCharCode(64 + ((c - 1) % 26 + 1)) + s; c = Math.floor((c - 1) / 26); } return s; })()}
+                    {colStr}{table.startRow + 1}
+                {:else}—{/if}
+            </span>
+            <button class="move-btn" onclick={startMove}>
+                Move on grid…
+            </button>
+        </div>
+
+        <!-- Open Tables panel shortcut -->
+        {#if onOpenTablesPanel}
+            <button class="open-panel-btn" onclick={() => { onOpenTablesPanel?.(); onClose?.(); }}>
+                {@html tableIcon} Open Tables panel →
+            </button>
         {/if}
+
     </div>
 
-    <!-- Create View -->
-    {#if session && !table?.isView}
-        <div class="section-divider"></div>
-        {#if showCreateView}
-            <div class="create-view-form">
-                <div class="col-section-label">Create View On Sheet</div>
-                <input
-                    class="view-name-input"
-                    type="text"
-                    placeholder="View name"
-                    bind:value={viewName}
-                />
-                <select class="sort-col-select" bind:value={viewTargetSheetId}>
-                    {#each otherSheets as s}
-                        <option value={s.id}>{s.name}</option>
-                    {/each}
-                </select>
-                <div class="col-section-label" style="margin-top:6px">Columns to include</div>
-                <div class="view-cols-list">
-                    {#each table?.columns ?? [] as col}
-                        <label class="view-col-check">
-                            <input
-                                type="checkbox"
-                                checked={viewColIds.includes(col.id)}
-                                onchange={() => toggleViewCol(col.id)}
-                            />
-                            {col.name}
-                        </label>
-                    {/each}
-                </div>
-                <div class="view-form-actions">
-                    <button class="view-create-btn" onclick={commitCreateView}>Create</button>
-                    <button class="pos-cancel-btn" onclick={() => showCreateView = false}>{@html close}</button>
-                </div>
-            </div>
-        {:else}
-            <div class="panel-body" style="padding-top:0;padding-bottom:6px;">
-                <button class="add-col-btn" onclick={openCreateView}>
-                    + Create view on another sheet
-                </button>
-            </div>
-        {/if}
-    {/if}
-
     <!-- Footer -->
-    <div class="panel-footer">
-        <button class="export-btn" onclick={handleExportCSV} title="Export as CSV">
-            {@html download} Export CSV
-        </button>
-        <button class="delete-btn" onclick={handleDelete}>
-            {@html trash} Delete Table
+    <div class="popup-footer">
+        <button class="del-btn" onclick={handleDelete}>
+            {@html trash} {isView ? 'Delete view' : 'Delete table'}
         </button>
     </div>
 {/snippet}
 
 {#if mobileState.isMobile}
-    <BottomSheet open={true} onClose={onClose} title={table?.name ?? "Table"} maxHeight="85vh">
+    <BottomSheet open={true} onClose={onClose} title={table?.name ?? 'Table'} maxHeight="60vh">
         {@render panelContent()}
     </BottomSheet>
 {:else}
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-    bind:this={panelEl}
-    class="table-edit-panel"
-    onkeydown={handleKeydown}
-    role="dialog"
-    aria-label="Table settings"
-    tabindex="-1"
->
-    <!-- Header -->
-    <div class="panel-header">
-        <span class="panel-icon">{@html grid}</span>
-        {#if editingName}
-            <input
-                class="name-edit-input"
-                type="text"
-                bind:value={editingNameValue}
-                onblur={commitNameEdit}
-                onkeydown={(e) => {
-                    if (e.key === "Enter") { e.stopPropagation(); commitNameEdit(); }
-                    else if (e.key === "Escape") { e.stopPropagation(); cancelNameEdit(); }
-                }}
-                autofocus
-            />
-        {:else}
-            <button class="name-btn" onclick={startNameEdit} title="Click to rename">
-                {table?.name ?? "Table"}
-            </button>
-        {/if}
-        <span class="row-count">{rowCount} row{rowCount !== 1 ? "s" : ""}</span>
-        <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
-    </div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+        bind:this={panelEl}
+        class="popup"
+        onkeydown={handleKeydown}
+        role="dialog"
+        aria-label="View settings"
+        tabindex="-1"
+    >
+        <!-- Header -->
+        <div class="popup-header">
+            <div class="popup-title">
+                {#if editingName}
+                    <!-- svelte-ignore a11y_autofocus -->
+                    <input
+                        class="name-input"
+                        bind:value={editNameVal}
+                        autofocus
+                        onblur={commitRename}
+                        onkeydown={(/** @type {KeyboardEvent} */ e) => {
+                            if (e.key === 'Enter') { e.stopPropagation(); commitRename(); }
+                            else if (e.key === 'Escape') { e.stopPropagation(); editingName = false; }
+                        }}
+                    />
+                {:else}
+                    <button class="name-btn" onclick={startRename} title="Click to rename">
+                        {table?.name ?? 'Table'}
+                    </button>
+                {/if}
+                {#if isView}
+                    <span class="view-badge">view</span>
+                {/if}
+            </div>
+            <div class="popup-meta">
+                {#if sourceName}
+                    <span class="source-ref">of {sourceName}</span>
+                {/if}
+                <span class="row-count">{rowCount} row{rowCount !== 1 ? 's' : ''}</span>
+                {#if totalRows !== rowCount}
+                    <span class="row-count muted">({totalRows} total)</span>
+                {/if}
+            </div>
+            <button class="close-btn" onclick={() => onClose?.()} aria-label="Close">{@html close}</button>
+        </div>
 
-    {@render panelContent()}
-</div>
+        {@render panelContent()}
+    </div>
 {/if}
 
 <style>
-    .table-edit-panel {
+    .popup {
         background: var(--cell-bg, #fff);
         border: 1px solid var(--cell-border, #e2e8f0);
         border-radius: 8px;
-        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
-        width: 250px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+        width: 240px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        max-height: min(78vh, 560px);
+        max-height: min(70vh, 400px);
     }
 
-    .panel-header {
+    .popup-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 9px 10px 7px;
+        border-bottom: 1px solid #e2e8f0;
+        background: #f8fafc;
+        flex-shrink: 0;
+    }
+
+    .popup-title {
+        flex: 1;
+        min-width: 0;
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 8px 10px 6px;
-        border-bottom: 1px solid var(--cell-border, #e2e8f0);
-        background: var(--table-header-bg, #f8fafc);
-        flex-shrink: 0;
-    }
-
-    .panel-icon {
-        font-size: 14px;
-        flex-shrink: 0;
-        color: #64748b;
     }
 
     .name-btn {
         flex: 1;
-        background: none;
-        border: none;
-        font-weight: 600;
-        font-size: 12px;
-        color: var(--text-color, #1e293b);
-        cursor: pointer;
-        text-align: left;
-        padding: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        min-width: 0;
+        background: none; border: none; font-weight: 700; font-size: 12px;
+        color: var(--text-color, #1e293b); cursor: pointer; text-align: left;
+        padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
     }
-
     .name-btn:hover { color: #475569; }
 
-    .name-edit-input {
-        flex: 1;
-        font-size: 12px;
-        font-weight: 600;
-        border: 1px solid #94a3b8;
-        border-radius: 3px;
-        padding: 1px 5px;
-        outline: none;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        min-width: 0;
+    .name-input {
+        flex: 1; font-size: 12px; font-weight: 700;
+        border: 1px solid #94a3b8; border-radius: 3px;
+        padding: 1px 5px; outline: none;
+        background: var(--cell-bg, #fff); color: var(--text-color, #1e293b); min-width: 0;
     }
 
-    .row-count {
-        font-size: 10px;
-        color: #94a3b8;
-        white-space: nowrap;
-        flex-shrink: 0;
+    .view-badge {
+        font-size: 9px; padding: 1px 5px; border-radius: 8px;
+        background: #eff6ff; color: #2563eb; font-weight: 600; flex-shrink: 0;
     }
 
-    .close-btn {
-        background: none;
-        border: none;
-        cursor: pointer;
-        color: #94a3b8;
-        padding: 2px;
-        border-radius: 3px;
-        flex-shrink: 0;
+    .popup-meta {
         display: flex;
         align-items: center;
-        justify-content: center;
-        width: 20px;
-        height: 20px;
-    }
-
-    .close-btn:hover { color: #475569; background: #e2e8f0; }
-
-    .stats-bar {
-        display: flex;
-        gap: 4px;
-        padding: 4px 10px;
-        background: var(--header-bg, #f8fafc);
-        border-bottom: 1px solid var(--cell-border, #e2e8f0);
+        gap: 6px;
         flex-shrink: 0;
         flex-wrap: wrap;
     }
 
-    .stat-pill {
-        font-size: 9px;
-        padding: 1px 6px;
-        border-radius: 8px;
-        font-weight: 500;
-        background: #f1f5f9;
-        color: #475569;
-        display: flex;
-        align-items: center;
-        gap: 3px;
+    .source-ref { font-size: 10px; color: #64748b; font-style: italic; }
+    .row-count  { font-size: 10px; color: #94a3b8; white-space: nowrap; }
+    .row-count.muted { color: #cbd5e1; }
+
+    .close-btn {
+        background: none; border: none; cursor: pointer; color: #94a3b8;
+        padding: 2px; border-radius: 3px; display: flex; align-items: center;
+        width: 20px; height: 20px; flex-shrink: 0; margin-top: 1px;
     }
+    .close-btn:hover { color: #475569; background: #e2e8f0; }
+    .close-btn :global(svg) { width: 12px; height: 12px; }
 
-    .stat-pill.muted { color: #94a3b8; }
-
-    .panel-body {
+    .popup-body {
         padding: 8px 10px;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
         overflow-y: auto;
         flex: 1;
     }
 
-    .col-section-label {
-        font-size: 10px;
-        font-weight: 600;
-        color: #94a3b8;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin-bottom: 2px;
-    }
-
-    .col-list {
-        display: flex;
-        flex-direction: column;
-        gap: 1px;
-    }
-
-    .col-item {
+    /* Definition filter notice */
+    .def-filter-notice {
         display: flex;
         align-items: center;
         gap: 5px;
-        padding: 4px;
+        padding: 5px 8px;
+        background: #fef9c3;
+        border: 1px solid #fde68a;
+        border-radius: 4px;
+        font-size: 10px;
+        color: #92400e;
+    }
+    .def-filter-notice :global(svg) { width: 10px; height: 10px; flex-shrink: 0; }
+    .dfn-hint { color: #b45309; font-style: italic; font-size: 9px; }
+
+    /* Ad-hoc filters */
+    .adhoc-section {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 6px 8px;
+        background: #f0f9ff;
+        border: 1px solid #bae6fd;
         border-radius: 4px;
     }
 
-    .col-item:hover { background: var(--header-bg, #f8fafc); }
-    .col-item.drag-over { border-top: 2px solid #94a3b8; }
-    .col-item.dragging { opacity: 0.4; }
-
-    .drag-handle {
-        color: #cbd5e1;
-        cursor: grab;
-        font-size: 11px;
-        flex-shrink: 0;
-        user-select: none;
-    }
-
-    .drag-handle:hover { color: #94a3b8; }
-    .drag-handle:active { cursor: grabbing; }
-
-    .type-badge {
+    .adhoc-label {
         font-size: 9px;
-        padding: 1px 5px;
-        border-radius: 3px;
-        background: #f1f5f9;
-        color: #475569;
-        font-weight: 500;
-        min-width: 20px;
-        text-align: center;
-        flex-shrink: 0;
-        border: 1px solid #e2e8f0;
-        cursor: pointer;
-        line-height: 16px;
-        height: 16px;
+        font-weight: 600;
+        color: #0369a1;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 1px;
     }
 
-    .type-badge:hover { background: #e2e8f0; }
-
-    .type-badge.formula-badge {
-        font-family: monospace;
-        background: #f1f5f9;
-        color: #64748b;
+    .adhoc-row {
+        display: flex;
+        align-items: center;
+        gap: 5px;
     }
 
-    .col-name {
+    .adhoc-desc {
         flex: 1;
-        font-size: 12px;
-        cursor: pointer;
+        font-size: 11px;
+        color: #0c4a6e;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
 
-    .col-name-input {
-        flex: 1;
-        font-size: 12px;
-        border: 1px solid #94a3b8;
-        border-radius: 3px;
-        padding: 1px 4px;
-        outline: none;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        min-width: 0;
+    .clear-adhoc-btn {
+        background: none; border: none; font-size: 10px; color: #0369a1;
+        cursor: pointer; text-align: left; padding: 1px 0;
     }
+    .clear-adhoc-btn:hover { text-decoration: underline; }
 
-    .col-config-inline {
-        margin: 2px 0 6px 16px;
-        border-left: 2px solid #e2e8f0;
-        padding-left: 6px;
+    /* Position */
+    .pos-display { display: flex; align-items: center; gap: 8px; }
+    .pos-text { flex: 1; font-size: 11px; color: #64748b; font-family: monospace; font-weight: 600; }
+    .move-btn {
+        font-size: 10px; padding: 3px 8px;
+        border: 1px solid #bfdbfe; border-radius: 4px;
+        background: #eff6ff; color: #2563eb; cursor: pointer; font-weight: 500;
+        white-space: nowrap;
     }
+    .move-btn:hover { background: #dbeafe; }
 
-    .section-divider {
-        height: 1px;
-        background: var(--border-color, #e2e8f0);
-        margin: 4px 0;
+    /* Icon buttons */
+    .icon-btn {
+        width: 22px; height: 22px; border-radius: 3px; border: 1px solid #e2e8f0;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        padding: 0; background: #f8fafc; color: #64748b; flex-shrink: 0;
     }
+    .icon-btn:hover { background: #e2e8f0; }
+    .icon-btn.sm { width: 18px; height: 18px; }
+    .icon-btn :global(svg) { width: 11px; height: 11px; }
 
-    .insert-sort-row { display: flex; gap: 4px; align-items: center; }
-
-    .sort-col-select {
-        flex: 1;
-        height: 26px;
-        font-size: 11px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 4px;
-        padding: 0 4px;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        outline: none;
-        min-width: 0;
-    }
-
-    .sort-dir-btn {
-        height: 26px;
-        padding: 0 8px;
-        font-size: 10px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 4px;
-        background: #f1f5f9;
-        color: #475569;
-        cursor: pointer;
-        flex-shrink: 0;
-    }
-
-    .position-display-row { display: flex; align-items: center; gap: 6px; }
-    .pos-value { flex: 1; font-size: 11px; color: #64748b; }
-
-    .pos-edit-btn {
-        font-size: 10px;
-        padding: 2px 6px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 3px;
-        background: none;
-        color: #64748b;
-        cursor: pointer;
-    }
-
-    .pos-edit-btn:hover { background: #f1f5f9; }
-
-    .position-edit-row {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        flex-wrap: wrap;
-    }
-
-    .pos-label { font-size: 10px; color: #64748b; }
-
-    .pos-input {
-        width: 48px;
-        height: 22px;
-        font-size: 11px;
-        border: 1px solid #94a3b8;
-        border-radius: 3px;
-        padding: 0 3px;
-        text-align: center;
-        outline: none;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-    }
-
-    .pos-ok-btn, .pos-cancel-btn {
-        width: 22px;
-        height: 22px;
-        border-radius: 3px;
-        border: 1px solid #e2e8f0;
-        font-size: 11px;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-        background: #f8fafc;
-        color: #64748b;
-    }
-
-    .pos-ok-btn:hover { background: #e2e8f0; }
-    .pos-cancel-btn:hover { background: #e2e8f0; }
-
-    .add-col-btn {
-        margin-top: 4px;
-        background: none;
-        border: 1px dashed #cbd5e1;
-        border-radius: 4px;
-        padding: 5px 8px;
-        font-size: 11px;
-        color: #64748b;
-        cursor: pointer;
+    /* Open Tables panel */
+    .open-panel-btn {
         width: 100%;
-        text-align: left;
-    }
-
-    .add-col-btn:hover { border-color: #94a3b8; color: #1e293b; }
-
-    .muted-note { font-size: 11px; color: #94a3b8; font-style: italic; }
-
-    .panel-footer {
-        padding: 6px 10px 8px;
-        border-top: 1px solid var(--border-color, #e2e8f0);
-        background: var(--table-header-bg, #f8fafc);
-        display: flex;
-        gap: 6px;
-        flex-shrink: 0;
-    }
-
-    .export-btn {
-        flex: 1;
-        background: none;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 4px;
-        padding: 4px 8px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 5px;
+        padding: 7px 10px;
         font-size: 11px;
-        color: #64748b;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-    }
-
-    .export-btn:hover { background: #f1f5f9; }
-
-    .delete-btn {
-        background: none;
-        border: 1px solid #fca5a5;
-        border-radius: 4px;
-        padding: 4px 8px;
-        font-size: 11px;
-        color: #dc2626;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-    }
-
-    .delete-btn:hover { background: #fef2f2; }
-
-    .create-view-form {
-        padding: 6px 10px 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-    }
-
-    .view-name-input {
-        height: 26px;
-        font-size: 11px;
-        border: 1px solid var(--border-color, #e2e8f0);
-        border-radius: 4px;
-        padding: 0 6px;
-        background: var(--cell-bg, #fff);
-        color: var(--text-color, #1e293b);
-        outline: none;
-        width: 100%;
-        box-sizing: border-box;
-    }
-
-    .view-cols-list {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        max-height: 120px;
-        overflow-y: auto;
-    }
-
-    .view-col-check {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 11px;
-        color: var(--text-color, #1e293b);
-        cursor: pointer;
-        padding: 2px 0;
-    }
-
-    .view-form-actions {
-        display: flex;
-        gap: 4px;
-        align-items: center;
-        margin-top: 2px;
-    }
-
-    .view-create-btn {
-        flex: 1;
-        height: 26px;
-        font-size: 11px;
-        border: 1px solid #3b82f6;
-        border-radius: 4px;
-        background: #3b82f6;
-        color: #fff;
-        cursor: pointer;
         font-weight: 500;
+        color: #2563eb;
+        cursor: pointer;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .open-panel-btn:hover { background: #dbeafe; }
+    .open-panel-btn :global(svg) { width: 12px; height: 12px; flex-shrink: 0; }
+
+    /* Footer */
+    .popup-footer {
+        padding: 6px 10px 8px;
+        border-top: 1px solid #e2e8f0;
+        background: #f8fafc;
+        flex-shrink: 0;
     }
 
-    .view-create-btn:hover { background: #2563eb; border-color: #2563eb; }
+    .del-btn {
+        width: 100%;
+        background: none; border: 1px solid #fca5a5; border-radius: 4px;
+        padding: 5px 10px; font-size: 11px; color: #dc2626; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; gap: 5px;
+    }
+    .del-btn:hover { background: #fef2f2; }
+    .del-btn :global(svg) { width: 11px; height: 11px; }
 
-    /* Mobile: larger touch targets inside BottomSheet */
     @media (max-width: 600px) {
-        .panel-body { padding: 10px 14px; gap: 8px; }
-        .col-item { padding: 8px; min-height: 44px; }
-        .col-section-label { font-size: 11px; }
-        .col-name { font-size: 14px; }
-        .type-badge { font-size: 11px; height: 24px; padding: 0 8px; }
-        .add-col-btn { padding: 10px 10px; font-size: 13px; min-height: 44px; }
-        .sort-col-select { height: 36px; font-size: 13px; }
-        .sort-dir-btn { height: 36px; }
-        .pos-edit-btn { padding: 6px 12px; font-size: 13px; }
-        .panel-footer { padding: 10px 14px 12px; gap: 10px; }
-        .export-btn, .delete-btn { padding: 10px 12px; font-size: 13px; min-height: 44px; }
+        .popup-body  { padding: 12px 14px; gap: 10px; }
+        .popup-footer { padding: 10px 14px 12px; }
+        .del-btn { padding: 10px; font-size: 13px; min-height: 44px; }
     }
 </style>

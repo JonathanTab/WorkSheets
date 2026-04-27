@@ -508,13 +508,13 @@ export class SpreadsheetSession {
 
         // Set up cell value getter - returns raw cell values from Yjs
         this.formulaEngine.setCellValueGetter((row, col) => {
-            // Check table cells first — they store data in TableStore rows, not sheet cells
+            // Check table cells first — they store data in TableStore rows, not sheet cells.
+            // table.getValue() evaluates formula strings via the injected sheet evaluator,
+            // so sheet formulas that reference table cells by grid coords get the right value.
             if (this.tableManager) {
                 const info = this.tableManager.getCellInfo(row, col);
                 if (info?.table && info.rowType === 'data' && info.colDef) {
-                    const rawVal = info.table.sortedFilteredRows[info.dataIndex]?.[info.colDef?.['id']];
-                    if (typeof rawVal === 'string' && rawVal.startsWith('=')) return null;
-                    return rawVal ?? null;
+                    return info.table.getValue(info.dataIndex, info.colDef.id) ?? null;
                 }
             }
             const cell = this.activeSheetStore?.getCell(row, col);
@@ -621,6 +621,33 @@ export class SpreadsheetSession {
             return evalCell(row, col, new Set());
         });
 
+        // Wire formula evaluator into all table stores so that table cell values
+        // like "=10*15" are evaluated on-demand through table.getValue().
+        // Must happen before the first recalculateDirty() so TABLE_* functions
+        // already get evaluated values during the initial formula pass.
+        if (tableManager) {
+            const evalFn = (formula) => {
+                try {
+                    const ast = parseFormula(formula);
+                    if (!ast) return null;
+                    return evaluate(ast, (r, c) => {
+                        const k = `${r},${c}`;
+                        if (this.formulaEngine && k in this.formulaEngine.computedValues) {
+                            return this.formulaEngine.computedValues[k];
+                        }
+                        const cell = this.activeSheetStore?.getCell(r, c);
+                        if (!cell?.exists) return null;
+                        const v = cell.v;
+                        if (typeof v === 'string' && v.startsWith('=')) return null;
+                        return v ?? null;
+                    }, {}, null, null);
+                } catch {
+                    return null;
+                }
+            };
+            tableManager.setSheetFormulaEvaluator(evalFn);
+        }
+
         // Load existing formulas from the sheet and compute initial values
         const cells = sheet.get('cells');
         if (cells) {
@@ -644,24 +671,6 @@ export class SpreadsheetSession {
             // Third pass: recalculate all formula cells in topological (dependency) order
             // so that chains like A1=10, B1=A1+5, C1=B1*2 all resolve correctly.
             // graph.setFormula marks every cell dirty, so recalculateDirty covers them all.
-            this.formulaEngine.recalculateDirty();
-        }
-
-        // Scan table cells for formula values stored in table row data
-        if (tableManager) {
-            for (const table of tableManager.stores.values()) {
-                const dataStart = table.startRow + 2;
-                const rows = table.sortedFilteredRows;
-                for (let i = 0; i < rows.length; i++) {
-                    table.columns.forEach((colDef, colIdx) => {
-                        if (colDef.isNonEntry) return;
-                        const val = rows[i]?.[colDef.id];
-                        if (typeof val === 'string' && val.startsWith('=')) {
-                            this.formulaEngine.setFormula(dataStart + i, table.startCol + colIdx, val);
-                        }
-                    });
-                }
-            }
             this.formulaEngine.recalculateDirty();
         }
 

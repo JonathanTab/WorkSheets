@@ -10,6 +10,8 @@
         awareness = null,
         currentUser = "",
         onShowHistory = undefined,
+        onShowTablesPanel = undefined,
+        tablesPanelOpen = false,
         registry = null,
     } = $props();
 </script>
@@ -27,7 +29,7 @@
                 </button>
             {/if}
             <DocumentName />
-            <MenuBar />
+            <MenuBar {onShowTablesPanel} />
         </div>
         <div class="row1-right">
             <PresenceIndicator {awareness} {currentUser} />
