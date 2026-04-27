@@ -355,6 +355,22 @@ export const functions = {
         }
     },
 
+    MROUND: {
+        description: 'Round to nearest multiple',
+        minArgs: 2,
+        maxArgs: 2,
+        call: (args) => {
+            const num = toNumber(args[0]);
+            const multiple = toNumber(args[1]);
+            if (isError(num)) return num;
+            if (isError(multiple)) return multiple;
+            if (multiple === 0) return 0;
+            // number and multiple must have the same sign
+            if ((num > 0 && multiple < 0) || (num < 0 && multiple > 0)) return FormulaError.NUM;
+            return multiple * Math.round(num / multiple);
+        }
+    },
+
     // =========================================================================
     // Logical Functions
     // =========================================================================

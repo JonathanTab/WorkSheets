@@ -123,6 +123,14 @@
             example:
                 "=MOD(10, 3)  →  1\n=MOD(ROW(), 2)  →  0 for even rows, 1 for odd",
         },
+        {
+            cat: "math",
+            name: "MROUND",
+            syntax: "MROUND(number, multiple)",
+            desc: "Rounds a number to the nearest specified multiple. number and multiple must have the same sign, or an error is returned. A multiple of 0 returns 0.",
+            example:
+                "=MROUND(16, 5)  →  15\n=MROUND(18, 5)  →  20\n=MROUND(1.23, 0.05)  →  1.25\n=MROUND(-10, -3)  →  -9",
+        },
 
         // ── Logic ─────────────────────────────────────────────────────────
         {
