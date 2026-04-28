@@ -185,9 +185,6 @@ export function createTableYMap(id, name, options = {}) {
     table.set('sortColId', null);
     table.set('sortDir', 'asc');
 
-    // Active filters (Y.Map<colId, Y.Map { type, op, value }>)
-    table.set('filters', new Y.Map());
-
     return table;
 }
 

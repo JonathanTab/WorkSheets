@@ -4,28 +4,17 @@
      *
      * Layout: two-pane side panel.
      *   Left  (180px) — list of source tables, clickable to select.
-     *   Right (360px) — detail pane for selected table:
-     *       • Table header: name, accent color, stats
+     *   Right (380px) — detail pane for selected table:
+     *       • Table header: name, accent color, sort-on-insert, stats
      *       • Columns tab: add/rename/type/formula/reorder/delete columns
-     *       • Views tab: list of views with column visibility + transparent filters
-     *
-     * Vocabulary:
-     *   Table  — the data/schema entity (isSourceOnly). Never appears on grid directly.
-     *   View   — a positioned rendering of a table on a sheet. Shows a column subset.
-     *            Views have "transparent filters" (always applied, part of the view
-     *            definition) that differ from the ad-hoc per-session filter UI.
-     *
-     * Transparent view filters:
-     *   Stored in the view's `persistedFilters` Y.Map via TableStore.setViewFilter().
-     *   Applied automatically to sortedFilteredRows at all times.
-     *   Edited only here, not via the filter-popover system.
+     *       • Views tab: list of views with column order + transparent filters
      */
 
     import { close, plus, trash, filter, download, check } from '../../../lib/icons/index.js';
     import TableColumnPanel from './TableColumnPanel.svelte';
     import { viewPlacementStore } from '../../../stores/spreadsheet/viewPlacementStore.svelte.js';
 
-    let { session, onClose } = $props();
+    let { session, onClose, initialTableId = null, initialColId = null } = $props();
 
     // ── Registry / data ────────────────────────────────────────────────────────
     let registry = $derived(session?.tableRegistry ?? null);
@@ -56,10 +45,16 @@
         selectedTableId ? sourceTables.find(t => t.tableId === selectedTableId) ?? null : null
     );
 
+    // Apply initialTableId prop once on mount, then auto-select first table
+    let _initialApplied = $state(false);
     $effect(() => {
-        // Auto-select first table when list loads
-        if (!selectedTableId && sourceTables.length > 0) {
-            selectedTableId = sourceTables[0].tableId;
+        if (!_initialApplied && sourceTables.length > 0) {
+            _initialApplied = true;
+            if (initialTableId && sourceTables.some(t => t.tableId === initialTableId)) {
+                selectedTableId = initialTableId;
+            } else {
+                selectedTableId = sourceTables[0].tableId;
+            }
         }
     });
 
@@ -92,6 +87,30 @@
     /** colId currently open in the inline config expander */
     let expandedColId = $state(/** @type {string|null} */ (null));
 
+    // Apply initialColId once after table is selected
+    $effect(() => {
+        if (initialColId && selectedTableId === initialTableId && !expandedColId) {
+            expandedColId = initialColId;
+            activeTab = 'columns';
+        }
+    });
+
+    /** colId currently being renamed */
+    let renamingColId  = $state(/** @type {string|null} */ (null));
+    let renameColValue = $state('');
+
+    function startRenameCol(colId, current, e) {
+        e?.stopPropagation();
+        renamingColId  = colId;
+        renameColValue = current;
+    }
+
+    function commitRenameCol(store, colId) {
+        const name = renameColValue.trim();
+        if (name) store.renameColumn(colId, name);
+        renamingColId = null;
+    }
+
     function addColumn(store) {
         const idx = store.columns.length;
         const id  = `col${Date.now()}`;
@@ -104,7 +123,7 @@
     /** @param {any} col */
     function colTypeIcon(col) { return col.isNonEntry ? 'fx' : (TYPE_ICONS[col.type] ?? 'A'); }
 
-    // ── Drag-to-reorder columns ─────────────────────────────────────────────
+    // ── Drag-to-reorder source columns ──────────────────────────────────────
     let dragColFrom = $state(-1);
     let dragColOver = $state(-1);
 
@@ -126,29 +145,81 @@
     let renamingViewId  = $state(/** @type {string|null} */ (null));
     let renameViewValue = $state('');
 
-    function startRenameView(viewId, current) { renamingViewId = viewId; renameViewValue = current; }
+    function startRenameView(viewId, current, e) {
+        e?.stopPropagation();
+        renamingViewId = viewId;
+        renameViewValue = current;
+    }
     function commitRenameView(store) {
         const name = renameViewValue.trim();
         if (name) store.rename(name);
         renamingViewId = null;
     }
 
-    // ── Visible columns for an expanded view ────────────────────────────────
-    /** visibleColIds state per viewId (local until written to Yjs) */
-    let viewColEdits = $state(/** @type {Record<string, string[]>} */ ({}));
+    // ── Visible columns for a view — ordered draggable list ─────────────────
+    /**
+     * Per-view local state: ordered list of colIds for visible columns.
+     * We keep a separate local drag state per view.
+     * @type {Record<string, string[]>}
+     */
+    let viewVisibleCols = $state({});
 
-    function getViewCols(viewId, store) {
-        if (viewId in viewColEdits) return viewColEdits[viewId];
-        return store.columns.map((/** @type {any} */ c) => c.id);
+    /**
+     * Initialize (or sync) the local visible column order for a view when it
+     * is expanded. Uses the view's actual visibleColumns if set, otherwise all
+     * source columns in source order.
+     */
+    function initViewCols(viewId, vStore, srcStore) {
+        // vStore.columns already reflects the visible+ordered subset (or all if show-all).
+        viewVisibleCols = { ...viewVisibleCols, [viewId]: vStore.columns.map((/** @type {any} */ c) => c.id) };
     }
 
-    function toggleViewCol(viewId, colId, store) {
-        const current = getViewCols(viewId, store);
-        const next = current.includes(colId)
-            ? current.filter(id => id !== colId)
-            : [...current, colId];
-        viewColEdits = { ...viewColEdits, [viewId]: next };
-        store.setVisibleColumns(next);
+    /** Returns ordered list of visible colIds for this view (from local state). */
+    function getVisibleColOrder(viewId, vStore, srcStore) {
+        if (viewId in viewVisibleCols) return viewVisibleCols[viewId];
+        return vStore.columns.map((/** @type {any} */ c) => c.id);
+    }
+
+    /** Returns hidden colIds (source cols not in visible order). */
+    function getHiddenCols(viewId, vStore, srcStore) {
+        const visible = new Set(getVisibleColOrder(viewId, vStore, srcStore));
+        return srcStore.columns.filter((/** @type {any} */ c) => !visible.has(c.id));
+    }
+
+    /** Toggle a column's visibility in a view. */
+    function toggleViewCol(viewId, colId, vStore, srcStore) {
+        const visible = getVisibleColOrder(viewId, vStore, srcStore);
+        let next;
+        if (visible.includes(colId)) {
+            next = visible.filter(id => id !== colId);
+        } else {
+            next = [...visible, colId];
+        }
+        viewVisibleCols = { ...viewVisibleCols, [viewId]: next };
+        vStore.setVisibleColumns(next);
+    }
+
+    // Drag-to-reorder visible columns within a view
+    let viewDragFrom = $state(-1);
+    let viewDragOver = $state(-1);
+    let viewDragId   = $state(/** @type {string|null} */ (null)); // which viewId is being dragged
+
+    function viewColDragStart(e, viewId, idx) {
+        viewDragFrom = idx; viewDragId = viewId;
+        e.dataTransfer?.setData('text/plain', String(idx));
+    }
+    function viewColDragOver(e, idx) { e.preventDefault(); viewDragOver = idx; }
+    function viewColDragEnd() { viewDragFrom = viewDragOver = -1; viewDragId = null; }
+    function viewColDrop(e, viewId, idx, vStore, srcStore) {
+        e.preventDefault();
+        if (viewDragFrom >= 0 && viewDragId === viewId && viewDragFrom !== idx) {
+            const order = [...getVisibleColOrder(viewId, vStore, srcStore)];
+            const [moved] = order.splice(viewDragFrom, 1);
+            order.splice(idx, 0, moved);
+            viewVisibleCols = { ...viewVisibleCols, [viewId]: order };
+            vStore.setVisibleColumns(order);
+        }
+        viewDragFrom = viewDragOver = -1; viewDragId = null;
     }
 
     // ── View definition filters ──────────────────────────────────────────────
@@ -173,39 +244,21 @@
     }
 
     // ── Create new view ──────────────────────────────────────────────────────
-    let creatingViewFor     = $state(/** @type {string|null} */ (null));
-    let newViewName         = $state('');
-    let newViewSheet        = $state('');
-    let newViewCols         = $state(/** @type {string[]} */ ([]));
+    let creatingViewFor = $state(/** @type {string|null} */ (null));
+    let newViewName     = $state('');
 
     function openCreateView(tableId, store) {
         creatingViewFor = tableId;
-        newViewName     = `${store.name} View`;
-        newViewSheet    = sheets[0]?.id ?? '';
-        // Pre-select all current columns (explicit list — won't auto-include new cols)
-        newViewCols = store.columns.map((/** @type {any} */ c) => c.id);
-    }
-
-    function toggleNewViewCol(colId) {
-        newViewCols = newViewCols.includes(colId)
-            ? newViewCols.filter(id => id !== colId)
-            : [...newViewCols, colId];
+        newViewName = `${store.name} View`;
     }
 
     function commitCreateView(sourceTableId, store) {
-        if (!creatingViewFor || !newViewSheet) return;
+        if (!creatingViewFor) return;
         const sourceSheetId = registry?.getSheetId(sourceTableId) ?? session?.activeSheetId ?? '';
         const name = newViewName.trim() || 'View';
-        const cols = [...newViewCols];
-        const targetSheet = newViewSheet;
+        const targetSheet = session?.activeSheetId ?? '';
         creatingViewFor = null;
 
-        // Switch to the target sheet so the placement overlay appears on it
-        if (targetSheet !== session?.activeSheetId) {
-            session?.setActiveSheet(targetSheet);
-        }
-
-        // Enter placement mode — the view is created when the user clicks a cell
         viewPlacementStore.activate(name, (row, col) => {
             session?.createTableViewOnSheet({
                 sourceSheetId,
@@ -214,9 +267,11 @@
                 name,
                 startRow: row,
                 startCol: col,
-                visibleColumns: cols,
+                visibleColumns: store.columns.map((/** @type {any} */ c) => c.id),
             });
         });
+        // Close panel so grid is accessible for placement
+        onClose?.();
     }
 
     /** Activate placement mode to move an existing view. */
@@ -229,16 +284,15 @@
         viewPlacementStore.activate(vStore.name, (row, col) => {
             vStore.moveTo(row, col);
         });
+        onClose?.();
     }
 
     // ── Delete helpers ───────────────────────────────────────────────────────
     function deleteTable(tableId, store) {
         if (!confirm(`Delete table "${store.name}" and all its views? This cannot be undone.`)) return;
-        // Delete all non-legacy views first (legacy views ARE the source, skip them)
         for (const { viewId, isLegacy } of viewsFor(tableId)) {
             if (!isLegacy) _deleteFromSheet(viewId);
         }
-        // Delete source table (also handles legacy combined tables)
         _deleteFromSheet(tableId);
         selectedTableId = null;
     }
@@ -370,9 +424,44 @@
                                     class:selected={store.accentColor === color}
                                     style="background: {color}"
                                     onclick={() => store.setAccentColor(color)}
+                                    aria-label="Set accent color {color}"
                                     title="Set accent color"
                                 ></button>
                             {/each}
+                        </div>
+
+                        <!-- Sort-on-insert row -->
+                        <div class="insert-sort-row">
+                            <span class="insert-sort-label">Sort on insert:</span>
+                            {#if store.insertSortColId}
+                                {@const isc = store.columns.find((/** @type {any} */ c) => c.id === store.insertSortColId)}
+                                <span class="insert-sort-value">{isc?.name ?? store.insertSortColId} ({store.insertSortDir})</span>
+                                <button class="insert-sort-clear" onclick={() => store.clearInsertSort()} title="Remove sort on insert">✕</button>
+                            {:else}
+                                <select
+                                    class="insert-sort-sel"
+                                    value=""
+                                    onchange={e => {
+                                        const val = /** @type {HTMLSelectElement} */ (e.target).value;
+                                        if (val) store.setInsertSort(val, 'asc');
+                                    }}
+                                >
+                                    <option value="">— none —</option>
+                                    {#each store.columns.filter((/** @type {any} */ c) => !c.isNonEntry) as c}
+                                        <option value={c.id}>{c.name}</option>
+                                    {/each}
+                                </select>
+                            {/if}
+                            {#if store.insertSortColId}
+                                <select
+                                    class="insert-sort-dir"
+                                    value={store.insertSortDir}
+                                    onchange={e => store.setInsertSort(store.insertSortColId, /** @type {HTMLSelectElement} */ (e.target).value)}
+                                >
+                                    <option value="asc">↑ Asc</option>
+                                    <option value="desc">↓ Desc</option>
+                                </select>
+                            {/if}
                         </div>
                     </div>
                     <div class="detail-header-actions">
@@ -404,6 +493,7 @@
                                 class="col-row"
                                 class:drag-over={dragColOver === idx && dragColFrom !== idx}
                                 class:dragging={dragColFrom === idx}
+                                class:col-expanded={expandedColId === col.id}
                                 role="listitem"
                                 draggable="true"
                                 ondragstart={e => colDragStart(e, idx)}
@@ -418,9 +508,28 @@
                                     onclick={() => expandedColId = expandedColId === col.id ? null : col.id}
                                     title="Configure column"
                                 >{colTypeIcon(col)}</button>
-                                <span class="col-name">{col.name}</span>
+                                {#if renamingColId === col.id}
+                                    <!-- svelte-ignore a11y_autofocus -->
+                                    <input
+                                        class="col-name-input"
+                                        bind:value={renameColValue}
+                                        autofocus
+                                        onblur={() => commitRenameCol(store, col.id)}
+                                        onkeydown={e => {
+                                            if (e.key === 'Enter') { e.stopPropagation(); commitRenameCol(store, col.id); }
+                                            else if (e.key === 'Escape') { e.stopPropagation(); renamingColId = null; }
+                                        }}
+                                    />
+                                {:else}
+                                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                    <span
+                                        class="col-name"
+                                        title="Double-click to rename"
+                                        ondblclick={e => startRenameCol(col.id, col.name, e)}
+                                    >{col.name}</span>
+                                {/if}
                                 {#if col.isNonEntry}
-                                    <span class="col-formula-badge" title={col.formula ?? ''}>= fx</span>
+                                    <span class="col-formula-badge" title={col.formula ?? ''}>= {col.formula ? col.formula.slice(0, 12) : 'fx'}</span>
                                 {/if}
                                 <button
                                     class="col-del-btn"
@@ -458,21 +567,22 @@
                                 {#if !isLegacy}
                                     <button
                                         class="view-expand-btn"
+                                        class:open={isExpanded}
                                         onclick={() => {
-                                            expandedViewId = isExpanded ? null : viewId;
-                                            if (!isExpanded && !(viewId in viewColEdits)) {
-                                                viewColEdits = { ...viewColEdits,
-                                                    [viewId]: vStore.columns.map((/** @type {any} */ c) => c.id) };
+                                            const next = isExpanded ? null : viewId;
+                                            expandedViewId = next;
+                                            if (next && !isLegacy) {
+                                                initViewCols(viewId, vStore, store);
                                             }
                                         }}
-                                        title="Expand view settings"
+                                        title={isExpanded ? 'Collapse' : 'Expand view settings'}
                                         aria-label="Expand view settings"
                                         aria-expanded={isExpanded}
                                     >
-                                        {isExpanded ? '▾' : '▸'}
+                                        <span class="expand-chevron">{isExpanded ? '▾' : '▸'}</span>
+                                        <span class="expand-label">Settings</span>
                                     </button>
                                 {:else}
-                                    <!-- Legacy: no expand toggle, just a spacer -->
                                     <span class="view-expand-spacer"></span>
                                 {/if}
 
@@ -493,7 +603,7 @@
                                         <!-- svelte-ignore a11y_no_static_element_interactions -->
                                         <span
                                             class="view-name"
-                                            ondblclick={!isLegacy ? () => startRenameView(viewId, vStore.name) : undefined}
+                                            ondblclick={!isLegacy ? e => startRenameView(viewId, vStore.name, e) : undefined}
                                             title={isLegacy ? 'Legacy table placement' : 'Double-click to rename'}
                                         >{vStore.name}</span>
                                     {/if}
@@ -527,30 +637,69 @@
 
                             <!-- Expanded view settings (new-style views only) -->
                             {#if isExpanded && !isLegacy}
+                                {@const visibleOrder = getVisibleColOrder(viewId, vStore, store)}
+                                {@const hiddenCols   = getHiddenCols(viewId, vStore, store)}
                                 <div class="view-detail">
 
-                                    <!-- Visible columns -->
-                                    <div class="vd-section-label">Visible columns</div>
-                                    <div class="vd-col-checks">
-                                        {#each store.columns as srcCol}
-                                            <label class="vd-col-check">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={getViewCols(viewId, vStore).includes(srcCol.id)}
-                                                    onchange={() => toggleViewCol(viewId, srcCol.id, vStore)}
-                                                />
-                                                <span class="vd-col-type">{colTypeIcon(srcCol)}</span>
-                                                {srcCol.name}
-                                            </label>
+                                    <!-- Column order section -->
+                                    <div class="vd-section-label">
+                                        Column order
+                                        <span class="vd-section-hint">drag to reorder · uncheck to hide</span>
+                                    </div>
+
+                                    <!-- Visible columns (draggable, ordered) -->
+                                    <div class="vd-col-order">
+                                        {#each visibleOrder as colId, ci (colId)}
+                                            {@const srcCol = store.columns.find((/** @type {any} */ c) => c.id === colId)}
+                                            {#if srcCol}
+                                                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                                <div
+                                                    class="vd-col-item visible"
+                                                    class:vd-drag-over={viewDragId === viewId && viewDragOver === ci && viewDragFrom !== ci}
+                                                    class:vd-dragging={viewDragId === viewId && viewDragFrom === ci}
+                                                    draggable="true"
+                                                    role="listitem"
+                                                    ondragstart={e => viewColDragStart(e, viewId, ci)}
+                                                    ondragover={e => viewColDragOver(e, ci)}
+                                                    ondrop={e => viewColDrop(e, viewId, ci, vStore, store)}
+                                                    ondragend={viewColDragEnd}
+                                                >
+                                                    <span class="vd-col-grip">⠿</span>
+                                                    <input
+                                                        type="checkbox"
+                                                        class="vd-col-check"
+                                                        checked={true}
+                                                        onchange={() => toggleViewCol(viewId, colId, vStore, store)}
+                                                    />
+                                                    <span class="vd-col-type">{colTypeIcon(srcCol)}</span>
+                                                    <span class="vd-col-name">{srcCol.name}</span>
+                                                </div>
+                                            {/if}
                                         {/each}
                                     </div>
+
+                                    <!-- Hidden columns (fixed order, just toggle to show) -->
+                                    {#if hiddenCols.length > 0}
+                                        <div class="vd-hidden-label">Hidden</div>
+                                        {#each hiddenCols as srcCol (srcCol.id)}
+                                            <div class="vd-col-item hidden">
+                                                <span class="vd-col-grip-ph"></span>
+                                                <input
+                                                    type="checkbox"
+                                                    class="vd-col-check"
+                                                    checked={false}
+                                                    onchange={() => toggleViewCol(viewId, srcCol.id, vStore, store)}
+                                                />
+                                                <span class="vd-col-type">{colTypeIcon(srcCol)}</span>
+                                                <span class="vd-col-name">{srcCol.name}</span>
+                                            </div>
+                                        {/each}
+                                    {/if}
 
                                     <!-- Transparent filters -->
                                     <div class="vd-section-label" style="margin-top:10px">
                                         Definition filters
-                                        <span class="vd-filter-hint" title="These filters are always applied to this view. Rows not matching these are never shown.">
-                                            (always applied)
-                                        </span>
+                                        <span class="vd-section-hint">(always applied)</span>
                                     </div>
 
                                     {#each Object.entries(vStore.viewDefinitionFilters ?? {}) as [fColId, fEntry]}
@@ -636,46 +785,36 @@
                             {/if}
                         {/each}
 
-                        <!-- Create view form -->
+                        <!-- Create view -->
                         {#if creatingViewFor === tableId}
                             <div class="create-view-card">
-                                <div class="cv-header">New view</div>
+                                <div class="cv-header">New view on current sheet</div>
                                 <div class="cv-field-row">
                                     <label class="cv-label" for="cv-name">Name</label>
-                                    <input id="cv-name" class="cv-input" type="text" bind:value={newViewName} />
+                                    <!-- svelte-ignore a11y_autofocus -->
+                                    <input
+                                        id="cv-name"
+                                        class="cv-input"
+                                        type="text"
+                                        bind:value={newViewName}
+                                        autofocus
+                                        onkeydown={e => {
+                                            if (e.key === 'Enter') { e.stopPropagation(); commitCreateView(tableId, store); }
+                                            else if (e.key === 'Escape') { e.stopPropagation(); creatingViewFor = null; }
+                                        }}
+                                    />
                                 </div>
-                                <div class="cv-field-row">
-                                    <label class="cv-label" for="cv-sheet">Sheet</label>
-                                    <select id="cv-sheet" class="cv-select" bind:value={newViewSheet}>
-                                        {#each sheets as s}
-                                            <option value={s.id}>{s.name}</option>
-                                        {/each}
-                                    </select>
-                                </div>
-                                <div class="cv-cols-label">Columns to show</div>
-                                <div class="cv-cols">
-                                    {#each store.columns as col}
-                                        <label class="cv-col-check">
-                                            <input
-                                                type="checkbox"
-                                                checked={newViewCols.includes(col.id)}
-                                                onchange={() => toggleNewViewCol(col.id)}
-                                            />
-                                            <span class="cv-col-type">{colTypeIcon(col)}</span>
-                                            {col.name}
-                                        </label>
-                                    {/each}
-                                </div>
+                                <div class="cv-hint">Click the grid to place the view after creating.</div>
                                 <div class="cv-actions">
                                     <button class="cv-create-btn" onclick={() => commitCreateView(tableId, store)}>
-                                        {@html check} Create view
+                                        {@html check} Place on grid…
                                     </button>
                                     <button class="cv-cancel-btn" onclick={() => creatingViewFor = null}>{@html close}</button>
                                 </div>
                             </div>
                         {:else}
                             <button class="add-view-btn" onclick={() => openCreateView(tableId, store)}>
-                                {@html plus} Add view on a sheet
+                                {@html plus} Add view on current sheet
                             </button>
                         {/if}
                     </div>
@@ -897,7 +1036,7 @@
         display: flex;
         gap: 5px;
         align-items: center;
-        margin-bottom: 6px;
+        margin-bottom: 5px;
     }
     .dot { color: #cbd5e1; }
 
@@ -905,6 +1044,7 @@
         display: flex;
         gap: 4px;
         flex-wrap: wrap;
+        margin-bottom: 7px;
     }
 
     .accent-dot {
@@ -918,6 +1058,49 @@
     }
     .accent-dot:hover { transform: scale(1.2); }
     .accent-dot.selected { border-color: #1e293b; }
+
+    /* Sort on insert row */
+    .insert-sort-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .insert-sort-label {
+        font-size: 10px;
+        font-weight: 600;
+        color: #64748b;
+        white-space: nowrap;
+    }
+    .insert-sort-value {
+        font-size: 11px;
+        color: #1e293b;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 3px;
+        padding: 1px 6px;
+    }
+    .insert-sort-sel, .insert-sort-dir {
+        height: 22px;
+        font-size: 10px;
+        border: 1px solid #e2e8f0;
+        border-radius: 3px;
+        padding: 0 4px;
+        background: var(--cell-bg, #fff);
+        color: var(--text-color, #1e293b);
+        outline: none;
+    }
+    .insert-sort-clear {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #94a3b8;
+        font-size: 10px;
+        padding: 1px 4px;
+        border-radius: 3px;
+        line-height: 1;
+    }
+    .insert-sort-clear:hover { color: #dc2626; background: #fef2f2; }
 
     .detail-header-actions {
         display: flex;
@@ -990,6 +1173,7 @@
     .col-row:hover { background: #f8fafc; }
     .col-row.drag-over { border-top: 2px solid #3b82f6; }
     .col-row.dragging  { opacity: 0.4; }
+    .col-row.col-expanded { background: #f0f4ff; }
 
     .drag-grip {
         color: #cbd5e1;
@@ -1026,6 +1210,20 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        cursor: pointer;
+    }
+    .col-name:hover { color: #3b82f6; }
+
+    .col-name-input {
+        flex: 1;
+        font-size: 12px;
+        border: 1px solid #94a3b8;
+        border-radius: 3px;
+        padding: 1px 5px;
+        outline: none;
+        background: var(--cell-bg, #fff);
+        color: var(--text-color, #1e293b);
+        min-width: 0;
     }
 
     .col-formula-badge {
@@ -1038,7 +1236,7 @@
         flex-shrink: 0;
         white-space: nowrap;
         overflow: hidden;
-        max-width: 80px;
+        max-width: 90px;
         text-overflow: ellipsis;
     }
 
@@ -1099,22 +1297,28 @@
         border-radius: 5px 5px 0 0;
     }
 
+    /* Expand button — wider and more prominent */
     .view-expand-btn {
-        background: none;
-        border: none;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
         cursor: pointer;
-        font-size: 11px;
-        color: #94a3b8;
-        width: 18px;
-        height: 18px;
+        font-size: 10px;
+        color: #475569;
+        height: 22px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
-        justify-content: center;
+        gap: 3px;
         margin-top: 1px;
-        border-radius: 3px;
+        border-radius: 4px;
+        padding: 0 6px;
+        font-weight: 500;
+        transition: background 0.1s, color 0.1s;
     }
-    .view-expand-btn:hover { background: #e2e8f0; color: #475569; }
+    .view-expand-btn:hover { background: #e2e8f0; color: #1e293b; }
+    .view-expand-btn.open  { background: #dbeafe; border-color: #bfdbfe; color: #2563eb; }
+    .expand-chevron { font-size: 9px; }
+    .expand-label   { font-size: 10px; }
 
     .view-info {
         flex: 1;
@@ -1164,7 +1368,7 @@
     .chip.filt :global(svg) { width: 8px; height: 8px; }
     .chip.legacy { background: #f1f5f9; color: #94a3b8; font-style: italic; }
 
-    .view-expand-spacer { width: 18px; flex-shrink: 0; }
+    .view-expand-spacer { width: 60px; flex-shrink: 0; }
 
     .view-row-actions {
         display: flex;
@@ -1213,7 +1417,7 @@
         gap: 5px;
     }
 
-    .vd-filter-hint {
+    .vd-section-hint {
         font-size: 9px;
         color: #b0b8c4;
         text-transform: none;
@@ -1222,27 +1426,74 @@
         font-style: italic;
     }
 
-    .vd-col-checks {
+    /* Column order list */
+    .vd-col-order {
         display: flex;
         flex-direction: column;
-        gap: 3px;
-        max-height: 120px;
-        overflow-y: auto;
+        gap: 2px;
+        margin-bottom: 4px;
     }
-    .vd-col-check {
+
+    .vd-col-item {
         display: flex;
         align-items: center;
         gap: 5px;
+        padding: 3px 4px;
+        border-radius: 4px;
+        border: 1px solid transparent;
         font-size: 11px;
-        cursor: pointer;
-        padding: 2px 0;
     }
+    .vd-col-item.visible {
+        background: #fff;
+        border-color: #e2e8f0;
+    }
+    .vd-col-item.hidden {
+        background: none;
+        opacity: 0.55;
+    }
+    .vd-col-item.vd-drag-over { border-color: #3b82f6; border-style: dashed; }
+    .vd-col-item.vd-dragging  { opacity: 0.3; }
+
+    .vd-col-grip {
+        color: #cbd5e1;
+        cursor: grab;
+        font-size: 12px;
+        user-select: none;
+        line-height: 1;
+        flex-shrink: 0;
+    }
+    .vd-col-grip:hover { color: #94a3b8; }
+    .vd-col-grip:active { cursor: grabbing; }
+    .vd-col-grip-ph { width: 14px; flex-shrink: 0; }
+
+    .vd-col-check {
+        flex-shrink: 0;
+        cursor: pointer;
+        accent-color: #3b82f6;
+    }
+
     .vd-col-type {
         font-size: 9px;
         width: 16px;
         text-align: center;
         color: #64748b;
         flex-shrink: 0;
+    }
+
+    .vd-col-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .vd-hidden-label {
+        font-size: 9px;
+        font-weight: 600;
+        color: #b0b8c4;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 6px 0 3px 2px;
     }
 
     .vd-filter-row {
@@ -1376,6 +1627,12 @@
         color: #1e293b;
     }
 
+    .cv-hint {
+        font-size: 10px;
+        color: #94a3b8;
+        font-style: italic;
+    }
+
     .cv-field-row {
         display: flex;
         align-items: center;
@@ -1389,7 +1646,7 @@
         flex-shrink: 0;
         text-align: right;
     }
-    .cv-input, .cv-select {
+    .cv-input {
         flex: 1;
         height: 26px;
         font-size: 11px;
@@ -1401,30 +1658,7 @@
         outline: none;
         box-sizing: border-box;
     }
-
-    .cv-cols-label {
-        font-size: 10px;
-        font-weight: 600;
-        color: #94a3b8;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
-    .cv-cols {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        max-height: 110px;
-        overflow-y: auto;
-    }
-    .cv-col-check {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 11px;
-        cursor: pointer;
-        padding: 1px 0;
-    }
-    .cv-col-type { font-size: 9px; width: 16px; text-align: center; color: #64748b; }
+    .cv-input:focus { border-color: #94a3b8; }
 
     .cv-actions {
         display: flex;

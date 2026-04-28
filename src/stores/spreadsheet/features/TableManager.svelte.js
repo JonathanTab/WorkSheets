@@ -383,7 +383,6 @@ export class TableManager {
             src.set("columnDefs", defsMap);
             src.set("columnOrder", orderArr);
             src.set("rows", new Y.Array());
-            src.set("filters", new Y.Map());
             this.#tablesYMap.set(sourceId, src);
 
             // ── Default view (positioned on grid, shows all columns) ──────────────

@@ -28,6 +28,8 @@
     let error = $state(null);
     let showHistory = $state(false);
     let showTablesPanel = $state(false);
+    let tablesPanelTableId = $state(/** @type {string|null} */ (null));
+    let tablesPanelColId   = $state(/** @type {string|null} */ (null));
     let formulaBarRef = $state(null);
 
     // ── Awareness / presence ───────────────────────────────────────────────────
@@ -279,7 +281,9 @@
             {#if showTablesPanel && !mobileState.isMobile}
                 <DocumentTablesPanel
                     session={spreadsheetSession}
-                    onClose={() => { showTablesPanel = false; }}
+                    onClose={() => { showTablesPanel = false; tablesPanelTableId = null; tablesPanelColId = null; }}
+                    initialTableId={tablesPanelTableId}
+                    initialColId={tablesPanelColId}
                 />
             {/if}
 
@@ -298,7 +302,7 @@
                         {awareness}
                         {currentUser}
                         onShowHistory={registry ? () => { showHistory = true; } : undefined}
-                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; }}
+                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; tablesPanelTableId = null; tablesPanelColId = null; }}
                         tablesPanelOpen={showTablesPanel}
                         {registry}
                     />
@@ -419,7 +423,7 @@
                         printSettings={pageBreakPrintSettings ??
                             spreadsheetSession.activeSheetStore?.getPrintSettings() ??
                             null}
-                        onShowTablesPanel={() => { showTablesPanel = true; }}
+                        onShowTablesPanel={(tableId, colId) => { tablesPanelTableId = tableId ?? null; tablesPanelColId = colId ?? null; showTablesPanel = true; }}
                     />
                     {#if isCrossSheetFormulaEdit}
                         <div class="cross-sheet-indicator">

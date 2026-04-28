@@ -61,8 +61,6 @@
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "./features/RepeaterCreateDialog.svelte";
     import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
-    import TableEditPanel from "./features/TableEditPanel.svelte";
-    import TableColumnPanel from "./features/TableColumnPanel.svelte";
     import ViewPlacementOverlay from "./features/ViewPlacementOverlay.svelte";
     import { viewPlacementStore } from "../../stores/spreadsheet/viewPlacementStore.svelte.js";
     import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
@@ -312,12 +310,10 @@
     /** @type {{ x: number, y: number }|null} */
     let editPanelPosition = $state(null);
     let editPanelEl = $state(null);
-    let columnConfigPosition = $state(null);
-    let columnConfigEl = $state(null);
 
     /**
-     * Calculate position for edit panel, ensuring it stays within viewport.
-     * @param {'table'|'repeater'} type
+     * Calculate position for repeater edit panel, ensuring it stays within viewport.
+     * @param {'repeater'} type
      * @param {any} store
      * @returns {{ x: number, y: number }}
      */
@@ -325,33 +321,20 @@
         if (!containerEl || !virtualizer || !renderPlan) return { x: 0, y: 0 };
 
         const panelRect = editPanelEl?.getBoundingClientRect();
-        const panelWidth = panelRect?.width ?? (type === "table" ? 258 : 248);
+        const panelWidth = panelRect?.width ?? 248;
         const panelHeight = panelRect?.height ?? 380;
 
         let anchorRight, anchorTop;
 
-        if (type === "repeater") {
-            const rect = rangeOutlineStyle(
-                store.templateStartRow,
-                store.templateStartCol,
-                store.inlineEndRow,
-                store.inlineEndCol,
-            );
-            if (!rect) return { x: 0, y: 0 };
-            anchorRight = rect.left + rect.width;
-            anchorTop = rect.top;
-        } else {
-            const endRow = store.startRow + 1 + store.sortedFilteredRows.length;
-            const rect = rangeOutlineStyle(
-                store.startRow,
-                store.startCol,
-                endRow,
-                store.endCol,
-            );
-            if (!rect) return { x: 0, y: 0 };
-            anchorRight = rect.left + rect.width;
-            anchorTop = rect.top;
-        }
+        const rect = rangeOutlineStyle(
+            store.templateStartRow,
+            store.templateStartCol,
+            store.inlineEndRow,
+            store.inlineEndCol,
+        );
+        if (!rect) return { x: 0, y: 0 };
+        anchorRight = rect.left + rect.width;
+        anchorTop = rect.top;
 
         const placed = placeOverlayNearAnchor(
             { left: anchorRight, top: anchorTop + 20, width: 18, height: 18 },
@@ -359,30 +342,6 @@
             { preferX: "start", preferY: "below", offset: 6, margin: 8 },
         );
         return { x: placed.left, y: placed.top };
-    }
-
-    function calculateColumnConfigPosition() {
-        if (!activeColumnConfig || !containerEl || !virtualizer) return null;
-        const anchor = {
-            left: cellContainerLeft(activeColumnConfig.anchorCol),
-            top: cellContainerTop(activeColumnConfig.anchorRow),
-            width: virtualizer.getColWidth(activeColumnConfig.anchorCol),
-            height: virtualizer.getRowHeight(activeColumnConfig.anchorRow),
-        };
-        const panelRect = columnConfigEl?.getBoundingClientRect();
-        return placeOverlayNearAnchor(
-            anchor,
-            {
-                width: panelRect?.width ?? 286,
-                height: panelRect?.height ?? 460,
-            },
-            {
-                preferX: "start",
-                preferY: "below",
-                offset: 4,
-                margin: 8,
-            },
-        );
     }
 
     // Recalculate position when activeEditPanel changes
@@ -421,23 +380,8 @@
     let focusedDropdownCell = $state(null);
     let dropdownFilter = $state("");
     let dropdownFilterInputEl = $state(null);
-    /** @type {{ type: 'table'|'repeater', store:any }|null} */
+    /** @type {{ type: 'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
-    /** @type {{ table:any, colId:string, anchorRow:number, anchorCol:number }|null} */
-    let activeColumnConfig = $state(null);
-
-    $effect(() => {
-        const _sl = virtualizer?.scrollLeft;
-        const _st = virtualizer?.scrollTop;
-        const _cw = containerEl?.clientWidth;
-        const _vh = getContainerVisibleBottomPx();
-        const _panelEl = columnConfigEl;
-        if (activeColumnConfig && containerEl && virtualizer) {
-            columnConfigPosition = calculateColumnConfigPosition();
-        } else {
-            columnConfigPosition = null;
-        }
-    });
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -4899,17 +4843,8 @@
                                 label: "Configure Column…",
                                 icon: "⚙",
                                 action: () => {
-                                    if (
-                                        tableCellInfo?.colDef &&
-                                        anchor &&
-                                        virtualizer
-                                    ) {
-                                        activeColumnConfig = {
-                                            table: tableCellInfo.table,
-                                            colId: tableCellInfo.colDef.id,
-                                            anchorRow: tableCellInfo.table.startRow,
-                                            anchorCol: anchor.col,
-                                        };
+                                    if (tableCellInfo?.colDef) {
+                                        onShowTablesPanel?.(tableCellInfo.table.id, tableCellInfo.colDef.id);
                                     }
                                 },
                             },
@@ -4926,13 +4861,7 @@
                       label: "Configure Table ⊞",
                       action: () => {
                           if (tableCellInfo) {
-                              activeEditPanel =
-                                  activeEditPanel?.store === tableCellInfo.table
-                                      ? null
-                                      : {
-                                            type: "table",
-                                            store: tableCellInfo.table,
-                                        };
+                              onShowTablesPanel?.(tableCellInfo.table.id);
                           }
                       },
                   },
@@ -5400,17 +5329,14 @@
                     )}px;"
                     onclick={(e) => {
                         e.stopPropagation();
-                        activeEditPanel =
-                            activeEditPanel?.store === tbl
-                                ? null
-                                : { type: "table", store: tbl };
+                        onShowTablesPanel?.(tbl.id);
                     }}
                     title="Table settings: {tbl.name}"
                     aria-label="Table settings">⊞</button
                 >
             {/each}
 
-            <!-- Edit panel (repeater or table settings) -->
+            <!-- Edit panel (repeater settings) -->
             {#if activeEditPanel && editPanelPosition}
                 <div
                     class="edit-panel-anchor"
@@ -5422,14 +5348,6 @@
                             repeater={activeEditPanel.store}
                             repeaterEngine={spreadsheetSession.repeaterEngine}
                             onClose={() => (activeEditPanel = null)}
-                        />
-                    {:else if activeEditPanel.type === "table"}
-                        <TableEditPanel
-                            table={activeEditPanel.store}
-                            tableManager={spreadsheetSession.tableManager}
-                            session={spreadsheetSession}
-                            onClose={() => (activeEditPanel = null)}
-                            onOpenTablesPanel={onShowTablesPanel}
                         />
                     {/if}
                 </div>
@@ -5564,20 +5482,6 @@
                 </div>
             {/if}
 
-            <!-- Column config panel (floating, from context menu or header badge click) -->
-            {#if activeColumnConfig && columnConfigPosition}
-                <div
-                    class="col-config-anchor"
-                    bind:this={columnConfigEl}
-                    style="position:absolute; left:{columnConfigPosition.left}px; top:{columnConfigPosition.top}px; z-index:60; pointer-events:auto;"
-                >
-                    <TableColumnPanel
-                        table={activeColumnConfig.table}
-                        colId={activeColumnConfig.colId}
-                        onClose={() => (activeColumnConfig = null)}
-                    />
-                </div>
-            {/if}
 
             <!-- (Viewport mode removed — all tables/repeaters are inline) -->
         </div>
@@ -6172,11 +6076,6 @@
         font-weight: 600;
         color: #1e293b;
         margin: 0;
-    }
-
-    /* ── Column config panel anchor ── */
-    .col-config-anchor {
-        pointer-events: auto;
     }
 
     /* ── Remote user cursors ── */

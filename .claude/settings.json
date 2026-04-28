@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(grep -E \"\\\\.\\(svelte|tsx|ts|jsx|js\\)$\")",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(xargs grep *)",
+      "Bash(npx svelte-check *)"
     ]
   }
 }
