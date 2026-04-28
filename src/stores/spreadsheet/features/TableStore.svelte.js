@@ -473,19 +473,38 @@ export class TableStore {
         this.#observers.push(() => m.unobserve(topObs));
 
         if (src) {
-            // View table: observe persistedFilters Y.Map so filter changes from other
-            // sessions (or undo/redo) are picked up and applied to the live view.
-            const existingPf = m.get("persistedFilters");
-            if (existingPf) {
-                const pfObs = () => {
-                    // Reload view definition filters into viewDefinitionFilters
-                    this.#loadPersistedFilters();
-                    this.#rebuildView();
+            // View table: observe visibleColumns Y.Array so column subset/order changes
+            // propagate immediately (Y.Map.observe does not fire for nested Y.Array edits).
+            const visibleArr = m.get("visibleColumns");
+            if (visibleArr) {
+                const visObs = () => {
+                    this.#syncColumns();
                     this._onFilterChange?.();
                 };
-                existingPf.observe(pfObs);
-                this.#observers.push(() => existingPf.unobserve(pfObs));
+                visibleArr.observe(visObs);
+                this.#observers.push(() => visibleArr.unobserve(visObs));
             }
+
+            // View table: observe persistedFilters Y.Map so filter changes from other
+            // sessions (or undo/redo) are picked up and applied to the live view.
+            let observedPf = null;
+            const pfObs = () => {
+                // Reload view definition filters into viewDefinitionFilters
+                this.#loadPersistedFilters();
+                this.#rebuildView();
+                this._onFilterChange?.();
+            };
+            const attachPersistedFiltersObserver = () => {
+                const nextPf = m.get("persistedFilters");
+                if (observedPf === nextPf) return;
+                if (observedPf) observedPf.unobserve(pfObs);
+                observedPf = nextPf ?? null;
+                if (observedPf) observedPf.observe(pfObs);
+            };
+            attachPersistedFiltersObserver();
+            this.#observers.push(() => {
+                if (observedPf) observedPf.unobserve(pfObs);
+            });
 
             // View table: observe source for sort/accentColor/column/row changes
             const srcTopObs = () => {
@@ -499,6 +518,11 @@ export class TableStore {
             };
             src.observe(srcTopObs);
             this.#observers.push(() => src.unobserve(srcTopObs));
+
+            // Catch late creation/replacement of persistedFilters Y.Map.
+            const ownTopObs = () => attachPersistedFiltersObserver();
+            m.observe(ownTopObs);
+            this.#observers.push(() => m.unobserve(ownTopObs));
 
             // Observe source columns
             const srcDefsMap = src.get("columnDefs");

@@ -163,6 +163,14 @@ export class TableManager {
             orderArr.observe(bumpOnOrderChange);
             this.#observers.push(() => orderArr.unobserve(bumpOnOrderChange));
         }
+        // View-only: visibleColumns is a nested Y.Array, so top-level observe on
+        // tableYMap won't fire when a view's column subset/order changes.
+        // Rebuild so col bounds, hit-testing and paint all refresh immediately.
+        const visibleArr = tableYMap.get("visibleColumns");
+        if (visibleArr) {
+            visibleArr.observe(rebuildOnChange);
+            this.#observers.push(() => visibleArr.unobserve(rebuildOnChange));
+        }
     }
 
     #removeTableStore(tableId) {
