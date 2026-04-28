@@ -30,6 +30,12 @@
         }
         return list;
     });
+
+    let bodyStartLeft = $derived.by(() => {
+        if (!virtualizer) return 0;
+        const start = Math.max(frozenCols, bodyColRange.start ?? 0);
+        return virtualizer.getColLeft(start);
+    });
 </script>
 
 <div class="col-headers-root" style="height:{HEADER_HEIGHT}px;">
@@ -83,7 +89,7 @@
     <div class="scrollable-cols" style="left:{frozenWidth}px;">
         <div
             class="scrollable-inner"
-            style="transform:translateX({Math.round(-scrollLeft)}px);"
+            style="transform:translateX({Math.round(bodyStartLeft - scrollLeft)}px);"
         >
             {#each bodyColIndices as col (col)}
                 {@const width = virtualizer.getColWidth(col)}
