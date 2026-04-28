@@ -1,262 +1,235 @@
 <script>
     /**
      * DocMenuBar — menu bar for document editor.
-     * Similar structure to spreadsheet MenuBar but with document-specific actions.
+     * File · Edit · View · Insert · Format · Help
      */
-    import MenuDropdown from "../spreadsheet/toolbar/MenuDropdown.svelte";
-    import { docSession } from "../../stores/docs/docStore.svelte.js";
-    import { openModal } from "../../lib/ui/modalStore.svelte.js";
-    import AlertModal from "../modals/AlertModal.svelte";
-    import { router } from "../../lib/router.svelte.js";
+    import MenuDropdown from '../spreadsheet/toolbar/MenuDropdown.svelte';
+    import { docSession } from '../../stores/docs/docStore.svelte.js';
+    import { openModal } from '../../lib/ui/modalStore.svelte.js';
+    import AlertModal from '../modals/AlertModal.svelte';
+    import { router } from '../../lib/router.svelte.js';
+    import { undo, redo } from 'y-prosemirror';
+    import {
+        toggleBold, toggleItalic, toggleUnderline,
+        toggleStrikethrough, toggleSuperscript, toggleSubscript,
+        clearFormatting,
+        toggleBulletList, toggleOrderedList, toggleCheckList,
+        toggleBlockquote, insertHR,
+        addRowBefore, addRowAfter, deleteRow,
+        addColumnBefore, addColumnAfter, deleteColumn,
+        mergeCells, splitCell,
+    } from '../../stores/docs/docCommands.js';
 
-    let { onShowPageSetup = undefined } = $props();
+    let {
+        view = null,
+        onShowPageSetup = undefined,
+        onToggleFind = undefined,
+        onToggleRuler = undefined,
+    } = $props();
 
-    // Shared state for cursor-following menu behavior
     let openMenuId = $state(null);
 
     function handleMenuOpenChange(isOpen, menuId) {
-        if (isOpen) {
-            openMenuId = menuId;
-        } else if (openMenuId === menuId) {
-            openMenuId = null;
-        }
+        openMenuId = isOpen ? menuId : (openMenuId === menuId ? null : openMenuId);
     }
 
-    function showAlert(title, message, type = "info") {
-        openModal(AlertModal, { title, message, type });
+    function run(cmd) {
+        if (!view) return;
+        cmd(view.state, view.dispatch, view);
+        view.focus();
     }
 
-    // ─── FILE MENU ────────────────────────────────────────────────────────────
+    function showAlert(title, message) {
+        openModal(AlertModal, { title, message, type: 'info' });
+    }
+
+    // ── FILE ──────────────────────────────────────────────────────────────────
     let fileItems = $derived([
-        {
-            label: "New",
-            action: () => (window.location.hash = "/new"),
-            shortcut: "Ctrl+N",
-        },
-        {
-            label: "Open...",
-            action: () => router.goHome(),
-            shortcut: "Ctrl+O",
-        },
+        { label: 'New document',    action: () => (window.location.hash = '/new'), shortcut: 'Ctrl+N' },
+        { label: 'Open…',           action: () => router.goHome(),                 shortcut: 'Ctrl+O' },
         { divider: true },
+        { label: 'Page Setup…',     action: () => onShowPageSetup?.() },
         {
-            label: "Page Setup...",
-            action: () => onShowPageSetup?.(),
-        },
-        {
-            label: "Download",
+            label: 'Download',
             submenu: [
-                {
-                    label: "Plain Text (.txt)",
-                    action: () => exportText(),
-                },
-                {
-                    label: "HTML (.html)",
-                    action: () => exportHTML(),
-                },
+                { label: 'Plain Text (.txt)',  action: exportText },
+                { label: 'HTML (.html)',       action: exportHTML  },
             ],
         },
         { divider: true },
-        {
-            label: "Print",
-            action: () => window.print(),
-            shortcut: "Ctrl+P",
-        },
+        { label: 'Print',           action: () => window.print(), shortcut: 'Ctrl+P' },
     ]);
 
-    // ─── EDIT MENU ────────────────────────────────────────────────────────────
-    // These will be passed from parent via props since we need access to the ProseMirror view
+    // ── EDIT ──────────────────────────────────────────────────────────────────
     let editItems = $derived([
-        {
-            label: "Undo",
-            action: () => handleUndo(),
-            shortcut: "Ctrl+Z",
-        },
-        {
-            label: "Redo",
-            action: () => handleRedo(),
-            shortcut: "Ctrl+Y",
-        },
+        { label: 'Undo',            action: () => run(undo),     shortcut: 'Ctrl+Z' },
+        { label: 'Redo',            action: () => run(redo),     shortcut: 'Ctrl+Y' },
         { divider: true },
-        {
-            label: "Cut",
-            action: () => document.execCommand("cut"),
-            shortcut: "Ctrl+X",
-        },
-        {
-            label: "Copy",
-            action: () => document.execCommand("copy"),
-            shortcut: "Ctrl+C",
-        },
-        {
-            label: "Paste",
-            action: () => document.execCommand("paste"),
-            shortcut: "Ctrl+V",
-        },
+        { label: 'Cut',             action: () => document.execCommand('cut'),       shortcut: 'Ctrl+X' },
+        { label: 'Copy',            action: () => document.execCommand('copy'),      shortcut: 'Ctrl+C' },
+        { label: 'Paste',           action: () => document.execCommand('paste'),     shortcut: 'Ctrl+V' },
+        { label: 'Paste without formatting', action: () => document.execCommand('paste') },
         { divider: true },
-        {
-            label: "Select All",
-            action: () => document.execCommand("selectAll"),
-            shortcut: "Ctrl+A",
-        },
+        { label: 'Select All',      action: () => document.execCommand('selectAll'), shortcut: 'Ctrl+A' },
+        { divider: true },
+        { label: 'Find…',           action: () => onToggleFind?.(), shortcut: 'Ctrl+F' },
+        { label: 'Find & Replace…', action: () => onToggleFind?.(), shortcut: 'Ctrl+H' },
     ]);
 
-    // ─── VIEW MENU ────────────────────────────────────────────────────────────
+    // ── VIEW ──────────────────────────────────────────────────────────────────
     const viewItems = [
-        {
-            label: "Toggle Full Screen",
-            action: () => toggleFullscreen(),
-        },
+        { label: 'Toggle ruler',      action: () => onToggleRuler?.() },
+        { divider: true },
+        { label: 'Toggle full screen', action: toggleFullscreen },
     ];
 
-    // ─── HELP MENU ────────────────────────────────────────────────────────────
-    const helpItems = [
+    // ── INSERT ────────────────────────────────────────────────────────────────
+    const insertItems = [
+        { label: 'Link…',             action: () => {}, shortcut: 'Ctrl+K' },
+        { label: 'Image…',            action: () => {} },
+        { divider: true },
+        { label: 'Table',             submenu: [
+            { label: '3 × 3',         action: () => {} },
+            { label: '5 × 5',         action: () => {} },
+            { label: 'Custom…',       action: () => {} },
+        ]},
+        { label: 'Horizontal rule',   action: () => run(insertHR) },
+        { divider: true },
+        { label: 'Comment',           action: () => {}, shortcut: 'Ctrl+Alt+M' },
+    ];
+
+    // ── FORMAT ────────────────────────────────────────────────────────────────
+    const formatItems = [
         {
-            label: "Keyboard Shortcuts",
-            shortcut: "Ctrl+/",
-            action: () => showKeyboardShortcuts(),
+            label: 'Text',
+            submenu: [
+                { label: 'Bold',          action: () => run(toggleBold),          shortcut: 'Ctrl+B' },
+                { label: 'Italic',        action: () => run(toggleItalic),        shortcut: 'Ctrl+I' },
+                { label: 'Underline',     action: () => run(toggleUnderline),     shortcut: 'Ctrl+U' },
+                { label: 'Strikethrough', action: () => run(toggleStrikethrough) },
+                { divider: true },
+                { label: 'Superscript',   action: () => run(toggleSuperscript) },
+                { label: 'Subscript',     action: () => run(toggleSubscript)   },
+            ],
+        },
+        {
+            label: 'Lists',
+            submenu: [
+                { label: 'Bullet list',   action: () => run(toggleBulletList)  },
+                { label: 'Numbered list', action: () => run(toggleOrderedList) },
+                { label: 'Checklist',     action: () => run(toggleCheckList)   },
+            ],
+        },
+        {
+            label: 'Table',
+            submenu: [
+                { label: 'Insert row above',    action: () => run(addRowBefore)    },
+                { label: 'Insert row below',    action: () => run(addRowAfter)     },
+                { label: 'Delete row',          action: () => run(deleteRow)       },
+                { divider: true },
+                { label: 'Insert column before', action: () => run(addColumnBefore) },
+                { label: 'Insert column after',  action: () => run(addColumnAfter)  },
+                { label: 'Delete column',        action: () => run(deleteColumn)    },
+                { divider: true },
+                { label: 'Merge cells',         action: () => run(mergeCells) },
+                { label: 'Split cell',          action: () => run(splitCell)  },
+            ],
         },
         { divider: true },
-        {
-            label: "Help",
-            action: () => showAlert("Help", "Visit our documentation for help"),
-        },
+        { label: 'Blockquote',        action: () => run(toggleBlockquote) },
+        { divider: true },
+        { label: 'Clear formatting',  action: () => run(clearFormatting) },
     ];
 
-    // ─── ACTION HANDLERS ──────────────────────────────────────────────────────
+    // ── HELP ──────────────────────────────────────────────────────────────────
+    const helpItems = [
+        { label: 'Keyboard shortcuts', shortcut: 'Ctrl+/', action: showKeyboardShortcuts },
+        { divider: true },
+        { label: 'Help', action: () => showAlert('Help', 'Visit the documentation for help.') },
+    ];
 
-    function handleUndo() {
-        document.execCommand("undo");
-    }
-
-    function handleRedo() {
-        document.execCommand("redo");
-    }
+    // ── Actions ───────────────────────────────────────────────────────────────
 
     function toggleFullscreen() {
-        if (document.fullscreenElement) {
-            document.exitFullscreen();
-        } else {
-            document.documentElement.requestFullscreen();
-        }
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
     }
 
     function exportText() {
-        const content = getPlainTextContent();
-        downloadFile(
-            content,
-            `${docSession.metadata?.title || "document"}.txt`,
-            "text/plain",
-        );
+        const el = document.querySelector('.ProseMirror');
+        downloadFile(el?.textContent ?? '', title() + '.txt', 'text/plain');
     }
 
     function exportHTML() {
-        const content = getHTMLContent();
-        downloadFile(
-            content,
-            `${docSession.metadata?.title || "document"}.html`,
-            "text/html",
-        );
-    }
-
-    function getPlainTextContent() {
-        // Get text content from the document
-        const editorEl = document.querySelector(".ProseMirror");
-        return editorEl?.textContent || "";
-    }
-
-    function getHTMLContent() {
-        const editorEl = document.querySelector(".ProseMirror");
-        if (!editorEl) return "";
-        return `<!DOCTYPE html>
+        const el = document.querySelector('.ProseMirror');
+        if (!el) return;
+        const html = `<!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>${docSession.metadata?.title || "Document"}</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
-        h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; }
-        blockquote { border-left: 3px solid #ccc; padding-left: 1em; color: #555; }
-        pre { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; }
-        code { background: #f0f0f0; padding: 0.2em 0.4em; border-radius: 3px; }
-    </style>
+  <meta charset="utf-8">
+  <title>${title()}</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
+    h1,h2,h3,h4,h5,h6 { margin-top: 1.5em; }
+    blockquote { border-left: 3px solid #ccc; padding-left: 1em; color: #555; font-style: italic; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; }
+    code { background: #f0f0f0; padding: .2em .4em; border-radius: 3px; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { border: 1px solid #ccc; padding: 6px 12px; }
+    th { background: #f5f5f5; font-weight: 600; }
+  </style>
 </head>
-<body>
-${editorEl.innerHTML}
-</body>
+<body>${el.innerHTML}</body>
 </html>`;
+        downloadFile(html, title() + '.html', 'text/html');
     }
 
-    function downloadFile(content, filename, mimeType) {
-        const blob = new Blob([content], { type: mimeType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
+    function title() {
+        return docSession.metadata?.title || 'document';
+    }
+
+    function downloadFile(content, filename, mime) {
+        const a = Object.assign(document.createElement('a'), {
+            href: URL.createObjectURL(new Blob([content], { type: mime })),
+            download: filename,
+        });
         a.click();
-        URL.revokeObjectURL(url);
+        URL.revokeObjectURL(a.href);
     }
 
     function showKeyboardShortcuts() {
-        const shortcuts = `Keyboard Shortcuts:
+        showAlert('Keyboard Shortcuts',
+`Formatting
+  Ctrl+B       Bold
+  Ctrl+I       Italic
+  Ctrl+U       Underline
+  Ctrl+K       Insert link
 
-Editing:
-Ctrl+B - Bold
-Ctrl+I - Italic
-Ctrl+U - Underline
-Ctrl+Z - Undo
-Ctrl+Y - Redo
-Ctrl+Shift+Z - Redo
+Undo / Redo
+  Ctrl+Z       Undo
+  Ctrl+Y       Redo
+  Ctrl+Shift+Z Redo
 
-Navigation:
-Ctrl+Home - Go to start of document
-Ctrl+End - Go to end of document
+Document
+  Ctrl+F       Find
+  Ctrl+H       Find & Replace
+  Ctrl+P       Print
+  Ctrl+/       This help
 
-Other:
-Ctrl+P - Print
-Ctrl+/ - Show keyboard shortcuts`;
-
-        openModal(AlertModal, {
-            title: "Keyboard Shortcuts",
-            message: shortcuts,
-            type: "info",
-        });
+Tables
+  Tab          Next cell
+  Shift+Tab    Previous cell`
+        );
     }
 </script>
 
 <div class="menu-bar" class:menu-active={openMenuId !== null}>
-    <MenuDropdown
-        label="File"
-        items={fileItems}
-        menuId="file"
-        isOpen={openMenuId === "file"}
-        anyMenuOpen={openMenuId !== null}
-        onOpenChange={handleMenuOpenChange}
-    />
-    <MenuDropdown
-        label="Edit"
-        items={editItems}
-        menuId="edit"
-        isOpen={openMenuId === "edit"}
-        anyMenuOpen={openMenuId !== null}
-        onOpenChange={handleMenuOpenChange}
-    />
-    <MenuDropdown
-        label="View"
-        items={viewItems}
-        menuId="view"
-        isOpen={openMenuId === "view"}
-        anyMenuOpen={openMenuId !== null}
-        onOpenChange={handleMenuOpenChange}
-    />
-    <MenuDropdown
-        label="Help"
-        items={helpItems}
-        menuId="help"
-        isOpen={openMenuId === "help"}
-        anyMenuOpen={openMenuId !== null}
-        onOpenChange={handleMenuOpenChange}
-    />
+    <MenuDropdown label="File"   items={fileItems}   menuId="file"   isOpen={openMenuId === 'file'}   anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
+    <MenuDropdown label="Edit"   items={editItems}   menuId="edit"   isOpen={openMenuId === 'edit'}   anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
+    <MenuDropdown label="View"   items={viewItems}   menuId="view"   isOpen={openMenuId === 'view'}   anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
+    <MenuDropdown label="Insert" items={insertItems} menuId="insert" isOpen={openMenuId === 'insert'} anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
+    <MenuDropdown label="Format" items={formatItems} menuId="format" isOpen={openMenuId === 'format'} anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
+    <MenuDropdown label="Help"   items={helpItems}   menuId="help"   isOpen={openMenuId === 'help'}   anyMenuOpen={openMenuId !== null} onOpenChange={handleMenuOpenChange} />
 </div>
 
 <style>
@@ -268,7 +241,6 @@ Ctrl+/ - Show keyboard shortcuts`;
         flex-shrink: 0;
     }
 
-    /* Show hover hint on all menu buttons when any menu is open */
     .menu-active :global(.menu-button:hover:not(.disabled):not(.active)) {
         background: var(--color-fill-tertiary);
     }
