@@ -14,7 +14,6 @@
  *   tableYMap.get('rows')        → Y.Array<Y.Map>  (data rows, each colId→value)
  *   tableYMap.get('sortColId')   → string|null
  *   tableYMap.get('sortDir')     → 'asc'|'desc'
- *   tableYMap.get('accentColor') → string  (CSS hex, e.g. '#3b82f6')
  *
  * Filters are local session state only (not persisted in Yjs).
  *
@@ -82,18 +81,6 @@ import { TableFormulaEvaluator } from './tableFormulaEval.js';
  *                     sourceSheetId, sourceTableId, visibleColumns (Y.Array)
  */
 
-/** Accent color palette (cycles by table count) */
-export const TABLE_ACCENT_COLORS = [
-    '#3b82f6', // blue
-    '#10b981', // emerald
-    '#f59e0b', // amber
-    '#8b5cf6', // violet
-    '#ef4444', // red
-    '#06b6d4', // cyan
-    '#ec4899', // pink
-    '#84cc16', // lime
-];
-
 /** Maps column type → display icon glyph */
 export const COLUMN_TYPE_ICONS = {
     text: 'A',
@@ -128,7 +115,6 @@ export class TableStore {
     id = $state("");
     name = $state("Table");
     mode = $state("inline"); // 'inline' | 'viewport'
-    accentColor = $state("#3b82f6");
 
     // ── Inline position ──────────────────────────────────────────────────────
     startRow = $state(0); // row of header
@@ -327,7 +313,6 @@ export class TableStore {
         this.id = m.get("id") ?? "";
         this.name = m.get("name") ?? "Table";
         this.mode = m.get("mode") ?? "inline";
-        this.accentColor = (this.#sourceYMap ?? m).get("accentColor") ?? "#3b82f6";
         this.startRow = m.get("startRow") ?? 0;
         this.startCol = m.get("startCol") ?? 0;
         this.vpStartRow = m.get("vpStartRow") ?? 0;
@@ -456,8 +441,7 @@ export class TableStore {
             this.vpEndRow = m.get("vpEndRow") ?? this.vpEndRow;
             this.vpEndCol = m.get("vpEndCol") ?? this.vpEndCol;
             if (!src) {
-                // Only regular tables store sort/accentColor on their own map
-                this.accentColor = m.get("accentColor") ?? this.accentColor;
+                // Only regular tables store sort state on their own map.
                 const prevSort = this.sortColId + this.sortDir;
                 this.sortColId = m.get("sortColId") ?? null;
                 this.sortDir = m.get("sortDir") ?? "asc";
@@ -506,9 +490,8 @@ export class TableStore {
                 if (observedPf) observedPf.unobserve(pfObs);
             });
 
-            // View table: observe source for sort/accentColor/column/row changes
+            // View table: observe source for sort/column/row changes
             const srcTopObs = () => {
-                this.accentColor = src.get("accentColor") ?? this.accentColor;
                 const prevSort = this.sortColId + this.sortDir;
                 this.sortColId = src.get("sortColId") ?? null;
                 this.sortDir = src.get("sortDir") ?? "asc";
@@ -842,16 +825,6 @@ export class TableStore {
     rename(newName) {
         this.#ydoc.transact(() => {
             this.#tableYMap.set("name", newName);
-        });
-    }
-
-    /**
-     * Set the accent color of the table.
-     * @param {string} color  CSS hex string
-     */
-    setAccentColor(color) {
-        this.#ydoc.transact(() => {
-            this.#tableYMap.set("accentColor", color);
         });
     }
 

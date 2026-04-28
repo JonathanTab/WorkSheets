@@ -5,7 +5,7 @@
      * Layout: two-pane side panel.
      *   Left  (180px) — list of source tables, clickable to select.
      *   Right (380px) — detail pane for selected table:
-     *       • Table header: name, accent color, sort-on-insert, stats
+     *       • Table header: name, sort-on-insert, stats
      *       • Columns tab: add/rename/type/formula/reorder/delete columns
      *       • Views tab: list of views with column order + transparent filters
      */
@@ -76,12 +76,6 @@
         if (name) store.rename(name);
         renamingTableId = null;
     }
-
-    // ── Accent color ────────────────────────────────────────────────────────
-    const ACCENT_COLORS = [
-        '#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444',
-        '#06b6d4','#ec4899','#84cc16','#f97316','#6366f1',
-    ];
 
     // ── Columns tab ─────────────────────────────────────────────────────────
     /** colId currently open in the inline config expander */
@@ -359,7 +353,7 @@
                 <button
                     class="table-list-item"
                     class:selected={isSelected}
-                    style="--accent: {store.accentColor}"
+                    style="--accent: #3b82f6"
                     onclick={() => { selectedTableId = tableId; }}
                 >
                     <div class="tli-accent"></div>
@@ -383,7 +377,7 @@
                 {@const { tableId, sheetId, store } = selectedTable}
 
                 <!-- ── Detail header ─────────────────────────────────────────── -->
-                <div class="detail-header" style="--accent: {store.accentColor}">
+                <div class="detail-header" style="--accent: #3b82f6">
                     <div class="detail-accent-strip"></div>
                     <div class="detail-header-content">
                         <div class="detail-title-row">
@@ -416,20 +410,6 @@
                             <span class="dot">·</span>
                             <span>{sheetName(sheetId)}</span>
                         </div>
-                        <!-- Accent color picker -->
-                        <div class="accent-picker">
-                            {#each ACCENT_COLORS as color}
-                                <button
-                                    class="accent-dot"
-                                    class:selected={store.accentColor === color}
-                                    style="background: {color}"
-                                    onclick={() => store.setAccentColor(color)}
-                                    aria-label="Set accent color {color}"
-                                    title="Set accent color"
-                                ></button>
-                            {/each}
-                        </div>
-
                         <!-- Sort-on-insert row -->
                         <div class="insert-sort-row">
                             <span class="insert-sort-label">Sort on insert:</span>
@@ -1039,25 +1019,6 @@
         margin-bottom: 5px;
     }
     .dot { color: #cbd5e1; }
-
-    .accent-picker {
-        display: flex;
-        gap: 4px;
-        flex-wrap: wrap;
-        margin-bottom: 7px;
-    }
-
-    .accent-dot {
-        width: 14px;
-        height: 14px;
-        border-radius: 50%;
-        border: 2px solid transparent;
-        cursor: pointer;
-        padding: 0;
-        transition: transform 0.1s;
-    }
-    .accent-dot:hover { transform: scale(1.2); }
-    .accent-dot.selected { border-color: #1e293b; }
 
     /* Sort on insert row */
     .insert-sort-row {

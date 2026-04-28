@@ -31,7 +31,6 @@ tableYMap {
   id:              string
   name:            string           (human-readable, user-editable)
   isSourceOnly:    true             (marker: data-only, not grid-placed)
-  accentColor:     CSS hex          (e.g. "#3b82f6")
   sortColId:       string | null
   sortDir:         "asc" | "desc"
   insertSortColId: string | null
@@ -353,7 +352,7 @@ row = rowMetrics.indexAtOffset(contentY)
 Two-pane (560px total):
 - **Left (180px):** source table list, each showing name + row/view count. Click to select.
 - **Right (380px):** detail for selected table.
-  - **Header:** editable name (double-click), accent color picker (10 colors), stats, export CSV, delete table.
+  - **Header:** editable name (double-click), stats, export CSV, delete table.
   - **Columns tab:** draggable list, type badge (click to expand `TableColumnPanel` inline), formula badge, delete; "+ Add column".
   - **Views tab:** each view shows name (double-click to rename), sheet badge, column count, filter chip count, ⊹ move, → navigate, 🗑 delete.
     - **Expanded view:** visible column checkboxes, definition filter list (add/remove), position (`Move on grid…` → placement mode).

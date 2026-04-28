@@ -47,13 +47,12 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  * @property {any} [rawValue]          For checkbox (boolean), rating (number), image (string blobId)
  * @property {number} [ratingMax]      For rating cells
  * @property {any} [ctConfig]          Raw cell type config object (used by image type for fit mode)
- * @property {{colName?:string,sortIcon?:string,hasFilter?:boolean,filterActive?:boolean,typeIcon?:string,isFormula?:boolean,accentColor?:string,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
+ * @property {{colName?:string,sortIcon?:string,hasFilter?:boolean,filterActive?:boolean,typeIcon?:string,isFormula?:boolean,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
  * @property {string} [placeholderText] For entry cells or empty typed cells — shown in placeholder style
  * @property {boolean} [isNonEntryCol]  For table entry cells — formula columns
  * @property {{top?,right?,bottom?,left?}} [borders]
  * @property {string} [formulaHighlight] Formula edit mode reference highlight color
  * @property {boolean} [isFirstTableCol] True for the leftmost column in a table
- * @property {string} [tableAccentColor] Table's accent color
  * @property {boolean} [isFormulaCol]   True for computed/formula columns
  * @property {boolean} [zebraRow]       True for even data rows (zebra striping)
  * @property {boolean} [isRepeaterCopy] True for non-template repeater cells (visual dimming)

@@ -567,7 +567,7 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
             if (info.sortIcon) {
                 pdf.setFont('helvetica', 'bold');
                 pdf.setFontSize(px2pt(8, s));
-                const [r, g, b] = parseColor(info.accentColor, [59, 130, 246]);
+                const [r, g, b] = parseColor('#3b82f6', [59, 130, 246]);
                 pdf.setTextColor(r, g, b);
                 pdf.text(info.sortIcon, cx + cw - filterW / 2, textY, { align: 'center', baseline: 'middle' });
             }

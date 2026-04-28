@@ -19,7 +19,7 @@
  */
 
 import * as Y from "yjs";
-import { TableStore, TABLE_ACCENT_COLORS } from "./TableStore.svelte.js";
+import { TableStore } from "./TableStore.svelte.js";
 import { matchCondition } from "./tableFormulaEval.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 import { perfMon } from "../perf/PerfMonitor.js";
@@ -351,7 +351,7 @@ export class TableManager {
      * positioned on the grid. The view has `visibleColumns = []` which means "show
      * all source columns" — new columns added later automatically appear.
      *
-     * @param {{ name?: string, accentColor?: string, startRow: number, startCol: number,
+     * @param {{ name?: string, startRow: number, startCol: number,
      *           columns: Array<{id:string, name:string, type?:string, required?:boolean,
      *                           hAlign?:string, isNonEntry?:boolean, formula?:string}>,
      *           sheetId?: string }} opts
@@ -362,16 +362,12 @@ export class TableManager {
         const sourceId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const viewId   = `view-${Date.now() + 1}-${Math.random().toString(36).slice(2, 7)}`;
 
-        const accentColor = opts.accentColor ??
-            TABLE_ACCENT_COLORS[this.tableList.length % TABLE_ACCENT_COLORS.length];
-
         this.#ydoc.transact(() => {
             // ── Source table (data + schema, not rendered on grid) ────────────────
             const src = new Y.Map();
             src.set("id", sourceId);
             src.set("name", opts.name ?? "Table");
             src.set("isSourceOnly", true);
-            src.set("accentColor", accentColor);
             src.set("sortColId", null);
             src.set("sortDir", "asc");
             src.set("insertSortColId", null);
