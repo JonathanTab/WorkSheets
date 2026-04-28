@@ -10,8 +10,8 @@
  * 3. UI components get display values through getDisplayValue()
  */
 
-import { parseFormula, extractCellRefs, NodeType } from './parser.js';
-import { evaluate } from './evaluator.js';
+import { extractCellRefs } from './parser.js';
+import { evaluate, cachedParseFormula } from './evaluator.js';
 import { DependencyGraph, cellKey, parseCellKey } from './dependency-graph.js';
 import { FormulaError, isError } from './functions.js';
 
@@ -265,8 +265,8 @@ export class FormulaEngine {
         const key = cellKey(row, col);
 
         try {
-            // Parse the formula
-            const ast = parseFormula(formula);
+            // Parse the formula (result cached — same string always yields same AST)
+            const ast = cachedParseFormula(formula);
 
             if (!ast) {
                 // Not a formula, clear from graph

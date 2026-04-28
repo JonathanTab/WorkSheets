@@ -4,6 +4,8 @@
  * Multiple reactive effects may fire synchronously when data changes.
  * The scheduler coalesces them into a single RAF paint call to avoid redundant repaints.
  */
+import { perfMon } from '../perf/PerfMonitor.js';
+
 export class RenderScheduler {
     /** @type {Set<string>} Panes that need repainting: 'body','top','left','corner' */
     #dirty = new Set();
@@ -75,7 +77,13 @@ export class RenderScheduler {
             this.#rafId = null;
             const panes = new Set(this.#dirty);
             this.#dirty.clear();
-            this.#paintCallback(panes);
+            if (perfMon.enabled) {
+                const t = performance.now();
+                this.#paintCallback(panes);
+                perfMon.record('render.frame', performance.now() - t);
+            } else {
+                this.#paintCallback(panes);
+            }
         });
     }
 }

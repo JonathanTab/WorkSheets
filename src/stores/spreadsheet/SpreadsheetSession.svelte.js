@@ -102,6 +102,17 @@ export class SpreadsheetSession {
     /** @type {Promise | null} Lock for preventing concurrent loads */
     #loadPromise = null;
 
+    /**
+     * LRU cache of sheet engines keyed by sheetId.
+     * Avoids re-constructing SheetStore + feature engines on every sheet switch.
+     * Engines are kept alive (observers remain attached) so cached sheets stay fresh.
+     * @type {Map<string, {sheetStore: SheetStore, tableManager: any, renderContext: any, repeaterEngine: any, undoManager: any, formulaEngine: any, cleanupFormulaObserver: Function|null}>}
+     */
+    #sheetEngineCache = new Map();
+    /** Insertion-order list for LRU eviction (oldest first). @type {string[]} */
+    #sheetEngineCacheOrder = [];
+    static #MAX_CACHED_SHEETS = 3;
+
     // Reactive undo/redo state (updated by observer)
     #canUndo = $state(false);
     #canRedo = $state(false);
@@ -161,6 +172,7 @@ export class SpreadsheetSession {
         this.error = null;
 
         console.log('[SpreadsheetSession] Starting document load...');
+        performance.mark('ss:load:start');
 
         try {
             // Cleanup previous session
@@ -170,7 +182,10 @@ export class SpreadsheetSession {
 
             // Load the document using the new Storage facade
             console.log('[SpreadsheetSession] Calling storage.drive.loadDoc()...');
+            performance.mark('ss:yjsLoad:start');
             const ydoc = await storage.drive.loadDoc(docId);
+            performance.mark('ss:yjsLoad:end');
+            performance.measure('ss:yjsLoad', 'ss:yjsLoad:start', 'ss:yjsLoad:end');
             console.log('[SpreadsheetSession] storage.drive.loadDoc() returned');
 
             const root = ydoc.getMap('spreadsheet');
@@ -201,7 +216,10 @@ export class SpreadsheetSession {
             // Create SheetStore for active sheet
             const activeSheet = sheets?.get(firstSheetId);
             if (activeSheet) {
+                performance.mark('ss:sheetStore:start');
                 this.activeSheetStore = new SheetStore(activeSheet, ydoc);
+                performance.mark('ss:sheetStore:end');
+                performance.measure('ss:sheetStore', 'ss:sheetStore:start', 'ss:sheetStore:end');
 
                 // Initialize undo manager — track all mutable Y types for this sheet.
                 // Ensure rowMeta/colMeta/tables/repeaters exist (older docs may lack them).
@@ -225,7 +243,10 @@ export class SpreadsheetSession {
 
                 // Create document-wide table registry before TableManager so the
                 // manager can borrow stores instead of creating duplicates.
+                performance.mark('ss:tableRegistry:start');
                 this.tableRegistry = new DocumentTableRegistry(root, ydoc);
+                performance.mark('ss:tableRegistry:end');
+                performance.measure('ss:tableRegistry', 'ss:tableRegistry:start', 'ss:tableRegistry:end');
                 // When any table (any sheet) changes → recalculate TABLE_* formula cells.
                 this.tableRegistry.onTableChange = () => {
                     this.formulaEngine?.recalculateTableDependents();
@@ -233,10 +254,16 @@ export class SpreadsheetSession {
 
                 // Create TableManager before formula engine so TABLE_* functions are
                 // registered before formulas are evaluated on first load.
+                performance.mark('ss:tableManager:start');
                 this.tableManager = new TableManager(activeSheet, ydoc, this.tableRegistry);
+                performance.mark('ss:tableManager:end');
+                performance.measure('ss:tableManager', 'ss:tableManager:start', 'ss:tableManager:end');
 
                 // Initialize formula engine for the active sheet (registers tableManager functions first)
+                performance.mark('ss:formulaEngine:start');
                 this.#initializeFormulaEngine(activeSheet, this.tableManager);
+                performance.mark('ss:formulaEngine:end');
+                performance.measure('ss:formulaEngine', 'ss:formulaEngine:start', 'ss:formulaEngine:end');
 
                 // Create SheetRenderContext (after formula engine is ready)
                 this.renderContext = new SheetRenderContext(this.activeSheetStore, ydoc, this);
@@ -273,6 +300,8 @@ export class SpreadsheetSession {
             console.error('[SpreadsheetSession] Failed to load document:', err);
             this.error = err.message;
         } finally {
+            performance.mark('ss:load:end');
+            performance.measure('ss:load:total', 'ss:load:start', 'ss:load:end');
             console.log('[SpreadsheetSession] Setting isLoading=false');
             this.isLoading = false;
             console.log('[SpreadsheetSession] Document load complete');
@@ -341,6 +370,9 @@ export class SpreadsheetSession {
             this.activeSheetStore.destroy();
             this.activeSheetStore = null;
         }
+
+        // Destroy all cached sheet engines
+        this.#clearSheetEngineCache();
 
         // Cleanup observers
         if (this.#cleanupObserver) {
@@ -772,6 +804,94 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Save the current sheet's engines to the LRU cache without destroying them.
+     * Engines stay alive (Yjs observers remain attached) so cached sheets stay fresh.
+     * Nulls out all this.* references so subsequent destroy-guards are no-ops.
+     * @param {string} sheetId
+     */
+    #cacheCurrentSheet(sheetId) {
+        if (!this.activeSheetStore) return;
+
+        this.#sheetEngineCache.set(sheetId, {
+            sheetStore: this.activeSheetStore,
+            tableManager: this.tableManager,
+            renderContext: this.renderContext,
+            repeaterEngine: this.repeaterEngine,
+            undoManager: this.undoManager,
+            formulaEngine: this.formulaEngine,
+            // Keep the formula observer alive in the background so formula
+            // results stay current even while this sheet is not active.
+            cleanupFormulaObserver: this.#cleanupFormulaObserver,
+        });
+
+        // Track LRU order and evict oldest if over limit
+        this.#sheetEngineCacheOrder = this.#sheetEngineCacheOrder.filter(id => id !== sheetId);
+        this.#sheetEngineCacheOrder.push(sheetId);
+        while (this.#sheetEngineCacheOrder.length > SpreadsheetSession.#MAX_CACHED_SHEETS) {
+            const evictId = this.#sheetEngineCacheOrder.shift();
+            if (!evictId) break;
+            const evicted = this.#sheetEngineCache.get(evictId);
+            if (evicted) {
+                evicted.cleanupFormulaObserver?.();
+                evicted.sheetStore.destroy();
+                evicted.tableManager?.destroy();
+                evicted.renderContext?.destroy();
+                evicted.repeaterEngine?.destroy();
+                this.#sheetEngineCache.delete(evictId);
+            }
+        }
+
+        // Null all references so destroy checks in setActiveSheet are no-ops
+        this.activeSheetStore = null;
+        this.tableManager = null;
+        this.renderContext = null;
+        this.repeaterEngine = null;
+        this.undoManager = null;
+        this.formulaEngine = null;
+        this.#cleanupFormulaObserver = null;
+    }
+
+    /**
+     * Restore a sheet from the engine cache if available.
+     * @param {string} sheetId
+     * @returns {boolean} true if restored from cache
+     */
+    #restoreSheetFromCache(sheetId) {
+        const cached = this.#sheetEngineCache.get(sheetId);
+        if (!cached) return false;
+
+        this.#sheetEngineCache.delete(sheetId);
+        this.#sheetEngineCacheOrder = this.#sheetEngineCacheOrder.filter(id => id !== sheetId);
+
+        this.activeSheetStore = cached.sheetStore;
+        this.tableManager = cached.tableManager;
+        this.renderContext = cached.renderContext;
+        this.repeaterEngine = cached.repeaterEngine;
+        this.undoManager = cached.undoManager;
+        this.formulaEngine = cached.formulaEngine;
+        this.#cleanupFormulaObserver = cached.cleanupFormulaObserver;
+
+        // Re-attach undo observer so #canUndo/#canRedo stay reactive for this sheet
+        this.#setupUndoObserver();
+        return true;
+    }
+
+    /**
+     * Destroy all cached sheet engines (called on document unload).
+     */
+    #clearSheetEngineCache() {
+        for (const [, cached] of this.#sheetEngineCache) {
+            cached.cleanupFormulaObserver?.();
+            cached.sheetStore.destroy();
+            cached.tableManager?.destroy();
+            cached.renderContext?.destroy();
+            cached.repeaterEngine?.destroy();
+        }
+        this.#sheetEngineCache.clear();
+        this.#sheetEngineCacheOrder = [];
+    }
+
+    /**
      * Switch to a different sheet
      * @param {string} sheetId
      */
@@ -781,14 +901,21 @@ export class SpreadsheetSession {
         const sheets = this.root.get('sheets');
         if (!sheets?.has(sheetId)) return;
 
-        // Cleanup old undo observer
+        const _switchT = performance.now();
+
+        // Detach undo observer from UI reactive state (don't destroy the undo manager)
         if (this.#cleanupUndoObserver) {
             this.#cleanupUndoObserver();
             this.#cleanupUndoObserver = null;
         }
 
-        // Cleanup old SheetStore
-        if (this.activeSheetStore) {
+        // Save current sheet to LRU cache instead of destroying it.
+        // #cacheCurrentSheet nulls all this.* refs so destroy-guards below are no-ops.
+        const oldSheetId = this.activeSheetId;
+        if (oldSheetId && oldSheetId !== sheetId) {
+            this.#cacheCurrentSheet(oldSheetId);
+        } else if (this.activeSheetStore) {
+            // Same sheet re-activation (shouldn't normally happen) — just destroy
             this.activeSheetStore.destroy();
             this.activeSheetStore = null;
         }
@@ -800,7 +927,13 @@ export class SpreadsheetSession {
         // highlights from the previous sheet would linger otherwise.
         this.remoteSelections = this.getRemoteSelections();
 
-        // Update SheetStore and undo manager for new sheet
+        // ── Try cache first ───────────────────────────────────────────────────
+        if (this.#restoreSheetFromCache(sheetId)) {
+            console.log(`[SpreadsheetSession] Sheet switch (cache hit): ${(performance.now() - _switchT).toFixed(1)}ms`);
+            return;
+        }
+
+        // ── Cache miss: construct engines for new sheet ───────────────────────
         const sheet = sheets.get(sheetId);
         if (sheet && this.ydoc) {
             this.activeSheetStore = new SheetStore(sheet, this.ydoc);
@@ -825,17 +958,7 @@ export class SpreadsheetSession {
                 this.#setupUndoObserver();
             }
 
-            // Reinitialize formula engine for new sheet
-            if (this.#cleanupFormulaObserver) {
-                this.#cleanupFormulaObserver();
-                this.#cleanupFormulaObserver = null;
-            }
-
-            // Recreate feature engines for the new sheet
-            if (this.tableManager) { this.tableManager.destroy(); }
-            if (this.repeaterEngine) { this.repeaterEngine.destroy(); }
-            if (this.renderContext) { this.renderContext.destroy(); }
-
+            // #cleanupFormulaObserver and engines are already null (from #cacheCurrentSheet)
             // Create TableManager before formula engine so TABLE_* functions are
             // registered before formulas are evaluated on sheet switch.
             this.tableManager = new TableManager(sheet, this.ydoc, this.tableRegistry);
@@ -846,6 +969,7 @@ export class SpreadsheetSession {
             this.renderContext.tableManager = this.tableManager;
             this.renderContext.repeaterEngine = this.repeaterEngine;
         }
+        console.log(`[SpreadsheetSession] Sheet switch (cache miss): ${(performance.now() - _switchT).toFixed(1)}ms`);
     }
 
     // ========================================================================

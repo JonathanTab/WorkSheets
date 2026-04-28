@@ -52,6 +52,7 @@
     import { RenderScheduler } from "../../stores/spreadsheet/rendering/RenderScheduler.js";
     import { HitTestEngine } from "../../stores/spreadsheet/rendering/HitTestEngine.js";
     import { buildPaneData } from "../../stores/spreadsheet/rendering/CellPaintData.js";
+    import { perfMon } from "../../stores/spreadsheet/perf/PerfMonitor.js";
     import GridOverlays from "./grid/GridOverlays.svelte";
     import ColHeaders from "./grid/ColHeaders.svelte";
     import RowHeaders from "./grid/RowHeaders.svelte";
@@ -733,6 +734,16 @@
         }
     });
 
+    // ─── Timed buildPaneData wrapper ──────────────────────────────────────────
+    function buildPaneDataTimed(params) {
+        if (!perfMon.enabled) return buildPaneData(params);
+        const t = performance.now();
+        const result = buildPaneData(params);
+        perfMon.record('render.buildPaneData', performance.now() - t);
+        perfMon.record('render.buildPaneCells', result.length);
+        return result;
+    }
+
     // ─── Paint function (called by RenderScheduler on RAF) ────────────────────
     // dirtyPanes: Set of 'body'|'top'|'left'|'corner' to repaint.
     // When all four are present (default), the whole canvas is cleared first.
@@ -780,7 +791,7 @@
                 );
             if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
                 canvasRenderer.paintPane(
-                    buildPaneData({
+                    buildPaneDataTimed({
                         ...commonParams,
                         rowRange: bp.rowRange,
                         colRange: bp.colRange,
@@ -804,7 +815,7 @@
                 canvasRenderer.clearPane(frozenWidth, 0, bodyW, frozenHeight);
             if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
                 canvasRenderer.paintPane(
-                    buildPaneData({
+                    buildPaneDataTimed({
                         ...commonParams,
                         rowRange: tp.rowRange,
                         colRange: tp.colRange,
@@ -828,7 +839,7 @@
                 canvasRenderer.clearPane(0, frozenHeight, frozenWidth, bodyH);
             if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
                 canvasRenderer.paintPane(
-                    buildPaneData({
+                    buildPaneDataTimed({
                         ...commonParams,
                         rowRange: lp.rowRange,
                         colRange: lp.colRange,
@@ -852,7 +863,7 @@
                 canvasRenderer.clearPane(0, 0, frozenWidth, frozenHeight);
             if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
                 canvasRenderer.paintPane(
-                    buildPaneData({
+                    buildPaneDataTimed({
                         ...commonParams,
                         rowRange: cp.rowRange,
                         colRange: cp.colRange,
@@ -996,7 +1007,7 @@
                 }
                 if (stripRows) {
                     canvasRenderer.paintPane(
-                        buildPaneData({
+                        buildPaneDataTimed({
                             ...commonParams,
                             rowRange: stripRows,
                             colRange: bp.colRange,
@@ -1025,7 +1036,7 @@
                 }
                 if (stripCols) {
                     canvasRenderer.paintPane(
-                        buildPaneData({
+                        buildPaneDataTimed({
                             ...commonParams,
                             rowRange: bp.rowRange,
                             colRange: stripCols,
@@ -1065,7 +1076,7 @@
                 }
                 if (stripCols) {
                     canvasRenderer.paintPane(
-                        buildPaneData({
+                        buildPaneDataTimed({
                             ...commonParams,
                             rowRange: tp.rowRange,
                             colRange: stripCols,
@@ -1105,7 +1116,7 @@
                 }
                 if (stripRows) {
                     canvasRenderer.paintPane(
-                        buildPaneData({
+                        buildPaneDataTimed({
                             ...commonParams,
                             rowRange: stripRows,
                             colRange: lp.colRange,

@@ -14,6 +14,7 @@
 import * as Y from 'yjs';
 import { createCellYMap } from './schema.js';
 import { isRichText, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
+import { perfMon } from './perf/PerfMonitor.js';
 import {
     CELL_KEYS,
     CELL_TYPE_CONFIG_KEY,
@@ -298,6 +299,7 @@ export class SheetStore {
                 }
             });
             this.cellsVersion++;
+            perfMon.count('data.cellsVersionBump');
         };
 
         // 3. Observe cell content changes deeply (for property updates within cells)
@@ -316,7 +318,7 @@ export class SheetStore {
                     }
                 }
             }
-            if (changed) this.cellsVersion++;
+            if (changed) { this.cellsVersion++; perfMon.count('data.cellsVersionBump'); }
         };
 
         this.#cells.observe(cellObserver);

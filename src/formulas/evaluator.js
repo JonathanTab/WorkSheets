@@ -8,6 +8,23 @@
 import { NodeType, parseFormula } from './parser.js';
 import { getFunction, isError, FormulaError } from './functions.js';
 
+// Formula string → AST cache. Parsing is expensive; the AST is a pure function
+// of the formula string so caching is safe. Limited to 1 000 entries (LRU-style eviction).
+const _parseCache = new Map();
+const _PARSE_CACHE_MAX = 1000;
+
+export function cachedParseFormula(formula) {
+    let ast = _parseCache.get(formula);
+    if (ast !== undefined) return ast;
+    ast = parseFormula(formula) ?? null;
+    _parseCache.set(formula, ast);
+    if (_parseCache.size > _PARSE_CACHE_MAX) {
+        const firstKey = _parseCache.keys().next().value;
+        _parseCache.delete(firstKey);
+    }
+    return ast;
+}
+
 /**
  * Evaluate an AST node
  * @param {Object} ast - The AST node to evaluate
@@ -365,7 +382,7 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCr
  */
 export function evaluateFormula(formula, getCellValue, context = {}, customFunctions = null, getCrossSheetValue = null) {
     try {
-        const ast = parseFormula(formula);
+        const ast = cachedParseFormula(formula);
         if (!ast) return null;
         return evaluate(ast, getCellValue, context, customFunctions, getCrossSheetValue);
     } catch (err) {

@@ -105,12 +105,21 @@ function _defaultNegativeStyle(subFormat) {
     return (subFormat === 'accounting' || subFormat === 'financial') ? 'parens' : 'minus';
 }
 
+// Cached by "decimals|grouping" key — Intl.NumberFormat construction is expensive,
+// so we reuse instances across the ~22 possible option combinations.
+const _intlFmtCache = new Map();
 function _intlFmt(absNum, decimals, useGrouping) {
-    return new Intl.NumberFormat(undefined, {
-        minimumFractionDigits: decimals,
-        maximumFractionDigits: decimals,
-        useGrouping,
-    }).format(absNum);
+    const key = `${decimals}|${useGrouping ? '1' : '0'}`;
+    let fmt = _intlFmtCache.get(key);
+    if (!fmt) {
+        fmt = new Intl.NumberFormat(undefined, {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
+            useGrouping,
+        });
+        _intlFmtCache.set(key, fmt);
+    }
+    return fmt.format(absNum);
 }
 
 function _applyNeg(absFormatted, isNeg, negativeStyle) {

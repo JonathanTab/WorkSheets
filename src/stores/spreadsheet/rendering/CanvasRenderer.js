@@ -16,6 +16,7 @@
 
 import { drawCheckbox, drawRating } from '../cellTypes/painters.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
+import { perfMon } from '../perf/PerfMonitor.js';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 const DEFAULT_THEME = {
@@ -228,6 +229,8 @@ export class CanvasRenderer {
         const { clipX, clipY, clipW, clipH, showGridLines = true } = options;
         if (clipW <= 0 || clipH <= 0) return;
 
+        const _perfT = perfMon.enabled ? performance.now() : 0;
+
         const dpr = this.#dpr;
 
         // Reset font cache at the start of each pane so stale state from a prior
@@ -287,6 +290,11 @@ export class CanvasRenderer {
             }
         } finally {
             ctx.restore(); // removes the DPR scale — back to physical pixel space
+        }
+
+        if (perfMon.enabled) {
+            perfMon.record('render.paintPane', performance.now() - _perfT);
+            perfMon.record('render.cellsPerPane', cells.length);
         }
     }
 

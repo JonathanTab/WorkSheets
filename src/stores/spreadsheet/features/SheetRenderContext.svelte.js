@@ -22,6 +22,7 @@
 import * as Y from 'yjs';
 import { MergeEngine } from './MergeEngine.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
+import { perfMon } from '../perf/PerfMonitor.js';
 
 // ─── Text measurement cache ──────────────────────────────────────────────────
 
@@ -47,8 +48,10 @@ function measureTextWidth(text, cell = {}) {
 
     const cacheKey = `${text}|${font}`;
     if (textMeasurementCache.has(cacheKey)) {
+        perfMon.count('text.measureHit');
         return textMeasurementCache.get(cacheKey);
     }
+    perfMon.count('text.measureMiss');
 
     if (!measureCanvasCtx) {
         const canvas = document.createElement('canvas');

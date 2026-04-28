@@ -11,6 +11,9 @@
  *   date string    → formatted date if parseable
  *   otherwise      → plain string
  */
+// Cached once at module load — avoids constructing a new Intl.NumberFormat per cell per frame.
+const _numFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 10 });
+
 export const automaticType = {
     id: 'automatic',
     formatValue(rawValue, _config) {
@@ -24,10 +27,7 @@ export const automaticType = {
         // Number
         const num = Number(rawValue);
         if (!isNaN(num) && rawValue !== '' && typeof rawValue !== 'boolean') {
-            // Use locale-aware formatting with up to 10 decimal places (trims trailing zeros)
-            return new Intl.NumberFormat(undefined, {
-                maximumFractionDigits: 10,
-            }).format(num);
+            return _numFmt.format(num);
         }
 
         // String value

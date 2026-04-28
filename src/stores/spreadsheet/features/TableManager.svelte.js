@@ -22,6 +22,7 @@ import * as Y from "yjs";
 import { TableStore, TABLE_ACCENT_COLORS } from "./TableStore.svelte.js";
 import { matchCondition } from "./tableFormulaEval.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
+import { perfMon } from "../perf/PerfMonitor.js";
 
 /** Extra buffer rows below the last data row so the table feels "infinite" */
 const BUFFER_ROWS = 10;
@@ -178,6 +179,7 @@ export class TableManager {
     }
 
     #rebuildRowIndex() {
+        const _perfT = perfMon.enabled ? performance.now() : 0;
         this.#rowIndex.clear();
         for (const table of this.stores.values()) {
             // Source-only tables (isSourceOnly = true) hold data + schema but are not
@@ -214,6 +216,7 @@ export class TableManager {
             }
         }
         this.tableVersion++;
+        if (perfMon.enabled) perfMon.record('table.rebuildRowIndex', performance.now() - _perfT);
     }
 
     /**
