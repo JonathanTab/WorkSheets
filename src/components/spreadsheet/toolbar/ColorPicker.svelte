@@ -1,46 +1,45 @@
 <script>
     import { onMount, onDestroy, tick } from "svelte";
 
+    // 5 shade rows × 10 hue columns (dark → light, left = neutrals)
+    const PALETTE = [
+        ['#1c1917', '#7f1d1d', '#7c2d12', '#78350f', '#365314', '#14532d', '#134e4a', '#1e3a8a', '#4c1d95', '#831843'],
+        ['#44403c', '#b91c1c', '#c2410c', '#b45309', '#4d7c0f', '#166534', '#115e59', '#1e40af', '#6b21a8', '#9d174d'],
+        ['#78716c', '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#14b8a6', '#3b82f6', '#8b5cf6', '#ec4899'],
+        ['#a8a29e', '#fca5a5', '#fdba74', '#fcd34d', '#bef264', '#86efac', '#5eead4', '#93c5fd', '#c4b5fd', '#f9a8d4'],
+        ['#e7e5e4', '#fee2e2', '#ffedd5', '#fef3c7', '#f7fee7', '#dcfce7', '#ccfbf1', '#dbeafe', '#ede9fe', '#fce7f3'],
+    ];
+
+    const RECENT_KEY = 'color-picker-recent';
+    const MAX_RECENT = 10;
+
     let {
         label = "",
         value = "#000000",
         variant = "text", // "text" | "fill"
         onchange = undefined,
-        presetColors = [
-            "#000000",
-            "#434343",
-            "#666666",
-            "#999999",
-            "#b7b7b7",
-            "#cccccc",
-            "#d9d9d9",
-            "#efefef",
-            "#f3f3f3",
-            "#ffffff",
-            "#980000",
-            "#ff0000",
-            "#ff9900",
-            "#ffff00",
-            "#00ff00",
-            "#00ffff",
-            "#4a86e8",
-            "#0000ff",
-            "#9900ff",
-            "#ff00ff",
-        ],
     } = $props();
 
     let open = $state(false);
     let buttonRef = $state(null);
     let panelRef = $state(null);
-    let colorInputRef = $state(null);
     let panelStyle = $state("position:fixed; left:-9999px; top:-9999px;");
+    let recentColors = $state([]);
     let panelResizeObserver = null;
     let buttonResizeObserver = null;
 
-    function toggle() {
-        open = !open;
+    function loadRecents() {
+        try { recentColors = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]'); }
+        catch { recentColors = []; }
     }
+
+    function addToRecents(color) {
+        const next = [color, ...recentColors.filter(c => c.toLowerCase() !== color.toLowerCase())].slice(0, MAX_RECENT);
+        recentColors = next;
+        try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch {}
+    }
+
+    function toggle() { open = !open; }
 
     function close({ restoreFocus = false } = {}) {
         open = false;
@@ -49,21 +48,17 @@
 
     function updatePanelPosition() {
         if (!open || !buttonRef) return;
-        const margin = 8;
-        const gap = 6;
+        const margin = 8, gap = 6;
         const br = buttonRef.getBoundingClientRect();
         const pr = panelRef?.getBoundingClientRect();
-        const panelWidth = pr?.width ?? 210;
-        const panelHeight = pr?.height ?? 154;
+        const panelWidth = pr?.width ?? 232;
+        const panelHeight = pr?.height ?? 220;
 
         let left = br.left;
         let top = br.bottom + gap;
 
-        if (left + panelWidth > window.innerWidth - margin) {
-            left = br.right - panelWidth;
-        }
+        if (left + panelWidth > window.innerWidth - margin) left = br.right - panelWidth;
         if (left < margin) left = margin;
-
         if (top + panelHeight > window.innerHeight - margin) {
             const aboveTop = br.top - panelHeight - gap;
             top = aboveTop >= margin ? aboveTop : Math.max(margin, window.innerHeight - panelHeight - margin);
@@ -78,33 +73,26 @@
     }
 
     function handleColorInputChange(e) {
-        onchange?.(e.target.value);
+        const color = e.target.value;
+        addToRecents(color);
+        onchange?.(color);
     }
 
     function handleClickOutside(e) {
-        if (
-            panelRef &&
-            !panelRef.contains(e.target) &&
-            buttonRef &&
-            !buttonRef.contains(e.target)
-        ) {
+        if (panelRef && !panelRef.contains(e.target) && buttonRef && !buttonRef.contains(e.target)) {
             close();
         }
     }
 
     function handleKeydown(e) {
         if (!open) return;
-        if (e.key === "Escape") {
-            e.stopPropagation();
-            close({ restoreFocus: true });
-        }
+        if (e.key === "Escape") { e.stopPropagation(); close({ restoreFocus: true }); }
     }
 
     $effect(() => {
         if (!open) return;
         tick().then(() => {
             updatePanelPosition();
-            colorInputRef?.focus();
             if (!panelResizeObserver && panelRef) {
                 panelResizeObserver = new ResizeObserver(() => updatePanelPosition());
                 panelResizeObserver.observe(panelRef);
@@ -115,14 +103,13 @@
             }
         });
         return () => {
-            panelResizeObserver?.disconnect();
-            panelResizeObserver = null;
-            buttonResizeObserver?.disconnect();
-            buttonResizeObserver = null;
+            panelResizeObserver?.disconnect(); panelResizeObserver = null;
+            buttonResizeObserver?.disconnect(); buttonResizeObserver = null;
         };
     });
 
     onMount(() => {
+        loadRecents();
         document.addEventListener("click", handleClickOutside);
         document.addEventListener("keydown", handleKeydown);
         window.addEventListener("resize", updatePanelPosition);
@@ -150,14 +137,12 @@
     >
         <div class="icon-stack">
             {#if variant === "fill"}
-                <!-- Paint bucket icon: wider at top (standard bucket shape) -->
                 <svg viewBox="0 0 16 16" fill="none" class="picker-icon">
                     <path d="M2 5.5 L4 13 H12 L14 5.5 Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="currentColor" fill-opacity="0.13"/>
                     <line x1="2" y1="5.5" x2="14" y2="5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
                     <path d="M5.5 5.5 Q8 1.5 10.5 5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>
                 </svg>
             {:else}
-                <!-- Text color "A" icon -->
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">
                     <path d="M2.5 13.5 8 2 13.5 13.5"/>
                     <path d="M4.8 9.5h6.4"/>
@@ -172,21 +157,42 @@
 
     {#if open}
         <div bind:this={panelRef} class="color-panel" style={panelStyle}>
-            <div class="preset-grid">
-                {#each presetColors as color}
-                    <button
-                        class="preset-color"
-                        class:selected={color === value}
-                        style="background-color: {color}"
-                        onclick={() => handlePresetClick(color)}
-                    >
-                    </button>
+            <div class="palette-grid">
+                {#each PALETTE as row}
+                    {#each row as color}
+                        <button
+                            class="swatch"
+                            class:selected={color.toLowerCase() === value?.toLowerCase()}
+                            style="background-color: {color}"
+                            title={color}
+                            aria-label={color}
+                            onclick={() => handlePresetClick(color)}
+                        ></button>
+                    {/each}
                 {/each}
             </div>
-            <div class="custom-section">
-                <label class="custom-label">Custom:</label>
+
+            {#if recentColors.length > 0}
+                <div class="section-row">
+                    <span class="section-label">Recent</span>
+                </div>
+                <div class="recent-grid">
+                    {#each recentColors as color}
+                        <button
+                            class="swatch"
+                            class:selected={color.toLowerCase() === value?.toLowerCase()}
+                            style="background-color: {color}"
+                            title={color}
+                            aria-label={color}
+                            onclick={() => handlePresetClick(color)}
+                        ></button>
+                    {/each}
+                </div>
+            {/if}
+
+            <div class="custom-row">
+                <span class="section-label">Custom</span>
                 <input
-                    bind:this={colorInputRef}
                     type="color"
                     class="custom-input"
                     {value}
@@ -254,41 +260,74 @@
     }
 
     .color-panel {
-        padding: 8px;
+        padding: 10px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14), 0 2px 6px rgba(15, 23, 42, 0.07);
         z-index: 1000;
         max-width: calc(100vw - 16px);
     }
 
-    .preset-grid {
+    .palette-grid,
+    .recent-grid {
         display: grid;
-        grid-template-columns: repeat(10, 1fr);
-        gap: 2px;
+        grid-template-columns: repeat(10, 18px);
+        gap: 3px;
     }
 
-    .preset-color {
-        width: 16px;
-        height: 16px;
+    .swatch {
+        width: 18px;
+        height: 18px;
         padding: 0;
-        border: 1px solid var(--color-border);
-        border-radius: 2px;
+        border: none;
+        border-radius: 3px;
         cursor: pointer;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+        transition: transform 0.1s ease, box-shadow 0.1s ease;
+        position: relative;
     }
 
-    .preset-color:hover {
-        outline: 2px solid var(--color-primary);
-        outline-offset: 1px;
+    .swatch:hover {
+        transform: scale(1.25);
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.22);
+        z-index: 1;
     }
 
-    .preset-color.selected {
-        outline: 2px solid var(--color-primary);
-        outline-offset: 1px;
+    .swatch.selected::after {
+        content: '';
+        position: absolute;
+        inset: -3px;
+        border-radius: 5px;
+        outline: 2px solid var(--color-primary, #3b82f6);
+        pointer-events: none;
     }
 
-    .custom-section {
+    .section-row {
+        display: flex;
+        align-items: center;
+        margin: 8px 0 5px;
+        gap: 6px;
+    }
+
+    .section-row::before,
+    .section-row::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--color-border);
+    }
+
+    .section-label {
+        font-size: 0.625rem;
+        font-weight: 500;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+        white-space: nowrap;
+    }
+
+    .custom-row {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -297,17 +336,24 @@
         border-top: 1px solid var(--color-border);
     }
 
-    .custom-label {
-        font-size: 0.6875rem;
-        color: var(--color-text-muted);
-    }
-
     .custom-input {
-        width: 28px;
-        height: 22px;
-        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+        width: 26px;
+        height: 20px;
+        padding: 2px;
+        background: transparent;
         border: 1px solid var(--color-border);
         border-radius: 4px;
         cursor: pointer;
+    }
+
+    .custom-input::-webkit-color-swatch-wrapper {
+        padding: 0;
+    }
+
+    .custom-input::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
     }
 </style>
