@@ -1,7 +1,7 @@
 /**
- * Central Storage Instance for WorkSheets App
+ * Central Storage Instance for Scriptorium App
  *
- * Singleton FileRegistry instance configured for the worksheets app.
+ * Singleton FileRegistry instance configured for the scriptorium app.
  * Uses createSvelteRegistry so drive/app stores are reactive Svelte stores.
  *
  * After calling `await storage.init()`:
@@ -17,7 +17,7 @@ import { writable, get } from 'svelte/store';
 import { createSvelteRegistry } from '../lib/FileRegistry/svelte/index.js';
 import { authStore } from './authStore.js';
 
-const APP_NAME = 'worksheets';
+const APP_NAME = 'scriptorium';
 const BASE_URL = 'https://instrumenta.cf/api/storage.php';
 const WS_URL = 'wss://instrumenta.cf/congruum/';
 const BLOB_URL = 'https://instrumenta.cf/api/blob-storage.php';

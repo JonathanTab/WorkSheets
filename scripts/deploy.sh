@@ -10,7 +10,7 @@
 # Configure these:
 SERVER_USER="${DEPLOY_USER:-jon}"
 SERVER_HOST="${DEPLOY_HOST:-instrumenta.cf}"
-SERVER_REPO_PATH="${DEPLOY_REPO_PATH:-/var/www/plainTab}"
+SERVER_REPO_PATH="${DEPLOY_REPO_PATH:-/var/www/scriptorium}"
 WEBROOT="${DEPLOY_WEBROOT:-/var/www/html}"
 
 set -euo pipefail

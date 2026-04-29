@@ -28,7 +28,7 @@ Two file types:
 import { FileRegistry } from '$lib/FileRegistry';
 
 const registry = new FileRegistry({
-  appName:     'plainTab',
+  appName:     'scriptorium',
   baseUrl:     '/api/storage.php',
   blobUrl:     '/api/blob-storage.php',
   wsUrl:       'wss://yjs.example.com',

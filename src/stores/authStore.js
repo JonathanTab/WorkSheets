@@ -1,8 +1,8 @@
 import { writable } from 'svelte/store';
 
 const AUTH_URL = 'https://instrumenta.cf/api/auth.php';
-const USER_CACHE = 'worksheets:user'; // only stores {username} — not a secret
-const DEV_API_KEY = 'worksheets:dev_api_key'; // dev-only API key for testing
+const USER_CACHE = 'scriptorium:user'; // only stores {username} — not a secret
+const DEV_API_KEY = 'scriptorium:dev_api_key'; // dev-only API key for testing
 
 /**
  * Session-only auth store for same-origin PWAs.

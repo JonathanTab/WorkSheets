@@ -1,4 +1,4 @@
-# Worksheets
+# Scriptorium
 
 A project using vite + vitePWA + svelte + yJS.
 A spreadsheet app with streamlined, offline tolerant usage.

@@ -50,7 +50,7 @@ export const APP_TYPES = {
         icon: 'spreadsheet',
         defaultTitle: 'Untitled Spreadsheet',
         mimeTypes: [
-            'application/vnd.plaintab.spreadsheet',
+            'application/vnd.scriptorium.spreadsheet',
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'application/vnd.ms-excel',
             'text/csv',
@@ -65,7 +65,7 @@ export const APP_TYPES = {
         icon: 'fileText',
         defaultTitle: 'Untitled Document',
         mimeTypes: [
-            'application/vnd.plaintab.document',
+            'application/vnd.scriptorium.document',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'application/msword',
             'text/plain',
@@ -154,7 +154,7 @@ export function getAppFromMimeType(mimeType) {
  */
 export function getFileRoute(appId, fileId) {
     const app = getAppType(appId);
-    return `/worksheets${app.routePrefix}${fileId}`;
+    return `/scriptorium${app.routePrefix}${fileId}`;
 }
 
 /**
@@ -179,8 +179,8 @@ export function getSupportedAppTypes() {
  */
 export const MIME_TYPES = {
     // Internal mime types for Yjs documents
-    SHEETS_YJS: 'application/vnd.plaintab.spreadsheet',
-    DOCS_YJS: 'application/vnd.plaintab.document',
+    SHEETS_YJS: 'application/vnd.scriptorium.spreadsheet',
+    DOCS_YJS: 'application/vnd.scriptorium.document',
 
     // Common external formats
     XLSX: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

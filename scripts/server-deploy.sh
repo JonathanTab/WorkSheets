@@ -5,8 +5,8 @@
 # --full  also runs pnpm install (use when package.json changed)
 #
 # One-time server setup:
-#   git clone <repo-url> /path/to/plainTab
-#   cd /path/to/plainTab
+#   git clone <repo-url> /path/to/scriptorium
+#   cd /path/to/scriptorium
 #   pnpm install
 #   cp spreadsheet-api/.env.example spreadsheet-api/.env && nano spreadsheet-api/.env
 #   cp yjs-server/.env.example yjs-server/.env && nano yjs-server/.env  # if applicable

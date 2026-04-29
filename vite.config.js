@@ -42,8 +42,8 @@ export default defineConfig({
         injectRegister: 'inline',
 
         manifest: {
-            name: 'Worksheets',
-            short_name: 'worksheets',
+            name: 'Scriptorium',
+            short_name: 'scriptorium',
             description: 'A simple spreadsheet app',
             theme_color: '#000C3F',
             background_color: '#000C3F',
@@ -142,9 +142,9 @@ export default defineConfig({
                     }
                 }
             ],
-            // SPA fallback: serve index.html for all /worksheets/* navigations
-            // so /worksheets/sheets/<id> and /worksheets/docs/<id> reload correctly.
-            navigateFallback: '/worksheets/index.html',
+            // SPA fallback: serve index.html for all /scriptorium/* navigations
+            // so /scriptorium/sheets/<id> and /scriptorium/docs/<id> reload correctly.
+            navigateFallback: '/scriptorium/index.html',
             navigateFallbackDenylist: [/^\/api\//, /^\/congruum\//, /\.(?:js|css|png|svg|ico|json|woff2?)$/],
         },
 

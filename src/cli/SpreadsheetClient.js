@@ -1,5 +1,5 @@
 /**
- * SpreadsheetClient - Programmatic API for reading and writing plainTab sheets.
+ * SpreadsheetClient - Programmatic API for reading and writing Scriptorium sheets.
  *
  * Combines StorageAPI (file listing/lookup) with NodeYjsRuntime (Yjs sync)
  * into a single ergonomic class suitable for scripts and automation.
@@ -7,7 +7,7 @@
  * Usage:
  *   import { SpreadsheetClient } from './src/cli/SpreadsheetClient.js';
  *
- *   const client = new SpreadsheetClient({ apiKey: process.env.PLAINTAB_API_KEY });
+ *   const client = new SpreadsheetClient({ apiKey: process.env.SCRIPTORIUM_API_KEY });
  *   await client.init();
  *
  *   const files  = client.listFiles();
@@ -87,13 +87,13 @@ export class SpreadsheetClient {
     // ─── File list ──────────────────────────────────────────────────────────
 
     /**
-     * All worksheet files (scope=app, app=worksheets).
+     * All app files (scope=app, app=scriptorium).
      * Requires init() to have been called first.
      * @returns {object[]}
      */
     listFiles() {
         return [...this._files.values()].filter(
-            f => !f.deleted && f.type === 'yjs' && f.scope === 'app' && f.app === 'worksheets'
+            f => !f.deleted && f.type === 'yjs' && f.scope === 'app' && f.app === 'scriptorium'
         );
     }
 
@@ -198,7 +198,7 @@ export class SpreadsheetClient {
             filename: opts.filename ?? opts.title ?? null,
             parentId: opts.parentId ?? null,
             scope:    opts.scope    ?? 'app',
-            app:      opts.app      ?? 'worksheets',
+            app:      opts.app      ?? 'scriptorium',
         });
         const blob = data instanceof Blob ? data : new Blob([data], { type: opts.mimeType ?? 'application/octet-stream' });
         await this._api.uploadBlob(file.id, blob);

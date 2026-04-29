@@ -115,7 +115,7 @@
         pageBreakPrintSettings = e.detail.settings ?? null;
     }
 
-    const APP_NAME = "WorkSheets";
+    const APP_NAME = "Scriptorium";
 
     $effect(() => {
         const meta = /** @type {any} */ (spreadsheetSession.metadata);

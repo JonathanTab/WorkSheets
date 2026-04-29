@@ -175,6 +175,50 @@
         return { rowLines, colLines, printEndX, printEndY };
     });
 
+    // ─── Zoom state (mobile pinch-to-zoom) ───────────────────────────────────
+    let zoomLevel = $state(1.0);
+    const ZOOM_MIN = 0.4;
+    const ZOOM_MAX = 3.0;
+    let isPinching = false;
+    let pinchStartDist = 0;
+    let pinchStartZoom = 1.0;
+    let pinchCenterScreenX = 0;
+    let pinchCenterScreenY = 0;
+
+    function getPinchDist(t1, t2) {
+        const dx = t1.clientX - t2.clientX;
+        const dy = t1.clientY - t2.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function applyZoom(newZoom, screenX, screenY) {
+        const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
+        if (!containerEl || !scrollEl || !virtualizer) {
+            zoomLevel = clamped;
+            return;
+        }
+        const rect = containerEl.getBoundingClientRect();
+        // Compute content point at pinch center in virtualizer scroll coordinates
+        const localX = (screenX - rect.left) / zoomLevel;
+        const localY = (screenY - rect.top) / zoomLevel;
+        const contentX = localX - HEADER_WIDTH + virtualizer.scrollLeft;
+        const contentY = localY - HEADER_HEIGHT + virtualizer.scrollTop;
+
+        // After new zoom, compute required scroll to keep content point fixed at pinch center
+        const localX_new = (screenX - rect.left) / clamped;
+        const localY_new = (screenY - rect.top) / clamped;
+        const newScrollLeft = contentX - (localX_new - HEADER_WIDTH);
+        const newScrollTop = contentY - (localY_new - HEADER_HEIGHT);
+
+        zoomLevel = clamped;
+        requestAnimationFrame(() => {
+            if (scrollEl) {
+                scrollEl.scrollLeft = Math.max(0, newScrollLeft);
+                scrollEl.scrollTop = Math.max(0, newScrollTop);
+            }
+        });
+    }
+
     // ─── Interaction state ────────────────────────────────────────────────────
     let isSelectingRange = $state(false);
     let rangeStartCell = $state(null);
@@ -1238,7 +1282,7 @@
     function getLocalCoords(e) {
         const rect = containerEl?.getBoundingClientRect();
         if (!rect) return { localX: 0, localY: 0 };
-        return { localX: e.clientX - rect.left, localY: e.clientY - rect.top };
+        return { localX: (e.clientX - rect.left) / zoomLevel, localY: (e.clientY - rect.top) / zoomLevel };
     }
 
     function cellContainerLeft(col) {
@@ -1817,8 +1861,8 @@
         const rect = containerEl?.getBoundingClientRect();
         if (!rect) return { localX: 0, localY: 0 };
         return {
-            localX: touch.clientX - rect.left,
-            localY: touch.clientY - rect.top,
+            localX: (touch.clientX - rect.left) / zoomLevel,
+            localY: (touch.clientY - rect.top) / zoomLevel,
         };
     }
 
@@ -3363,7 +3407,7 @@
         function onMove(e) {
             if (!freezeDrag || !virtualizer || !containerEl) return;
             const rect = containerEl.getBoundingClientRect();
-            const contentX = e.clientX - rect.left - HEADER_WIDTH;
+            const contentX = (e.clientX - rect.left) / zoomLevel - HEADER_WIDTH;
             const newCount = snapToColFreezeCount(contentX);
             if (freezeDrag.currentCount !== newCount) {
                 freezeDrag = { ...freezeDrag, currentCount: newCount };
@@ -3377,7 +3421,7 @@
             if (!sheetStore) return;
             const rect = containerEl?.getBoundingClientRect();
             if (rect) {
-                const contentX = e.clientX - rect.left - HEADER_WIDTH;
+                const contentX = (e.clientX - rect.left) / zoomLevel - HEADER_WIDTH;
                 const newCount = snapToColFreezeCount(contentX);
                 sheetStore.setFrozenColumns(newCount);
             }
@@ -3399,7 +3443,7 @@
         function onMove(e) {
             if (!freezeDrag || !virtualizer || !containerEl) return;
             const rect = containerEl.getBoundingClientRect();
-            const contentY = e.clientY - rect.top - HEADER_HEIGHT;
+            const contentY = (e.clientY - rect.top) / zoomLevel - HEADER_HEIGHT;
             const newCount = snapToRowFreezeCount(contentY);
             if (freezeDrag.currentCount !== newCount) {
                 freezeDrag = { ...freezeDrag, currentCount: newCount };
@@ -3412,7 +3456,7 @@
             if (!sheetStore) return;
             const rect = containerEl?.getBoundingClientRect();
             if (rect) {
-                const contentY = e.clientY - rect.top - HEADER_HEIGHT;
+                const contentY = (e.clientY - rect.top) / zoomLevel - HEADER_HEIGHT;
                 const newCount = snapToRowFreezeCount(contentY);
                 sheetStore.setFrozenRows(newCount);
             }
@@ -5106,6 +5150,51 @@
         }
     });
 
+    // ─── Pinch-to-zoom (mobile only) ─────────────────────────────────────────
+    // Registered non-passive on containerEl so we can preventDefault on touchmove
+    // during a 2-finger pinch, preventing native 2-finger pan from fighting us.
+    $effect(() => {
+        if (!containerEl || !mobileState.isMobile) return;
+
+        function onTouchStart(e) {
+            if (e.touches.length !== 2) return;
+            clearTimeout(longPressTimer);
+            isPinching = true;
+            pinchStartDist = getPinchDist(e.touches[0], e.touches[1]);
+            pinchStartZoom = zoomLevel;
+            pinchCenterScreenX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+            pinchCenterScreenY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+            if (scrollEl) scrollEl.style.touchAction = 'none';
+        }
+
+        function onTouchMove(e) {
+            if (!isPinching || e.touches.length !== 2) return;
+            e.preventDefault();
+            const dist = getPinchDist(e.touches[0], e.touches[1]);
+            pinchCenterScreenX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+            pinchCenterScreenY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+            applyZoom(pinchStartZoom * (dist / pinchStartDist), pinchCenterScreenX, pinchCenterScreenY);
+        }
+
+        function onTouchEnd(_e) {
+            if (!isPinching) return;
+            isPinching = false;
+            if (scrollEl) scrollEl.style.touchAction = '';
+        }
+
+        containerEl.addEventListener('touchstart', onTouchStart, { passive: true });
+        containerEl.addEventListener('touchmove', onTouchMove, { passive: false });
+        containerEl.addEventListener('touchend', onTouchEnd, { passive: true });
+        containerEl.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+        return () => {
+            containerEl.removeEventListener('touchstart', onTouchStart);
+            containerEl.removeEventListener('touchmove', onTouchMove);
+            containerEl.removeEventListener('touchend', onTouchEnd);
+            containerEl.removeEventListener('touchcancel', onTouchEnd);
+        };
+    });
+
     // ─── Passive touch event listeners (registered via effect, not template) ────
     // Using passive: true tells the browser it can start scrolling immediately
     // without waiting for these handlers. touch-action: pan-x pan-y already
@@ -5163,7 +5252,7 @@
 
 <svelte:window onkeydown={handleKeydown} oncopy={handleCopy} oncut={handleCut} onpaste={handlePaste} />
 
-<div class="grid-root" bind:this={containerEl}>
+<div class="grid-root" bind:this={containerEl} style={zoomLevel !== 1 ? `transform:scale(${zoomLevel});transform-origin:0 0;` : ''}>
     {#if renderPlan && virtualizer}
         <!-- ── 1a. Data canvas (cell backgrounds, text, borders, gridlines) ── -->
         <!-- width/height="0" prevents the browser default 300×150 from showing -->

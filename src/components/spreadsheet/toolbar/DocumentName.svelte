@@ -19,9 +19,9 @@
 
     $effect(() => {
         if (documentTitle) {
-            document.title = documentTitle + " - Worksheets";
+            document.title = documentTitle + " - Scriptorium";
         } else {
-            document.title = "Worksheets";
+            document.title = "Scriptorium";
         }
     });
 

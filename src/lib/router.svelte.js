@@ -1,12 +1,12 @@
 import { APP_SHEETS, APP_DOCS, APP_SVG, DEFAULT_APP } from './appTypes.js';
 
 /**
- * Client-side router for the /worksheets/ SPA.
+ * Client-side router for the /scriptorium/ SPA.
  *
  * Routes:
- *   /worksheets/              → { view: 'browser' }
- *   /worksheets/sheets/<id>   → { view: 'sheet', docId: '<id>' }
- *   /worksheets/docs/<id>     → { view: 'doc', docId: '<id>' }
+ *   /scriptorium/              → { view: 'browser' }
+ *   /scriptorium/sheets/<id>   → { view: 'sheet', docId: '<id>' }
+ *   /scriptorium/docs/<id>     → { view: 'doc', docId: '<id>' }
  */
 
 const BASE = '/scriptorium';
@@ -46,7 +46,7 @@ let _route = $state(parsePath(window.location.pathname));
 export const router = {
     get route() { return _route; },
 
-    /** Navigate to a path relative to /worksheets (e.g. '/sheets/abc123') */
+    /** Navigate to a path relative to /scriptorium (e.g. '/sheets/abc123') */
     navigate(subpath, { replace = false } = {}) {
         const fullPath = BASE + subpath;
         if (replace) {

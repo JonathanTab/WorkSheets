@@ -4,7 +4,23 @@
       "Bash(grep -E \"\\\\.\\(svelte|tsx|ts|jsx|js\\)$\")",
       "Bash(npm install *)",
       "Bash(xargs grep *)",
-      "Bash(npx svelte-check *)"
+      "Bash(npx svelte-check *)",
+      "Read(//c/Users/Jon/code/instrumenta/instrumenta/**)",
+      "Bash(python deploy.py -d)",
+      "Bash(python \"../instrumenta/deploy.py\" -d)",
+      "PowerShell(wsl rsync -n isidore@instrumenta.cf:/var/www/instrumenta/favicon.ico /tmp/test_rsync_out 2>&1)",
+      "Bash(python deploy.py pull -d)",
+      "Bash(python ../instrumenta/deploy.py -d)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(pnpm build *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm --version)",
+      "Bash(pnpm config *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Jon\\code\\instrumenta\\instrumenta"
     ]
   }
 }

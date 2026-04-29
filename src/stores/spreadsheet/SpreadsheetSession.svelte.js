@@ -1812,7 +1812,7 @@ export function getStorage() {
  * Get all documents (Yjs files belonging to this app)
  */
 export function getAllDocuments() {
-    // Filter to only Yjs files belonging to the worksheets app
+    // Filter to only Yjs files belonging to the scriptorium app
     return storage.drive.listFiles().filter(f => f.type === 'yjs');
 }
 

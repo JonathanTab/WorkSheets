@@ -1,12 +1,12 @@
 /**
- * spreadsheet-api - General-purpose HTTP API for plainTab spreadsheets.
+ * spreadsheet-api - General-purpose HTTP API for Scriptorium spreadsheets.
  *
  * Wraps SpreadsheetClient (Yjs + WebSocket) as a persistent REST service.
  * Any app can call this API with a Bearer token to read/write spreadsheet
  * tables, cells, and blob files without needing to run Yjs directly.
  *
  * Auth: the caller's  Authorization: Bearer <token>  is forwarded directly
- * to plainTab. The server has no API key of its own — any valid plainTab
+ * to Scriptorium. The server has no API key of its own — any valid Scriptorium
  * API key works. SpreadsheetClient instances are cached per token so each
  * unique caller keeps a persistent WebSocket connection.
  *
@@ -205,7 +205,7 @@ async function route(req, res) {
     try {
         client = await getClient(apiKey);
     } catch (err) {
-        return json(res, 401, { error: `plainTab auth failed: ${err.message}` });
+        return json(res, 401, { error: `Scriptorium auth failed: ${err.message}` });
     }
 
     const url    = new URL(req.url, 'http://localhost');

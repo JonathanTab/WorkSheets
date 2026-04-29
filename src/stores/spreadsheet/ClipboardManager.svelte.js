@@ -21,7 +21,7 @@
  *     keydown sets _pendingPasteMode and does NOT preventDefault. The browser fires a
  *     native `paste` event → handleNativePasteEvent() reads e.clipboardData with full
  *     MIME type access (including custom types). Priority order:
- *       PLAINTAB_MIME → PLAINTAB_MIME_WEB → fingerprint-matched in-memory →
+ *       SCRIPTORIUM_MIME → SCRIPTORIUM_MIME_WEB → fingerprint-matched in-memory →
  *       Google compact JSON → HTML table → TSV
  *   Context menu Paste:
  *     paste() validates in-memory clipboard against the system clipboard fingerprint
@@ -31,26 +31,26 @@
  * In-app fidelity:
  *   A UUID fingerprint is generated on every copy/cut and stored in the in-memory
  *   clipboard. It is also embedded in the HTML clipboard data as
- *   <meta name="x-plaintab-id" content="UUID">. On paste, matching fingerprints
+ *   <meta name="x-scriptorium-id" content="UUID">. On paste, matching fingerprints
  *   allow context menu paste to use the full-fidelity in-memory data.
  */
 
 // ─── MIME types ──────────────────────────────────────────────────────────────
 
 /** App-specific MIME — readable via native copy/paste events (Firefox, Safari) */
-const PLAINTAB_MIME = 'application/x-plaintab-clipboard+json';
+const SCRIPTORIUM_MIME = 'application/x-scriptorium-clipboard+json';
 
 /**
  * 'web ' prefixed variant — required for ClipboardItem custom types in Chrome 104+.
  * When read back via navigator.clipboard.read(), the 'web ' prefix is stripped.
  */
-const PLAINTAB_MIME_WEB = 'web application/x-plaintab-clipboard+json';
+const SCRIPTORIUM_MIME_WEB = 'web application/x-scriptorium-clipboard+json';
 
 /** Google Sheets internal compact format — available in native paste events */
 const GOOGLE_COMPACT_MIME = 'application/x-vnd.google-spreadsheet-compact-table+json';
 
 /** Meta tag name used to embed the session fingerprint inside the HTML clipboard */
-const FINGERPRINT_META = 'x-plaintab-id';
+const FINGERPRINT_META = 'x-scriptorium-id';
 
 // ─── Selection state injection (avoids circular dependency) ──────────────────
 
@@ -182,7 +182,7 @@ class ClipboardManager {
         // Custom MIME type — works in Firefox and Safari via the native event.
         // Chrome ignores non-standard types here; it needs the 'web ' prefix via
         // ClipboardItem (handled in #writeAsyncClipboard).
-        try { e.clipboardData.setData(PLAINTAB_MIME, json); } catch (_) { /* browser may reject */ }
+        try { e.clipboardData.setData(SCRIPTORIUM_MIME, json); } catch (_) { /* browser may reject */ }
     }
 
     // ─── Async Clipboard Write (fallback / context menu) ─────────────────────
@@ -207,7 +207,7 @@ class ClipboardManager {
         // Constructing the Blob with the un-prefixed type is intentional — the browser
         // maps the 'web ' key to the actual blob content.
         try {
-            itemTypes[PLAINTAB_MIME_WEB] = new Blob([json], { type: PLAINTAB_MIME_WEB });
+            itemTypes[SCRIPTORIUM_MIME_WEB] = new Blob([json], { type: SCRIPTORIUM_MIME_WEB });
         } catch (_) { /* unsupported */ }
 
         try {
@@ -225,7 +225,7 @@ class ClipboardManager {
         if (rangeDataList && rangeDataList.length > 1) {
             return JSON.stringify({
                 version: 4,
-                source: 'plainTab',
+                source: 'scriptorium',
                 fingerprint,
                 multiRange: true,
                 ranges: rangeDataList.map(({ range: r, data: d }) => ({
@@ -251,7 +251,7 @@ class ClipboardManager {
         }
         return JSON.stringify({
             version: 3,
-            source: 'plainTab',
+            source: 'scriptorium',
             fingerprint,
             range: {
                 startRow: range.startRow, endRow: range.endRow,
@@ -271,7 +271,7 @@ class ClipboardManager {
     #parseInternalJSON(jsonStr) {
         try {
             const json = JSON.parse(jsonStr);
-            if (json.source !== 'plainTab' || !Array.isArray(json.cells)) return null;
+            if (json.source !== 'scriptorium' || !Array.isArray(json.cells)) return null;
             const base = {
                 cells:              json.cells,
                 borders:            json.borders            || [],
@@ -1062,8 +1062,8 @@ class ClipboardManager {
      * compact JSON format.
      *
      * Priority order:
-     *   1. PLAINTAB_MIME          — our custom type, set via native copy event (Firefox/Safari)
-     *   2. PLAINTAB_MIME_WEB      — Chrome 104+ async clipboard path (strips 'web ' prefix)
+     *   1. SCRIPTORIUM_MIME          — our custom type, set via native copy event (Firefox/Safari)
+     *   2. SCRIPTORIUM_MIME_WEB      — Chrome 104+ async clipboard path (strips 'web ' prefix)
      *   3. In-memory clipboard    — fingerprint-validated for full in-app fidelity
      *   4. Google compact JSON    — merged with HTML for formatting
      *   5. HTML table             — from other spreadsheet apps or rich text
@@ -1080,8 +1080,8 @@ class ClipboardManager {
         const range  = getSelectionState()?.range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
         if (!range || !sheetStore) return;
 
-        const plainTabJson     = clipboardData.getData(PLAINTAB_MIME);
-        const plainTabJsonWeb  = clipboardData.getData(PLAINTAB_MIME_WEB);
+        const scriptoriumJson     = clipboardData.getData(SCRIPTORIUM_MIME);
+        const scriptoriumJsonWeb  = clipboardData.getData(SCRIPTORIUM_MIME_WEB);
         const googleCompactJson = clipboardData.getData(GOOGLE_COMPACT_MIME);
         const htmlText         = clipboardData.getData('text/html');
         const plainText        = clipboardData.getData('text/plain');
@@ -1090,14 +1090,14 @@ class ClipboardManager {
         let isInternal = false;
 
         // 1. Our native-event custom MIME (Firefox, Safari, and our own oncopy handler)
-        if (plainTabJson) {
-            data = this.#parseInternalJSON(plainTabJson);
+        if (scriptoriumJson) {
+            data = this.#parseInternalJSON(scriptoriumJson);
             if (data) isInternal = true;
         }
 
         // 2. Web-prefixed custom MIME (Chrome 104+ async write → native paste event)
-        if (!data && plainTabJsonWeb) {
-            data = this.#parseInternalJSON(plainTabJsonWeb);
+        if (!data && scriptoriumJsonWeb) {
+            data = this.#parseInternalJSON(scriptoriumJsonWeb);
             if (data) isInternal = true;
         }
 
@@ -1240,9 +1240,9 @@ class ClipboardManager {
             const items = await navigator.clipboard.read();
             for (const item of items) {
                 // Chrome 104+: custom type
-                if (item.types.includes(PLAINTAB_MIME_WEB)) {
+                if (item.types.includes(SCRIPTORIUM_MIME_WEB)) {
                     try {
-                        const blob = await item.getType(PLAINTAB_MIME_WEB);
+                        const blob = await item.getType(SCRIPTORIUM_MIME_WEB);
                         const json = JSON.parse(await blob.text());
                         if (json.fingerprint === fp) return true;
                     } catch (_) { /* ignore */ }
@@ -1280,9 +1280,9 @@ class ClipboardManager {
 
             for (const item of items) {
                 // Our custom type (Chrome 104+ web- prefix; 'web ' is stripped on read)
-                if (item.types.includes(PLAINTAB_MIME_WEB)) {
+                if (item.types.includes(SCRIPTORIUM_MIME_WEB)) {
                     try {
-                        const blob   = await item.getType(PLAINTAB_MIME_WEB);
+                        const blob   = await item.getType(SCRIPTORIUM_MIME_WEB);
                         const parsed = this.#parseInternalJSON(await blob.text());
                         if (parsed) return { data: parsed, isInternal: true };
                     } catch (_) { /* ignore */ }

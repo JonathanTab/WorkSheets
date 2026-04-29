@@ -2,7 +2,7 @@
     import { router } from "../lib/router.svelte.js";
     import storage from "../stores/storage.js";
 
-    const APP_NAME = "WorkSheets";
+    const APP_NAME = "Scriptorium";
 
     let route = $derived(router.route);
 

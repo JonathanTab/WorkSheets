@@ -76,7 +76,7 @@
     // ---- Props (for standalone / embeddable use) ----
     let {
         registry = storage,
-        appTitle = "WorkSheets",
+        appTitle = "Scriptorium",
         appSubtitle = "Collaborative Spreadsheets",
     } = $props();
 
