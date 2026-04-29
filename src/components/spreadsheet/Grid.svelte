@@ -2006,6 +2006,15 @@
         }
     }
 
+    function handleRowHeaderContextMenu(row, e) {
+        if (!selectionState.isRowHighlighted(row)) {
+            selectionState.selectRow(row);
+        }
+        e.preventDefault();
+        contextMenuPosition = { x: e.clientX, y: e.clientY };
+        contextMenuVisible = true;
+    }
+
     function handleColHeaderMouseDown(col, e) {
         const isCtrl = e?.ctrlKey || e?.metaKey;
         if (e?.shiftKey && selectionState.selectionMode === "cols") {
@@ -2015,6 +2024,15 @@
         } else {
             selectionState.startColDrag(col);
         }
+    }
+
+    function handleColHeaderContextMenu(col, e) {
+        if (!selectionState.isColHighlighted(col)) {
+            selectionState.selectColumn(col);
+        }
+        e.preventDefault();
+        contextMenuPosition = { x: e.clientX, y: e.clientY };
+        contextMenuVisible = true;
     }
 
     // ─── Cell mouse events ────────────────────────────────────────────────────
@@ -5198,6 +5216,7 @@
                     {isColSelected}
                     {colHeader}
                     onColHeaderMouseDown={handleColHeaderMouseDown}
+                    onColHeaderContextMenu={handleColHeaderContextMenu}
                     onStartColResize={startColResize}
                     onStartColResizeTouch={startColResizeTouch}
                     onStartFreezeColDrag={startFreezeColDrag}
@@ -5214,6 +5233,7 @@
                     bodyRowRange={renderPlan.plans.body.rowRange}
                     {isRowSelected}
                     onRowHeaderMouseDown={handleRowHeaderMouseDown}
+                    onRowHeaderContextMenu={handleRowHeaderContextMenu}
                     onStartRowResize={startRowResize}
                     onStartRowResizeTouch={startRowResizeTouch}
                     onStartFreezeRowDrag={startFreezeRowDrag}

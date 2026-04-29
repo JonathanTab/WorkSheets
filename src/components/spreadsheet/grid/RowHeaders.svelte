@@ -7,6 +7,7 @@
         bodyRowRange = { start: 0, end: -1, count: 0 },
         isRowSelected,
         onRowHeaderMouseDown,
+        onRowHeaderContextMenu,
         onStartRowResize,
         onStartRowResizeTouch,
         onStartFreezeRowDrag,
@@ -49,6 +50,7 @@
                     class:selected={isRowSelected?.(row)}
                     style="height:{height}px; top:{frozenTop(row)}px;"
                     onmousedown={(e) => onRowHeaderMouseDown?.(row, e)}
+                    oncontextmenu={(e) => onRowHeaderContextMenu?.(row, e)}
                     role="button"
                     tabindex="-1"
                 >
@@ -99,6 +101,7 @@
                     class:selected={isRowSelected?.(row)}
                     style="height:{height}px; top:{bodyTop(row)}px;"
                     onmousedown={(e) => onRowHeaderMouseDown?.(row, e)}
+                    oncontextmenu={(e) => onRowHeaderContextMenu?.(row, e)}
                     role="button"
                     tabindex="-1"
                 >

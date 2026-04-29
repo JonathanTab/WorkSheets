@@ -8,6 +8,7 @@
         isColSelected,
         colHeader,
         onColHeaderMouseDown,
+        onColHeaderContextMenu,
         onStartColResize,
         onStartColResizeTouch,
         onStartFreezeColDrag,
@@ -48,6 +49,7 @@
                     class:selected={isColSelected?.(col)}
                     style="width:{width}px;"
                     onmousedown={(e) => onColHeaderMouseDown?.(col, e)}
+                    oncontextmenu={(e) => onColHeaderContextMenu?.(col, e)}
                     role="button"
                     tabindex="-1"
                 >
@@ -98,6 +100,7 @@
                     class:selected={isColSelected?.(col)}
                     style="width:{width}px;"
                     onmousedown={(e) => onColHeaderMouseDown?.(col, e)}
+                    oncontextmenu={(e) => onColHeaderContextMenu?.(col, e)}
                     role="button"
                     tabindex="-1"
                 >
