@@ -5,8 +5,11 @@ import { APP_SHEETS, APP_DOCS, APP_SVG, DEFAULT_APP } from './appTypes.js';
  *
  * Routes:
  *   /scriptorium/              → { view: 'browser' }
- *   /scriptorium/sheets/<id>   → { view: 'sheet', docId: '<id>' }
- *   /scriptorium/docs/<id>     → { view: 'doc', docId: '<id>' }
+ *   /scriptorium/sheets/<id>   → { view: 'sheets', docId: '<id>' }
+ *   /scriptorium/docs/<id>     → { view: 'docs',   docId: '<id>' }
+ *   /scriptorium/svg/<id>      → { view: 'svg',    docId: '<id>' }
+ *
+ * view names match APP_SHEETS / APP_DOCS / APP_SVG constants from appTypes.js.
  */
 
 const BASE = '/scriptorium';
@@ -22,13 +25,13 @@ function parsePath(pathname) {
     if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
 
     const sheetsMatch = path.match(/^\/sheets\/([^/?#]+)/);
-    if (sheetsMatch) return { view: 'sheet', docId: sheetsMatch[1] };
+    if (sheetsMatch) return { view: APP_SHEETS, docId: sheetsMatch[1] };
 
     const docsMatch = path.match(/^\/docs\/([^/?#]+)/);
-    if (docsMatch) return { view: 'doc', docId: docsMatch[1] };
+    if (docsMatch) return { view: APP_DOCS, docId: docsMatch[1] };
 
     const svgMatch = path.match(/^\/svg\/([^/?#]+)/);
-    if (svgMatch) return { view: 'svg', docId: svgMatch[1] };
+    if (svgMatch) return { view: APP_SVG, docId: svgMatch[1] };
 
     const folderMatch = path.match(/^\/drive\/folder\/([^/?#]+)/);
     if (folderMatch) return { view: 'browser', tab: 'drive', folderId: folderMatch[1] };

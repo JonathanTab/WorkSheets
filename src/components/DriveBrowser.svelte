@@ -505,9 +505,7 @@
 
     // Build the correct URL for a file (for "open in new tab")
     function fileUrl(item) {
-        const app = item?.app ?? "sheets";
-        if (app === "docs") return `/scriptorium/docs/${item.id}`;
-        return `/scriptorium/sheets/${item.id}`;
+        return getFileRoute(item?.app ?? DEFAULT_APP, item.id);
     }
 
     function handleCreateSheet() {
@@ -574,10 +572,30 @@
         });
     }
 
-    // Legacy alias
-    function handleCreateDocument() {
-        handleCreateSheet();
-    }
+    // ---------- Header "New" dropdown ----------
+    let newMenuOpen = $state(false);
+    let newMenuRef = $state(null);
+    let newMenuTriggerRef = $state(null);
+
+    function toggleNewMenu() { newMenuOpen = !newMenuOpen; }
+
+    function closeNewMenu() { newMenuOpen = false; }
+
+    $effect(() => {
+        if (!newMenuOpen) return;
+        function onClickOutside(e) {
+            if (!newMenuRef?.contains(e.target) && !newMenuTriggerRef?.contains(e.target)) {
+                newMenuOpen = false;
+            }
+        }
+        function onKeydown(e) { if (e.key === 'Escape') { newMenuOpen = false; newMenuTriggerRef?.focus(); } }
+        document.addEventListener('click', onClickOutside);
+        document.addEventListener('keydown', onKeydown);
+        return () => {
+            document.removeEventListener('click', onClickOutside);
+            document.removeEventListener('keydown', onKeydown);
+        };
+    });
 
     function handleUploadFiles() {
         openModal(UploadFileModal, {
@@ -1663,15 +1681,29 @@
                 </div>
             </div>
             <div class="header-actions">
-                <Button
-                    onclick={handleCreateDocument}
-                    size="sm"
-                    icon={plus}
-                    iconPosition="left"
-                    className="mobile-hidden"
-                >
-                    New
-                </Button>
+                <div class="new-menu-wrap mobile-hidden" bind:this={newMenuTriggerRef}>
+                    <Button
+                        onclick={toggleNewMenu}
+                        size="sm"
+                        icon={plus}
+                        iconPosition="left"
+                    >
+                        New
+                    </Button>
+                    {#if newMenuOpen}
+                        <div class="new-menu" bind:this={newMenuRef}>
+                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSheet(); }}>
+                                {@html spreadsheet} New Spreadsheet
+                            </button>
+                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateDoc(); }}>
+                                {@html fileText} New Document
+                            </button>
+                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSvg(); }}>
+                                {@html penTool} New Drawing
+                            </button>
+                        </div>
+                    {/if}
+                </div>
                 <UserMenu {registry} />
             </div>
         </header>
@@ -2095,8 +2127,10 @@
                                                     {@html icons[
                                                         getFileIcon(item)
                                                     ] || file}
-                                                {:else if item.app === "docs"}
+                                                {:else if item.app === APP_DOCS}
                                                     {@html fileText}
+                                                {:else if item.app === APP_SVG}
+                                                    {@html penTool}
                                                 {:else}
                                                     {@html spreadsheet}
                                                 {/if}
@@ -2280,8 +2314,10 @@
                                     />
                                 {:else if isBlobFile(item)}
                                     {@html icons[getFileIcon(item)] || file}
-                                {:else if item.app === "docs"}
+                                {:else if item.app === APP_DOCS}
                                     {@html fileText}
+                                {:else if item.app === APP_SVG}
+                                    {@html penTool}
                                 {:else}
                                     {@html spreadsheet}
                                 {/if}
@@ -2985,6 +3021,40 @@
         display: flex;
         gap: 0.5rem;
     }
+
+    .new-menu-wrap {
+        position: relative;
+    }
+
+    .new-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+        min-width: 170px;
+        z-index: 200;
+        overflow: hidden;
+    }
+
+    .new-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        padding: 8px 14px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--color-text);
+        text-align: left;
+        white-space: nowrap;
+    }
+    .new-menu-item:hover { background: var(--color-bg-secondary); }
+    .new-menu-item :global(svg) { width: 15px; height: 15px; flex-shrink: 0; opacity: 0.7; }
 
     /* Toolbar */
     .toolbar {

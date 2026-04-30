@@ -1,6 +1,7 @@
 <script>
     import { router } from "../lib/router.svelte.js";
     import storage from "../stores/storage.js";
+    import { APP_SHEETS, APP_DOCS, APP_SVG } from "../lib/appTypes.js";
 
     const APP_NAME = "Scriptorium";
 
@@ -14,22 +15,22 @@
     const driveMod  = import("../components/DriveBrowser.svelte");
 
     $effect(() => {
-        if (route.view !== 'sheet') {
+        if (route.view === 'browser') {
             document.title = APP_NAME;
         }
     });
 </script>
 
 <div class="home-container">
-    {#if route.view === 'sheet'}
+    {#if route.view === APP_SHEETS}
         {#await sheetMod then { default: SpreadsheetWorkspace }}
             <SpreadsheetWorkspace docId={route.docId} registry={storage} />
         {/await}
-    {:else if route.view === 'doc'}
+    {:else if route.view === APP_DOCS}
         {#await docMod then { default: DocWorkspace }}
             <DocWorkspace docId={route.docId} registry={storage} />
         {/await}
-    {:else if route.view === 'svg'}
+    {:else if route.view === APP_SVG}
         {#await svgMod then { default: SvgWorkspace }}
             <SvgWorkspace docId={route.docId} registry={storage} />
         {/await}
