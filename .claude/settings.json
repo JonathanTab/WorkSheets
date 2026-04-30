@@ -17,7 +17,8 @@
       "Bash(pnpm install *)",
       "Bash(pnpm add *)",
       "Bash(pnpm --version)",
-      "Bash(pnpm config *)"
+      "Bash(pnpm config *)",
+      "Read(//c/Users/Jon/code/plainTab/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Jon\\code\\instrumenta\\instrumenta"
