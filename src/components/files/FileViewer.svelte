@@ -1,4 +1,4 @@
-<script context="module">
+<script module>
     function formatSize(bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
@@ -18,17 +18,11 @@
         fullscreen,
         minimize,
     } from "../../lib/icons/index.js";
-    import {
-        getFileCategory,
-        isBlobFile,
-        isPreviewable,
-    } from "../../lib/appTypes.js";
 
     let { file, blobUrl, onClose } = $props();
 
     let imgElement = $state(null);
     let videoElement = $state(null);
-    let audioElement = $state(null);
 
     let zoom = $state(1);
     let isFullscreen = $state(false);
@@ -44,15 +38,6 @@
             currentTime = 0;
         }
     });
-
-    function getViewerType(file) {
-        if (!file) return "other";
-        const category = getFileCategory(file.mimeType);
-        const categoryKey = Object.keys(
-            getFileCategory.constructor === Function ? {} : {},
-        ).find((k) => false);
-        return category.name?.toLowerCase() || "other";
-    }
 
     function handleZoomIn() {
         zoom = Math.min(zoom + 0.25, 4);
@@ -195,7 +180,7 @@
         </div>
     </div>
 
-    <div class="viewer-content" class:fullscreen={isFullscreen}>
+    <div class="viewer-content" class:fullscreen={isFullscreen} class:viewer-content--pdf={viewerType === 'pdf'}>
         {#if blobUrl}
             {#if viewerType === "image"}
                 <div class="image-container">
@@ -214,18 +199,28 @@
                         ontimeupdate={handleVideoTimeUpdate}
                         onloadedmetadata={handleVideoLoadedMetadata}
                         onended={handleVideoEnd}
-                    />
+                    >
+                        <track kind="captions" />
+                    </video>
                     <div class="video-controls">
                         <button class="play-btn" onclick={handleVideoPlay}>
                             {@html isPlaying ? pause : play}
                         </button>
                         <span class="time">{formatTime(currentTime)}</span>
-                        <div class="progress-bar" onclick={handleSeek}>
+                        <button
+                            class="progress-bar"
+                            role="slider"
+                            aria-label="Seek"
+                            aria-valuemin={0}
+                            aria-valuemax={duration}
+                            aria-valuenow={currentTime}
+                            onclick={handleSeek}
+                        >
                             <div
                                 class="progress"
                                 style="width: {(currentTime / duration) * 100}%"
                             ></div>
-                        </div>
+                        </button>
                         <span class="time">{formatTime(duration)}</span>
                     </div>
                 </div>
@@ -233,29 +228,39 @@
                 <div class="audio-container">
                     <div class="audio-icon">🎵</div>
                     <audio
-                        bind:this={audioElement}
                         src={blobUrl}
                         ontimeupdate={handleVideoTimeUpdate}
                         onloadedmetadata={handleVideoLoadedMetadata}
                         onended={handleVideoEnd}
-                    />
+                    ></audio>
                     <div class="audio-controls">
                         <button class="play-btn" onclick={handleVideoPlay}>
                             {@html isPlaying ? pause : play}
                         </button>
                         <span class="time">{formatTime(currentTime)}</span>
-                        <div class="progress-bar" onclick={handleSeek}>
+                        <button
+                            class="progress-bar"
+                            role="slider"
+                            aria-label="Seek"
+                            aria-valuemin={0}
+                            aria-valuemax={duration}
+                            aria-valuenow={currentTime}
+                            onclick={handleSeek}
+                        >
                             <div
                                 class="progress"
                                 style="width: {(currentTime / duration) * 100}%"
                             ></div>
-                        </div>
+                        </button>
                         <span class="time">{formatTime(duration)}</span>
                     </div>
                 </div>
             {:else if viewerType === "pdf"}
                 <div class="pdf-container">
-                    <iframe src={blobUrl} title={file?.name || "PDF"}></iframe>
+                    <iframe
+                        src={blobUrl}
+                        title={file?.name || "PDF"}
+                    ></iframe>
                 </div>
             {:else}
                 <div class="other-container">
@@ -365,6 +370,11 @@
         padding: 1rem;
     }
 
+    .viewer-content--pdf {
+        padding: 0;
+        background: var(--color-bg-secondary);
+    }
+
     .viewer-content.fullscreen {
         background: var(--color-bg);
     }
@@ -445,6 +455,8 @@
         background: rgba(255, 255, 255, 0.3);
         border-radius: 2px;
         cursor: pointer;
+        border: none;
+        padding: 0;
         overflow: hidden;
     }
 

@@ -41,7 +41,7 @@ export const APP_TYPES = {
             'image/svg+xml',
         ],
         routePrefix: '/svg/',
-        color: '#f97316', // Orange for SVG drawings
+        color: '#dc2626', // Red for SVG drawings
     },
     [APP_SHEETS]: {
         id: APP_SHEETS,
@@ -56,7 +56,7 @@ export const APP_TYPES = {
             'text/csv',
         ],
         routePrefix: '/sheets/',
-        color: 'var(--color-primary)',
+        color: '#01ac47', // Green for spreadsheets
     },
     [APP_DOCS]: {
         id: APP_DOCS,
@@ -283,7 +283,7 @@ export const FILE_CATEGORIES = {
         name: 'Spreadsheet',
         icon: 'spreadsheet',
         mimeTypes: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv'],
-        color: 'var(--color-primary)',
+        color: '#01ac47',
     },
     other: {
         name: 'File',

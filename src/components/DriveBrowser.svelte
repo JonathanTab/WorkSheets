@@ -101,7 +101,7 @@
     let viewMode = $state(
         (typeof localStorage !== "undefined" &&
             localStorage.getItem("drive-view-mode")) ||
-            "list",
+            "grid",
     ); // "list" | "grid"
     $effect(() => {
         localStorage.setItem("drive-view-mode", viewMode);
@@ -399,12 +399,13 @@
         focusedItemKey = null;
     }
 
+    // Called by checkbox clicks — always accumulates (never clears other selections).
     function toggleItem(item, event) {
         const key = itemKey(item);
         const newSelection = new Set(selectedItems);
 
         if (event?.shiftKey && lastSelectedKey !== null) {
-            // Range select — resolve anchor by key so stale indices don't bite us
+            // Range select from anchor to here
             const anchorIndex = displayItems.findIndex(
                 (i) => itemKey(i) === lastSelectedKey,
             );
@@ -417,29 +418,21 @@
                 }
             } else {
                 newSelection.add(key);
-                lastSelectedKey = key;
             }
-        } else if (event?.ctrlKey || event?.metaKey) {
-            // Toggle individual
+        } else {
+            // Toggle this item in/out without disturbing others
             if (newSelection.has(key)) {
                 newSelection.delete(key);
             } else {
                 newSelection.add(key);
             }
-            lastSelectedKey = key;
-        } else {
-            // Single select
-            newSelection.clear();
-            newSelection.add(key);
-            lastSelectedKey = key;
         }
 
+        lastSelectedKey = key;
         selectedItems = newSelection;
     }
 
-    // First click focuses the row (shows action btn, no checkbox change).
-    // Second click on the same focused row toggles the checkbox.
-    // Modifier keys (shift/ctrl/meta) fall through to toggleItem immediately.
+    // Called by row clicks — plain click selects only this item; modifiers accumulate.
     function handleRowClick(item, event) {
         const key = itemKey(item);
         if (event.shiftKey || event.ctrlKey || event.metaKey) {
@@ -447,13 +440,10 @@
             focusedItemKey = key;
             return;
         }
-        if (focusedItemKey === key) {
-            // Second click: toggle checkbox
-            toggleItem(item, event);
-        } else {
-            // First click: just focus
-            focusedItemKey = key;
-        }
+        // Plain click: replace selection with just this item
+        selectedItems = new Set([key]);
+        lastSelectedKey = key;
+        focusedItemKey = key;
     }
 
     function selectAll() {
@@ -617,21 +607,23 @@
         });
     }
 
-    async function openBlobFile(file) {
-        try {
-            const blobUrl = await registry.drive.getBlobUrl(file.id);
-            registry.drive.recordOpen(file.id);
-            viewingFile = file;
-            viewingBlobUrl = blobUrl;
-        } catch (err) {
-            console.error("Failed to load blob file:", err);
+    function openBlobFile(file) {
+        if (!isPreviewable(file)) {
+            // Non-previewable types (zip, etc.) — download directly
+            const a = document.createElement('a');
+            a.href = registry.drive.getBlobUrl(file.id);
+            a.download = file.filename || file.title || 'download';
+            a.click();
+            return;
         }
+        // Use the stream URL (?action=stream) which the server serves with
+        // Content-Disposition: inline, so the browser renders rather than downloads.
+        registry.drive.recordOpen(file.id);
+        viewingFile = file;
+        viewingBlobUrl = registry.drive.getStreamUrl(file.id);
     }
 
     function closeFileViewer() {
-        if (viewingBlobUrl) {
-            URL.revokeObjectURL(viewingBlobUrl);
-        }
         viewingFile = null;
         viewingBlobUrl = null;
     }
@@ -1161,6 +1153,15 @@
     }
 
     // ---- Item drag (moving files/folders) ----
+    let _hoverExpandTimer = null;
+    let _hoverExpandFolderId = null;
+
+    function _clearHoverExpand() {
+        clearTimeout(_hoverExpandTimer);
+        _hoverExpandTimer = null;
+        _hoverExpandFolderId = null;
+    }
+
     function handleItemDragStart(e, item) {
         isInternalDragging = true;
         isDraggingOver = false;
@@ -1177,6 +1178,7 @@
         isInternalDragging = false;
         draggingItem = null;
         dropTargetId = null;
+        _clearHoverExpand();
     }
 
     function handleFolderDragOver(e, folderId) {
@@ -1188,12 +1190,26 @@
         e.stopPropagation();
         e.dataTransfer.dropEffect = "move";
         dropTargetId = folderId;
+
+        // Auto-expand after 600ms hover if collapsed and has children
+        if (_hoverExpandFolderId !== folderId) {
+            _clearHoverExpand();
+            _hoverExpandFolderId = folderId;
+            if (!expandedFolders.has(folderId) && getChildFolders(folderId).length > 0) {
+                _hoverExpandTimer = setTimeout(() => {
+                    const next = new Set(expandedFolders);
+                    next.add(folderId);
+                    expandedFolders = next;
+                }, 600);
+            }
+        }
     }
 
     function handleFolderDragLeave(e, folderId) {
         // Only clear if leaving the element itself (not a child)
         if (!e.currentTarget.contains(e.relatedTarget)) {
             if (dropTargetId === folderId) dropTargetId = null;
+            if (_hoverExpandFolderId === folderId) _clearHoverExpand();
         }
     }
 
@@ -1203,6 +1219,7 @@
         isInternalDragging = false;
         dropTargetId = null;
         draggingItem = null;
+        _clearHoverExpand();
 
         const raw = e.dataTransfer.getData(DRAG_MIME);
         if (!raw) return;
@@ -1235,7 +1252,7 @@
 
     // ---- Trash drag-and-drop ----
     function handleTrashDragOver(e) {
-        if (!draggingItem || draggingItem.itemType !== "file") return;
+        if (!draggingItem) return;
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = "move";
@@ -1261,16 +1278,20 @@
         const { id, itemType } = JSON.parse(raw);
         draggingItem = null;
 
-        if (itemType !== "file") return; // only soft-delete files via drag
-
-        const f = driveFiles.find((x) => x.id === id);
-        if (!f) return;
-        await registry.drive.deleteFile(id).catch(console.error);
-        pushUndo({
-            description: `Delete "${f.title}"`,
-            undo: async () => registry.drive.restoreFile(id),
-            redo: async () => registry.drive.deleteFile(id),
-        });
+        if (itemType === "folder") {
+            const f = driveFolders.find((x) => x.id === id);
+            if (!f) return;
+            await registry.drive.deleteFolder(id).catch(console.error);
+        } else {
+            const f = driveFiles.find((x) => x.id === id);
+            if (!f) return;
+            await registry.drive.deleteFile(id).catch(console.error);
+            pushUndo({
+                description: `Delete "${f.title}"`,
+                undo: async () => registry.drive.restoreFile(id),
+                redo: async () => registry.drive.deleteFile(id),
+            });
+        }
     }
 
     // ---- Undo / Redo ----
@@ -1497,6 +1518,15 @@
                 New Drawing
             </Button>
             <Button
+                onclick={handleCreateFolder}
+                icon={newFolder}
+                iconPosition="left"
+                variant="secondary"
+                className="new-btn"
+            >
+                New Folder
+            </Button>
+            <Button
                 onclick={handleUploadFiles}
                 icon={upload}
                 iconPosition="left"
@@ -1538,43 +1568,43 @@
                     >
                         {@html newFolder}
                     </button>
-                    {#if rootFolders.length > 0}
-                        <span
-                            class="tree-expand nav-expand"
-                            onclick={(e) => {
-                                e.stopPropagation();
-                                // Toggle all root folders
-                                const allExpanded = rootFolders.every((f) =>
-                                    isFolderExpanded(f.id),
-                                );
-                                const newExpanded = new Set(expandedFolders);
-                                rootFolders.forEach((f) => {
-                                    if (allExpanded) {
-                                        newExpanded.delete(f.id);
-                                    } else {
-                                        newExpanded.add(f.id);
-                                    }
-                                });
-                                expandedFolders = newExpanded;
-                            }}
-                            title={rootFolders.every((f) =>
+                {/if}
+                {#if (tab === "drive" || isInternalDragging) && rootFolders.length > 0}
+                    <span
+                        class="tree-expand nav-expand"
+                        onclick={(e) => {
+                            e.stopPropagation();
+                            // Toggle all root folders
+                            const allExpanded = rootFolders.every((f) =>
                                 isFolderExpanded(f.id),
-                            )
-                                ? "Collapse all"
-                                : "Expand all"}
-                        >
-                            {@html rootFolders.every((f) =>
-                                isFolderExpanded(f.id),
-                            )
-                                ? chevronDown
-                                : chevronRight}
-                        </span>
-                    {/if}
+                            );
+                            const newExpanded = new Set(expandedFolders);
+                            rootFolders.forEach((f) => {
+                                if (allExpanded) {
+                                    newExpanded.delete(f.id);
+                                } else {
+                                    newExpanded.add(f.id);
+                                }
+                            });
+                            expandedFolders = newExpanded;
+                        }}
+                        title={rootFolders.every((f) =>
+                            isFolderExpanded(f.id),
+                        )
+                            ? "Collapse all"
+                            : "Expand all"}
+                    >
+                        {@html rootFolders.every((f) =>
+                            isFolderExpanded(f.id),
+                        )
+                            ? chevronDown
+                            : chevronRight}
+                    </span>
                 {/if}
             </div>
 
-            <!-- Folder Tree (only in drive tab) -->
-            {#if tab === "drive" && rootFolders.length > 0}
+            <!-- Folder Tree (drive tab, or any tab while dragging so items can be dropped into folders) -->
+            {#if (tab === "drive" || isInternalDragging) && rootFolders.length > 0}
                 <div class="folder-tree">
                     <FolderTree
                         folders={rootFolders}
@@ -1660,11 +1690,8 @@
                     {@html menu}
                 </button>
                 <div class="app-title desktop-only">
-                    <span class="app-icon">{@html spreadsheet}</span>
-                    <div>
-                        <h1>{appTitle}</h1>
-                        <p>{appSubtitle}</p>
-                    </div>
+                    <span class="app-icon">{@html penTool}</span>
+                    <h1>{appTitle}</h1>
                 </div>
                 <!-- Current location for mobile -->
                 <div class="mobile-title mobile-only">
@@ -1700,6 +1727,10 @@
                             </button>
                             <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSvg(); }}>
                                 {@html penTool} New Drawing
+                            </button>
+                            <div class="new-menu-divider"></div>
+                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateFolder(); }}>
+                                {@html newFolder} New Folder
                             </button>
                         </div>
                     {/if}
@@ -2119,6 +2150,8 @@
                                                 class="item-icon {item.itemType}"
                                                 style={isBlobFile(item)
                                                     ? `color: ${getFileCategory(item.mimeType)?.color || "#6b7280"}`
+                                                    : item.itemType !== "folder"
+                                                    ? `color: ${getAppType(item.app ?? DEFAULT_APP).color}`
                                                     : ""}
                                             >
                                                 {#if item.itemType === "folder"}
@@ -2298,6 +2331,8 @@
                                 class="grid-item-icon"
                                 style={isBlobFile(item) && !item.thumbnailKey
                                     ? `color: ${getFileCategory(item.mimeType)?.color || "#6b7280"}`
+                                    : !isBlobFile(item) && item.itemType !== "folder" && !item.thumbnailKey
+                                    ? `color: ${getAppType(item.app ?? DEFAULT_APP).color}`
                                     : ""}
                             >
                                 {#if item.itemType === "folder"}
@@ -3055,6 +3090,7 @@
     }
     .new-menu-item:hover { background: var(--color-bg-secondary); }
     .new-menu-item :global(svg) { width: 15px; height: 15px; flex-shrink: 0; opacity: 0.7; }
+    .new-menu-divider { height: 1px; background: var(--color-border); margin: 4px 0; }
 
     /* Toolbar */
     .toolbar {

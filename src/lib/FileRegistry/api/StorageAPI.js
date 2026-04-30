@@ -318,6 +318,24 @@ export class StorageAPI {
     }
 
     /**
+     * Returns the inline-stream URL for a blob file (Content-Disposition: inline).
+     * Use this for in-browser preview (PDF viewer, video player, etc.) so the
+     * browser renders the file rather than downloading it.
+     * @param {string} fileId
+     * @returns {string}
+     */
+    getStreamUrl(fileId) {
+        const url = this.blobUrl.startsWith('http')
+            ? new URL(this.blobUrl)
+            : new URL(this.blobUrl, window.location.origin);
+        url.searchParams.set('id', fileId);
+        url.searchParams.set('action', 'stream');
+        const key = this.getApiKey();
+        if (key) url.searchParams.set('apikey', key);
+        return url.toString();
+    }
+
+    /**
      * Fetch mimeType and filename for a blob by inspecting its HTTP response headers.
      * Used as a fallback when the file descriptor is not in the local registry.
      * @param {string} fileId

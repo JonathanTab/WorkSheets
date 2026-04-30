@@ -222,6 +222,9 @@ class AppView {
     /** Returns the authenticated URL for downloading a blob. @param {string} id @returns {string} */
     getBlobUrl(id) { return this._r._api.getBlobUrl(id); }
 
+    /** Returns the authenticated stream URL (Content-Disposition: inline) for a blob. @param {string} id @returns {string} */
+    getStreamUrl(id) { return this._r._api.getStreamUrl(id); }
+
     /**
      * Return the descriptor for a blob, fetching metadata from the server via
      * GET request (headers only) if the file is not in the local registry.
@@ -654,6 +657,9 @@ class DriveView {
     // -------------------------------------------------------
 
     getBlobUrl(id) { return this._r._api.getBlobUrl(id); }
+
+    /** Returns the authenticated stream URL (Content-Disposition: inline) for a blob. @param {string} id @returns {string} */
+    getStreamUrl(id) { return this._r._api.getStreamUrl(id); }
 
     async fetchBlob(id) {
         const pending = await this._r._getPendingBlob(id);
