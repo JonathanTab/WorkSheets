@@ -187,6 +187,10 @@
     // null | { axis: 'row'|'col', startPx: number, currentCount: number }
     let freezeDrag = $state(null);
 
+    // ─── Fill-handle drag state ────────────────────────────────────────────────
+    // null | { srcRange: CellRange, fillRange: CellRange|null, direction: string|null }
+    let fillHandleDrag = $state(null);
+
     // ─── Overlay state ────────────────────────────────────────────────────────
     /** @type {{ table:any, colId:string|null, anchorRow:number, anchorCol:number }|null} */
     let activeFilterPopover = $state(null);
@@ -1710,6 +1714,21 @@
         return expandRangeForMerges(range, renderContext?.mergeEngine) ?? range;
     });
 
+    // Bottom-right corner (container-local px) where the fill handle dot sits.
+    let fillHandlePos = $derived.by(() => {
+        if (!virtualizer || !renderPlan || editSessionState.isEditing) return null;
+        if (selectionState.selectionMode !== 'range') return null;
+        if (selectionState.isSelecting || fillHandleDrag) return null;
+        if (!anchor) return null;
+        const eff = expandedRange;
+        const endCol = eff ? eff.endCol : anchor.col;
+        const endRow = eff ? eff.endRow : anchor.row;
+        return {
+            right: cellContainerLeft(endCol) + virtualizer.getColWidth(endCol),
+            bottom: cellContainerTop(endRow) + virtualizer.getRowHeight(endRow),
+        };
+    });
+
     function isSelected(row, col) {
         return selectionState.isSelected(row, col, rowCount, colCount);
     }
@@ -1718,6 +1737,206 @@
     }
     function isColSelected(col) {
         return selectionState.isColHighlighted(col);
+    }
+
+    // ─── Fill-handle handlers ─────────────────────────────────────────────────
+    function handleFillHandleMouseDown(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const range = selectionState.range;
+        const srcRange = range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
+        if (!srcRange) return;
+
+        fillHandleDrag = { srcRange, fillRange: null, direction: null };
+        currentCursor = 'crosshair';
+
+        function onMove(e) {
+            if (!fillHandleDrag || !virtualizer || !containerEl) return;
+            const { localX, localY } = getLocalCoords(e);
+            const hit = doHitTest(localX, localY);
+            if (hit.region !== 'cell') return;
+
+            const { row, col } = hit;
+            const src = fillHandleDrag.srcRange;
+            let fillRange = null;
+            let direction = null;
+
+            if (row > src.endRow) {
+                direction = 'down';
+                fillRange = { startRow: src.endRow + 1, endRow: row, startCol: src.startCol, endCol: src.endCol };
+            } else if (row < src.startRow) {
+                direction = 'up';
+                fillRange = { startRow: row, endRow: src.startRow - 1, startCol: src.startCol, endCol: src.endCol };
+            } else if (col > src.endCol) {
+                direction = 'right';
+                fillRange = { startRow: src.startRow, endRow: src.endRow, startCol: src.endCol + 1, endCol: col };
+            } else if (col < src.startCol) {
+                direction = 'left';
+                fillRange = { startRow: src.startRow, endRow: src.endRow, startCol: col, endCol: src.startCol - 1 };
+            }
+
+            fillHandleDrag = { ...fillHandleDrag, fillRange, direction };
+        }
+
+        function onUp() {
+            if (fillHandleDrag?.fillRange && fillHandleDrag.direction) {
+                applyFill(fillHandleDrag.srcRange, fillHandleDrag.fillRange, fillHandleDrag.direction);
+            }
+            fillHandleDrag = null;
+            currentCursor = 'cell';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
+    // ─── Fill-handle series detection helpers ────────────────────────────────
+    const FILL_MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const FILL_MONTHS_LONG  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const FILL_DAYS_SHORT   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const FILL_DAYS_LONG    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    const FILL_CYCLIC_LISTS = [FILL_MONTHS_SHORT, FILL_MONTHS_LONG, FILL_DAYS_SHORT, FILL_DAYS_LONG];
+
+    /**
+     * Given an array of raw (non-formula) source values ordered along the fill axis,
+     * returns a function (stepIndex) => value, or null if no series is detected.
+     * stepIndex is the 0-based offset from srcRange.startRow/Col — negative for up/left fills.
+     */
+    function detectFillSeries(rawValues) {
+        const vals = rawValues.filter(v => v !== null && v !== undefined);
+        if (vals.length === 0) return null;
+
+        // 1. Number series
+        if (vals.every(v => typeof v === 'number' || (typeof v === 'string' && v !== '' && !isNaN(Number(v))))) {
+            const nums = vals.map(Number);
+            const step = nums.length === 1 ? 1 : (nums[nums.length - 1] - nums[0]) / (nums.length - 1);
+            const base = nums[0];
+            return (si) => {
+                const result = base + si * step;
+                return Number.isInteger(step) ? Math.round(result) : result;
+            };
+        }
+
+        // 2. Cyclic named lists (months, weekdays)
+        for (const list of FILL_CYCLIC_LISTS) {
+            const lower = list.map(s => s.toLowerCase());
+            const indices = vals.map(v => (typeof v === 'string' ? lower.indexOf(v.toLowerCase()) : -1));
+            if (indices.every(i => i >= 0)) {
+                const baseIdx = indices[0];
+                const step = indices.length > 1
+                    ? ((indices[1] - indices[0] + list.length) % list.length) || 1
+                    : 1;
+                const n = list.length;
+                return (si) => list[((baseIdx + si * step) % n + n) % n];
+            }
+        }
+
+        // 3. String + number suffix  (e.g. "Q1", "Q2" or "Item 1", "Item 2")
+        const SFX = /^(.*?)(\d+)(\D*)$/;
+        const matches = vals.map(v => {
+            if (typeof v !== 'string') return null;
+            const m = v.match(SFX);
+            return m ? { prefix: m[1], num: parseInt(m[2], 10), padLen: m[2].length, suffix: m[3] } : null;
+        });
+        if (matches.every(m => m !== null)) {
+            const { prefix, padLen, suffix } = matches[0];
+            if (matches.every(m => m.prefix === prefix && m.suffix === suffix)) {
+                const nums = matches.map(m => m.num);
+                const step = nums.length === 1 ? 1 : Math.round((nums[nums.length - 1] - nums[0]) / (nums.length - 1));
+                return (si) => {
+                    const n = Math.round(nums[0] + si * step);
+                    const digits = String(Math.abs(n)).padStart(padLen, '0');
+                    return `${prefix}${n < 0 ? '-' : ''}${digits}${suffix}`;
+                };
+            }
+        }
+
+        return null;
+    }
+
+    function applyFill(srcRange, fillRange, direction) {
+        const store = sheetStore;
+        if (!store) return;
+
+        const srcRows = srcRange.endRow - srcRange.startRow + 1;
+        const srcCols = srcRange.endCol - srcRange.startCol + 1;
+        const isVertical = direction === 'down' || direction === 'up';
+
+        if (isVertical) {
+            for (let c = srcRange.startCol; c <= srcRange.endCol; c++) {
+                const laneValues = [];
+                let hasFormula = false;
+                for (let r = srcRange.startRow; r <= srcRange.endRow; r++) {
+                    const cell = store.getCell(r, c);
+                    const v = cell?.exists ? cell.v : null;
+                    if (typeof v === 'string' && v.startsWith('=')) hasFormula = true;
+                    laneValues.push(v);
+                }
+                const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
+
+                for (let r = fillRange.startRow; r <= fillRange.endRow; r++) {
+                    if (hasFormula) {
+                        const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
+                        const cell = store.getCell(srcRow, c);
+                        if (!cell?.exists) continue;
+                        const v = cell.v;
+                        if (typeof v === 'string' && v.startsWith('=')) {
+                            store.setCellFormula(r, c, clipboardManager.adjustFormula(v, r - srcRow, 0));
+                        } else if (v !== null && v !== undefined) {
+                            store.setCellValue(r, c, v);
+                        }
+                    } else if (seriesFn) {
+                        store.setCellValue(r, c, seriesFn(r - srcRange.startRow));
+                    } else {
+                        const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
+                        const cell = store.getCell(srcRow, c);
+                        if (cell?.exists && cell.v !== null && cell.v !== undefined) {
+                            store.setCellValue(r, c, cell.v);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (let r = srcRange.startRow; r <= srcRange.endRow; r++) {
+                const laneValues = [];
+                let hasFormula = false;
+                for (let c = srcRange.startCol; c <= srcRange.endCol; c++) {
+                    const cell = store.getCell(r, c);
+                    const v = cell?.exists ? cell.v : null;
+                    if (typeof v === 'string' && v.startsWith('=')) hasFormula = true;
+                    laneValues.push(v);
+                }
+                const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
+
+                for (let c = fillRange.startCol; c <= fillRange.endCol; c++) {
+                    if (hasFormula) {
+                        const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
+                        const cell = store.getCell(r, srcCol);
+                        if (!cell?.exists) continue;
+                        const v = cell.v;
+                        if (typeof v === 'string' && v.startsWith('=')) {
+                            store.setCellFormula(r, c, clipboardManager.adjustFormula(v, 0, c - srcCol));
+                        } else if (v !== null && v !== undefined) {
+                            store.setCellValue(r, c, v);
+                        }
+                    } else if (seriesFn) {
+                        store.setCellValue(r, c, seriesFn(c - srcRange.startCol));
+                    } else {
+                        const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
+                        const cell = store.getCell(r, srcCol);
+                        if (cell?.exists && cell.v !== null && cell.v !== undefined) {
+                            store.setCellValue(r, c, cell.v);
+                        }
+                    }
+                }
+            }
+        }
+
+        renderScheduler?.invalidateAll();
+        selectionScheduler?.invalidateAll();
     }
 
     // ─── Event layer handlers ─────────────────────────────────────────────────
@@ -5255,6 +5474,29 @@
                 <div class="anchor-border" style={anchorBorderStyle}></div>
             {/if}
 
+            <!-- Fill handle dot (bottom-right of selection) -->
+            {#if fillHandlePos && !mobileState.isMobile}
+                <div
+                    class="fill-handle"
+                    role="presentation"
+                    style="transform: translate({fillHandlePos.right - 4}px, {fillHandlePos.bottom - 4}px);"
+                    onmousedown={handleFillHandleMouseDown}
+                ></div>
+            {/if}
+
+            <!-- Fill preview border (shown while dragging fill handle) -->
+            {#if fillHandleDrag?.fillRange && virtualizer}
+                {@const fr = fillHandleDrag.fillRange}
+                {@const fLeft = cellContainerLeft(fr.startCol)}
+                {@const fTop = cellContainerTop(fr.startRow)}
+                {@const fRight = cellContainerLeft(fr.endCol) + virtualizer.getColWidth(fr.endCol)}
+                {@const fBottom = cellContainerTop(fr.endRow) + virtualizer.getRowHeight(fr.endRow)}
+                <div
+                    class="fill-preview-border"
+                    style="transform: translate({fLeft}px, {fTop}px); width:{Math.max(0, fRight - fLeft)}px; height:{Math.max(0, fBottom - fTop)}px;"
+                ></div>
+            {/if}
+
             <!-- Mobile selection handles -->
             {#if mobileState.isMobile && !editSessionState.isEditing}
                 <SelectionHandles
@@ -5823,6 +6065,34 @@
         border: 2px solid var(--anchor-border, #3b82f6);
         pointer-events: none;
         z-index: 11;
+        box-sizing: border-box;
+        will-change: transform;
+    }
+
+    /* ── Fill handle dot ── */
+    .fill-handle {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 8px;
+        height: 8px;
+        background: var(--selection-border, #3b82f6);
+        border: 1px solid #fff;
+        border-radius: 1px;
+        pointer-events: auto;
+        cursor: crosshair;
+        z-index: 12;
+        will-change: transform;
+    }
+
+    /* ── Fill preview border (dashed, shown while dragging fill handle) ── */
+    .fill-preview-border {
+        position: absolute;
+        left: 0;
+        top: 0;
+        border: 2px dashed var(--selection-border, #3b82f6);
+        pointer-events: none;
+        z-index: 10;
         box-sizing: border-box;
         will-change: transform;
     }
