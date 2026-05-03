@@ -47,9 +47,13 @@ function _getOrderedColMaps(table) {
 }
 
 function _getFormulaCols(table) {
+    // Pure computed columns: isNonEntry=true with a defaultFormula (never stored).
+    // isNonEntry alone (no formula) is just a read-only flag — values are still stored.
     const formulaCols = new Set();
     for (const c of _getOrderedColMaps(table)) {
-        if (c.get('isNonEntry')) formulaCols.add(c.get('id'));
+        if (c.get('isNonEntry') && (c.get('defaultFormula') || c.get('formula'))) {
+            formulaCols.add(c.get('id'));
+        }
     }
     return formulaCols;
 }
@@ -416,8 +420,8 @@ export function getTableRowsWithFormulas(ydoc, sheetId, tableId) {
             name:       raw.name ?? '',
             type:       typeConfig?.type ?? raw.type ?? 'text',
             typeConfig,
-            isNonEntry: raw.isNonEntry ?? false,
-            formula:    raw.formula ?? null,
+            isNonEntry:     raw.isNonEntry ?? false,
+            defaultFormula: raw.defaultFormula ?? raw.formula ?? null,
         };
     });
 

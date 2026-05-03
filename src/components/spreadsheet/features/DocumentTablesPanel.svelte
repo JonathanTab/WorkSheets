@@ -115,7 +115,7 @@
     const TYPE_ICONS = { text:'A', number:'#', currency:'$', percent:'%', date:'D',
                          checkbox:'✓', rating:'★', url:'↗', dropdown:'▾' };
     /** @param {any} col */
-    function colTypeIcon(col) { return col.isNonEntry ? 'fx' : (TYPE_ICONS[col.type] ?? 'A'); }
+    function colTypeIcon(col) { return col.defaultFormula ? 'fx' : (TYPE_ICONS[col.type] ?? 'A'); }
 
     // ── Drag-to-reorder source columns ──────────────────────────────────────
     let dragColFrom = $state(-1);
@@ -410,13 +410,13 @@
                             <span class="dot">·</span>
                             <span>{sheetName(sheetId)}</span>
                         </div>
-                        <!-- Sort-on-insert row -->
+                        <!-- Place-by row (governs where new rows land on insert) -->
                         <div class="insert-sort-row">
-                            <span class="insert-sort-label">Sort on insert:</span>
+                            <span class="insert-sort-label">Place by:</span>
                             {#if store.insertSortColId}
                                 {@const isc = store.columns.find((/** @type {any} */ c) => c.id === store.insertSortColId)}
-                                <span class="insert-sort-value">{isc?.name ?? store.insertSortColId} ({store.insertSortDir})</span>
-                                <button class="insert-sort-clear" onclick={() => store.clearInsertSort()} title="Remove sort on insert">✕</button>
+                                <span class="insert-sort-value">{isc?.name ?? store.insertSortColId}</span>
+                                <button class="insert-sort-clear" onclick={() => store.clearInsertSort()} title="Remove place-by column">✕</button>
                             {:else}
                                 <select
                                     class="insert-sort-sel"
@@ -427,7 +427,7 @@
                                     }}
                                 >
                                     <option value="">— none —</option>
-                                    {#each store.columns.filter((/** @type {any} */ c) => !c.isNonEntry) as c}
+                                    {#each store.columns.filter((/** @type {any} */ c) => !c.isNonEntry || c.defaultFormula) as c}
                                         <option value={c.id}>{c.name}</option>
                                     {/each}
                                 </select>
@@ -438,8 +438,8 @@
                                     value={store.insertSortDir}
                                     onchange={e => store.setInsertSort(store.insertSortColId, /** @type {HTMLSelectElement} */ (e.target).value)}
                                 >
-                                    <option value="asc">↑ Asc</option>
-                                    <option value="desc">↓ Desc</option>
+                                    <option value="asc">Highest first</option>
+                                    <option value="desc">Lowest first</option>
                                 </select>
                             {/if}
                         </div>
@@ -484,7 +484,7 @@
                                 <span class="drag-grip" title="Drag to reorder">⠿</span>
                                 <button
                                     class="col-type-btn"
-                                    class:formula={col.isNonEntry}
+                                    class:formula={col.defaultFormula}
                                     onclick={() => expandedColId = expandedColId === col.id ? null : col.id}
                                     title="Configure column"
                                 >{colTypeIcon(col)}</button>
@@ -508,8 +508,10 @@
                                         ondblclick={e => startRenameCol(col.id, col.name, e)}
                                     >{col.name}</span>
                                 {/if}
-                                {#if col.isNonEntry}
-                                    <span class="col-formula-badge" title={col.formula ?? ''}>= {col.formula ? col.formula.slice(0, 12) : 'fx'}</span>
+                                {#if col.defaultFormula}
+                                    <span class="col-formula-badge" title={col.defaultFormula}>= {col.defaultFormula.slice(0, 12)}</span>
+                                {:else if col.isNonEntry}
+                                    <span class="col-formula-badge col-readonly-badge">read-only</span>
                                 {/if}
                                 <button
                                     class="col-del-btn"
@@ -707,7 +709,7 @@
                                                 onchange={e => pendingFilter = { ...pendingFilter,
                                                     [viewId]: { ...pf, colId: /** @type {any} */ (e.target).value } }}
                                             >
-                                                {#each store.columns.filter((/** @type {any} */ c) => !c.isNonEntry) as c}
+                                                {#each store.columns.filter((/** @type {any} */ c) => !c.isNonEntry || c.defaultFormula) as c}
                                                     <option value={c.id}>{c.name}</option>
                                                 {/each}
                                             </select>
@@ -1199,6 +1201,12 @@
         overflow: hidden;
         max-width: 90px;
         text-overflow: ellipsis;
+    }
+
+    .col-readonly-badge {
+        background: #f1f5f9;
+        color: #64748b;
+        font-family: sans-serif;
     }
 
     .col-del-btn {

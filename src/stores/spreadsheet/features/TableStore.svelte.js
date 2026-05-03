@@ -20,54 +20,55 @@
  * ## Column definition (Y.Map fields)
  *   id, name, type, required,
  *   hAlign, textColor, bgColor, width,
- *   isNonEntry, formula,
+ *   isNonEntry, defaultFormula,
  *   conditionalFormats (JSON string)
  *
- * ## Computed column formulas
- * A column with isNonEntry=true uses the `formula` field to derive its value.
- * The formula DSL supports:
+ * ## Column default formulas
+ * Any column may have a `defaultFormula`. When a row is inserted the formula is
+ * evaluated and its result is stored as a plain value. The user can later edit
+ * that cell to override the stored value — the formula is not re-evaluated.
  *
- *   {colId}            Current row's value for that column
- *   ROW / ROW1         0-based or 1-based row index
- *   COUNT              Total number of rows
+ * `isNonEntry` is an independent toggle. When true the cell is read-only in the
+ * grid regardless of whether a defaultFormula is set.
+ *
+ * Columns with `isNonEntry=true` AND `defaultFormula` behave as pure computed
+ * columns (values are never stored, always derived from the formula at read time).
+ *
+ * ## Formula DSL
+ *
+ *   {colId} / {column name}   Current row value of a column
+ *   ROW / ROW1                0-based / 1-based row index
+ *   COUNT                     Total number of rows
+ *
+ *   — Row reference helpers —
+ *   PREV(col)                 Computed value of col in the previous row (0 if none)
+ *   PREV(col, default)        Same, with explicit fallback value
+ *   NEXT(col)                 Computed value of col in the next row (null if none)
+ *   NEXT(col, default)        Same, with explicit fallback
+ *   ROWVAL(col, n)            Computed value of col at absolute row index n
+ *   WINDOW(col, before)       Array of col values [ROW-before…ROW] — use with AVERAGE()/SUM()
+ *   WINDOW(col, before,after) Array of col values [ROW-before…ROW+after]
  *
  *   — Aggregates (all rows) —
- *   SUM(colId)         Sum of all values in a column
- *   AVG(colId)         Average of all values
- *   MIN(colId)         Minimum value
- *   MAX(colId)         Maximum value
+ *   SUM(col), AVG(col), MIN(col), MAX(col)
  *
- *   — Conditional aggregates (all rows, filtered) —
- *   SUMIF(sumCol, filterCol, op, filterVal)   Sum where condition is met
- *   COUNTIF(filterCol, op, filterVal)          Count where condition is met
- *   AVGIF(sumCol, filterCol, op, filterVal)   Average where condition is met
- *   MINIF(colId, filterCol, op, filterVal)    Min where condition is met
- *   MAXIF(colId, filterCol, op, filterVal)    Max where condition is met
- *   SUMIFS(sumCol, col1,op1,val1, ...)         Sum with multiple conditions
+ *   — Conditional aggregates —
+ *   SUMIF(sum, filter, op, val), COUNTIF, AVGIF, MINIF, MAXIF
+ *   SUMIFS(sum, col1,op1,val1,...), COUNTIFS, AVGIFS
  *
- *   — Running / position-aware (up to current row) —
- *   CUMSUM(colId)                             Running total up to current row
- *   RUNNINGIF(sumCol, filterCol, op, filterVal)  Running sum matching condition
- *   RUNNINGIFS(sumCol, col1,op1,val1, ...)       Running sum with multiple conditions
- *
- *   — Operators supported in op argument —
- *   "="  "<>"  ">"  "<"  ">="  "<="  "contains"  "startswith"  "notcontains"
- *
- *   — Arithmetic & logic —
- *   {price} * {qty}                   Arithmetic over column values
- *   IF({status} = "done", 1, 0)       Conditional expression (full formula syntax)
- *   {amount} * IF({type}="income",1,-1)   Combined formula and arithmetic
+ *   — Running aggregates (up to current row) —
+ *   RUNNINGIF(sum, filter, op, val)
+ *   RUNNINGIFS(sum, col1,op1,val1,...)
  *
  * ## Examples
- *   CUMSUM(amount)                    Running balance
- *   RUNNINGIF(amount, account, "=", {account})   Balance per account up to this row
- *   SUMIF(amount, category, "=", "Food")          Total food spending
- *   IF({qty} > 0, {price} * {qty}, 0)             Row total (zero if no qty)
- *   COUNTIF(status, "=", "done")                  Count completed items
+ *   {amount} + PREV(balance, 0)       Running balance (cumsum via row formula)
+ *   AVERAGE(WINDOW(amount, 2))        3-row sliding average
+ *   {price} * {qty}                   Row total
+ *   IF({qty} > 0, {price} * {qty}, 0) Row total with guard
  */
 
 import * as Y from "yjs";
-import { TableFormulaEvaluator } from './tableFormulaEval.js';
+import { TableFormulaEvaluator, matchCondition } from './tableFormulaEval.js';
 
 /**
  * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
@@ -136,7 +137,7 @@ export class TableStore {
      *   bold: boolean|null, italic: boolean|null, underline: boolean|null,
      *   fontSize: number|null, fontFamily: string|null,
      *   width: number|null,
-     *   isNonEntry: boolean, formula: string|null,
+     *   isNonEntry: boolean, defaultFormula: string|null,
      *   conditionalFormats: Array<{condition:string,value:any,style:{backgroundColor?:string,color?:string,bold?:boolean}}>
      * }>}
      */
@@ -180,44 +181,24 @@ export class TableStore {
     // components regardless of Svelte's cross-boundary reactive graph.
     sortedFilteredRows = $state([]);
 
-    #rebuildView() {
-        let result = [...this.rows].reverse();
+    // Set by checkOutOfOrder() after a cell edit — cleared by reorderRow/resetOrder.
+    outOfOrderRow = $state(null);
 
-        // ── Helper: apply a single filter entry ─────────────────────────────────
-        const applyFilter = (rows, colId, f) => rows.filter((row) => {
-            const v  = row[colId];
-            const fv = f.value;
-            switch (f.op) {
-                case "=":  return v == fv;
-                case "<>": return v != fv;
-                case ">": case "<": case ">=": case "<=": {
-                    const tryDate = typeof v === 'string' && typeof fv === 'string' && v.includes('-') && fv.includes('-');
-                    const vd = tryDate ? Date.parse(v) : NaN;
-                    const fd = tryDate ? Date.parse(fv) : NaN;
-                    const lv = (!isNaN(vd) && !isNaN(fd)) ? vd : Number(v);
-                    const lf = (!isNaN(vd) && !isNaN(fd)) ? fd : Number(fv);
-                    if (f.op === ">")  return lv > lf;
-                    if (f.op === "<")  return lv < lf;
-                    if (f.op === ">=") return lv >= lf;
-                    return lv <= lf;
-                }
-                case "contains":    return String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
-                case "notcontains": return !String(v ?? "").toLowerCase().includes(String(fv).toLowerCase());
-                case "startswith":  return String(v ?? "").toLowerCase().startsWith(String(fv).toLowerCase());
-                case "empty":    return v == null || v === "" || v === false;
-                case "notempty": return v != null && v !== "" && v !== false;
-                default: return true;
-            }
-        });
+    #rebuildView() {
+        // Use _pos (desc) as inherent order when any row carries it and no view sort overrides.
+        const hasPos = this.rows.some(r => r._pos != null);
+        let result = (hasPos && !this.sortColId)
+            ? [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0))
+            : [...this.rows].reverse();
 
         // 1. Apply transparent view-definition filters (views only, from persistedFilters)
         for (const [colId, f] of Object.entries(this.viewDefinitionFilters)) {
-            result = applyFilter(result, colId, f);
+            result = result.filter(row => matchCondition(row[colId], f.op, f.value));
         }
 
         // 2. Apply ad-hoc session filters on top
         for (const [colId, f] of Object.entries(this.filters)) {
-            result = applyFilter(result, colId, f);
+            result = result.filter(row => matchCondition(row[colId], f.op, f.value));
         }
 
         if (this.sortColId) {
@@ -236,12 +217,9 @@ export class TableStore {
         }
 
         this.sortedFilteredRows = result;
-        this.#eval = new TableFormulaEvaluator(
-            result,
-            this.columns,
-            this.sortColId === null || this.sortDir === 'desc',
-            this.#tableResolver,
-        );
+        const cumReverse = this.sortColId === null || this.sortDir === 'desc';
+        this.#eval = new TableFormulaEvaluator(result, this.columns, cumReverse, this.#tableResolver);
+        this.#allRowsEval = new TableFormulaEvaluator(this.rows, this.columns, cumReverse, this.#tableResolver);
     }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
@@ -259,9 +237,11 @@ export class TableStore {
     /** @type {((name: string) => import('./TableStore.svelte.js').TableStore|null)|null} */
     #tableResolver = null;
 
-    // ── Formula evaluator (recreated on every #rebuildView) ───────────────────
-    /** @type {TableFormulaEvaluator|null} */
+    // ── Formula evaluators (recreated on every #rebuildView) ─────────────────
+    /** @type {TableFormulaEvaluator|null} Evaluator for sortedFilteredRows (display API). */
     #eval = null;
+    /** @type {TableFormulaEvaluator|null} Evaluator for all rows (sheet formula API). */
+    #allRowsEval = null;
 
     /**
      * @param {import('yjs').Map<any>} tableYMap
@@ -278,30 +258,54 @@ export class TableStore {
     }
 
     /**
-     * One-time migration: converts old `columns` Y.Array<Y.Map> to
-     * `columnDefs` Y.Map<colId,Y.Map> + `columnOrder` Y.Array<string>.
-     * Safe to call on already-migrated docs (no-ops if new keys exist).
+     * One-time migrations:
+     * 1. Converts old `columns` Y.Array<Y.Map> to `columnDefs`/`columnOrder`.
+     * 2. Renames `formula` → `defaultFormula` on each column def (the old model
+     *    coupled formula with isNonEntry=true; the new model separates them).
      */
     #migrateColumnsIfNeeded() {
-        if (this.#tableYMap.has("columnDefs") || this.#tableYMap.has("columnOrder")) return;
-        const oldCols = this.#tableYMap.get("columns");
-        if (!oldCols) return;
-        this.#ydoc.transact(() => {
-            const defsMap = new Y.Map();
-            const orderArr = new Y.Array();
-            for (let i = 0; i < oldCols.length; i++) {
-                const old = oldCols.get(i);
-                const colId = old.get("id");
-                if (!colId) continue;
-                const cm = new Y.Map();
-                for (const [k, v] of old.entries()) cm.set(k, v);
-                defsMap.set(colId, cm);
-                orderArr.push([colId]);
+        // Migration 1: old flat columns array → columnDefs map + columnOrder array
+        if (!this.#tableYMap.has("columnDefs") && !this.#tableYMap.has("columnOrder")) {
+            const oldCols = this.#tableYMap.get("columns");
+            if (oldCols) {
+                this.#ydoc.transact(() => {
+                    const defsMap = new Y.Map();
+                    const orderArr = new Y.Array();
+                    for (let i = 0; i < oldCols.length; i++) {
+                        const old = oldCols.get(i);
+                        const colId = old.get("id");
+                        if (!colId) continue;
+                        const cm = new Y.Map();
+                        for (const [k, v] of old.entries()) cm.set(k, v);
+                        defsMap.set(colId, cm);
+                        orderArr.push([colId]);
+                    }
+                    this.#tableYMap.set("columnDefs", defsMap);
+                    this.#tableYMap.set("columnOrder", orderArr);
+                    this.#tableYMap.delete("columns");
+                });
             }
-            this.#tableYMap.set("columnDefs", defsMap);
-            this.#tableYMap.set("columnOrder", orderArr);
-            this.#tableYMap.delete("columns");
-        });
+        }
+
+        // Migration 2: rename `formula` → `defaultFormula` on each column def
+        const src = this.#sourceYMap ?? this.#tableYMap;
+        const defsMap = src.get("columnDefs");
+        if (defsMap) {
+            let needsMigration = false;
+            defsMap.forEach((cm) => {
+                if (cm && cm.has && cm.has("formula") && !cm.has("defaultFormula")) needsMigration = true;
+            });
+            if (needsMigration) {
+                this.#ydoc.transact(() => {
+                    defsMap.forEach((cm) => {
+                        if (!cm || !cm.has || !cm.has("formula") || cm.has("defaultFormula")) return;
+                        const f = cm.get("formula");
+                        if (f) cm.set("defaultFormula", f);
+                        cm.delete("formula");
+                    });
+                });
+            }
+        }
     }
 
     // ─── Yjs sync ────────────────────────────────────────────────────────────
@@ -405,7 +409,7 @@ export class TableStore {
                 fontSize: raw.fontSize ?? null,
                 fontFamily: raw.fontFamily ?? null,
                 isNonEntry: raw.isNonEntry ?? false,
-                formula: raw.formula ?? null,
+                defaultFormula: raw.defaultFormula ?? null,
                 conditionalFormats: Array.isArray(raw.conditionalFormats) ? raw.conditionalFormats : [],
             }];
         });
@@ -564,16 +568,42 @@ export class TableStore {
         const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
+        // Evaluate default formulas and merge with user-provided data.
+        // isNonEntry columns are never stored; defaultFormula (non-isNonEntry) cols
+        // get their formula result stored unless the user already provided a value.
+        const withDefaults = { ...rowData };
+        if (this.#eval) {
+            const computed = this.#eval.applyDefaultFormulas(rowData);
+            for (const [colId, val] of computed) {
+                const def = this.columns.find(c => c.id === colId);
+                if (!def || def.isNonEntry) continue; // isNonEntry: never store
+                if (withDefaults[colId] === undefined || withDefaults[colId] === null) {
+                    withDefaults[colId] = val;
+                }
+            }
+        }
+
         this.#ydoc.transact(() => {
             const yRow = new Y.Map();
-            // Only store user-entry columns (skip formula columns)
-            for (const [k, v] of Object.entries(rowData)) {
+            // Store all columns except isNonEntry (pure computed, never stored)
+            for (const [k, v] of Object.entries(withDefaults)) {
                 const colDef = this.columns.find(c => c.id === k);
-                if (colDef?.isNonEntry) continue; // don't store computed values
+                if (colDef?.isNonEntry) continue;
                 yRow.set(k, v);
             }
 
-            // Default: append to end (O(1)) - newest appears at display top
+            if (this.hasManualOrder) {
+                // _pos mode: always append to Y.Array, compute _pos for display position.
+                const newPos = this.insertSortColId
+                    ? this.#computeInsertPos(rowData[this.insertSortColId])
+                    : (Math.max(0, ...this.sortedFilteredRows.map(r => r._pos ?? 0)) + 1000);
+                yRow.set('_pos', newPos);
+                rowArr.push([yRow]);
+                return;
+            }
+
+            // Legacy mode (no _pos): use Y.Array insertion position.
+            // Default: append to end (O(1)) - newest appears at display top.
             let insertAt = rowArr.length;
 
             // If insertSort is configured, find position closest to display-top
@@ -584,27 +614,13 @@ export class TableStore {
                 const dir = this.insertSortDir === "desc" ? -1 : 1;
                 const newVal = rowData[colId];
 
-                // Scan from beginning (oldest/bottom) to find where new value fits.
-                // We want the highest index where sort order is maintained.
-                // For ascending: insert after all values <= newVal
-                // For descending: insert after all values >= newVal
                 for (let i = 0; i < rowArr.length; i++) {
                     const rv = rowArr.get(i)?.get?.(colId);
-                    const cmp = (() => {
-                        if (rv == null && newVal == null) return 0;
-                        if (rv == null) return 1;
-                        if (newVal == null) return -1;
-                        if (typeof rv === "number" && typeof newVal === "number")
-                            return rv - newVal;
-                        return String(rv).localeCompare(String(newVal));
-                    })();
-                    // For ascending (dir=1): stop when existing > new (cmp > 0)
-                    // For descending (dir=-1): stop when existing < new (cmp < 0, so dir*cmp > 0)
+                    const cmp = this.#cmpValues(rv, newVal);
                     if (dir * cmp > 0) {
                         insertAt = i;
                         break;
                     }
-                    // Otherwise, this position is valid, keep looking for a higher index
                 }
             }
 
@@ -653,6 +669,187 @@ export class TableStore {
         });
     }
 
+    // ─── Row ordering helpers (private) ──────────────────────────────────────
+
+    /** Generic value comparator used by insertRow and checkOutOfOrder. */
+    #cmpValues(a, b) {
+        if (a == null && b == null) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+        if (typeof a === "number" && typeof b === "number") return a - b;
+        return String(a).localeCompare(String(b));
+    }
+
+    /**
+     * Assign _pos to every row in the raw Y.Array based on current display order.
+     * Top display row (sortedFilteredRows[0]) gets the highest _pos.
+     * Must be called inside a Yjs transaction.
+     * @param {import('yjs').Array} rowArr
+     */
+    #initPos(rowArr) {
+        const n = this.sortedFilteredRows.length;
+        for (let di = 0; di < n; di++) {
+            const row = this.sortedFilteredRows[di];
+            const rawIndex = this.rows.findIndex(r => r === row);
+            if (rawIndex < 0) continue;
+            const yRow = rowArr.get(rawIndex);
+            if (yRow) yRow.set('_pos', (n - di) * 1000);
+        }
+    }
+
+    /**
+     * Write a new _pos to the row at displayIndex.
+     * @param {import('yjs').Array} rowArr
+     * @param {number} displayIndex
+     * @param {number} newPos
+     */
+    #setRowPos(rowArr, displayIndex, newPos) {
+        const row = this.sortedFilteredRows[displayIndex];
+        if (!row) return;
+        const rawIndex = this.rows.findIndex(r => r === row);
+        if (rawIndex < 0) return;
+        const yRow = rowArr.get(rawIndex);
+        if (yRow) yRow.set('_pos', newPos);
+    }
+
+    /**
+     * Compute a _pos value for a new row with the given insertSort column value.
+     * Walks sortedFilteredRows (desc _pos) to find the right slot.
+     * @param {any} newVal
+     * @returns {number}
+     */
+    #computeInsertPos(newVal) {
+        const colId = this.insertSortColId;
+        const dir = this.insertSortDir === "desc" ? -1 : 1;
+        const rows = this.sortedFilteredRows;
+        if (!rows.length) return 1000;
+
+        for (let i = 0; i < rows.length; i++) {
+            const rowVal = rows[i][colId];
+            // For asc (dir=1): stop at first row whose value < newVal → insert above it.
+            // For desc (dir=-1): stop at first row whose value > newVal → insert above it.
+            if (dir * this.#cmpValues(rowVal, newVal) < 0) {
+                const abovePos = i > 0 ? (rows[i - 1]._pos ?? 0) : null;
+                const belowPos = rows[i]._pos ?? 0;
+                return abovePos == null ? belowPos + 1000 : (abovePos + belowPos) / 2;
+            }
+        }
+        // Goes below all existing rows.
+        return Math.max(0, (rows[rows.length - 1]._pos ?? 1000) - 1000);
+    }
+
+    // ─── Row ordering (public) ────────────────────────────────────────────────
+
+    /**
+     * Move a row from one display index to another.
+     * Initialises _pos on all rows on the first call (opt-in to manual-order mode).
+     * @param {number} fromDisplayIndex
+     * @param {number} toDisplayIndex
+     */
+    reorderRow(fromDisplayIndex, toDisplayIndex) {
+        if (fromDisplayIndex === toDisplayIndex) return;
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return;
+
+        this.#ydoc.transact(() => {
+            if (!this.hasManualOrder) this.#initPos(rowArr);
+
+            // Build display list with the moved row removed to find its new neighbours.
+            const rows = this.sortedFilteredRows;
+            const filtered = rows.filter((_, i) => i !== fromDisplayIndex);
+
+            // Regardless of direction: in the filtered array, target neighbours are
+            // filtered[toDisplayIndex - 1] (above) and filtered[toDisplayIndex] (below).
+            const aboveIdx = toDisplayIndex - 1;
+            const belowIdx = toDisplayIndex;
+            const above = filtered[aboveIdx];
+            const below = filtered[belowIdx];
+
+            let newPos;
+            if (!above && below) {
+                newPos = (below._pos ?? 1000) + 1000;          // new top
+            } else if (above && !below) {
+                newPos = Math.max(0, (above._pos ?? 1000) - 1000); // new bottom
+            } else if (above && below) {
+                const ap = above._pos ?? 0;
+                const bp = below._pos ?? 0;
+                newPos = (ap + bp) / 2;
+                // Re-normalise if gap collapses (< 1 precision).
+                if (Math.abs(ap - bp) < 1) {
+                    const n = rows.length;
+                    for (let di = 0; di < n; di++) {
+                        const r = di === toDisplayIndex ? rows[fromDisplayIndex] : filtered[di < toDisplayIndex ? di : di - 1];
+                        const rawIdx = this.rows.findIndex(raw => raw === r);
+                        if (rawIdx < 0) continue;
+                        const yRow = rowArr.get(rawIdx);
+                        if (yRow) yRow.set('_pos', (n - di) * 1000);
+                    }
+                    return;
+                }
+            } else {
+                newPos = 1000; // single row
+            }
+
+            this.#setRowPos(rowArr, fromDisplayIndex, newPos);
+        });
+
+        this.outOfOrderRow = null;
+    }
+
+    /**
+     * Remove all _pos fields, reverting the table to newest-first inherent order.
+     */
+    resetOrder() {
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return;
+        this.#ydoc.transact(() => {
+            for (let i = 0; i < rowArr.length; i++) {
+                const yRow = rowArr.get(i);
+                if (yRow?.has?.('_pos')) yRow.delete('_pos');
+            }
+        });
+        this.outOfOrderRow = null;
+    }
+
+    /**
+     * Check whether the row at displayIndex is out of insertSort order after an edit.
+     * Returns null when the row is in order (or insertSort is not configured).
+     * Returns an object with placeInOrder() when the row should be moved.
+     * @param {number} displayIndex
+     * @returns {{ displayIndex: number, placeInOrder: () => void } | null}
+     */
+    checkOutOfOrder(displayIndex) {
+        if (!this.insertSortColId || !this.hasManualOrder) return null;
+        const colId = this.insertSortColId;
+        const dir = this.insertSortDir === "desc" ? -1 : 1;
+        const rows = this.sortedFilteredRows;
+        const val = rows[displayIndex]?.[colId];
+        const prevVal = displayIndex > 0 ? rows[displayIndex - 1]?.[colId] : null;
+        const nextVal = displayIndex < rows.length - 1 ? rows[displayIndex + 1]?.[colId] : null;
+
+        const prevOk = prevVal == null || dir * this.#cmpValues(prevVal, val) >= 0;
+        const nextOk = nextVal == null || dir * this.#cmpValues(val, nextVal) >= 0;
+        if (prevOk && nextOk) return null;
+
+        const result = {
+            displayIndex,
+            placeInOrder: () => {
+                const newPos = this.#computeInsertPos(val);
+                const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+                if (!rowArr) return;
+                this.#ydoc.transact(() => this.#setRowPos(rowArr, displayIndex, newPos));
+                this.outOfOrderRow = null;
+            },
+        };
+        this.outOfOrderRow = result;
+        return result;
+    }
+
+    /** True when any row carries a _pos field (manual-order mode is active). */
+    get hasManualOrder() {
+        return this.rows.some(r => r._pos != null);
+    }
+
     /**
      * Update a single cell in a display-indexed row.
      * @param {number} displayIndex
@@ -663,7 +860,7 @@ export class TableStore {
         const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
-        // Block updates to formula columns
+        // Block updates to non-entry columns (read-only toggle)
         const colDef = this.columns.find(c => c.id === colId);
         if (colDef?.isNonEntry) return;
 
@@ -721,15 +918,36 @@ export class TableStore {
     }
 
     /**
-     * Set or clear a column formula (makes it a computed non-entry column).
+     * Set or clear the default formula for a column.
+     * Setting a formula does NOT automatically set isNonEntry — use setColumnIsNonEntry
+     * separately if you want the column to be read-only.
      * @param {string} colId
      * @param {string|null} formula  null to clear
      */
+    setColumnDefaultFormula(colId, formula) {
+        this.updateColumnDef(colId, { defaultFormula: formula ?? null });
+    }
+
+    /**
+     * Set or clear the isNonEntry (read-only) flag for a column.
+     * @param {string} colId
+     * @param {boolean} isNonEntry
+     */
+    setColumnIsNonEntry(colId, isNonEntry) {
+        this.updateColumnDef(colId, { isNonEntry: !!isNonEntry });
+    }
+
+    /**
+     * @deprecated Use setColumnDefaultFormula / setColumnIsNonEntry instead.
+     * Kept for backward compatibility with any callers that haven't migrated.
+     * @param {string} colId
+     * @param {string|null} formula
+     */
     setColumnFormula(colId, formula) {
         if (formula) {
-            this.updateColumnDef(colId, { isNonEntry: true, formula });
+            this.updateColumnDef(colId, { defaultFormula: formula });
         } else {
-            this.updateColumnDef(colId, { isNonEntry: false, formula: null });
+            this.updateColumnDef(colId, { defaultFormula: null });
         }
     }
 
@@ -767,7 +985,7 @@ export class TableStore {
             cm.set("type", colDef.type ?? "text");
             cm.set("required", colDef.required ?? false);
             cm.set("isNonEntry", colDef.isNonEntry ?? false);
-            if (colDef.formula) cm.set("formula", colDef.formula);
+            if (colDef.defaultFormula) cm.set("defaultFormula", colDef.defaultFormula);
             if (colDef.hAlign) cm.set("hAlign", colDef.hAlign);
 
             defsMap.set(colId, cm);
@@ -955,8 +1173,10 @@ export class TableStore {
     commitEntry() {
         const errors = {};
         for (const col of this.columns) {
-            if (col.isNonEntry) continue; // skip formula columns
-            if (col.required && (this.entryBuffer[col.id] === undefined || this.entryBuffer[col.id] === "")) {
+            if (col.isNonEntry) continue; // read-only columns never require entry
+            // For required columns with a defaultFormula, the formula will fill the value
+            // at insert time, so only error if there's no formula and no user value.
+            if (col.required && !col.defaultFormula && (this.entryBuffer[col.id] === undefined || this.entryBuffer[col.id] === "")) {
                 errors[col.id] = "Required";
             }
         }
@@ -1141,7 +1361,7 @@ export class TableStore {
             const result = this.#sheetFormulaEval(raw);
             return result ?? raw;
         }
-        return raw;
+        return raw ?? null;
     }
 
     getColumn(colId) {
@@ -1152,11 +1372,32 @@ export class TableStore {
         return this.sortedFilteredRows.length;
     }
 
+    // ── Full (unfiltered) row access — used by TABLE_* sheet formula functions ─
+    // Filters are a display-time concept. Sheet formulas reference a table by name
+    // and must always see all rows regardless of what filter any session has active.
+
+    getFullRowCount() {
+        return this.rows.length;
+    }
+
+    getFullValue(rawIndex, colId) {
+        const raw = this.#allRowsEval
+            ? this.#allRowsEval.getValue(rawIndex, colId)
+            : this.rows[rawIndex]?.[colId];
+        if (typeof raw === 'string' && raw.startsWith('=') && this.#sheetFormulaEval) {
+            return this.#sheetFormulaEval(raw) ?? raw;
+        }
+        return raw ?? null;
+    }
+
+    getFullColumn(colId) {
+        return this.rows.map((_, i) => this.getFullValue(i, colId));
+    }
+
     getCumulativeSum(colId, upToDisplayIndex) {
         return this.#eval ? this.#eval.getCumulativeSum(colId, upToDisplayIndex) : 0;
     }
 
-    // kept for callers that do `store.evaluateFormula(formula, rowIndex)` directly
     evaluateFormula(formula, rowIndex) {
         return this.#eval ? this.#eval.evaluateFormula(formula, rowIndex) : null;
     }
@@ -1191,7 +1432,8 @@ export class TableStore {
      */
     getRawValue(displayIndex, colId) {
         const def = this.columns.find(c => c.id === colId);
-        if (def?.isNonEntry && def.formula) return null; // computed column has no editable value
+        // isNonEntry columns are never stored — no raw value to edit
+        if (def?.isNonEntry) return null;
         return this.sortedFilteredRows[displayIndex]?.[colId] ?? null;
     }
 

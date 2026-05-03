@@ -9,9 +9,8 @@
  *   // Returns '#LOADING' the first time, triggers async load, then recalculates.
  */
 
-import { parseFormula } from '../../formulas/parser.js';
-import { evaluate } from '../../formulas/evaluator.js';
 import { FormulaError } from '../../formulas/functions.js';
+import { makeSheetCellEvaluator } from './sheetCellEval.js';
 
 /** Sentinel returned while a doc is being loaded. */
 export const LOADING_VALUE = '#LOADING';
@@ -197,57 +196,15 @@ export class ExternalDocManager {
         const cells = targetSheet.get('cells');
         if (!cells) return FormulaError.REF;
 
-        // Build result 2D array
+        const { evalCell } = makeSheetCellEvaluator(cells, null);
         const result = [];
         for (let r = startRow; r <= endRow; r++) {
             const row = [];
             for (let c = startCol; c <= endCol; c++) {
-                row.push(this.#evalCell(cells, r, c, new Set()));
+                row.push(evalCell(r, c, new Set()));
             }
             result.push(row);
         }
         return result;
-    }
-
-    /**
-     * Recursively evaluate a cell value in an external doc's cells Y.Map.
-     * Follows formula chains with cycle detection.
-     * @param {any} cells  Y.Map<"row,col", Y.Map>
-     * @param {number} r
-     * @param {number} c
-     * @param {Set<string>} visited
-     * @returns {any}
-     */
-    #evalCell(cells, r, c, visited) {
-        const k = `${r},${c}`;
-        if (visited.has(k)) return FormulaError.REF; // circular ref guard
-        const cm = cells.get(k);
-        if (!cm) return null;
-        const v = cm.get?.('v');
-        if (v === undefined || v === null) return null;
-
-        if (typeof v === 'string' && v.startsWith('=')) {
-            const nextVisited = new Set(visited);
-            nextVisited.add(k);
-            try {
-                const ast = parseFormula(v);
-                if (!ast) return null;
-                return evaluate(
-                    ast,
-                    (gr, gc) => this.#evalCell(cells, gr, gc, nextVisited),
-                    {},
-                    null,
-                    null
-                );
-            } catch {
-                return FormulaError.ERROR;
-            }
-        }
-
-        // Coerce numeric strings
-        if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) {
-            return Number(v);
-        }
-        return v;
     }
 }

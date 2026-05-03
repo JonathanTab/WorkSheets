@@ -191,6 +191,23 @@
     // null | { srcRange: CellRange, fillRange: CellRange|null, direction: string|null }
     let fillHandleDrag = $state(null);
 
+    // ─── Table row drag / grip hover ─────────────────────────────────────────
+    let tableGripHoverRow = $state(-1); // grid row whose grip is hovered (-1 = none)
+    // null | { table, fromDisplayIndex, fromGridRow, ghostY, dropGridRow, dropDisplayIndex }
+    let tableRowDrag = $state(null);
+    // Width/left of the ghost bar in container coords (derived when drag is active)
+    let tableRowDragGeom = $derived.by(() => {
+        if (!tableRowDrag || !virtualizer || !renderPlan) return null;
+        const { table } = tableRowDrag;
+        const left = cellContainerLeft(table.startCol);
+        const right = cellContainerLeft(table.endCol) + virtualizer.getColWidth(table.endCol);
+        return { left, width: Math.max(0, right - left) };
+    });
+
+    // ─── Out-of-order notice ──────────────────────────────────────────────────
+    // { table, displayIndex, gridRow, placeInOrder: fn } | null
+    let outOfOrderNotice = $state(null);
+
     // ─── Overlay state ────────────────────────────────────────────────────────
     /** @type {{ table:any, colId:string|null, anchorRow:number, anchorCol:number }|null} */
     let activeFilterPopover = $state(null);
@@ -898,6 +915,47 @@
                     frozenHeight,
                     scrollLeft,
                 });
+            }
+        }
+
+        // Grip icons for reorderable table rows (post-paint, direct 2d context)
+        paintTableGripIcons(scrollLeft, scrollTop, frozenHeight, bodyH);
+    }
+
+    function paintTableGripIcons(scrollLeft, scrollTop, frozenHeight, bodyH) {
+        if (!canvasEl || !virtualizer || !renderContext?.tableManager) return;
+        const ctx = canvasEl.getContext('2d');
+        if (!ctx) return;
+
+        for (const table of renderContext.tableManager.stores.values()) {
+            if (table.isSourceOnly || table.sortColId) continue;
+
+            const tableCanvasX = virtualizer.colMetrics.offsetOf(table.startCol) - scrollLeft;
+            const colW = virtualizer.getColWidth(table.startCol);
+            if (tableCanvasX > virtualizer.containerWidth - HEADER_WIDTH || tableCanvasX + colW < 0) continue;
+
+            const firstDataRow = table.startRow + 2;
+            const rowCount = table.sortedFilteredRows.length;
+
+            for (let di = 0; di < rowCount; di++) {
+                const gridRow = firstDataRow + di;
+                const rowCanvasY = virtualizer.rowMetrics.offsetOf(gridRow) - scrollTop + frozenHeight;
+                const rowH = virtualizer.getRowHeight(gridRow);
+                if (rowCanvasY + rowH < frozenHeight || rowCanvasY > frozenHeight + bodyH) continue;
+
+                const isHovered = tableGripHoverRow === gridRow;
+                const isDragging = tableRowDrag?.fromGridRow === gridRow;
+                ctx.fillStyle = isDragging ? 'rgba(59,130,246,0.8)'
+                    : isHovered ? 'rgba(100,116,139,0.65)'
+                    : 'rgba(148,163,184,0.3)';
+
+                const cx = tableCanvasX + 7;
+                const cy = rowCanvasY + rowH / 2;
+                for (let r = 0; r < 3; r++) {
+                    for (let c = 0; c < 2; c++) {
+                        ctx.fillRect(Math.round(cx + c * 4 - 2), Math.round(cy + r * 4 - 4), 2, 2);
+                    }
+                }
             }
         }
     }
@@ -1976,6 +2034,29 @@
         const hit = doHitTest(localX, localY);
         currentCursor = hitTestEngine.getCursor(hit);
 
+        // Detect grip-handle hover: leftmost 14 px of a reorderable TABLE_DATA row.
+        if (hit.region === 'cell' && hit.row >= 0 && hit.col >= 0) {
+            const cellType = renderContext?.getCellType(hit.row, hit.col);
+            if (cellType === CELL_TYPE.TABLE_DATA) {
+                const info = renderContext?.tableManager?.getCellInfo(hit.row, hit.col);
+                if (info?.table && !info.table.sortColId && hit.col === info.table.startCol) {
+                    const xInCell = localX - cellContainerLeft(hit.col);
+                    if (xInCell >= 0 && xInCell < 14) {
+                        currentCursor = tableRowDrag ? 'grabbing' : 'grab';
+                        if (tableGripHoverRow !== hit.row) {
+                            tableGripHoverRow = hit.row;
+                            untrack(() => renderScheduler?.invalidateAll());
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        if (tableGripHoverRow !== -1) {
+            tableGripHoverRow = -1;
+            untrack(() => renderScheduler?.invalidateAll());
+        }
+
         if (isFormulaEditMode && isSelectingRange && hit.region === "cell") {
             rangeEndCell = { row: hit.row, col: hit.col };
             return;
@@ -2209,6 +2290,89 @@
         touchScrolled = false;
     }
 
+    // ─── Out-of-order helper ──────────────────────────────────────────────────
+    // Called after any table data cell edit — shows the reorder notice if the
+    // edited column is the insertSortColId and the row is now out of position.
+    function checkOrderAfterUpdate(info, gridRow) {
+        if (!info?.table || !info.colDef) return;
+        if (info.colDef.id !== info.table.insertSortColId) return;
+        const ooo = info.table.checkOutOfOrder(info.dataIndex);
+        if (ooo) outOfOrderNotice = { table: info.table, displayIndex: info.dataIndex, gridRow, placeInOrder: ooo.placeInOrder };
+        else outOfOrderNotice = null;
+    }
+
+    /**
+     * Single source of truth for mutating a TABLE_DATA cell.
+     * Parses the value, writes to the table store, notifies the formula engine,
+     * checks insertion-sort order, and schedules a repaint.
+     */
+    function commitTableDataCell(info, row, col, value) {
+        if (!info?.table || !info.colDef || info.colDef.isNonEntry) return;
+        const parsed = typeof value === 'string' && value.startsWith('=')
+            ? value
+            : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+        info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+        spreadsheetSession.formulaEngine?.cellValueChanged(row, col);
+        spreadsheetSession.formulaEngine?.recalculateDirty();
+        checkOrderAfterUpdate(info, row);
+        untrack(() => renderScheduler?.invalidateAll());
+    }
+
+    /**
+     * Single source of truth for mutating a TABLE_ENTRY buffer cell.
+     * Parses the value, writes to the entry buffer, and schedules a repaint.
+     */
+    function commitTableEntryCell(info, value) {
+        if (!info?.table || !info.colDef || info.colDef.isNonEntry) return;
+        const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+        info.table.setEntryValue(info.colDef.id, parsed);
+        untrack(() => renderScheduler?.invalidateAll());
+    }
+
+    // ─── Table row drag ───────────────────────────────────────────────────────
+
+    function startTableRowDrag(e, table, displayIndex, gridRow) {
+        tableRowDrag = { table, fromDisplayIndex: displayIndex, fromGridRow: gridRow,
+                         ghostY: e.clientY, dropGridRow: gridRow, dropDisplayIndex: displayIndex };
+        outOfOrderNotice = null;
+
+        function onMove(ev) {
+            if (!tableRowDrag || !virtualizer) return;
+            const { localY } = getLocalCoords(ev);
+            // Find which TABLE_DATA row the cursor is over within the same table
+            const hit = doHitTest(cellContainerLeft(tableRowDrag.table.startCol) + 7, localY);
+            let dropGridRow = tableRowDrag.dropGridRow;
+            let dropDisplayIndex = tableRowDrag.dropDisplayIndex;
+            if (hit.region === 'cell' && hit.row >= 0) {
+                const hitType = renderContext?.getCellType(hit.row, tableRowDrag.table.startCol);
+                if (hitType === CELL_TYPE.TABLE_DATA) {
+                    const hitInfo = renderContext?.tableManager?.getCellInfo(hit.row, tableRowDrag.table.startCol);
+                    if (hitInfo?.table === tableRowDrag.table) {
+                        dropGridRow = hit.row;
+                        dropDisplayIndex = hitInfo.dataIndex;
+                    }
+                }
+            }
+            tableRowDrag = { ...tableRowDrag, ghostY: ev.clientY, dropGridRow, dropDisplayIndex };
+        }
+
+        function onUp() {
+            if (tableRowDrag) {
+                const { table: t, fromDisplayIndex, dropDisplayIndex } = tableRowDrag;
+                if (fromDisplayIndex !== dropDisplayIndex) {
+                    t.reorderRow(fromDisplayIndex, dropDisplayIndex);
+                    untrack(() => renderScheduler?.invalidateAll());
+                }
+                tableRowDrag = null;
+            }
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
     // ─── Header event handlers ────────────────────────────────────────────────
     function handleCornerCellMouseDown() {
         selectionState.selectAll();
@@ -2348,8 +2512,7 @@
                 if (info.colDef?.type === "checkbox") {
                     if (isCheckboxClick(row, col, e)) {
                         const cur = info.table.entryBuffer?.[info.colDef.id];
-                        info.table.setEntryValue(info.colDef.id, !cur);
-                        untrack(() => renderScheduler?.invalidateAll());
+                        commitTableEntryCell(info, !cur);
                     }
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
@@ -2363,10 +2526,9 @@
                     const cellWidth = virtualizer.getColWidth(col);
                     const relX = Math.max(0, e.clientX - containerEl.getBoundingClientRect().left - cellLeft);
                     const newVal = Math.max(1, Math.min(max, Math.ceil(relX / (cellWidth / max))));
-                    info.table.setEntryValue(info.colDef.id, newVal);
+                    commitTableEntryCell(info, newVal);
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
-                    untrack(() => renderScheduler?.invalidateAll());
                     return;
                 }
                 // Formula columns: redirect selection to first editable column
@@ -2389,17 +2551,24 @@
         // ── TABLE_DATA: special cell type clicks ─────────────────────────────
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
+
+            // ── Drag handle: leftmost 14 px of the table's first column ─────
+            if (info?.table && !info.table.sortColId && col === info.table.startCol) {
+                const cellLeft = cellContainerLeft(col);
+                const { localX } = getLocalCoords(e);
+                if (localX - cellLeft >= 0 && localX - cellLeft < 14) {
+                    e.preventDefault();
+                    startTableRowDrag(e, info.table, info.dataIndex, row);
+                    return;
+                }
+            }
+
             if (info?.table && info.colDef) {
                 const colType = info.colDef.type;
                 if (colType === "checkbox") {
                     if (isCheckboxClick(row, col, e)) {
-                        const cur = info.table.getValue(
-                            info.dataIndex,
-                            info.colDef.id,
-                        );
-                        info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
-                        // Force canvas repaint for table cell data changes
-                        untrack(() => renderScheduler?.invalidateAll());
+                        const cur = info.table.getValue(info.dataIndex, info.colDef.id);
+                        commitTableDataCell(info, row, col, !cur);
                     }
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
@@ -2409,23 +2578,9 @@
                     const cellLeft = cellContainerLeft(col);
                     const cellWidth = virtualizer.getColWidth(col);
                     const max = 5;
-                    const relX = Math.max(
-                        0,
-                        e.clientX -
-                            containerEl.getBoundingClientRect().left -
-                            cellLeft,
-                    );
-                    const newVal = Math.max(
-                        1,
-                        Math.min(max, Math.ceil(relX / (cellWidth / max))),
-                    );
-                    info.table.updateCell(
-                        info.dataIndex,
-                        info.colDef.id,
-                        newVal,
-                    );
-                    // Force canvas repaint for table cell data changes
-                    untrack(() => renderScheduler?.invalidateAll());
+                    const relX = Math.max(0, e.clientX - containerEl.getBoundingClientRect().left - cellLeft);
+                    const newVal = Math.max(1, Math.min(max, Math.ceil(relX / (cellWidth / max))));
+                    commitTableDataCell(info, row, col, newVal);
                     selectionState.startSelection(row, col);
                     selectionState.endSelection();
                     return;
@@ -2732,7 +2887,6 @@
                 if (ddOptions.length > 0) {
                     dropdownFilter = seedText ?? "";
                     const capturedInfo = info;
-                    const capturedCt = ct;
                     const capturedCellType = tblCellType;
                     focusedDropdownCell = {
                         row, col,
@@ -2742,13 +2896,11 @@
                         width: virtualizer.getColWidth(col),
                         height: virtualizer.getRowHeight(row),
                         onCommit: (opt) => {
-                            const parsed = CellTypeRegistry.parseInput(capturedCt ?? { type: 'text' }, opt);
                             if (capturedCellType === CELL_TYPE.TABLE_ENTRY) {
-                                capturedInfo.table.setEntryValue(capturedInfo.colDef.id, parsed);
+                                commitTableEntryCell(capturedInfo, opt);
                             } else {
-                                capturedInfo.table.updateCell(capturedInfo.dataIndex, capturedInfo.colDef.id, parsed);
+                                commitTableDataCell(capturedInfo, row, col, opt);
                             }
-                            untrack(() => renderScheduler?.invalidateAll());
                         },
                     };
                     return;
@@ -2893,42 +3045,16 @@
 
     /**
      * Persist a cell edit to the correct store (table or sheet).
-     * Handles TABLE_DATA → table.updateCell, TABLE_ENTRY → table.setEntryValue,
-     * TABLE_HEADER → table.renameColumn, regular cells → persistEditOnSheet.
-     * @param {string|null} sheetId
-     * @param {{ row:number, col:number, value:string }} payload
+     * Routes to commitTableDataCell, commitTableEntryCell, renameColumn, or persistEditOnSheet.
      */
-    function persistCellEdit(sheetId, payload) {
-        const { row, col, value } = payload;
+    function persistCellEdit(sheetId, row, col, value) {
         const cellType = renderContext?.getCellType(row, col);
-
         if (cellType === CELL_TYPE.TABLE_DATA) {
-            const info = renderContext?.tableManager?.getCellInfo(row, col);
-            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                // Store formula strings as-is; they are evaluated on-demand via the
-                // table store's injected sheet evaluator.  For non-formula values,
-                // parse according to the column type.
-                const parsed = typeof value === 'string' && value.startsWith('=')
-                    ? value
-                    : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                // Notify dependent sheet formulas that this cell's value changed.
-                spreadsheetSession.formulaEngine?.cellValueChanged(row, col);
-                spreadsheetSession.formulaEngine?.recalculateDirty();
-                untrack(() => renderScheduler?.invalidateAll());
-            }
+            commitTableDataCell(renderContext.tableManager.getCellInfo(row, col), row, col, value);
             return;
         }
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
-            const info = renderContext?.tableManager?.getCellInfo(row, col);
-            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const parsed = CellTypeRegistry.parseInput(
-                    { type: info.colDef.type },
-                    value,
-                );
-                info.table.setEntryValue(info.colDef.id, parsed);
-                untrack(() => renderScheduler?.invalidateAll());
-            }
+            commitTableEntryCell(renderContext.tableManager.getCellInfo(row, col), value);
             return;
         }
         if (cellType === CELL_TYPE.TABLE_HEADER) {
@@ -2939,7 +3065,7 @@
             }
             return;
         }
-        persistEditOnSheet(sheetId, payload);
+        persistEditOnSheet(sheetId, { row, col, value });
     }
 
     /**
@@ -3112,106 +3238,31 @@
     }
 
     function commitCurrentEdit() {
-        const editRow = editSessionState.cell?.row;
-        const editCol = editSessionState.cell?.col;
         const editingSheetId = editSessionState.editingSheetId;
-        const editCellType =
-            editRow != null
-                ? renderContext?.getCellType(editRow, editCol)
-                : null;
         const payload = editSessionState.commit();
         if (!payload) return;
-
-        if (
-            editCellType === CELL_TYPE.TABLE_DATA ||
-            editCellType === CELL_TYPE.TABLE_ENTRY ||
-            editCellType === CELL_TYPE.TABLE_HEADER
-        ) {
-            persistCellEdit(editingSheetId, payload);
-            return;
-        }
-
-        persistEditOnSheet(editingSheetId, payload);
-        // Return to origin sheet if we navigated away for cross-sheet ref picking
-        if (
-            editingSheetId &&
-            editingSheetId !== spreadsheetSession.activeSheetId
-        ) {
+        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value);
+        if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
             spreadsheetSession.setActiveSheet(editingSheetId);
-        }
     }
 
     function commitEditAndMove(dRow, dCol) {
         const editRow = editSessionState.cell?.row;
         const editCol = editSessionState.cell?.col;
         const editingSheetId = editSessionState.editingSheetId;
-        const editCellType =
-            editRow != null
-                ? renderContext?.getCellType(editRow, editCol)
-                : null;
+        const editCellType = editRow != null ? renderContext?.getCellType(editRow, editCol) : null;
         const payload = editSessionState.commit();
         if (!payload) return;
 
-        if (editCellType === CELL_TYPE.TABLE_ENTRY) {
-            const info = renderContext?.tableManager?.getCellInfo(
-                payload.row,
-                payload.col,
-            );
-            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const parsed = CellTypeRegistry.parseInput(
-                    { type: info.colDef.type },
-                    payload.value,
-                );
-                info.table.setEntryValue(info.colDef.id, parsed);
-                untrack(() => renderScheduler?.invalidateAll());
-            }
-            if (info?.table) {
-                navigateEntryRow(
-                    payload.row,
-                    payload.col,
-                    dRow,
-                    dCol,
-                    info.table,
-                );
-            }
-            return;
-        }
-        if (editCellType === CELL_TYPE.TABLE_DATA) {
-            const info = renderContext?.tableManager?.getCellInfo(
-                payload.row,
-                payload.col,
-            );
-            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const parsed = CellTypeRegistry.parseInput(
-                    { type: info.colDef.type },
-                    payload.value,
-                );
-                info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                untrack(() => renderScheduler?.invalidateAll());
-            }
-            selectionState.moveSelection(dRow, dCol);
-            scrollToAnchor();
-            return;
-        }
-        if (editCellType === CELL_TYPE.TABLE_HEADER) {
-            const info = renderContext?.tableManager?.getCellInfo(
-                payload.row,
-                payload.col,
-            );
-            if (info?.table && info.colDef) {
-                const newName = String(payload.value ?? "").trim();
-                if (newName) info.table.renameColumn(info.colDef.id, newName);
-            }
-            selectionState.moveSelection(dRow, dCol);
-            scrollToAnchor();
-            return;
-        }
+        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value);
 
-        persistEditOnSheet(editingSheetId, payload);
-        if (
-            editingSheetId &&
-            editingSheetId !== spreadsheetSession.activeSheetId
-        ) {
+        if (editCellType === CELL_TYPE.TABLE_ENTRY) {
+            const info = renderContext?.tableManager?.getCellInfo(payload.row, payload.col);
+            if (info?.table) navigateEntryRow(payload.row, payload.col, dRow, dCol, info.table);
+        } else if (editCellType === CELL_TYPE.TABLE_DATA || editCellType === CELL_TYPE.TABLE_HEADER) {
+            selectionState.moveSelection(dRow, dCol);
+            scrollToAnchor();
+        } else if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId) {
             spreadsheetSession.setActiveSheet(editingSheetId);
         } else {
             selectionState.moveSelection(dRow, dCol);
@@ -3221,78 +3272,22 @@
 
     function commitEdit(value = undefined) {
         if (value !== undefined && editSessionState.isEditing) {
-            // Rich text / contenteditable passes value (HTML string or plain string) directly
+            // Pickers and rich-text editors pass an explicit value; session state
+            // may hold stale/async content so we bypass editSessionState.commit().
             const editRow = editSessionState.cell.row;
             const editCol = editSessionState.cell.col;
             const editingSheetId = editSessionState.editingSheetId;
             const editCellType = renderContext?.getCellType(editRow, editCol);
+            // Capture entry-row ref before cancel (for rich-text Enter navigation).
+            const entryInfo = editCellType === CELL_TYPE.TABLE_ENTRY
+                ? renderContext?.tableManager?.getCellInfo(editRow, editCol)
+                : null;
             editSessionState.cancel();
-
-            if (editCellType === CELL_TYPE.TABLE_ENTRY) {
-                const info = renderContext?.tableManager?.getCellInfo(
-                    editRow,
-                    editCol,
-                );
-                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                    const parsed = CellTypeRegistry.parseInput(
-                        { type: info.colDef.type },
-                        value,
-                    );
-                    info.table.setEntryValue(info.colDef.id, parsed);
-                    untrack(() => renderScheduler?.invalidateAll());
-                    // Store for onTabCommit navigation (rich-text Enter path)
-                    if (info.table)
-                        lastTableEntryEditInfo = {
-                            row: editRow,
-                            col: editCol,
-                            table: info.table,
-                        };
-                }
-                return;
-            }
-            if (editCellType === CELL_TYPE.TABLE_DATA) {
-                const info = renderContext?.tableManager?.getCellInfo(
-                    editRow,
-                    editCol,
-                );
-                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                    const parsed = CellTypeRegistry.parseInput(
-                        { type: info.colDef.type },
-                        value,
-                    );
-                    info.table.updateCell(
-                        info.dataIndex,
-                        info.colDef.id,
-                        parsed,
-                    );
-                    untrack(() => renderScheduler?.invalidateAll());
-                }
-                return;
-            }
-            if (editCellType === CELL_TYPE.TABLE_HEADER) {
-                const info = renderContext?.tableManager?.getCellInfo(
-                    editRow,
-                    editCol,
-                );
-                if (info?.table && info.colDef) {
-                    const newName = String(value ?? "").trim();
-                    if (newName)
-                        info.table.renameColumn(info.colDef.id, newName);
-                }
-                return;
-            }
-
-            persistEditOnSheet(editingSheetId, {
-                row: editRow,
-                col: editCol,
-                value,
-            });
-            if (
-                editingSheetId &&
-                editingSheetId !== spreadsheetSession.activeSheetId
-            ) {
+            persistCellEdit(editingSheetId, editRow, editCol, value);
+            if (entryInfo?.table)
+                lastTableEntryEditInfo = { row: editRow, col: editCol, table: entryInfo.table };
+            if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
                 spreadsheetSession.setActiveSheet(editingSheetId);
-            }
         } else {
             commitCurrentEdit();
         }
@@ -5497,6 +5492,29 @@
                 ></div>
             {/if}
 
+            <!-- Table row drag: ghost bar + drop line -->
+            {#if tableRowDrag && tableRowDragGeom && virtualizer && containerEl}
+                {@const geom = tableRowDragGeom}
+                {@const rowH = virtualizer.getRowHeight(tableRowDrag.fromGridRow)}
+                {@const ghostTop = tableRowDrag.ghostY - containerEl.getBoundingClientRect().top - rowH / 2}
+                {@const dropTop = cellContainerTop(tableRowDrag.dropGridRow) + (tableRowDrag.dropDisplayIndex >= tableRowDrag.fromDisplayIndex ? virtualizer.getRowHeight(tableRowDrag.dropGridRow) : 0)}
+                <!-- Ghost row -->
+                <div class="trow-drag-ghost" style="left:{geom.left}px; top:{ghostTop}px; width:{geom.width}px; height:{rowH}px;"></div>
+                <!-- Drop indicator line -->
+                <div class="trow-drag-drop-line" style="left:{geom.left}px; top:{dropTop}px; width:{geom.width}px;"></div>
+            {/if}
+
+            <!-- Out-of-order notice -->
+            {#if outOfOrderNotice && virtualizer}
+                {@const noticeTop = cellContainerTop(outOfOrderNotice.gridRow) + virtualizer.getRowHeight(outOfOrderNotice.gridRow) + 2}
+                {@const noticeLeft = outOfOrderNotice.table ? cellContainerLeft(outOfOrderNotice.table.startCol) : HEADER_WIDTH}
+                <div class="ooo-notice" style="left:{noticeLeft}px; top:{noticeTop}px;">
+                    Row out of order —
+                    <button class="ooo-btn" onclick={() => { outOfOrderNotice?.placeInOrder(); outOfOrderNotice = null; untrack(() => renderScheduler?.invalidateAll()); }}>Place in order</button>
+                    <button class="ooo-dismiss" onclick={() => outOfOrderNotice = null}>Keep here</button>
+                </div>
+            {/if}
+
             <!-- Mobile selection handles -->
             {#if mobileState.isMobile && !editSessionState.isEditing}
                 <SelectionHandles
@@ -6096,6 +6114,67 @@
         box-sizing: border-box;
         will-change: transform;
     }
+
+    /* ── Table row drag ghost + drop line ── */
+    .trow-drag-ghost {
+        position: absolute;
+        pointer-events: none;
+        z-index: 18;
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        border-radius: 2px;
+        box-sizing: border-box;
+    }
+
+    .trow-drag-drop-line {
+        position: absolute;
+        height: 2px;
+        background: #3b82f6;
+        pointer-events: none;
+        z-index: 19;
+        border-radius: 1px;
+        box-shadow: 0 0 4px rgba(59, 130, 246, 0.6);
+    }
+
+    /* ── Out-of-order notice ── */
+    .ooo-notice {
+        position: absolute;
+        z-index: 22;
+        background: #fef9c3;
+        border: 1px solid #fde68a;
+        border-radius: 5px;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: #92400e;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        white-space: nowrap;
+        pointer-events: all;
+    }
+
+    .ooo-btn {
+        font-size: 10px;
+        padding: 2px 7px;
+        border: 1px solid #f59e0b;
+        border-radius: 3px;
+        background: #fff;
+        color: #92400e;
+        cursor: pointer;
+        font-weight: 600;
+    }
+    .ooo-btn:hover { background: #fef3c7; }
+
+    .ooo-dismiss {
+        font-size: 10px;
+        background: none;
+        border: none;
+        color: #b45309;
+        cursor: pointer;
+        padding: 0;
+    }
+    .ooo-dismiss:hover { text-decoration: underline; }
 
     /* ── Frozen-pane divider lines ── */
     .frozen-divider {

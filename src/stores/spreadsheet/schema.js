@@ -202,7 +202,7 @@ export function createTableColumnYMap(options = {}) {
     col.set('sortOrder', options.sortOrder ?? 0);
     col.set('conditionalFormats', new Y.Array());
     col.set('width', options.width ?? null);
-    col.set('formula', options.formula ?? null); // computed column formula (uses $row)
+    col.set('defaultFormula', options.defaultFormula ?? options.formula ?? null);
 
     if (options.dataValidation) {
         const dv = new Y.Map();

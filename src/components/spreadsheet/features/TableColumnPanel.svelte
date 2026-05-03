@@ -3,11 +3,12 @@
      * TableColumnPanel - Column configuration panel.
      *
      * Covers table-specific column settings:
-     *   - Computed (formula) column with full formula reference and live preview
+     *   - Default formula: evaluated at insert time; result stored. User can override.
+     *   - Read-only toggle (isNonEntry): prevents editing regardless of formula.
      *   - Delete column
      *
-     * Type, alignment, colors, borders, and font formatting are applied via the
-     * formatting toolbar when a table header or data cell is selected.
+     * When both defaultFormula and isNonEntry are set, the column acts as a pure
+     * computed column (always derived, never stored).
      */
 
     import {
@@ -22,39 +23,37 @@
         table,
         colId,
         onClose,
-        inline = false,  // when true, always render inline (no BottomSheet wrapping)
+        inline = false,
     } = $props();
     let panelEl = $state(null);
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
 
-    let localIsFormula = $state(false);
     let localFormula = $state("");
+    let localIsNonEntry = $state(false);
     let formulaInputEl = $state(null);
     let showRef = $state(false);
 
     $effect(() => {
         if (col) {
-            localIsFormula = col.isNonEntry ?? false;
-            localFormula = col.formula ?? "";
+            localFormula = col.defaultFormula ?? "";
+            localIsNonEntry = col.isNonEntry ?? false;
         }
     });
 
     function applyFormula() {
         if (!table || !colId) return;
-        if (localIsFormula && localFormula.trim()) {
-            table.setColumnFormula(colId, localFormula.trim());
-        } else if (!localIsFormula) {
-            table.setColumnFormula(colId, null);
-        }
+        table.setColumnDefaultFormula(colId, localFormula.trim() || null);
     }
 
-    function toggleFormula(val) {
-        localIsFormula = val;
-        if (!val) {
-            localFormula = "";
-            table?.setColumnFormula(colId, null);
-        }
+    function clearFormula() {
+        localFormula = "";
+        table?.setColumnDefaultFormula(colId, null);
+    }
+
+    function handleIsNonEntryChange() {
+        if (!table || !colId) return;
+        table.setColumnIsNonEntry(colId, localIsNonEntry);
     }
 
     function handleDelete() {
@@ -71,7 +70,6 @@
         }
     }
 
-    /** Insert text at the cursor position in the formula input */
     function insertAtCursor(text) {
         if (!formulaInputEl) {
             localFormula += text;
@@ -80,29 +78,27 @@
         const start = formulaInputEl.selectionStart ?? localFormula.length;
         const end = formulaInputEl.selectionEnd ?? localFormula.length;
         localFormula = localFormula.slice(0, start) + text + localFormula.slice(end);
-        // Move cursor after inserted text
         setTimeout(() => {
             formulaInputEl?.focus();
             formulaInputEl?.setSelectionRange(start + text.length, start + text.length);
         }, 0);
     }
 
-    /** Non-formula columns available for reference */
-    let inputCols = $derived(
-        (table?.columns ?? []).filter(c => !c.isNonEntry && c.id !== colId)
+    /** All columns except this one (for chip insertion) */
+    let otherCols = $derived(
+        (table?.columns ?? []).filter(c => c.id !== colId)
     );
 
     /** Live preview: compute formula for first 3 rows */
     let previewRows = $derived.by(() => {
-        if (!localIsFormula || !localFormula.trim() || !table) return [];
+        if (!localFormula.trim() || !table) return [];
         const count = Math.min(3, table.sortedFilteredRows.length);
         const results = [];
+        const labelCol = otherCols[0];
         for (let i = 0; i < count; i++) {
             try {
                 const val = table.evaluateFormula(localFormula.trim(), i);
                 const row = table.sortedFilteredRows[i];
-                // Show a label column (first non-formula col) if available
-                const labelCol = inputCols[0];
                 const label = labelCol ? String(row?.[labelCol.id] ?? '').slice(0, 20) : `Row ${i + 1}`;
                 results.push({ label, value: val });
             } catch {
@@ -112,11 +108,12 @@
         return results;
     });
 
+    let hasFormula = $derived(!!localFormula.trim());
     let canDelete = $derived(table ? table.columns.length > 1 : false);
 
     const REF_SECTIONS = [
         {
-            title: "Row values  (use column name or ID)",
+            title: "Current row values",
             items: [
                 { syntax: "{colName}", desc: "Value from this row's column" },
                 { syntax: "ROW", desc: "0-based row index" },
@@ -125,25 +122,31 @@
             ]
         },
         {
-            title: "Running totals (up to this row)",
+            title: "Row reference helpers",
             items: [
-                { syntax: "CUMSUM(colName)", desc: "Running sum" },
+                { syntax: "PREV(col)", desc: "Computed value in previous row (0 if none)" },
+                { syntax: "PREV(col, default)", desc: "Computed value in previous row with fallback" },
+                { syntax: "NEXT(col)", desc: "Computed value in next row (null if none)" },
+                { syntax: "ROWVAL(col, n)", desc: "Computed value of col at row index n" },
+                { syntax: "WINDOW(col, before)", desc: "Array of col values [ROW-before…ROW]" },
+                { syntax: "WINDOW(col, before, after)", desc: "Array of col values [ROW-before…ROW+after]" },
+            ]
+        },
+        {
+            title: "Running aggregates (up to this row)",
+            items: [
                 { syntax: 'RUNNINGIF(sum, filter, "op", val)', desc: "Running sum where condition met" },
                 { syntax: 'RUNNINGIFS(sum, col1,"op1",val1, ...)', desc: "Running sum, multiple conditions" },
             ]
         },
         {
-            title: "Aggregates (all rows)",
+            title: "Whole-column aggregates",
             items: [
-                { syntax: "SUM(colName)", desc: "Total sum" },
-                { syntax: "AVG(colName)", desc: "Average" },
-                { syntax: "MIN(col) / MAX(col)", desc: "Min or max value" },
+                { syntax: "SUM(col), AVG(col), MIN(col), MAX(col)", desc: "Total / average / min / max" },
                 { syntax: 'SUMIF(sum, filter, "op", val)', desc: "Sum where condition met" },
                 { syntax: 'SUMIFS(sum, col1,"op1",val1, ...)', desc: "Sum, multiple conditions" },
                 { syntax: 'COUNTIF(filter, "op", val)', desc: "Count where condition met" },
                 { syntax: 'AVGIF(sum, filter, "op", val)', desc: "Average where condition met" },
-                { syntax: 'MINIF(col, filter, "op", val)', desc: "Min where condition met" },
-                { syntax: 'MAXIF(col, filter, "op", val)', desc: "Max where condition met" },
             ]
         },
         {
@@ -170,57 +173,45 @@
 
 {#snippet colPanelContent()}
     <div class="panel-body">
-        <!-- Computed column -->
+        <!-- Default formula section -->
         <section class="section">
-            <div class="section-row" style="margin-bottom:6px;">
-                <label class="toggle-label">
-                    <div>
-                        <div class="section-label" style="margin:0;">Computed column</div>
-                        <div class="section-sublabel">Value is calculated, not entered</div>
-                    </div>
-                    <div class="toggle-wrapper">
-                        <input
-                            type="checkbox"
-                            class="toggle-input"
-                            bind:checked={localIsFormula}
-                            onchange={() => toggleFormula(localIsFormula)}
-                        />
-                        <div class="toggle-track" class:on={localIsFormula}></div>
-                    </div>
-                </label>
+            <div class="section-label">Default Formula</div>
+            <div class="section-sublabel" style="margin-bottom:6px;">
+                Evaluated when a row is inserted. Value is stored — can be overridden by editing.
             </div>
 
-            {#if localIsFormula}
-                <!-- Formula input -->
-                <div class="formula-input-row">
-                    <span class="fx-badge">fx</span>
-                    <input
-                        bind:this={formulaInputEl}
-                        class="formula-input"
-                        type="text"
-                        bind:value={localFormula}
-                        placeholder="e.g. CUMSUM(amount) or {'{price}'}*{'{qty}'}"
-                        onblur={applyFormula}
-                        onkeydown={(e) => {
-                            if (e.key === "Enter") { e.stopPropagation(); applyFormula(); }
-                        }}
-                    />
-                </div>
+            <div class="formula-input-row">
+                <span class="fx-badge">fx</span>
+                <input
+                    bind:this={formulaInputEl}
+                    class="formula-input"
+                    type="text"
+                    bind:value={localFormula}
+                    placeholder="e.g. {'{amount}'} + PREV(balance, 0)"
+                    onblur={applyFormula}
+                    onkeydown={(e) => {
+                        if (e.key === "Enter") { e.stopPropagation(); applyFormula(); }
+                    }}
+                />
+                {#if hasFormula}
+                    <button class="clear-formula-btn" onclick={clearFormula} title="Clear formula">×</button>
+                {/if}
+            </div>
 
-                <!-- Formula hint (always visible) -->
+            {#if hasFormula}
                 <div class="formula-quick-hint">
-                    Use <code>{'{'}colName{'}'}</code> for row value · <code>CUMSUM(col)</code> running total · <code>IF(cond, t, f)</code>
+                    Use <code>{'{'}colName{'}'}</code> · <code>PREV(col)</code> prior row · <code>WINDOW(col, n)</code> sliding range
                 </div>
 
                 <!-- Column chips -->
-                {#if inputCols.length > 0}
+                {#if otherCols.length > 0}
                     <div class="chips-label">Insert column reference:</div>
                     <div class="chips-row">
-                        {#each inputCols as c}
+                        {#each otherCols as c}
                             <button
                                 class="col-chip"
                                 onclick={() => insertAtCursor(`{${c.name}}`)}
-                                title="Insert column '{c.name}'"
+                                title="Insert {c.name}"
                             >{c.name}</button>
                         {/each}
                     </div>
@@ -264,12 +255,16 @@
                         <div class="ref-examples">
                             <div class="ref-section-title">Examples</div>
                             <div class="ref-example">
-                                <code>RUNNINGIF(amount, account, "=", {"{account}"})</code>
-                                <span class="ref-desc">Running balance per account</span>
+                                <code>{'{amount}'} + PREV(balance, 0)</code>
+                                <span class="ref-desc">Running balance (cumulative sum)</span>
                             </div>
                             <div class="ref-example">
-                                <code>SUMIFS(cost, payee, "=", "Amazon", date, "&gt;=", "2024-01-01")</code>
-                                <span class="ref-desc">Amazon spending in 2024</span>
+                                <code>AVERAGE(WINDOW(amount, 2))</code>
+                                <span class="ref-desc">3-row sliding average</span>
+                            </div>
+                            <div class="ref-example">
+                                <code>RUNNINGIF(amount, account, "=", {"{account}"})</code>
+                                <span class="ref-desc">Running balance per account</span>
                             </div>
                             <div class="ref-example">
                                 <code>IF({"{type}"} = "income", {"{amount}"}, -{"{amount}"})</code>
@@ -278,6 +273,30 @@
                         </div>
                     </div>
                 {/if}
+            {/if}
+        </section>
+
+        <!-- Read-only toggle -->
+        <section class="section">
+            <label class="toggle-label">
+                <div>
+                    <div class="section-label" style="margin:0;">Read-only</div>
+                    <div class="section-sublabel">Prevent direct editing of this column</div>
+                </div>
+                <div class="toggle-wrapper">
+                    <input
+                        type="checkbox"
+                        class="toggle-input"
+                        bind:checked={localIsNonEntry}
+                        onchange={handleIsNonEntryChange}
+                    />
+                    <div class="toggle-track" class:on={localIsNonEntry}></div>
+                </div>
+            </label>
+            {#if localIsNonEntry && hasFormula}
+                <div class="computed-note">
+                    With both default formula and read-only set, this column is always computed and never stored.
+                </div>
             {/if}
         </section>
     </div>
@@ -321,7 +340,7 @@
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        max-height: min(78vh, 620px);
+        max-height: min(78vh, 660px);
     }
 
     .panel-header {
@@ -367,25 +386,29 @@
     }
     .section:last-child { border-bottom: none; }
 
-    .section-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-
     .section-label {
         font-size: 10px;
         font-weight: 600;
         color: #64748b;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
     }
 
     .section-sublabel {
         font-size: 10px;
         color: #94a3b8;
         margin-top: 1px;
+    }
+
+    .computed-note {
+        font-size: 9px;
+        color: #7c3aed;
+        background: #f5f3ff;
+        border-radius: 3px;
+        padding: 3px 6px;
+        margin-top: 6px;
+        line-height: 1.4;
     }
 
     .toggle-label {
@@ -458,7 +481,18 @@
 
     .formula-input:focus { border-color: #94a3b8; }
 
-    /* ── Formula quick hint ───────────────────────────────────────── */
+    .clear-formula-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #94a3b8;
+        font-size: 14px;
+        padding: 0 2px;
+        flex-shrink: 0;
+        line-height: 1;
+    }
+    .clear-formula-btn:hover { color: #475569; }
+
     .formula-quick-hint {
         font-size: 9px;
         color: #94a3b8;
@@ -475,7 +509,6 @@
         border-radius: 2px;
     }
 
-    /* ── Column chips ─────────────────────────────────────────────── */
     .chips-label {
         font-size: 9px;
         color: #94a3b8;
@@ -506,7 +539,6 @@
 
     .col-chip:hover { background: #e2e8f0; border-color: #94a3b8; color: #1e293b; }
 
-    /* ── Live preview ──────────────────────────────────────────────── */
     .preview-label {
         font-size: 9px;
         font-weight: 600;
@@ -553,7 +585,6 @@
 
     .preview-val.preview-null { color: #94a3b8; font-weight: 400; }
 
-    /* ── Formula reference ─────────────────────────────────────────── */
     .ref-toggle { margin-bottom: 2px; }
 
     .ref-toggle-btn {
@@ -643,7 +674,6 @@
     .delete-btn:hover:not(:disabled) { background: #fef2f2; }
     .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    /* Mobile: larger controls inside BottomSheet */
     @media (max-width: 600px) {
         .section { padding: 12px 16px; }
         .section-label { font-size: 11px; margin-bottom: 8px; }

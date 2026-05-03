@@ -20,7 +20,7 @@
 
 import * as Y from "yjs";
 import { TableStore } from "./TableStore.svelte.js";
-import { matchCondition } from "./tableFormulaEval.js";
+import { buildTableFunctions } from "./tableFormulaEval.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 import { perfMon } from "../perf/PerfMonitor.js";
 
@@ -353,7 +353,7 @@ export class TableManager {
      *
      * @param {{ name?: string, startRow: number, startCol: number,
      *           columns: Array<{id:string, name:string, type?:string, required?:boolean,
-     *                           hAlign?:string, isNonEntry?:boolean, formula?:string}>,
+     *                           hAlign?:string, isNonEntry?:boolean, defaultFormula?:string}>,
      *           sheetId?: string }} opts
      * @returns {{ sourceId: string, viewId: string }}
      */
@@ -383,7 +383,7 @@ export class TableManager {
                 cm.set("required", c.required ?? false);
                 if (c.hAlign)      cm.set("hAlign", c.hAlign);
                 if (c.isNonEntry)  cm.set("isNonEntry", true);
-                if (c.formula)     cm.set("formula", c.formula);
+                if (c.defaultFormula) cm.set("defaultFormula", c.defaultFormula);
                 defsMap.set(c.id, cm);
                 orderArr.push([c.id]);
             }
@@ -480,273 +480,9 @@ export class TableManager {
      */
     registerFunctions(formulaEngine, session) {
         const byName = (name) => this.getTableByName(name) ?? session?.getCrossSheetTable(name) ?? null;
-
-        // ── Single-cell access ─────────────────────────────────────────────────
-        // TABLE_GET(tableName, rowIndex, colId) → value at display index
-        formulaEngine.registerFunction("TABLE_GET", (tableName, rowIndex, colId) => {
-            const t = byName(tableName);
-            if (!t) return null;
-            return t.getValue(Number(rowIndex), t.resolveColId(String(colId))) ?? null;
-        });
-
-        // ── Column access ─────────────────────────────────────────────────────
-        // TABLE_COL(tableName, colId) → flat array of all values
-        formulaEngine.registerFunction("TABLE_COL", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return [];
-            return t.getColumn(t.resolveColId(String(colId)));
-        });
-
-        // ── Row count ─────────────────────────────────────────────────────────
-        // TABLE_COUNT(tableName) → number of rows
-        formulaEngine.registerFunction("TABLE_COUNT", (tableName) => {
-            const t = byName(tableName);
-            return t ? t.getRowCount() : 0;
-        });
-
-        // ── Simple aggregates ─────────────────────────────────────────────────
-        // TABLE_SUM(tableName, colId) → sum of all values
-        formulaEngine.registerFunction("TABLE_SUM", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            return t.getColumn(t.resolveColId(String(colId))).reduce((acc, v) => acc + (Number(v) || 0), 0);
-        });
-
-        // TABLE_AVG(tableName, colId) → average
-        formulaEngine.registerFunction("TABLE_AVG", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
-            return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : 0;
-        });
-
-        // TABLE_MIN(tableName, colId) → minimum
-        formulaEngine.registerFunction("TABLE_MIN", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
-            return vals.length ? Math.min(...vals) : 0;
-        });
-
-        // TABLE_MAX(tableName, colId) → maximum
-        formulaEngine.registerFunction("TABLE_MAX", (tableName, colId) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const vals = t.getColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
-            return vals.length ? Math.max(...vals) : 0;
-        });
-
-        // ── Running / cumulative ───────────────────────────────────────────────
-        // TABLE_CUMSUM(tableName, colId, upToIndex) → cumulative sum
-        formulaEngine.registerFunction("TABLE_CUMSUM", (tableName, colId, upToIndex) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            return t.getCumulativeSum(t.resolveColId(String(colId)), Number(upToIndex));
-        });
-
-        // ── Conditional aggregates ────────────────────────────────────────────
-        // All conditional functions use t.getValue(i, colId) so that computed
-        // (formula) columns are correctly evaluated rather than returning null.
-
-        // TABLE_SUMIF(tableName, sumColId, filterColId, op, filterValue) → conditional sum
-        formulaEngine.registerFunction("TABLE_SUMIF", (tableName, sumColId, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const sId = t.resolveColId(String(sumColId));
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            let sum = 0;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue))
-                    sum += Number(t.getValue(i, sId)) || 0;
-            }
-            return sum;
-        });
-
-        // TABLE_SUMIFS(tableName, sumColId, col1, op1, val1, ...) → multi-condition sum
-        formulaEngine.registerFunction("TABLE_SUMIFS", (tableName, sumColId, ...triplets) => {
-            const t = byName(tableName);
-            if (!t || triplets.length < 3) return 0;
-            const sId = t.resolveColId(String(sumColId));
-            const conds = [];
-            for (let i = 0; i + 2 < triplets.length; i += 3)
-                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            const n = t.getRowCount();
-            let sum = 0;
-            for (let i = 0; i < n; i++) {
-                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val)))
-                    sum += Number(t.getValue(i, sId)) || 0;
-            }
-            return sum;
-        });
-
-        // TABLE_COUNTIF(tableName, filterColId, op, filterValue) → conditional count
-        formulaEngine.registerFunction("TABLE_COUNTIF", (tableName, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            let count = 0;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) count++;
-            }
-            return count;
-        });
-
-        // TABLE_COUNTIFS(tableName, col1, op1, val1, ...) → multi-condition count
-        formulaEngine.registerFunction("TABLE_COUNTIFS", (tableName, ...triplets) => {
-            const t = byName(tableName);
-            if (!t || triplets.length < 3) return 0;
-            const conds = [];
-            for (let i = 0; i + 2 < triplets.length; i += 3)
-                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            const n = t.getRowCount();
-            let count = 0;
-            for (let i = 0; i < n; i++) {
-                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) count++;
-            }
-            return count;
-        });
-
-        // TABLE_AVGIF(tableName, sumColId, filterColId, op, filterValue) → conditional average
-        formulaEngine.registerFunction("TABLE_AVGIF", (tableName, sumColId, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const sId = t.resolveColId(String(sumColId));
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            let sum = 0, count = 0;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
-                    sum += Number(t.getValue(i, sId)) || 0;
-                    count++;
-                }
-            }
-            return count ? sum / count : 0;
-        });
-
-        // TABLE_MINIF(tableName, colId, filterColId, op, filterValue) → conditional min
-        formulaEngine.registerFunction("TABLE_MINIF", (tableName, colId, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const cId = t.resolveColId(String(colId));
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            let min = Infinity;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
-                    const v = Number(t.getValue(i, cId));
-                    if (!isNaN(v) && v < min) min = v;
-                }
-            }
-            return isFinite(min) ? min : 0;
-        });
-
-        // TABLE_MAXIF(tableName, colId, filterColId, op, filterValue) → conditional max
-        formulaEngine.registerFunction("TABLE_MAXIF", (tableName, colId, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const cId = t.resolveColId(String(colId));
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            let max = -Infinity;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue)) {
-                    const v = Number(t.getValue(i, cId));
-                    if (!isNaN(v) && v > max) max = v;
-                }
-            }
-            return isFinite(max) ? max : 0;
-        });
-
-        // TABLE_FILTER (legacy — use TABLE_COUNTIF instead)
-        // TABLE_FILTER(tableName, colId, op, value) → count of matching rows
-        formulaEngine.registerFunction("TABLE_FILTER", (tableName, colId, op, value) => {
-            const t = byName(tableName);
-            if (!t) return 0;
-            const cId = t.resolveColId(String(colId));
-            const n = t.getRowCount();
-            let count = 0;
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, cId), String(op), value)) count++;
-            }
-            return count;
-        });
-
-        // ── Array-returning queries ────────────────────────────────────────────
-
-        // TABLE_FILTERCOL(tableName, colId, filterColId, op, filterValue)
-        // → flat array of values from colId for rows matching the condition.
-        // Example: =SUM(TABLE_FILTERCOL("Sales", "amount", "region", "=", "West"))
-        formulaEngine.registerFunction("TABLE_FILTERCOL", (tableName, colId, filterColId, op, filterValue) => {
-            const t = byName(tableName);
-            if (!t) return [];
-            const cId = t.resolveColId(String(colId));
-            const fId = t.resolveColId(String(filterColId));
-            const n = t.getRowCount();
-            const result = [];
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, fId), String(op), filterValue))
-                    result.push(t.getValue(i, cId) ?? null);
-            }
-            return result;
-        });
-
-        // TABLE_FILTERCOLIFS(tableName, colId, col1, op1, val1, col2, op2, val2, ...)
-        // → flat array of values from colId for rows matching ALL conditions.
-        // Example: =AVERAGE(TABLE_FILTERCOLIFS("Sales","amount","region","=","West","year","=",2024))
-        formulaEngine.registerFunction("TABLE_FILTERCOLIFS", (tableName, colId, ...triplets) => {
-            const t = byName(tableName);
-            if (!t || triplets.length < 3) return [];
-            const cId = t.resolveColId(String(colId));
-            const conds = [];
-            for (let i = 0; i + 2 < triplets.length; i += 3)
-                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            const n = t.getRowCount();
-            const result = [];
-            for (let i = 0; i < n; i++) {
-                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val)))
-                    result.push(t.getValue(i, cId) ?? null);
-            }
-            return result;
-        });
-
-        // TABLE_LOOKUP(tableName, lookupColId, lookupValue, returnColId)
-        // → value from returnColId in the first row where lookupColId equals lookupValue.
-        // Returns #N/A if no match.
-        // Example: =TABLE_LOOKUP("Products", "sku", A1, "price")
-        formulaEngine.registerFunction("TABLE_LOOKUP", (tableName, lookupColId, lookupValue, returnColId) => {
-            const t = byName(tableName);
-            if (!t) return '#N/A';
-            const lId = t.resolveColId(String(lookupColId));
-            const rId = t.resolveColId(String(returnColId));
-            const n = t.getRowCount();
-            for (let i = 0; i < n; i++) {
-                if (matchCondition(t.getValue(i, lId), '=', lookupValue))
-                    return t.getValue(i, rId) ?? null;
-            }
-            return '#N/A';
-        });
-
-        // TABLE_AVGIFS(tableName, sumColId, col1, op1, val1, ...) → conditional average
-        // Example: =TABLE_AVGIFS("Sales", "amount", "region", "=", "West", "year", "=", 2024)
-        formulaEngine.registerFunction("TABLE_AVGIFS", (tableName, sumColId, ...triplets) => {
-            const t = byName(tableName);
-            if (!t || triplets.length < 3) return 0;
-            const sId = t.resolveColId(String(sumColId));
-            const conds = [];
-            for (let i = 0; i + 2 < triplets.length; i += 3)
-                conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-            const n = t.getRowCount();
-            let sum = 0, count = 0;
-            for (let i = 0; i < n; i++) {
-                if (conds.every(c => matchCondition(t.getValue(i, c.col), c.op, c.val))) {
-                    sum += Number(t.getValue(i, sId)) || 0;
-                    count++;
-                }
-            }
-            return count ? sum / count : 0;
-        });
+        for (const [name, fn] of buildTableFunctions(byName)) {
+            formulaEngine.registerFunction(name, fn);
+        }
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────

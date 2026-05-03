@@ -45,12 +45,17 @@ tableYMap {
 
 Each **column definition** Y.Map:
 ```
-{ id, name, type, typeConfig (JSON string), required, isNonEntry, formula,
+{ id, name, type, typeConfig (JSON string), required,
+  isNonEntry, defaultFormula,
   hAlign, textColor, bgColor, width, bold, italic, underline, fontSize,
   fontFamily, conditionalFormats (JSON string) }
 ```
 
-Formula (computed) columns: `isNonEntry: true` + `formula: string`. Their values are evaluated at read time by `TableFormulaEvaluator`; they are **not stored** in `rows`.
+**`defaultFormula`** (optional): A formula string evaluated when a row is inserted. The result is stored as a plain value in the row. The user can edit the cell later to override the stored value — the formula is *not* re-evaluated. Supports the full table formula DSL including `PREV`, `NEXT`, `ROWVAL`, `WINDOW` row-reference helpers and all aggregates.
+
+**`isNonEntry`** (optional, default false): When true the cell is read-only in the grid. Independent of `defaultFormula`. When both are set, the column behaves as a pure computed column — formula values are always derived at read time and never stored.
+
+**Migration**: Old `formula` field (the previous computed-column mechanism which tied `isNonEntry=true` + `formula` together) is automatically renamed to `defaultFormula` by `#migrateColumnsIfNeeded` on first load.
 
 ### View Y.Map
 
@@ -140,30 +145,46 @@ Pure JS, no Svelte runes. Importable in Node.js (used by both browser and API se
 
 **Constructor:** `TableFormulaEvaluator(rows, columns, cumReverse, tableResolver = null)`
 
-`tableResolver` is a `(name: string) => TableStore | null` callback. When provided, the evaluator builds a `customFunctions` Map of all `TABLE_*` functions and passes it to the formula engine, enabling cross-table lookups inside computed column formulas.
+On construction the evaluator:
+1. Builds a dependency graph from each column's `defaultFormula` (or `formula` for `isNonEntry` columns) using `{colRef}` extraction.
+2. Topologically sorts columns using Kahn's algorithm. Cyclic columns are detected and produce `#CYCLE`.
+3. Walks all rows in order, evaluating each column in topo order and caching results in a 2-D `computed[rowIndex][colId]` grid. `PREV`/`NEXT`/`ROWVAL` read from this cache, so cross-row references always see freshly-computed values rather than raw stored data.
 
-**Formula DSL (same-table, substituted before formula eval):**
+**Formula DSL:**
 
 | Token / function | Meaning |
 |---|---|
-| `{colId}` / `{column name}` | Current row value |
+| `{colId}` / `{column name}` | Current row computed value |
 | `ROW` / `ROW1` | 0-based / 1-based row index |
 | `COUNT` | Total row count |
+| `PREV(col)` | Computed value of col in previous row (0 if none) |
+| `PREV(col, default)` | Same with explicit fallback |
+| `NEXT(col)` | Computed value of col in next row (null if none) |
+| `NEXT(col, default)` | Same with explicit fallback |
+| `ROWVAL(col, n)` | Computed value of col at absolute row index n |
+| `WINDOW(col, before)` | Array of col values `[ROW-before…ROW]` — use with `AVERAGE()`, `SUM()` etc. |
+| `WINDOW(col, before, after)` | Array of col values `[ROW-before…ROW+after]` |
 | `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)` | Whole-column aggregates |
 | `SUMIF(sum, filter, op, val)` | Conditional aggregate |
 | `SUMIFS(sum, col1,op1,val1,...)` | Multi-condition aggregate |
 | `COUNTIF`, `AVGIF`, `MINIF`, `MAXIF` | Conditional variants |
-| `CUMSUM(col)` | Running total up to current row |
-| `RUNNINGIF(sum, filter, op, val)` | Running conditional sum |
+| `RUNNINGIF(sum, filter, op, val)` | Running conditional sum up to current row |
 | `RUNNINGIFS(...)` | Running multi-condition sum |
+
+**Examples:**
+- `{amount} + PREV(balance, 0)` — cumulative running balance (replaces old `CUMSUM`)
+- `AVERAGE(WINDOW(amount, 2))` — 3-row sliding average
+- `{price} * {qty}` — row total
+
+**`applyDefaultFormulas(entryData)`** — called by `TableStore.insertRow`. Returns a `Map<colId, value>` of formula results for a hypothetical new row, evaluated in topo order using `entryData` as the row context. The caller merges these values into the Yjs row, storing each formula result as a plain value.
+
+**`getValue(rowIndex, colId)`** — for `isNonEntry` columns always returns the computed cache value; for `defaultFormula` (non-`isNonEntry`) columns returns the stored value if present (user override), else the computed cache value; for regular columns returns the stored value.
 
 **Cross-table functions (available when `tableResolver` is set):**
 
-All `TABLE_*` functions registered in `TableManager` are also available in computed column formulas with identical signatures. They are passed as `customFunctions` to the sheet formula engine, so they compose with standard functions (e.g. `ROUND(TABLE_SUM('Ledger','Amount'), 2)`). A leading `=` on the stored formula string is stripped automatically.
+All `TABLE_*` functions are built as `customFunctions` and passed to the sheet formula engine, so they compose with standard functions. A leading `=` on formula strings is stripped automatically.
 
-After DSL substitution, the expression — including any `TABLE_*` calls and standard sheet functions — is evaluated by the sheet formula parser/evaluator with the full `customFunctions` map.
-
-`getCumulativeSum` uses a lazy `Float64Array` cache, direction-aware via `cumReverse`.
+`getCumulativeSum(colId, upToIndex)` — still available for use by `TABLE_CUMSUM` in cross-table contexts; sums computed values via `getValue`.
 
 ---
 
@@ -447,3 +468,9 @@ Yjs observer fires on rowArr (TableStore + TableManager + DocumentTableRegistry)
 **Source tables don't have grid positions.** `startRow`/`startCol` are only meaningful on views. `isSourceOnly` tables are skipped in `#rebuildRowIndex`, `maxInlineTableRow`, and `isTableShadowCell`.
 
 **API server uses `TableFormulaEvaluator` directly.** No Svelte, no reactive state. `getTableRowsWithFormulas` manually applies sort and creates the evaluator, matching browser behavior. Callers get `?formulas=0` to opt into raw rows if needed.
+
+**Default formula vs. isNonEntry are independent.** A column with `defaultFormula` only gets its formula evaluated at insert time — the result is stored as a plain value, and the user can edit it at any time. `isNonEntry` is a separate read-only toggle. Only when both are set does the column act as a "pure computed" column (always derived, never stored).
+
+**Dependency resolution ensures correct order.** The evaluator topologically sorts columns before evaluating each row. Columns that use `PREV`/`NEXT`/`ROWVAL`/`WINDOW` are evaluated row-by-row sequentially so that cross-row references always read freshly-computed values from the 2-D cache. Cycles produce `#CYCLE` rather than crashing.
+
+**`PREV(col, 0)` replaces `CUMSUM(col)`.** The old opaque `CUMSUM` helper is removed. Users write `{amount} + PREV(balance, 0)` which is explicit, overrideable per-row, and follows the same evaluation rules as every other formula. Old docs/formulas using `CUMSUM` inside a column default formula will continue to work via the migration path but new formulas should use `PREV`.

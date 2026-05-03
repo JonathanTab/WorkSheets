@@ -123,6 +123,14 @@
             </div>
         {/if}
 
+        <!-- Manual order indicator -->
+        {#if table?.hasManualOrder}
+            <div class="manual-order-row">
+                <span class="manual-order-badge">⇕ Custom order</span>
+                <button class="reset-order-btn" onclick={() => table?.resetOrder()} title="Revert to newest-first order">Reset order</button>
+            </div>
+        {/if}
+
         <!-- Position -->
         <div class="pos-display">
             <span class="pos-text">
@@ -345,6 +353,33 @@
         cursor: pointer; text-align: left; padding: 1px 0;
     }
     .clear-adhoc-btn:hover { text-decoration: underline; }
+
+    /* Manual order */
+    .manual-order-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 7px;
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        border-radius: 4px;
+    }
+    .manual-order-badge {
+        flex: 1;
+        font-size: 10px;
+        font-weight: 600;
+        color: #166534;
+    }
+    .reset-order-btn {
+        font-size: 9px;
+        background: none;
+        border: 1px solid #86efac;
+        border-radius: 3px;
+        padding: 1px 6px;
+        color: #166534;
+        cursor: pointer;
+    }
+    .reset-order-btn:hover { background: #dcfce7; }
 
     /* Position */
     .pos-display { display: flex; align-items: center; gap: 8px; }
