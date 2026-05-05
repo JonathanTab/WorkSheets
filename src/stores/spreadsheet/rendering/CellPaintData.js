@@ -66,6 +66,27 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  */
 
 /**
+ * Apply a parsed table formatting object (per-row or per-cell) onto a CellPaintItem.
+ * Uses the toolbar/sheet naming convention (color, backgroundColor, horizontalAlign…).
+ * @param {import('./CellPaintData.js').CellPaintItem} item
+ * @param {Object|null|undefined} fmt
+ */
+function applyTableFmt(item, fmt) {
+    if (!fmt) return;
+    if (fmt.backgroundColor != null) item.bgColor = fmt.backgroundColor;
+    if (fmt.color != null) item.textColor = fmt.color;
+    if (fmt.bold != null) item.bold = fmt.bold;
+    if (fmt.italic != null) item.italic = fmt.italic;
+    if (fmt.underline != null) item.underline = fmt.underline;
+    if (fmt.strikethrough != null) item.strikethrough = fmt.strikethrough;
+    if (fmt.fontSize != null) item.fontSize = fmt.fontSize;
+    if (fmt.fontFamily != null) item.fontFamily = fmt.fontFamily;
+    if (fmt.horizontalAlign != null) item.hAlign = fmt.horizontalAlign;
+    if (fmt.verticalAlign != null) item.vAlign = fmt.verticalAlign;
+    if (fmt.wrapText != null) item.wrapText = fmt.wrapText;
+}
+
+/**
  * Match a conditional format condition.
  */
 function matchesCondition(v, cond, threshold) {
@@ -477,6 +498,12 @@ export function buildPaneData(params) {
                                 break;
                             }
                         }
+                    }
+                    // Per-row then per-cell formatting (overrides column and conditional)
+                    if (tableCellInfo.dataIndex >= 0) {
+                        const tableRow = tableCellInfo.table.sortedFilteredRows[tableCellInfo.dataIndex];
+                        applyTableFmt(item, tableRow?._rowFmt);
+                        applyTableFmt(item, tableRow?._fmt?.[colDef?.id]);
                     }
 
                 } else if (cellType === CELL_TYPE.TABLE_ENTRY) {

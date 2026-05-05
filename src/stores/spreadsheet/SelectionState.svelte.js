@@ -177,11 +177,29 @@ export class SelectionState {
     /**
      * Add a new range to the selection (Ctrl+click).  The current active
      * range is committed to extraRanges and a new active range begins.
+     * Ctrl+clicking a cell already in an extra range removes it (toggle).
+     * Ctrl+clicking the active single-cell range is a no-op (already active).
      * @param {number} row
      * @param {number} col
      */
     startAdditionalSelection(row, col) {
         if (this.selectionMode === 'range' && this.range) {
+            // If the clicked cell is the active single-cell, stay put (no duplicate).
+            if (this.isSingleCell && this.anchor.row === row && this.anchor.col === col) {
+                this.isSelecting = true;
+                return;
+            }
+            // Toggle: if the cell is already in an extra range, remove that range.
+            const toggleIdx = this.extraRanges.findIndex(r =>
+                row >= r.startRow && row <= r.endRow &&
+                col >= r.startCol && col <= r.endCol
+            );
+            if (toggleIdx !== -1) {
+                this.extraRanges = this.extraRanges.filter((_, i) => i !== toggleIdx);
+                // Keep the current active range, just deselect the toggled extra.
+                this.isSelecting = false;
+                return;
+            }
             this.extraRanges = [...this.extraRanges, { ...this.range }];
         } else {
             // Switching from rows/cols/all mode into range multi-select
@@ -380,11 +398,24 @@ export class SelectionState {
 
     /**
      * Add another row to the multi-selection (Ctrl+click row header).
+     * Ctrl+clicking an already-selected row toggles it off.
      * @param {number} row
      */
     addRowSelection(row) {
         if (this.selectionMode !== 'rows') {
             this.selectRow(row);
+            return;
+        }
+        // Toggle: if the row is already in an extra range, remove it.
+        const toggleIdx = this.extraRowRanges.findIndex(r => row >= r.start && row <= r.end);
+        if (toggleIdx !== -1) {
+            this.extraRowRanges = this.extraRowRanges.filter((_, i) => i !== toggleIdx);
+            this.isSelecting = false;
+            return;
+        }
+        // If clicking the currently active row range, it's already active — no duplicate.
+        if (this.selectedRows && row >= this.selectedRows.start && row <= this.selectedRows.end) {
+            this.isSelecting = true;
             return;
         }
         if (this.selectedRows) {
@@ -441,11 +472,24 @@ export class SelectionState {
 
     /**
      * Add another column to the multi-selection (Ctrl+click col header).
+     * Ctrl+clicking an already-selected column toggles it off.
      * @param {number} col
      */
     addColSelection(col) {
         if (this.selectionMode !== 'cols') {
             this.selectColumn(col);
+            return;
+        }
+        // Toggle: if the col is already in an extra range, remove it.
+        const toggleIdx = this.extraColRanges.findIndex(r => col >= r.start && col <= r.end);
+        if (toggleIdx !== -1) {
+            this.extraColRanges = this.extraColRanges.filter((_, i) => i !== toggleIdx);
+            this.isSelecting = false;
+            return;
+        }
+        // If clicking the currently active col range, it's already active — no duplicate.
+        if (this.selectedCols && col >= this.selectedCols.start && col <= this.selectedCols.end) {
+            this.isSelecting = true;
             return;
         }
         if (this.selectedCols) {

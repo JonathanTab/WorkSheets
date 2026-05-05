@@ -27,11 +27,29 @@ function sheetById(ydoc, sheetId) {
     return s;
 }
 
+/**
+ * Resolve a table Y.Map by ID, checking root.tables (sources), then sheet.tables (views/legacy).
+ * If the entry is a view (has sourceTableId), follows the reference to return the source Y.Map.
+ * This means callers always get the Y.Map that contains rows and columnDefs.
+ */
 function _getTable(ydoc, sheetId, tableId) {
+    // Check document-level source tables first
+    const globalTables = root(ydoc).get('tables');
+    if (globalTables) {
+        const src = globalTables.get(tableId);
+        if (src) return src;
+    }
+    // Check sheet tables (views or legacy)
     const tables = sheetById(ydoc, sheetId).get('tables');
-    const table = tables?.get(tableId);
-    if (!table) throw new Error(`Table "${tableId}" not found in sheet "${sheetId}"`);
-    return table;
+    const entry = tables?.get(tableId);
+    if (!entry) throw new Error(`Table "${tableId}" not found`);
+    // If it's a view, follow sourceTableId to the source
+    const sourceId = entry.get('sourceTableId');
+    if (sourceId && globalTables) {
+        const src = globalTables.get(sourceId);
+        if (src) return src;
+    }
+    return entry;
 }
 
 /** Returns ordered column Y.Maps for a table, supporting both new and legacy layouts. */
@@ -313,18 +331,41 @@ export function clearRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
  * @returns {{ id: string, name: string, mode: string, columns: object[] }[]}
  */
 export function listTables(ydoc, sheetId) {
-    const tables = sheetById(ydoc, sheetId).get('tables');
-    if (!tables) return [];
+    const sheetTablesMap = sheetById(ydoc, sheetId).get('tables');
+    if (!sheetTablesMap) return [];
 
+    const globalTables = root(ydoc).get('tables');
     const result = [];
-    tables.forEach((t, id) => {
-        const columns = _getOrderedColMaps(t).map(c => c.toJSON ? c.toJSON() : { ...c });
-        result.push({
-            id,
-            name:    t.get('name') ?? id,
-            mode:    t.get('mode') ?? 'inline',
-            columns,
-        });
+    const seen = new Set();
+
+    sheetTablesMap.forEach((entry, id) => {
+        const sourceId = entry.get('sourceTableId');
+        if (sourceId) {
+            // View entry: expose via the source table's schema
+            if (seen.has(sourceId)) return;
+            seen.add(sourceId);
+            const src = globalTables?.get(sourceId) ?? entry;
+            const columns = _getOrderedColMaps(src).map(c => c.toJSON ? c.toJSON() : { ...c });
+            result.push({
+                id: sourceId,       // callers use the source ID for subsequent queries
+                viewId: id,
+                name:    src.get('name') ?? entry.get('name') ?? id,
+                mode:    entry.get('mode') ?? 'inline',
+                columns,
+            });
+        } else if (!entry.get('isSourceOnly')) {
+            // Legacy combined table (pre-migration)
+            if (seen.has(id)) return;
+            seen.add(id);
+            const columns = _getOrderedColMaps(entry).map(c => c.toJSON ? c.toJSON() : { ...c });
+            result.push({
+                id,
+                name:    entry.get('name') ?? id,
+                mode:    entry.get('mode') ?? 'inline',
+                columns,
+            });
+        }
+        // Skip isSourceOnly entries in sheet.tables (shouldn't exist after migration)
     });
     return result;
 }

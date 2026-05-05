@@ -103,11 +103,25 @@ export class TableStore {
     #ydoc;
 
     /**
-     * For view tables: the Y.Map of the source table.
-     * Null for regular tables.
+     * For view tables: the Y.Map of the source table. Used for Yjs mutations
+     * (insertRow, updateCell) and observing source sort/column changes.
      * @type {import('yjs').Map<any> | null}
      */
     #sourceYMap = null;
+
+    /**
+     * For view tables: the live TableStore of the source table.
+     * Views borrow rows and allColumns from here instead of re-reading Yjs.
+     * @type {TableStore | null}
+     */
+    #sourceStore = null;
+
+    /**
+     * For source tables: view TableStores registered to receive row-change
+     * notifications. Populated by views calling #addViewStore on their source.
+     * @type {TableStore[]}
+     */
+    #viewStores = [];
 
     /** @type {Function[]} cleanup callbacks */
     #observers = [];
@@ -142,7 +156,19 @@ export class TableStore {
      * }>}
      */
     columns = $state([]);
-    rows = $state([]); // plain objects: colId → value
+
+    // rows and allColumns are owned by source tables; views return the source's values
+    // via getters so there is only one copy of each in memory per source table.
+    #_allColumns = $state([]);
+    #_rows = $state([]);
+
+    /** Full parsed column defs including hidden columns. Source tables own the array; views borrow it. */
+    get allColumns() { return this.#sourceStore ? this.#sourceStore.allColumns : this.#_allColumns; }
+    set allColumns(v) { if (!this.#sourceStore) this.#_allColumns = v; }
+
+    /** Plain-object row array. Source tables own the array; views borrow it. */
+    get rows() { return this.#sourceStore ? this.#sourceStore.rows : this.#_rows; }
+    set rows(v) { if (!this.#sourceStore) this.#_rows = v; }
 
     // ── Sort / filter ─────────────────────────────────────────────────────────
     sortColId = $state(null);
@@ -184,7 +210,7 @@ export class TableStore {
     // Set by checkOutOfOrder() after a cell edit — cleared by reorderRow/resetOrder.
     outOfOrderRow = $state(null);
 
-    #rebuildView() {
+    #rebuildView(rebuildAllRowsEval = true) {
         // Use _pos (desc) as inherent order when any row carries it and no view sort overrides.
         const hasPos = this.rows.some(r => r._pos != null);
         let result = (hasPos && !this.sortColId)
@@ -218,8 +244,22 @@ export class TableStore {
 
         this.sortedFilteredRows = result;
         const cumReverse = this.sortColId === null || this.sortDir === 'desc';
-        this.#eval = new TableFormulaEvaluator(result, this.columns, cumReverse, this.#tableResolver);
-        this.#allRowsEval = new TableFormulaEvaluator(this.rows, this.columns, cumReverse, this.#tableResolver);
+        // Evaluate formulas against the full schema (including hidden columns on views)
+        // so row formulas can reference source columns not currently visible.
+        const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
+
+        // Snapshot Svelte proxy rows to plain objects before handing to the formula
+        // evaluator. Without this, every this.#rows[i][colId] access inside
+        // #buildComputedCache fires the Svelte proxy get handler, adding ~60ms of
+        // overhead per evaluation on tables with formula columns.
+        const plainRows = result.map(r => ({ ...r }));
+        this.#eval = new TableFormulaEvaluator(plainRows, evalColumns, cumReverse, this.#tableResolver, this.#sheetFormulaEval);
+
+        // Views delegate getFullValue/getFullRowCount to the source store — no #allRowsEval needed.
+        if (!this.#sourceStore && (rebuildAllRowsEval || !this.#allRowsEval)) {
+            const plainAllRows = this.rows.map(r => ({ ...r }));
+            this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, cumReverse, this.#tableResolver, this.#sheetFormulaEval);
+        }
     }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
@@ -246,12 +286,14 @@ export class TableStore {
     /**
      * @param {import('yjs').Map<any>} tableYMap
      * @param {import('yjs').Doc} ydoc
-     * @param {import('yjs').Map<any> | null} [sourceTableYMap]  Provide for view tables.
+     * @param {import('yjs').Map<any> | null} [sourceTableYMap]  Source Y.Map for view tables (Yjs mutations + sort/column observers).
+     * @param {TableStore | null} [sourceStore]  Live source TableStore for views. When provided, rows and allColumns are borrowed from it.
      */
-    constructor(tableYMap, ydoc, sourceTableYMap = null) {
+    constructor(tableYMap, ydoc, sourceTableYMap = null, sourceStore = null) {
         this.#tableYMap = tableYMap;
         this.#ydoc = ydoc;
         this.#sourceYMap = sourceTableYMap;
+        this.#sourceStore = sourceStore;
         this.#migrateColumnsIfNeeded();
         this.#syncFromYjs();
         this.#observeYjs();
@@ -366,28 +408,39 @@ export class TableStore {
     }
 
     #syncColumns() {
-        // Views read column definitions from the source table, then filter to
-        // only the columns listed in visibleColumns (in that order).
+        if (this.#sourceStore) {
+            // View: build the visible column subset from the source store's already-parsed
+            // allColumns. No Y.Map reads — zero redundant work.
+            const allCols = this.#sourceStore.allColumns;
+            const visibleArr = this.#tableYMap.get("visibleColumns");
+            if (!visibleArr || visibleArr.length === 0) {
+                this.columns = allCols;
+            } else {
+                const byId = new Map(allCols.map(c => [c.id, c]));
+                this.columns = visibleArr.toArray().flatMap(id => byId.has(id) ? [byId.get(id)] : []);
+            }
+            this.endCol = this.startCol + this.columns.length - 1;
+            return;
+        }
+
+        // Source/legacy table: parse column defs from Y.Map once.
+        // allColumns and columns are identical for source tables (no visibleColumns filter).
         const colSrc = this.#sourceYMap ?? this.#tableYMap;
         const defsMap = colSrc.get("columnDefs");
         const orderArr = colSrc.get("columnOrder");
         if (!defsMap || !orderArr) {
+            this.#_allColumns = [];
             this.columns = [];
             return;
         }
 
-        // For view tables, respect the visibleColumns ordering/subset.
-        const visibleArr = this.#sourceYMap ? this.#tableYMap.get("visibleColumns") : null;
-        const orderedIds = visibleArr && visibleArr.length > 0
-            ? visibleArr.toArray()
-            : orderArr.toArray();
-
-        this.columns = orderedIds.flatMap((/** @type {string} */ colId) => {
+        const allColumns = orderArr.toArray().flatMap((/** @type {string} */ colId) => {
             const c = defsMap.get(colId);
             if (!c) return [];
             const raw = c.toJSON ? c.toJSON() : { ...c };
             if (typeof raw.conditionalFormats === "string") {
-                try { raw.conditionalFormats = JSON.parse(raw.conditionalFormats); } catch { raw.conditionalFormats = []; }
+                try { raw.conditionalFormats = JSON.parse(raw.conditionalFormats); }
+                catch { raw.conditionalFormats = []; }
             }
             let typeConfig = null;
             if (typeof raw.typeConfig === "string") {
@@ -402,30 +455,70 @@ export class TableStore {
                 hAlign: raw.hAlign ?? null,
                 textColor: raw.textColor ?? null,
                 bgColor: raw.bgColor ?? null,
-                width: raw.width ?? null,
                 bold: raw.bold ?? null,
                 italic: raw.italic ?? null,
                 underline: raw.underline ?? null,
                 fontSize: raw.fontSize ?? null,
                 fontFamily: raw.fontFamily ?? null,
+                width: raw.width ?? null,
                 isNonEntry: raw.isNonEntry ?? false,
                 defaultFormula: raw.defaultFormula ?? null,
                 conditionalFormats: Array.isArray(raw.conditionalFormats) ? raw.conditionalFormats : [],
             }];
         });
+        // Source tables: columns === allColumns (no visibility filter applied here).
+        this.#_allColumns = allColumns;
+        this.columns = allColumns;
         this.endCol = this.startCol + this.columns.length - 1;
     }
 
     #syncRows() {
-        // Views read rows from the source table, not their own Y.Map.
-        const rowSrc = this.#sourceYMap ?? this.#tableYMap;
-        const arr = rowSrc.get("rows");
-        if (!arr) {
-            this.rows = [];
+        if (this.#sourceStore) {
+            // View: rows are owned by the source store (borrowed via getter).
+            // Just rebuild our sorted/filtered view — no Yjs read needed.
             this.#rebuildView();
             return;
         }
-        this.rows = arr.toArray().map((r) => (r.toJSON ? r.toJSON() : { ...r }));
+        // Source/legacy table: read rows from Y.Map and notify registered views.
+        const rowSrc = this.#sourceYMap ?? this.#tableYMap;
+        const arr = rowSrc.get("rows");
+        if (!arr) {
+            this.#_rows = [];
+            this.#rebuildView();
+            this.#notifyViewStores();
+            return;
+        }
+        this.#_rows = arr.toArray().map((r) => {
+            const obj = r.toJSON ? r.toJSON() : { ...r };
+            // Parse per-row and per-cell formatting JSON eagerly so paint reads are O(1)
+            if (typeof obj._rowFmt === 'string') {
+                try { obj._rowFmt = JSON.parse(obj._rowFmt); } catch { obj._rowFmt = undefined; }
+            }
+            if (typeof obj._fmt === 'string') {
+                try { obj._fmt = JSON.parse(obj._fmt); } catch { obj._fmt = undefined; }
+            }
+            return obj;
+        });
+        this.#rebuildView();
+        this.#notifyViewStores();
+    }
+
+    // ── View store notification (source → views) ─────────────────────────────
+
+    /** Register a view store to be notified when this source's rows change. */
+    #addViewStore(view) { this.#viewStores.push(view); }
+
+    /** Unregister a view store (called from the view's destroy cleanup). */
+    #removeViewStore(view) { this.#viewStores = this.#viewStores.filter(v => v !== view); }
+
+    /** Called by source after #syncRows() to propagate the update to all views. */
+    #notifyViewStores() {
+        for (const view of this.#viewStores) view.#onSourceRowsChanged();
+    }
+
+    /** Called on a view when its source store's rows have been updated. */
+    #onSourceRowsChanged() {
+        // this.rows (getter) already returns the updated source rows — just rebuild view.
         this.#rebuildView();
     }
 
@@ -451,7 +544,7 @@ export class TableStore {
                 this.sortDir = m.get("sortDir") ?? "asc";
                 this.insertSortColId = m.get("insertSortColId") ?? null;
                 this.insertSortDir = m.get("insertSortDir") ?? "asc";
-                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
+                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView(false);
             } else {
                 // Views: re-sync visible-columns ordering when own map changes
                 this.#syncColumns();
@@ -479,7 +572,7 @@ export class TableStore {
             const pfObs = () => {
                 // Reload view definition filters into viewDefinitionFilters
                 this.#loadPersistedFilters();
-                this.#rebuildView();
+                this.#rebuildView(false);
                 this._onFilterChange?.();
             };
             const attachPersistedFiltersObserver = () => {
@@ -501,7 +594,7 @@ export class TableStore {
                 this.sortDir = src.get("sortDir") ?? "asc";
                 this.insertSortColId = src.get("insertSortColId") ?? null;
                 this.insertSortDir = src.get("insertSortDir") ?? "asc";
-                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView();
+                if (prevSort !== this.sortColId + this.sortDir) this.#rebuildView(false);
             };
             src.observe(srcTopObs);
             this.#observers.push(() => src.unobserve(srcTopObs));
@@ -511,7 +604,7 @@ export class TableStore {
             m.observe(ownTopObs);
             this.#observers.push(() => m.unobserve(ownTopObs));
 
-            // Observe source columns
+            // Observe source columns (views rebuild their visible subset when source schema changes).
             const srcDefsMap = src.get("columnDefs");
             const srcOrderArr = src.get("columnOrder");
             if (srcDefsMap && srcOrderArr) {
@@ -524,12 +617,21 @@ export class TableStore {
                 });
             }
 
-            // Observe source rows
-            const srcRowArr = src.get("rows");
-            if (srcRowArr) {
-                const rowObs = () => this.#syncRows();
-                srcRowArr.observeDeep(rowObs);
-                this.#observers.push(() => srcRowArr.unobserveDeep(rowObs));
+            // Row changes: register with the source store so it calls #onSourceRowsChanged()
+            // after its own #syncRows(). This replaces the previous srcRowArr.observeDeep,
+            // which caused a full duplicate sync (2× TableFormulaEvaluator construction) on
+            // every cell edit.
+            if (this.#sourceStore) {
+                this.#sourceStore.#addViewStore(this);
+                this.#observers.push(() => this.#sourceStore.#removeViewStore(this));
+            } else {
+                // Fallback: no live source store reference — observe Y.Array directly.
+                const srcRowArr = src.get("rows");
+                if (srcRowArr) {
+                    const rowObs = () => this.#syncRows();
+                    srcRowArr.observeDeep(rowObs);
+                    this.#observers.push(() => srcRowArr.unobserveDeep(rowObs));
+                }
             }
         } else {
             // Regular table: observe own columns and rows
@@ -885,8 +987,136 @@ export class TableStore {
      * @param {string} colId
      * @param {string} newName
      */
+    /** Returns the Y.Map that owns columnDefs, columnOrder, and rows (source for views, own map otherwise). */
+    #getColSource() { return this.#sourceYMap ?? this.#tableYMap; }
+
+    // ─── Per-cell / per-row formatting ────────────────────────────────────────
+    // Formatting is stored as JSON strings in each row Y.Map:
+    //   _rowFmt: { bold, italic, underline, fontSize, fontFamily, color, backgroundColor, horizontalAlign, verticalAlign, wrapText }
+    //   _fmt:    { [colId]: { same keys } }
+    // JSON strings are parsed eagerly in #syncRows() so read-path is O(1).
+    // Write-path reads from Yjs directly to avoid stale-snapshot races.
+    //
+    // Property names use the toolbar/sheet convention:
+    //   color (text), backgroundColor, horizontalAlign, verticalAlign, bold, italic, ...
+
+    #getRowYMap(displayIndex) {
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return null;
+        const sortedRow = this.sortedFilteredRows[displayIndex];
+        if (!sortedRow) return null;
+        const rawIndex = this.rows.findIndex(r => r === sortedRow);
+        if (rawIndex < 0) return null;
+        return rowArr.get(rawIndex) ?? null;
+    }
+
+    /** Get the parsed per-cell formatting for a display row + column. Returns {} if none set. */
+    getCellFormatting(displayIndex, colId) {
+        const row = this.sortedFilteredRows[displayIndex];
+        return row?._fmt?.[colId] ?? {};
+    }
+
+    /** Get the parsed per-row formatting for a display row. Returns {} if none set. */
+    getTableRowFormatting(displayIndex) {
+        const row = this.sortedFilteredRows[displayIndex];
+        return row?._rowFmt ?? {};
+    }
+
+    /**
+     * Effective merged formatting for one cell: column-def → row → cell (cell wins).
+     * Uses same property names as sheet cells (color, backgroundColor, horizontalAlign…).
+     */
+    getEffectiveCellFormatting(displayIndex, colId) {
+        const colDef = this.columns.find(c => c.id === colId);
+        const merged = {
+            bold: colDef?.bold ?? null,
+            italic: colDef?.italic ?? null,
+            underline: colDef?.underline ?? null,
+            fontSize: colDef?.fontSize ?? null,
+            fontFamily: colDef?.fontFamily ?? null,
+            color: colDef?.textColor ?? null,
+            backgroundColor: colDef?.bgColor ?? null,
+            horizontalAlign: colDef?.hAlign ?? null,
+            verticalAlign: null,
+            wrapText: null,
+        };
+        const rowFmt = this.getTableRowFormatting(displayIndex);
+        const cellFmt = this.getCellFormatting(displayIndex, colId);
+        for (const src of [rowFmt, cellFmt]) {
+            for (const [k, v] of Object.entries(src)) {
+                if (v != null) merged[k] = v;
+            }
+        }
+        return merged;
+    }
+
+    /**
+     * Set per-cell formatting for a display-indexed row + column.
+     * Pass null for a property to clear it.
+     * @param {number} displayIndex
+     * @param {string} colId
+     * @param {Object} props  e.g. { bold: true, backgroundColor: '#f00' }
+     */
+    setCellFormatting(displayIndex, colId, props) {
+        const yRow = this.#getRowYMap(displayIndex);
+        if (!yRow) return;
+        this.#ydoc.transact(() => {
+            const existing = yRow.get('_fmt');
+            const fmt = existing ? JSON.parse(existing) : {};
+            if (!fmt[colId]) fmt[colId] = {};
+            for (const [k, v] of Object.entries(props)) {
+                if (v == null) delete fmt[colId][k];
+                else fmt[colId][k] = v;
+            }
+            if (Object.keys(fmt[colId]).length === 0) delete fmt[colId];
+            if (Object.keys(fmt).length === 0) yRow.delete('_fmt');
+            else yRow.set('_fmt', JSON.stringify(fmt));
+        });
+    }
+
+    /**
+     * Set per-row formatting for a display-indexed row.
+     * Pass null for a property to clear it.
+     * @param {number} displayIndex
+     * @param {Object} props
+     */
+    setTableRowFormatting(displayIndex, props) {
+        const yRow = this.#getRowYMap(displayIndex);
+        if (!yRow) return;
+        this.#ydoc.transact(() => {
+            const existing = yRow.get('_rowFmt');
+            const fmt = existing ? JSON.parse(existing) : {};
+            for (const [k, v] of Object.entries(props)) {
+                if (v == null) delete fmt[k];
+                else fmt[k] = v;
+            }
+            if (Object.keys(fmt).length === 0) yRow.delete('_rowFmt');
+            else yRow.set('_rowFmt', JSON.stringify(fmt));
+        });
+    }
+
+    /**
+     * Clear all per-cell formatting for a specific column in a display row.
+     * @param {number} displayIndex
+     * @param {string} colId
+     */
+    clearCellFormatting(displayIndex, colId) {
+        const yRow = this.#getRowYMap(displayIndex);
+        if (!yRow) return;
+        const existing = yRow.get('_fmt');
+        if (!existing) return;
+        this.#ydoc.transact(() => {
+            try {
+                const fmt = JSON.parse(existing);
+                delete fmt[colId];
+                if (Object.keys(fmt).length === 0) yRow.delete('_fmt');
+                else yRow.set('_fmt', JSON.stringify(fmt));
+            } catch { /* malformed JSON — just delete */ yRow.delete('_fmt'); }
+        });
+    }
+
     renameColumn(colId, newName) {
-        const defsMap = this.#tableYMap.get("columnDefs");
+        const defsMap = this.#getColSource().get("columnDefs");
         if (!defsMap) return;
         this.#ydoc.transact(() => {
             const cm = defsMap.get(colId);
@@ -900,7 +1130,7 @@ export class TableStore {
      * @param {Object} changes - Partial column definition
      */
     updateColumnDef(colId, changes) {
-        const defsMap = this.#tableYMap.get("columnDefs");
+        const defsMap = this.#getColSource().get("columnDefs");
         if (!defsMap) return;
         this.#ydoc.transact(() => {
             const cm = defsMap.get(colId);
@@ -972,8 +1202,9 @@ export class TableStore {
      * @returns {string} the new column's id
      */
     insertColumn(atIndex, colDef) {
-        const defsMap = this.#tableYMap.get("columnDefs");
-        const orderArr = this.#tableYMap.get("columnOrder");
+        const src = this.#getColSource();
+        const defsMap = src.get("columnDefs");
+        const orderArr = src.get("columnOrder");
         if (!defsMap || !orderArr) return "";
 
         const colId = colDef.id ?? `col${Date.now()}`;
@@ -1001,9 +1232,10 @@ export class TableStore {
      * @param {string} colId
      */
     deleteColumn(colId) {
-        const defsMap = this.#tableYMap.get("columnDefs");
-        const orderArr = this.#tableYMap.get("columnOrder");
-        const rowArr = this.#tableYMap.get("rows");
+        const src = this.#getColSource();
+        const defsMap = src.get("columnDefs");
+        const orderArr = src.get("columnOrder");
+        const rowArr = src.get("rows");
         if (!defsMap || !orderArr) return;
 
         this.#ydoc.transact(() => {
@@ -1025,7 +1257,7 @@ export class TableStore {
      * @param {number} toIndex
      */
     reorderColumns(fromIndex, toIndex) {
-        const orderArr = this.#tableYMap.get("columnOrder");
+        const orderArr = this.#getColSource().get("columnOrder");
         if (!orderArr || fromIndex === toIndex) return;
         if (fromIndex < 0 || toIndex < 0 || fromIndex >= orderArr.length || toIndex >= orderArr.length) return;
 
@@ -1049,30 +1281,34 @@ export class TableStore {
     // ─── Sort / filter ────────────────────────────────────────────────────────
 
     setSort(colId, dir = "asc") {
+        const sortMap = this.#sourceYMap ?? this.#tableYMap;
         this.#ydoc.transact(() => {
-            this.#tableYMap.set("sortColId", colId);
-            this.#tableYMap.set("sortDir", dir);
+            sortMap.set("sortColId", colId);
+            sortMap.set("sortDir", dir);
         });
     }
 
     clearSort() {
+        const sortMap = this.#sourceYMap ?? this.#tableYMap;
         this.#ydoc.transact(() => {
-            this.#tableYMap.set("sortColId", null);
-            this.#tableYMap.set("sortDir", "asc");
+            sortMap.set("sortColId", null);
+            sortMap.set("sortDir", "asc");
         });
     }
 
     setInsertSort(colId, dir = "asc") {
+        const sortMap = this.#sourceYMap ?? this.#tableYMap;
         this.#ydoc.transact(() => {
-            this.#tableYMap.set("insertSortColId", colId);
-            this.#tableYMap.set("insertSortDir", dir);
+            sortMap.set("insertSortColId", colId);
+            sortMap.set("insertSortDir", dir);
         });
     }
 
     clearInsertSort() {
+        const sortMap = this.#sourceYMap ?? this.#tableYMap;
         this.#ydoc.transact(() => {
-            this.#tableYMap.set("insertSortColId", null);
-            this.#tableYMap.set("insertSortDir", "asc");
+            sortMap.set("insertSortColId", null);
+            sortMap.set("insertSortDir", "asc");
         });
     }
 
@@ -1096,7 +1332,7 @@ export class TableStore {
 
     setFilter(colId, op, value) {
         this.filters = { ...this.filters, [colId]: { op, value } };
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
@@ -1104,13 +1340,13 @@ export class TableStore {
         const f = { ...this.filters };
         delete f[colId];
         this.filters = f;
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
     clearAllFilters() {
         this.filters = {};
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
@@ -1129,7 +1365,7 @@ export class TableStore {
         const pf = this.#getOrCreatePersistedFilters();
         this.#ydoc.transact(() => { pf.set(colId, JSON.stringify({ op, value })); });
         this.viewDefinitionFilters = { ...this.viewDefinitionFilters, [colId]: { op, value } };
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
@@ -1144,7 +1380,7 @@ export class TableStore {
         const vdf = { ...this.viewDefinitionFilters };
         delete vdf[colId];
         this.viewDefinitionFilters = vdf;
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
@@ -1156,7 +1392,7 @@ export class TableStore {
             for (const k of [...pf.keys()]) pf.delete(k);
         });
         this.viewDefinitionFilters = {};
-        this.#rebuildView();
+        this.#rebuildView(false);
         this._onFilterChange?.();
     }
 
@@ -1353,13 +1589,23 @@ export class TableStore {
 
     // ─── Query API ────────────────────────────────────────────────────────────
 
+    #isTableDslFormula(formula) {
+        return /\{[^}]+\}/.test(formula) || /\b(PREV|NEXT|ROWVAL|WINDOW|RUNNINGIF|RUNNINGIFS)\s*\(/i.test(formula);
+    }
+
     getValue(displayIndex, colId) {
         const raw = this.#eval
             ? this.#eval.getValue(displayIndex, colId)
             : this.sortedFilteredRows[displayIndex]?.[colId];
-        if (typeof raw === 'string' && raw.startsWith('=') && this.#sheetFormulaEval) {
-            const result = this.#sheetFormulaEval(raw);
-            return result ?? raw;
+        if (typeof raw === 'string' && raw.startsWith('=')) {
+            if (this.#isTableDslFormula(raw) && this.#eval) {
+                const result = this.#eval.evaluateFormula(raw, displayIndex);
+                return result ?? raw;
+            }
+            if (this.#sheetFormulaEval) {
+                const result = this.#sheetFormulaEval(raw);
+                return result ?? raw;
+            }
         }
         return raw ?? null;
     }
@@ -1375,22 +1621,33 @@ export class TableStore {
     // ── Full (unfiltered) row access — used by TABLE_* sheet formula functions ─
     // Filters are a display-time concept. Sheet formulas reference a table by name
     // and must always see all rows regardless of what filter any session has active.
+    // Views delegate these methods to the source store — they share rows and have
+    // no #allRowsEval of their own.
 
     getFullRowCount() {
+        if (this.#sourceStore) return this.#sourceStore.getFullRowCount();
         return this.rows.length;
     }
 
     getFullValue(rawIndex, colId) {
+        if (this.#sourceStore) return this.#sourceStore.getFullValue(rawIndex, colId);
         const raw = this.#allRowsEval
             ? this.#allRowsEval.getValue(rawIndex, colId)
             : this.rows[rawIndex]?.[colId];
-        if (typeof raw === 'string' && raw.startsWith('=') && this.#sheetFormulaEval) {
-            return this.#sheetFormulaEval(raw) ?? raw;
+        if (typeof raw === 'string' && raw.startsWith('=')) {
+            if (this.#isTableDslFormula(raw) && this.#allRowsEval) {
+                const result = this.#allRowsEval.evaluateFormula(raw, rawIndex);
+                return result ?? raw;
+            }
+            if (this.#sheetFormulaEval) {
+                return this.#sheetFormulaEval(raw) ?? raw;
+            }
         }
         return raw ?? null;
     }
 
     getFullColumn(colId) {
+        if (this.#sourceStore) return this.#sourceStore.getFullColumn(colId);
         return this.rows.map((_, i) => this.getFullValue(i, colId));
     }
 
@@ -1410,6 +1667,7 @@ export class TableStore {
      */
     setSheetFormulaEvaluator(fn) {
         this.#sheetFormulaEval = fn;
+        if (this.#eval) this.#rebuildView();
     }
 
     /**
@@ -1456,6 +1714,13 @@ export class TableStore {
 
     /** True when this store is a view of another table. */
     get isView() { return this.#sourceYMap !== null; }
+
+    /**
+     * The Y.Map that owns rows, columnDefs, and columnOrder for this store.
+     * For views this is the source Y.Map; for source/legacy tables it is the table's own Y.Map.
+     * Used by TableManager to attach row/column change observers.
+     */
+    get sourceYMapForObservation() { return this.#sourceYMap ?? this.#tableYMap; }
 
     /**
      * True when this is a source-only table (data + schema, not displayed on grid).

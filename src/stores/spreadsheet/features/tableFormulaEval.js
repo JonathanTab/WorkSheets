@@ -162,36 +162,44 @@ export function matchCondition(rowVal, op, filterVal) {
  */
 export function buildTableFunctions(resolveTableByName) {
     const tbl = (name) => resolveTableByName(String(name ?? ''));
+    const wantsFiltered = (flag) =>
+        flag === true || String(flag ?? '').toLowerCase() === 'filtered' || String(flag ?? '').toLowerCase() === 'view';
+    const rowCountOf = (t, filtered) => filtered ? t.getRowCount() : t.getFullRowCount();
+    const valueAt = (t, idx, colId, filtered) =>
+        filtered ? t.getValue(idx, colId) : t.getFullValue(idx, colId);
+    const colOf = (t, colId, filtered) =>
+        filtered ? t.getColumn(colId) : t.getFullColumn(colId);
     const fns = new Map();
 
-    fns.set('TABLE_GET', (tableName, rowIndex, colId) => {
+    fns.set('TABLE_GET', (tableName, rowIndex, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return null;
-        return t.getFullValue(Number(rowIndex), t.resolveColId(String(colId))) ?? null;
+        const resolvedCol = t.resolveColId(String(colId));
+        return valueAt(t, Number(rowIndex), resolvedCol, wantsFiltered(filtered)) ?? null;
     });
-    fns.set('TABLE_COL', (tableName, colId) => {
+    fns.set('TABLE_COL', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return [];
-        return t.getFullColumn(t.resolveColId(String(colId)));
+        return colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered));
     });
-    fns.set('TABLE_COUNT', (tableName) => {
-        const t = tbl(tableName); return t ? t.getFullRowCount() : 0;
+    fns.set('TABLE_COUNT', (tableName, filtered = false) => {
+        const t = tbl(tableName); return t ? rowCountOf(t, wantsFiltered(filtered)) : 0;
     });
-    fns.set('TABLE_SUM', (tableName, colId) => {
+    fns.set('TABLE_SUM', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        return t.getFullColumn(t.resolveColId(String(colId))).reduce((acc, v) => acc + (Number(v) || 0), 0);
+        return colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).reduce((acc, v) => acc + (Number(v) || 0), 0);
     });
-    fns.set('TABLE_AVG', (tableName, colId) => {
+    fns.set('TABLE_AVG', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = t.getFullColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : 0;
     });
-    fns.set('TABLE_MIN', (tableName, colId) => {
+    fns.set('TABLE_MIN', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = t.getFullColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? Math.min(...vals) : 0;
     });
-    fns.set('TABLE_MAX', (tableName, colId) => {
+    fns.set('TABLE_MAX', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = t.getFullColumn(t.resolveColId(String(colId))).map(Number).filter(v => !isNaN(v));
+        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? Math.max(...vals) : 0;
     });
     // TABLE_CUMSUM intentionally uses the filtered evaluator (display-order running sum).
@@ -294,19 +302,21 @@ export function buildTableFunctions(resolveTableByName) {
             if (conds.every(c => matchCondition(t.getFullValue(i, c.col), c.op, c.val))) result.push(t.getFullValue(i, cId) ?? null);
         return result;
     });
-    fns.set('TABLE_LOOKUP', (tableName, lookupColId, lookupValue, returnColId) => {
+    fns.set('TABLE_LOOKUP', (tableName, lookupColId, lookupValue, returnColId, filtered = false) => {
         const t = tbl(tableName); if (!t) return '#N/A';
+        const useFiltered = wantsFiltered(filtered);
         const lId = t.resolveColId(String(lookupColId)), rId = t.resolveColId(String(returnColId));
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (matchCondition(t.getFullValue(i, lId), '=', lookupValue)) return t.getFullValue(i, rId) ?? null;
+        for (let i = 0; i < rowCountOf(t, useFiltered); i++)
+            if (matchCondition(valueAt(t, i, lId, useFiltered), '=', lookupValue)) return valueAt(t, i, rId, useFiltered) ?? null;
         return '#N/A';
     });
-    fns.set('TABLE_FILTER', (tableName, colId, op, value) => {
+    fns.set('TABLE_FILTER', (tableName, colId, op, value, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
+        const useFiltered = wantsFiltered(filtered);
         const cId = t.resolveColId(String(colId));
         let count = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (matchCondition(t.getFullValue(i, cId), String(op), value)) count++;
+        for (let i = 0; i < rowCountOf(t, useFiltered); i++)
+            if (matchCondition(valueAt(t, i, cId, useFiltered), String(op), value)) count++;
         return count;
     });
 
@@ -433,6 +443,7 @@ function _getCachedEvalPlan(columns, nameToId) {
  * @param {object[]} columns      Column defs: [{id, name, isNonEntry, formula, defaultFormula, ...}].
  * @param {boolean}  cumReverse   True when display is newest-first (no sort or desc sort).
  * @param {((name: string) => {getValue,getRowCount,resolveColId,getColumn}|null)|null} tableResolver
+ * @param {((formula: string) => any)|null} sheetValueEval
  */
 export class TableFormulaEvaluator {
     /** @type {object[]} */ #rows;
@@ -440,6 +451,7 @@ export class TableFormulaEvaluator {
     /** @type {boolean}  */ #cumReverse;
     /** @type {Map<string,string>} lowercase name/id → canonical id */ #nameToId;
     /** @type {Map<string,Function>|null} */ #customFunctions = null;
+    /** @type {((formula: string) => any)|null} */ #sheetValueEval = null;
 
     // Evaluation plan
     /** @type {string[]} */ #evalOrder = [];
@@ -450,18 +462,24 @@ export class TableFormulaEvaluator {
     // Populated during #buildComputedCache(). PREV/NEXT/ROWVAL read from here.
     /** @type {Array<Map<string,any>>|null} */ #computed = null;
 
+    // O(1) column def lookup by id — avoids Array.find() in hot paths.
+    /** @type {Map<string,object>} */ #colById = new Map();
+
     // Legacy running caches (for RUNNINGIF/RUNNINGIFS which are whole-column ops)
     #runningIfCache  = new Map();
     #runningIfDirty  = new Map();
 
-    constructor(rows, columns, cumReverse = false, tableResolver = null) {
+    constructor(rows, columns, cumReverse = false, tableResolver = null, sheetValueEval = null) {
         this.#rows       = rows;
         this.#cols       = columns;
         this.#cumReverse = cumReverse;
+        this.#sheetValueEval = sheetValueEval;
         this.#nameToId   = new Map();
+        this.#colById    = new Map();
         for (const col of columns) {
             this.#nameToId.set(col.id.toLowerCase(), col.id);
             if (col.name) this.#nameToId.set(col.name.toLowerCase(), col.id);
+            this.#colById.set(col.id, col);
         }
         if (tableResolver) this.#buildCustomFunctions(tableResolver);
 
@@ -470,7 +488,9 @@ export class TableFormulaEvaluator {
         this.#crossRowCols = plan.crossRowCols;
         this.#cyclicCols  = plan.cyclic;
 
-        this.#buildComputedCache();
+        // Skip the O(rows × cols) cache build when no column has a formula.
+        const hasForms = columns.some(c => c.defaultFormula || (c.isNonEntry && c.formula));
+        if (hasForms) this.#buildComputedCache();
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
@@ -488,8 +508,8 @@ export class TableFormulaEvaluator {
      * For regular columns (or overridden cells), reads the stored row value.
      */
     getValue(rowIndex, colId) {
-        const def = this.#cols.find(c => c.id === colId);
-        if (!def) return this.#rows[rowIndex]?.[colId];
+        const def = this.#colById.get(colId);
+        if (!def) return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
 
         // isNonEntry: always return computed value (never stored)
         if (def.isNonEntry && (def.defaultFormula || def.formula)) {
@@ -500,11 +520,11 @@ export class TableFormulaEvaluator {
         // otherwise return computed value
         if (def.defaultFormula) {
             const stored = this.#rows[rowIndex]?.[colId];
-            if (stored !== undefined && stored !== null) return stored;
-            return this.#getComputed(rowIndex, colId);
+            if (stored !== undefined && stored !== null) return this.#resolveMaybeFormula(stored);
+            return this.#resolveMaybeFormula(this.#getComputed(rowIndex, colId));
         }
 
-        return this.#rows[rowIndex]?.[colId];
+        return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
     }
 
     getColumn(colId) {
@@ -540,7 +560,7 @@ export class TableFormulaEvaluator {
         const tempRow = { ...entryData };
 
         for (const colId of this.#evalOrder) {
-            const def = this.#cols.find(c => c.id === colId);
+            const def = this.#colById.get(colId);
             if (!def) continue;
             const formula = def.defaultFormula ?? (def.isNonEntry ? def.formula : null);
             if (!formula) continue;
@@ -591,12 +611,12 @@ export class TableFormulaEvaluator {
 
         for (let i = 0; i < n; i++) {
             for (const colId of this.#evalOrder) {
-                const def = this.#cols.find(c => c.id === colId);
+                const def = this.#colById.get(colId);
                 if (!def) continue;
                 const formula = def.defaultFormula ?? (def.isNonEntry ? def.formula : null);
                 if (!formula) {
                     // No formula: just cache the stored value
-                    this.#computed[i].set(colId, this.#rows[i]?.[colId]);
+                    this.#computed[i].set(colId, this.#resolveMaybeFormula(this.#rows[i]?.[colId]));
                     continue;
                 }
                 if (this.#cyclicCols.has(colId)) {
@@ -611,7 +631,7 @@ export class TableFormulaEvaluator {
                     // defaultFormula: use stored value if present (override), else compute
                     const stored = this.#rows[i]?.[colId];
                     if (stored !== undefined && stored !== null) {
-                        this.#computed[i].set(colId, stored);
+                        this.#computed[i].set(colId, this.#resolveMaybeFormula(stored));
                     } else {
                         const val = this.#evalFormula(formula, i);
                         this.#computed[i].set(colId, val);
@@ -624,10 +644,20 @@ export class TableFormulaEvaluator {
     /** Read from computed cache (falls back to stored row value). */
     #getComputed(rowIndex, colId) {
         if (!this.#computed || rowIndex < 0 || rowIndex >= this.#computed.length) {
-            return this.#rows[rowIndex]?.[colId];
+            return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
         }
         const cached = this.#computed[rowIndex].get(colId);
-        return cached !== undefined ? cached : this.#rows[rowIndex]?.[colId];
+        return cached !== undefined
+            ? this.#resolveMaybeFormula(cached)
+            : this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
+    }
+
+    #resolveMaybeFormula(val) {
+        if (typeof val === 'string' && val.startsWith('=') && this.#sheetValueEval) {
+            const result = this.#sheetValueEval(val);
+            return result ?? val;
+        }
+        return val;
     }
 
     // ─── Formula evaluation ───────────────────────────────────────────────────

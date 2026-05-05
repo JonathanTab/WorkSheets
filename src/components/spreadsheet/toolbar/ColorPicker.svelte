@@ -1,13 +1,17 @@
 <script>
     import { onMount, onDestroy, tick } from "svelte";
 
-    // 5 shade rows × 10 hue columns (dark → light, left = neutrals)
+    // 7 rows × 10 columns
+    // Row 0: grayscale | Rows 1-6: one hue per column (red→orange→amber→lime→green→teal→sky→indigo→purple→pink)
+    // Each row is a consistent shade level: base → light tint → light-mid → mid → dark → deep
     const PALETTE = [
-        ['#1c1917', '#7f1d1d', '#7c2d12', '#78350f', '#365314', '#14532d', '#134e4a', '#1e3a8a', '#4c1d95', '#831843'],
-        ['#44403c', '#b91c1c', '#c2410c', '#b45309', '#4d7c0f', '#166534', '#115e59', '#1e40af', '#6b21a8', '#9d174d'],
-        ['#78716c', '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#14b8a6', '#3b82f6', '#8b5cf6', '#ec4899'],
-        ['#a8a29e', '#fca5a5', '#fdba74', '#fcd34d', '#bef264', '#86efac', '#5eead4', '#93c5fd', '#c4b5fd', '#f9a8d4'],
-        ['#e7e5e4', '#fee2e2', '#ffedd5', '#fef3c7', '#f7fee7', '#dcfce7', '#ccfbf1', '#dbeafe', '#ede9fe', '#fce7f3'],
+        ['#000000', '#333333', '#555555', '#777777', '#999999', '#BBBBBB', '#DDDDDD', '#EEEEEE', '#F5F5F5', '#FFFFFF'],
+        ['#F44336', '#FF5722', '#FFC107', '#8BC34A', '#4CAF50', '#00BCD4', '#03A9F4', '#3F51B5', '#9C27B0', '#E91E63'],
+        ['#FFEBEE', '#FBE9E7', '#FFF8E1', '#F1F8E9', '#E8F5E9', '#E0F7FA', '#E1F5FE', '#E8EAF6', '#F3E5F5', '#FCE4EC'],
+        ['#EF9A9A', '#FFAB91', '#FFE082', '#C5E1A5', '#A5D6A7', '#80DEEA', '#81D4FA', '#9FA8DA', '#CE93D8', '#F48FB1'],
+        ['#E57373', '#FF8A65', '#FFD54F', '#AED581', '#81C784', '#4DD0E1', '#4FC3F7', '#7986CB', '#BA68C8', '#F06292'],
+        ['#D32F2F', '#E64A19', '#FFA000', '#689F38', '#388E3C', '#0097A7', '#0288D1', '#303F9F', '#7B1FA2', '#C2185B'],
+        ['#B71C1C', '#BF360C', '#FF6F00', '#33691E', '#1B5E20', '#006064', '#01579B', '#1A237E', '#4A148C', '#880E4F'],
     ];
 
     const RECENT_KEY = 'color-picker-recent';

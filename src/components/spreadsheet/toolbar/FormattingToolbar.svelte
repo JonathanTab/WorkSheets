@@ -77,28 +77,40 @@
      * otherwise null.  Reads table.columns to establish reactivity so that
      * selectedFormatting re-derives whenever any column property changes.
      */
+    /**
+     * When the anchor is on a TABLE_HEADER, returns { table, colId, colDef } for routing
+     * formatting to the column definition. Returns null for all other cell types.
+     */
     function getTableColContext() {
         const renderContext = spreadsheetSession.renderContext;
         const anchor = selectionState.anchor;
         if (!anchor || !renderContext) return null;
         const cellType = renderContext.getCellType(anchor.row, anchor.col);
-        if (
-            cellType !== CELL_TYPE.TABLE_HEADER &&
-            cellType !== CELL_TYPE.TABLE_DATA &&
-            cellType !== CELL_TYPE.TABLE_ENTRY
-        ) return null;
+        if (cellType !== CELL_TYPE.TABLE_HEADER) return null;
         const info = renderContext.tableManager?.getCellInfo(anchor.row, anchor.col);
         if (!info?.table || !info?.colDef) return null;
-        // Look up the live column object from table.columns so we track reactivity
         const liveCol = info.table.columns.find(c => c.id === info.colDef.id) ?? info.colDef;
         return { table: info.table, colId: liveCol.id, colDef: liveCol };
+    }
+
+    /**
+     * When the anchor is on a TABLE_DATA or TABLE_ENTRY cell, returns the cell info
+     * for routing formatting to per-cell storage. Returns null for other cell types.
+     */
+    function getTableDataCellInfo() {
+        const renderContext = spreadsheetSession.renderContext;
+        const anchor = selectionState.anchor;
+        if (!anchor || !renderContext) return null;
+        const cellType = renderContext.getCellType(anchor.row, anchor.col);
+        if (cellType !== CELL_TYPE.TABLE_DATA && cellType !== CELL_TYPE.TABLE_ENTRY) return null;
+        return renderContext.tableManager?.getCellInfo(anchor.row, anchor.col) ?? null;
     }
 
     let selectedFormatting = $derived.by(() => {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return null;
 
-        // Table column context: read formatting directly from colDef
+        // TABLE_HEADER: read formatting from column definition
         const tcc = getTableColContext();
         if (tcc) {
             const cd = tcc.colDef;
@@ -112,6 +124,23 @@
                 backgroundColor: cd.bgColor ?? null,
                 horizontalAlign: cd.hAlign ?? null,
                 verticalAlign: null,
+            };
+        }
+
+        // TABLE_DATA / TABLE_ENTRY: read effective merged formatting (col → row → cell)
+        const tdi = getTableDataCellInfo();
+        if (tdi?.table && tdi?.colDef && tdi.dataIndex >= 0) {
+            const fmt = tdi.table.getEffectiveCellFormatting(tdi.dataIndex, tdi.colDef.id);
+            return {
+                bold: fmt.bold ?? null,
+                italic: fmt.italic ?? null,
+                underline: fmt.underline ?? null,
+                fontSize: fmt.fontSize ?? null,
+                fontFamily: fmt.fontFamily ?? null,
+                color: fmt.color ?? null,
+                backgroundColor: fmt.backgroundColor ?? null,
+                horizontalAlign: fmt.horizontalAlign ?? null,
+                verticalAlign: fmt.verticalAlign ?? null,
             };
         }
 
@@ -191,15 +220,26 @@
                 c <= eff.endCol && sampled < MAX_SAMPLE_CELLS;
                 c++
             ) {
-                // Skip table/repeater cells as they don't use sheet formatting
                 const ct = renderContext?.getCellType(r, c);
-                if (
-                    ct === CELL_TYPE.TABLE_HEADER ||
-                    ct === CELL_TYPE.TABLE_ENTRY ||
-                    ct === CELL_TYPE.TABLE_DATA ||
-                    ct === CELL_TYPE.VIEWPORT_OCCUPIED
-                )
+                if (ct === CELL_TYPE.TABLE_HEADER) continue;
+
+                if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
+                    // Sample effective merged formatting from the table store
+                    const info = renderContext?.tableManager?.getCellInfo(r, c);
+                    if (info?.table && info.colDef && info.dataIndex >= 0) {
+                        const fmt = info.table.getEffectiveCellFormatting(info.dataIndex, info.colDef.id);
+                        const fmtKeyMap = { color: 'color', backgroundColor: 'backgroundColor',
+                            bold: 'bold', italic: 'italic', underline: 'underline',
+                            fontSize: 'fontSize', fontFamily: 'fontFamily',
+                            horizontalAlign: 'horizontalAlign', verticalAlign: 'verticalAlign' };
+                        for (const key of keys) {
+                            props[key].values.add(fmt[fmtKeyMap[key]] ?? null);
+                            props[key].count++;
+                        }
+                        sampled++;
+                    }
                     continue;
+                }
 
                 const cell = sheetStore.getCell(r, c);
                 for (const key of keys) {
@@ -298,7 +338,10 @@
             return;
         }
 
-        // Range / all mode — iterate all selected ranges, skip table cells
+        // Range / all mode — iterate all selected ranges, routing each cell correctly.
+        // TABLE_DATA/TABLE_ENTRY → per-cell table formatting.
+        // TABLE_HEADER → skip (format headers by selecting them directly).
+        // Regular cells → sheetStore.setCellProperties.
         const ranges = mode === 'all'
             ? [selectionState.effectiveRange(rowCount, colCount)]
             : selectionState.allRanges;
@@ -311,13 +354,14 @@
                 for (let r = eff.startRow; r <= eff.endRow; r++) {
                     for (let c = eff.startCol; c <= eff.endCol; c++) {
                         const ct = renderContext?.getCellType(r, c);
-                        if (
-                            ct === CELL_TYPE.TABLE_HEADER ||
-                            ct === CELL_TYPE.TABLE_ENTRY ||
-                            ct === CELL_TYPE.TABLE_DATA ||
-                            ct === CELL_TYPE.VIEWPORT_OCCUPIED
-                        )
+                        if (ct === CELL_TYPE.TABLE_HEADER) continue;
+                        if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
+                            const info = renderContext?.tableManager?.getCellInfo(r, c);
+                            if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
+                                info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
+                            }
                             continue;
+                        }
                         sheetStore.setCellProperties(r, c, { [property]: value });
                     }
                 }
@@ -450,13 +494,8 @@
             for (let r = eff.startRow; r <= eff.endRow; r++) {
                 for (let c = eff.startCol; c <= eff.endCol; c++) {
                     const ct = renderContext?.getCellType(r, c);
-                    if (
-                        ct === CELL_TYPE.TABLE_HEADER ||
-                        ct === CELL_TYPE.TABLE_ENTRY ||
-                        ct === CELL_TYPE.TABLE_DATA ||
-                        ct === CELL_TYPE.VIEWPORT_OCCUPIED
-                    )
-                        continue;
+                    if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
+                        ct === CELL_TYPE.TABLE_DATA) continue;
                     sheetStore.setCellTypeConfig(r, c, config);
                 }
             }

@@ -682,10 +682,20 @@
         const sheetStore = spreadsheetSession.activeSheetStore;
         const range = selectionState.range;
         if (!sheetStore || !range) return;
+        const renderContext = spreadsheetSession.renderContext;
 
         spreadsheetSession.ydoc?.transact(() => {
             for (let r = range.startRow; r <= range.endRow; r++) {
                 for (let c = range.startCol; c <= range.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct === 'TABLE_HEADER') continue;
+                    if (ct === 'TABLE_DATA' || ct === 'TABLE_ENTRY') {
+                        const info = renderContext?.tableManager?.getCellInfo(r, c);
+                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
+                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
+                        }
+                        continue;
+                    }
                     sheetStore.setCellProperties(r, c, { [property]: value });
                 }
             }
@@ -708,9 +718,12 @@
 
         const config = typeConfigs[type] || { type };
 
+        const renderContext = spreadsheetSession.renderContext;
         spreadsheetSession.ydoc?.transact(() => {
             for (let r = range.startRow; r <= range.endRow; r++) {
                 for (let c = range.startCol; c <= range.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct === 'TABLE_HEADER' || ct === 'TABLE_DATA' || ct === 'TABLE_ENTRY') continue;
                     sheetStore.setCellTypeConfig(r, c, config);
                 }
             }
@@ -721,10 +734,20 @@
         const sheetStore = spreadsheetSession.activeSheetStore;
         const range = selectionState.range;
         if (!sheetStore || !range) return;
+        const renderContext = spreadsheetSession.renderContext;
 
         spreadsheetSession.ydoc?.transact(() => {
             for (let r = range.startRow; r <= range.endRow; r++) {
                 for (let c = range.startCol; c <= range.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct === 'TABLE_HEADER') continue;
+                    if (ct === 'TABLE_DATA' || ct === 'TABLE_ENTRY') {
+                        const info = renderContext?.tableManager?.getCellInfo(r, c);
+                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
+                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { wrapText: mode });
+                        }
+                        continue;
+                    }
                     sheetStore.setCellProperties(r, c, { textWrap: mode });
                 }
             }

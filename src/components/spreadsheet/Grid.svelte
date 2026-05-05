@@ -1919,6 +1919,32 @@
         const store = sheetStore;
         if (!store) return;
 
+        /**
+         * Write a fill value to cell (r,c), routing table cells to their store.
+         * Formulas are adjusted for table data cells to plain formula strings only
+         * if the column supports it; otherwise the raw value is used.
+         */
+        /** @param {number} r @param {number} c @param {any} value */
+        function writeFillValue(r, c, value) {
+            const ct = renderContext?.getCellType(r, c);
+            if (ct === CELL_TYPE.TABLE_DATA) {
+                const info = renderContext?.tableManager?.getCellInfo(r, c);
+                if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
+                    const parsed = typeof value === 'string' && value.startsWith('=')
+                        ? value
+                        : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                }
+                return; // never fall through to sheet store for table cells
+            }
+            if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
+            if (typeof value === 'string' && value.startsWith('=')) {
+                store.setCellFormula(r, c, value);
+            } else {
+                store.setCellValue(r, c, value);
+            }
+        }
+
         const srcRows = srcRange.endRow - srcRange.startRow + 1;
         const srcCols = srcRange.endCol - srcRange.startCol + 1;
         const isVertical = direction === 'down' || direction === 'up';
@@ -1941,18 +1967,19 @@
                         const cell = store.getCell(srcRow, c);
                         if (!cell?.exists) continue;
                         const v = cell.v;
-                        if (typeof v === 'string' && v.startsWith('=')) {
-                            store.setCellFormula(r, c, clipboardManager.adjustFormula(v, r - srcRow, 0));
-                        } else if (v !== null && v !== undefined) {
-                            store.setCellValue(r, c, v);
+                        if (v !== null && v !== undefined) {
+                            const adjusted = typeof v === 'string' && v.startsWith('=')
+                                ? clipboardManager.adjustFormula(v, r - srcRow, 0)
+                                : v;
+                            writeFillValue(r, c, adjusted);
                         }
                     } else if (seriesFn) {
-                        store.setCellValue(r, c, seriesFn(r - srcRange.startRow));
+                        writeFillValue(r, c, seriesFn(r - srcRange.startRow));
                     } else {
                         const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
                         const cell = store.getCell(srcRow, c);
                         if (cell?.exists && cell.v !== null && cell.v !== undefined) {
-                            store.setCellValue(r, c, cell.v);
+                            writeFillValue(r, c, cell.v);
                         }
                     }
                 }
@@ -1975,18 +2002,19 @@
                         const cell = store.getCell(r, srcCol);
                         if (!cell?.exists) continue;
                         const v = cell.v;
-                        if (typeof v === 'string' && v.startsWith('=')) {
-                            store.setCellFormula(r, c, clipboardManager.adjustFormula(v, 0, c - srcCol));
-                        } else if (v !== null && v !== undefined) {
-                            store.setCellValue(r, c, v);
+                        if (v !== null && v !== undefined) {
+                            const adjusted = typeof v === 'string' && v.startsWith('=')
+                                ? clipboardManager.adjustFormula(v, 0, c - srcCol)
+                                : v;
+                            writeFillValue(r, c, adjusted);
                         }
                     } else if (seriesFn) {
-                        store.setCellValue(r, c, seriesFn(c - srcRange.startCol));
+                        writeFillValue(r, c, seriesFn(c - srcRange.startCol));
                     } else {
                         const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
                         const cell = store.getCell(r, srcCol);
                         if (cell?.exists && cell.v !== null && cell.v !== undefined) {
-                            store.setCellValue(r, c, cell.v);
+                            writeFillValue(r, c, cell.v);
                         }
                     }
                 }
@@ -4502,6 +4530,10 @@
         spreadsheetSession.ydoc?.transact(() => {
             for (let r = eff.startRow; r <= eff.endRow; r++) {
                 for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    // Table cells use column-level type config (set via header) — skip
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_DATA ||
+                        ct === CELL_TYPE.TABLE_ENTRY) continue;
                     sheetStore.setCellTypeConfig(r, c, config);
                 }
             }
@@ -4553,6 +4585,19 @@
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return;
+
+        // Clear per-cell formatting for any table data cells in the range
+        for (let r = eff.startRow; r <= eff.endRow; r++) {
+            for (let c = eff.startCol; c <= eff.endCol; c++) {
+                const ct = renderContext?.getCellType(r, c);
+                if (ct !== CELL_TYPE.TABLE_DATA) continue;
+                const info = renderContext?.tableManager?.getCellInfo(r, c);
+                if (info?.table && info.colDef && info.dataIndex >= 0) {
+                    info.table.clearCellFormatting(info.dataIndex, info.colDef.id);
+                }
+            }
+        }
+
         sheetStore.clearRangeFormatting(
             eff.startRow,
             eff.startCol,

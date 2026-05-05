@@ -203,11 +203,10 @@ class ClipboardManager {
             'text/html':  new Blob([html], { type: 'text/html' }),
         };
 
-        // Chrome 104+: custom types require the 'web ' prefix inside a ClipboardItem.
-        // Constructing the Blob with the un-prefixed type is intentional — the browser
-        // maps the 'web ' key to the actual blob content.
+        // Chrome 104+: custom types require the 'web ' prefix as the ClipboardItem key.
+        // The Blob itself should use the un-prefixed MIME type.
         try {
-            itemTypes[SCRIPTORIUM_MIME_WEB] = new Blob([json], { type: SCRIPTORIUM_MIME_WEB });
+            itemTypes[SCRIPTORIUM_MIME_WEB] = new Blob([json], { type: SCRIPTORIUM_MIME });
         } catch (_) { /* unsupported */ }
 
         try {
@@ -1105,7 +1104,13 @@ class ClipboardManager {
         if (!data && this.clipboardData && htmlText) {
             const fp = this.clipboardData.fingerprint;
             if (fp && htmlText.includes(`content="${fp}"`)) {
-                data = this.clipboardData.data;
+                // Use the full in-memory clipboard object so multi-range paste works.
+                // Attach multiRange/ranges from the parent clipboard onto the data object.
+                data = { ...this.clipboardData.data };
+                if (this.clipboardData.ranges?.length > 1) {
+                    data.multiRange = true;
+                    data.ranges = this.clipboardData.ranges;
+                }
                 isInternal = true;
             }
         }
@@ -1172,7 +1177,11 @@ class ClipboardManager {
         if (this.clipboardData?.fingerprint) {
             const valid = await this.#validateInMemoryClipboard();
             if (valid) {
-                data       = this.clipboardData.data;
+                data = { ...this.clipboardData.data };
+                if (this.clipboardData.ranges?.length > 1) {
+                    data.multiRange = true;
+                    data.ranges = this.clipboardData.ranges;
+                }
                 isInternal = true;
             }
         }
@@ -1401,8 +1410,21 @@ class ClipboardManager {
                 const cell   = cells[srcRow]?.[srcCol];
                 if (!cell) continue;
 
-                const rowOffset = r - (this.clipboardData?.range?.startRow ?? destStartRow);
-                const colOffset = c - (this.clipboardData?.range?.startCol ?? destStartCol);
+                // Formula adjustment offset = dest position minus the source cell's
+                // absolute sheet position.
+                // Internal paste: source cell was at (clipboardOriginRow + srcRow, ...).
+                //   rowOffset = r - (clipboardOriginRow + srcRow)
+                //   This gives the true delta from source to dest, e.g. copying from row 1
+                //   to row 5 → offset 4 for every cell regardless of srcRow.
+                // External paste (Google Sheets, HTML): formulas are already expressed
+                //   relative to the 0-based clipboard position (row srcRow, col srcCol).
+                //   rowOffset = r - srcRow maps clipboard-relative refs to dest sheet coords.
+                const rowOffset = isInternal
+                    ? r - ((this.clipboardData?.range?.startRow ?? destStartRow) + srcRow)
+                    : r - srcRow;
+                const colOffset = isInternal
+                    ? c - ((this.clipboardData?.range?.startCol ?? destStartCol) + srcCol)
+                    : c - srcCol;
 
                 if (includesFormulas && (cell.isFormula || cell.formula)) {
                     this.applyValue(sheetStore, cell, r, c, rowOffset, colOffset, isInternal);
@@ -1511,18 +1533,21 @@ class ClipboardManager {
 
     applyFormatting(sheetStore, cell, row, col) {
         const props = {};
-        if (cell.fontFamily)       props.fontFamily    = cell.fontFamily;
-        if (cell.fontSize)         props.fontSize      = cell.fontSize;
-        if (cell.bold)             props.bold          = cell.bold;
-        if (cell.italic)           props.italic        = cell.italic;
-        if (cell.underline)        props.underline     = cell.underline;
-        if (cell.strikethrough)    props.strikethrough = cell.strikethrough;
-        if (cell.color)            props.color         = cell.color;
-        if (cell.backgroundColor)  props.backgroundColor = cell.backgroundColor;
-        if (cell.horizontalAlign)  props.horizontalAlign = cell.horizontalAlign;
-        if (cell.verticalAlign)    props.verticalAlign   = cell.verticalAlign;
-        if (cell.wrapText != null) props.wrapText        = cell.wrapText;
-        if (cell.numberFormat)     props.numberFormat    = cell.numberFormat;
+        // String/null properties: apply only when set (null/undefined means "default", don't override)
+        if (cell.fontFamily != null)      props.fontFamily      = cell.fontFamily;
+        if (cell.fontSize   != null)      props.fontSize        = cell.fontSize;
+        if (cell.color      != null)      props.color           = cell.color;
+        if (cell.backgroundColor != null) props.backgroundColor = cell.backgroundColor;
+        if (cell.horizontalAlign != null) props.horizontalAlign = cell.horizontalAlign;
+        if (cell.verticalAlign   != null) props.verticalAlign   = cell.verticalAlign;
+        if (cell.numberFormat    != null) props.numberFormat    = cell.numberFormat;
+        if (cell.wrapText        != null) props.wrapText        = cell.wrapText;
+        // Boolean properties: always apply so pasting a plain cell clears bold/italic/etc.
+        // from the destination. The source cell stores `false` explicitly for these.
+        if ('bold'          in cell) props.bold          = !!cell.bold;
+        if ('italic'        in cell) props.italic        = !!cell.italic;
+        if ('underline'     in cell) props.underline     = !!cell.underline;
+        if ('strikethrough' in cell) props.strikethrough = !!cell.strikethrough;
 
         if (Object.keys(props).length > 0) sheetStore.setCellProperties(row, col, props);
         if (cell.ct) sheetStore.setCellTypeConfig(row, col, cell.ct);

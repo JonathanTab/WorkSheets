@@ -34,6 +34,9 @@ export class TableManager {
     /** @type {import('yjs').Doc} */
     #ydoc;
 
+    /** @type {import('yjs').Map<any> | null} root spreadsheet Y.Map (for source table creation) */
+    #root = null;
+
     /** @type {Function[]} */
     #observers = [];
 
@@ -76,10 +79,12 @@ export class TableManager {
      * @param {import('yjs').Map<any>} sheet
      * @param {import('yjs').Doc} ydoc
      * @param {import('./DocumentTableRegistry.svelte.js').DocumentTableRegistry | null} [registry]
+     * @param {import('yjs').Map<any> | null} [root]  root spreadsheet Y.Map, for source table creation
      */
-    constructor(sheet, ydoc, registry = null) {
+    constructor(sheet, ydoc, registry = null, root = null) {
         this.#ydoc = ydoc;
         this.#registry = registry;
+        this.#root = root;
         this.#tablesYMap = sheet.get("tables");
 
         if (!this.#tablesYMap) {
@@ -129,14 +134,17 @@ export class TableManager {
         // attaches its observeDeep first (in its constructor), ours fires second,
         // ensuring sortedFilteredRows is up-to-date when we rebuild the index.
         const rebuildOnChange = () => this.#rebuildRowIndex();
-        const rowArr = tableYMap.get("rows");
+        // For views, rows/columns live on the SOURCE Y.Map (not tableYMap).
+        // sourceYMapForObservation returns the source for views, own map for source/legacy tables.
+        const obsYMap = store.sourceYMapForObservation;
+        const rowArr = obsYMap.get("rows");
         if (rowArr) {
             rowArr.observeDeep(rebuildOnChange);
             this.#observers.push(() => rowArr.unobserveDeep(rebuildOnChange));
         }
         // Observe filters Y.Map for filter changes that affect sortedFilteredRows.length.
         // Note: local (session-only) filters are handled via store._onFilterChange below.
-        const filtersYMap = tableYMap.get("filters");
+        const filtersYMap = obsYMap.get("filters");
         if (filtersYMap) {
             filtersYMap.observeDeep(rebuildOnChange);
             this.#observers.push(() => filtersYMap.unobserveDeep(rebuildOnChange));
@@ -145,14 +153,13 @@ export class TableManager {
         // clearFilter / clearAllFilters trigger a row-index rebuild and canvas repaint.
         store._onFilterChange = rebuildOnChange;
         this.#observers.push(() => { store._onFilterChange = null; });
-        // Also observe top-level for startRow/startCol changes
-        // This fires after TableStore's top-level observer (same attachment order)
+        // Also observe top-level for startRow/startCol changes (own view Y.Map)
         tableYMap.observe(rebuildOnChange);
         this.#observers.push(() => tableYMap.unobserve(rebuildOnChange));
         // Observe column definition/order changes so the canvas repaints when
         // column metadata changes. These don't affect row structure so we just bump tableVersion.
-        const defsMap = tableYMap.get("columnDefs");
-        const orderArr = tableYMap.get("columnOrder");
+        const defsMap = obsYMap.get("columnDefs");
+        const orderArr = obsYMap.get("columnOrder");
         if (defsMap) {
             const bumpOnColChange = () => { this.tableVersion++; };
             defsMap.observeDeep(bumpOnColChange);
@@ -362,6 +369,10 @@ export class TableManager {
         const sourceId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const viewId   = `view-${Date.now() + 1}-${Math.random().toString(36).slice(2, 7)}`;
 
+        // Source tables live in root.tables (document-level, not tied to any sheet).
+        // Fall back to sheet.tables if root is unavailable (legacy/test contexts).
+        const globalTablesMap = this.#root?.get('tables') ?? this.#registry?.getGlobalTablesMap() ?? this.#tablesYMap;
+
         this.#ydoc.transact(() => {
             // ── Source table (data + schema, not rendered on grid) ────────────────
             const src = new Y.Map();
@@ -390,7 +401,8 @@ export class TableManager {
             src.set("columnDefs", defsMap);
             src.set("columnOrder", orderArr);
             src.set("rows", new Y.Array());
-            this.#tablesYMap.set(sourceId, src);
+            src.set("filters", new Y.Map());
+            globalTablesMap.set(sourceId, src);
 
             // ── Default view (positioned on grid, shows all columns) ──────────────
             const vm = new Y.Map();
@@ -402,8 +414,8 @@ export class TableManager {
             vm.set("sortColId", null);
             vm.set("sortDir", "asc");
             vm.set("sourceTableId", sourceId);
-            vm.set("sourceSheetId", opts.sheetId ?? "");
             vm.set("visibleColumns", new Y.Array()); // [] = show all columns
+            vm.set("persistedFilters", new Y.Map());
             this.#tablesYMap.set(viewId, vm);
         });
 
@@ -427,7 +439,6 @@ export class TableManager {
      * a different subset/ordering of columns and sits at its own grid position.
      *
      * @param {{
-     *   sourceSheetId: string,
      *   sourceTableId: string,
      *   name?: string,
      *   startRow: number,
@@ -449,11 +460,11 @@ export class TableManager {
             vm.set("startCol", opts.startCol);
             vm.set("sortColId", null);
             vm.set("sortDir", "asc");
-            vm.set("sourceSheetId", opts.sourceSheetId);
             vm.set("sourceTableId", opts.sourceTableId);
             const visArr = new Y.Array();
             if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
             vm.set("visibleColumns", visArr);
+            vm.set("persistedFilters", new Y.Map());
             this.#tablesYMap.set(viewId, vm);
         });
 

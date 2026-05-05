@@ -120,8 +120,14 @@
             for (let r = eff.startRow; r <= eff.endRow; r++) {
                 for (let c = eff.startCol; c <= eff.endCol; c++) {
                     const ct = renderContext?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
-                        ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.VIEWPORT_OCCUPIED) continue;
+                    if (ct === CELL_TYPE.TABLE_HEADER) continue;
+                    if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
+                        const info = renderContext?.tableManager?.getCellInfo(r, c);
+                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
+                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
+                        }
+                        continue;
+                    }
                     sheetStore.setCellProperties(r, c, { [property]: value });
                 }
             }

@@ -248,14 +248,12 @@
 
     function commitCreateView(sourceTableId, store) {
         if (!creatingViewFor) return;
-        const sourceSheetId = registry?.getSheetId(sourceTableId) ?? session?.activeSheetId ?? '';
         const name = newViewName.trim() || 'View';
         const targetSheet = session?.activeSheetId ?? '';
         creatingViewFor = null;
 
         viewPlacementStore.activate(name, (row, col) => {
             session?.createTableViewOnSheet({
-                sourceSheetId,
                 sourceTableId,
                 targetSheetId: targetSheet,
                 name,
@@ -298,10 +296,17 @@
     }
 
     function _deleteFromSheet(id) {
+        if (!session?.ydoc || !session?.root) return;
         const sheetId = registry?.getSheetId(id);
-        if (!sheetId || !session?.ydoc || !session?.root) return;
-        const tablesMap = session.root.get('sheets')?.get(sheetId)?.get('tables');
-        if (tablesMap) session.ydoc.transact(() => tablesMap.delete(id));
+        if (sheetId) {
+            // View or legacy table on a specific sheet
+            const tablesMap = session.root.get('sheets')?.get(sheetId)?.get('tables');
+            if (tablesMap) session.ydoc.transact(() => tablesMap.delete(id));
+        } else {
+            // Document-level source table in root.tables
+            const globalTables = session.root.get('tables');
+            if (globalTables) session.ydoc.transact(() => globalTables.delete(id));
+        }
     }
 
     // ── Navigate to view ─────────────────────────────────────────────────────

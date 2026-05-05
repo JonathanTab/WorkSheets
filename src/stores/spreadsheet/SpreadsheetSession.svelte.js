@@ -256,7 +256,7 @@ export class SpreadsheetSession {
                 // Create TableManager before formula engine so TABLE_* functions are
                 // registered before formulas are evaluated on first load.
                 performance.mark('ss:tableManager:start');
-                this.tableManager = new TableManager(activeSheet, ydoc, this.tableRegistry);
+                this.tableManager = new TableManager(activeSheet, ydoc, this.tableRegistry, root);
                 performance.mark('ss:tableManager:end');
                 performance.measure('ss:tableManager', 'ss:tableManager:start', 'ss:tableManager:end');
 
@@ -890,7 +890,7 @@ export class SpreadsheetSession {
             // #cleanupFormulaObserver and engines are already null (from #cacheCurrentSheet)
             // Create TableManager before formula engine so TABLE_* functions are
             // registered before formulas are evaluated on sheet switch.
-            this.tableManager = new TableManager(sheet, this.ydoc, this.tableRegistry);
+            this.tableManager = new TableManager(sheet, this.ydoc, this.tableRegistry, this.root);
             this.#initializeFormulaEngine(sheet, this.tableManager);
 
             this.renderContext = new SheetRenderContext(this.activeSheetStore, this.ydoc, this);
@@ -1098,31 +1098,46 @@ export class SpreadsheetSession {
      */
     getAllTableDescriptors() {
         if (!this.root) return /** @type {{ tableName: string, sheetId: string, sheetName: string, columns: { id: string, name: string }[] }[]} */ ([]);
-        const sheetsMap = this.root.get('sheets');
+
         /** @type {{ tableName: string, sheetId: string, sheetName: string, columns: { id: string, name: string }[] }[]} */
         const result = [];
+
+        const addFromYMap = (tableYMap, sheetId, sheetName) => {
+            const tableName = tableYMap.get('name') ?? 'Table';
+            const defsMap = tableYMap.get('columnDefs');
+            const orderArr = tableYMap.get('columnOrder');
+            /** @type {{ id: string, name: string }[]} */
+            const columns = [];
+            if (defsMap && orderArr) {
+                for (const colId of orderArr.toArray()) {
+                    const c = defsMap.get(colId);
+                    if (c) columns.push({ id: colId, name: c.get?.('name') ?? colId });
+                }
+            }
+            result.push({ tableName, sheetId, sheetName, columns });
+        };
+
+        // Document-level source tables (post-migration storage)
+        const globalTables = this.root.get('tables');
+        if (globalTables) {
+            globalTables.forEach((tableYMap) => {
+                addFromYMap(tableYMap, '', '');
+            });
+        }
+
+        // Per-sheet legacy tables (pre-migration, or any that weren't migrated)
+        const sheetsMap = this.root.get('sheets');
         for (const { id: sheetId, name: sheetName } of this.sheets) {
             const sheetYMap = sheetsMap?.get(sheetId);
             const tablesMap = sheetYMap?.get('tables');
             if (!tablesMap) continue;
-            tablesMap.forEach((/** @type {import('yjs').Map<any>} */ tableYMap) => {
-                // Skip view tables — they have no own column defs and shouldn't appear as
-                // independent table sources in the configurator.
-                if (tableYMap.get('sourceTableId')) return;
-                const tableName = tableYMap.get('name') ?? 'Table';
-                const defsMap = tableYMap.get('columnDefs');
-                const orderArr = tableYMap.get('columnOrder');
-                /** @type {{ id: string, name: string }[]} */
-                const columns = [];
-                if (defsMap && orderArr) {
-                    for (const colId of orderArr.toArray()) {
-                        const c = defsMap.get(colId);
-                        if (c) columns.push({ id: colId, name: c.get?.('name') ?? colId });
-                    }
-                }
-                result.push({ tableName, sheetId, sheetName, columns });
+            tablesMap.forEach((tableYMap) => {
+                // Skip views and isSourceOnly entries — only want standalone legacy tables
+                if (tableYMap.get('sourceTableId') || tableYMap.get('isSourceOnly')) return;
+                addFromYMap(tableYMap, sheetId, sheetName);
             });
         }
+
         return result;
     }
 
@@ -1165,7 +1180,6 @@ export class SpreadsheetSession {
      * but can show a different column subset and lives at its own grid position.
      *
      * @param {{
-     *   sourceSheetId: string,
      *   sourceTableId: string,
      *   targetSheetId: string,
      *   name?: string,
@@ -1197,11 +1211,11 @@ export class SpreadsheetSession {
             vm.set('startCol', opts.startCol ?? 0);
             vm.set('sortColId', null);
             vm.set('sortDir', 'asc');
-            vm.set('sourceSheetId', opts.sourceSheetId);
             vm.set('sourceTableId', opts.sourceTableId);
             const visArr = new Y.Array();
             if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
             vm.set('visibleColumns', visArr);
+            vm.set('persistedFilters', new Y.Map());
             tablesMap.set(viewId, vm);
         });
         return viewId;
