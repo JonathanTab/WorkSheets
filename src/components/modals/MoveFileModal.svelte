@@ -18,8 +18,6 @@
     let allFiles = $state(/** @type {any[]} */ ([]));
     let browseFolderId = $state(file.folderId ?? null);
     let selectedFolderId = $state(file.folderId ?? null);
-    let saving = $state(false);
-
     $effect(() => {
         const unsubFolders = storage.drive.folders.subscribe((/** @type {any[]} */ f) => { allFolders = f; });
         const unsubFiles = storage.drive.files.subscribe((/** @type {any[]} */ f) => { allFiles = f; });
@@ -56,12 +54,8 @@
     }
 
     async function confirm() {
-        saving = true;
-        try {
-            await onConfirm(selectedFolderId);
-        } finally {
-            saving = false;
-        }
+        closeTopModal();
+        onConfirm(selectedFolderId);
     }
 
     function folderName(id) {
@@ -177,7 +171,6 @@
     <div class="dialog-footer">
         <Button variant="secondary" onclick={closeTopModal}>Cancel</Button>
         <Button
-            loading={saving}
             onclick={confirm}
             disabled={selectedFolderId === (file.folderId ?? null)}
         >

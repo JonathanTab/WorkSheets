@@ -1,6 +1,6 @@
 <script>
-    import { openModal, closeModal } from "../../lib/ui/modalStore.svelte.js";
-    import DeleteSheetModal from "../modals/DeleteSheetModal.svelte";
+    import { openModal } from "../../lib/ui/modalStore.svelte.js";
+    import ConfirmModal from "../modals/ConfirmModal.svelte";
     import SelectionStats from "./SelectionStats.svelte";
     import BottomSheet from "../ui/BottomSheet.svelte";
     import ContextMenu from "../ui/ContextMenu.svelte";
@@ -149,12 +149,12 @@
         if (sheets.length <= 1) return;
         const sheet = sheets.find((s) => s.id === sheetId);
         if (sheet) {
-            openModal(DeleteSheetModal, {
-                sheetName: sheet.name,
-                onConfirm: () => {
-                    onDeleteSheet(sheetId);
-                    closeModal();
-                },
+            openModal(ConfirmModal, {
+                title: "Delete sheet",
+                message: `Delete "${sheet.name}"? This cannot be undone.`,
+                variant: "danger",
+                confirmText: "Delete",
+                onConfirm: () => onDeleteSheet(sheetId),
             });
         }
     }

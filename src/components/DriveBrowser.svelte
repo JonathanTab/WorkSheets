@@ -3,9 +3,6 @@
     import { openModal, closeTopModal } from "../lib/ui/modalStore.svelte.js";
     import Button from "../lib/ui/Button.svelte";
     import UserMenu from "./UserMenu.svelte";
-    import CreateDocumentModal from "./modals/CreateDocumentModal.svelte";
-    import DeleteConfirmModal from "./modals/DeleteConfirmModal.svelte";
-    import RenameDocumentModal from "./modals/RenameDocumentModal.svelte";
     import MoveFileModal from "./modals/MoveFileModal.svelte";
     import ShareFileModal from "./modals/ShareFileModal.svelte";
     import VersionHistoryModal from "./modals/VersionHistoryModal.svelte";
@@ -71,6 +68,8 @@
         isBlobFile,
         isPreviewable,
         DEFAULT_APP,
+        getDefaultTitle,
+        getAppName,
     } from "../lib/appTypes.js";
 
     // ---- Props (for standalone / embeddable use) ----
@@ -499,8 +498,10 @@
     }
 
     function handleCreateSheet() {
-        openModal(CreateDocumentModal, {
-            appType: APP_SHEETS,
+        openModal(PromptModal, {
+            title: `New ${getAppName(APP_SHEETS)}`,
+            value: getDefaultTitle(APP_SHEETS),
+            confirmText: "Create",
             onConfirm: async (title) => {
                 try {
                     const doc = await registry.drive.createAndInitializeFile({
@@ -509,7 +510,6 @@
                         folderId: tab === "drive" ? currentFolderId : null,
                         initializer: (ydoc) => initializeSpreadsheet(ydoc),
                     });
-                    closeTopModal();
                     router.openSheet(doc.id);
                 } catch (e) {
                     console.error("Failed to create spreadsheet:", e);
@@ -519,8 +519,10 @@
     }
 
     function handleCreateDoc() {
-        openModal(CreateDocumentModal, {
-            appType: APP_DOCS,
+        openModal(PromptModal, {
+            title: `New ${getAppName(APP_DOCS)}`,
+            value: getDefaultTitle(APP_DOCS),
+            confirmText: "Create",
             onConfirm: async (title) => {
                 try {
                     const doc = await registry.drive.createFile({
@@ -528,7 +530,6 @@
                         app: APP_DOCS,
                         folderId: tab === "drive" ? currentFolderId : null,
                     });
-                    closeTopModal();
                     router.openDoc(doc.id);
                 } catch (e) {
                     console.error("Failed to create document:", e);
@@ -538,8 +539,10 @@
     }
 
     function handleCreateSvg() {
-        openModal(CreateDocumentModal, {
-            appType: APP_SVG,
+        openModal(PromptModal, {
+            title: `New ${getAppName(APP_SVG)}`,
+            value: getDefaultTitle(APP_SVG),
+            confirmText: "Create",
             onConfirm: async (title) => {
                 try {
                     const EMPTY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="640" height="480" viewBox="0 0 640 480"><title>${title}</title></svg>`;
@@ -553,7 +556,6 @@
                         app: APP_SVG,
                         folderId: tab === "drive" ? currentFolderId : null,
                     });
-                    closeTopModal();
                     router.openSvg(doc.id);
                 } catch (e) {
                     console.error("Failed to create drawing:", e);
@@ -640,7 +642,6 @@
                         name,
                         parentId: tab === "drive" ? currentFolderId : null,
                     });
-                    closeTopModal();
                 } catch (e) {
                     console.error("Failed to create folder:", e);
                 }
@@ -651,8 +652,10 @@
     function handleRenameFile(file, e) {
         e?.stopPropagation();
         closeContextMenu();
-        openModal(RenameDocumentModal, {
-            currentTitle: file.title,
+        openModal(PromptModal, {
+            title: "Rename",
+            value: file.title,
+            confirmText: "Rename",
             onConfirm: async (newTitle) => {
                 const oldTitle = file.title;
                 try {
@@ -664,7 +667,6 @@
                         redo: async () =>
                             registry.drive.renameFile(file.id, newTitle),
                     });
-                    closeTopModal();
                 } catch (err) {
                     console.error("Failed to rename:", err);
                 }
@@ -675,8 +677,11 @@
     function handleDeleteFile(file, e) {
         e?.stopPropagation();
         closeContextMenu();
-        openModal(DeleteConfirmModal, {
-            documentTitle: file.title || "this document",
+        openModal(ConfirmModal, {
+            title: "Delete document",
+            message: `Delete "${file.title || "this document"}"? This cannot be undone.`,
+            variant: "danger",
+            confirmText: "Delete",
             onConfirm: async () => {
                 try {
                     await registry.drive.deleteFile(file.id);
@@ -685,7 +690,6 @@
                         undo: async () => registry.drive.restoreFile(file.id),
                         redo: async () => registry.drive.deleteFile(file.id),
                     });
-                    closeTopModal();
                 } catch (err) {
                     console.error("Failed to delete:", err);
                 }
@@ -701,7 +705,6 @@
             onConfirm: async (targetFolderId) => {
                 try {
                     await registry.drive.moveFile(file.id, targetFolderId);
-                    closeTopModal();
                 } catch (err) {
                     console.error("Failed to move:", err);
                 }
@@ -734,7 +737,6 @@
                     await registry.drive.deleteFolder(folder.id);
                     if (currentFolderId === folder.id)
                         currentFolderId = folder.parentId ?? null;
-                    closeTopModal();
                 } catch (err) {
                     console.error("Failed to delete folder:", err);
                 }
@@ -1409,7 +1411,6 @@
             onConfirm: async () => {
                 try {
                     await registry.drive.permanentDeleteFile(file.id);
-                    closeTopModal();
                 } catch (err) {
                     console.error("Failed to permanently delete:", err);
                 }

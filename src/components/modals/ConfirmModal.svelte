@@ -14,6 +14,7 @@
     } = $props();
 
     function handleConfirm() {
+        closeTopModal();
         onConfirm();
     }
 </script>

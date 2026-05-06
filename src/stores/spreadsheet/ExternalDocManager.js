@@ -11,6 +11,7 @@
 
 import { FormulaError } from '../../formulas/functions.js';
 import { makeSheetCellEvaluator } from './sheetCellEval.js';
+import { YKeyValue } from 'y-utility/y-keyvalue';
 
 /** Sentinel returned while a doc is being loaded. */
 export const LOADING_VALUE = '#LOADING';
@@ -193,10 +194,10 @@ export class ExternalDocManager {
 
         if (!targetSheet) return FormulaError.REF;
 
-        const cells = targetSheet.get('cells');
-        if (!cells) return FormulaError.REF;
+        const cvArr = targetSheet.get('cellValues');
+        if (!cvArr) return FormulaError.REF;
 
-        const { evalCell } = makeSheetCellEvaluator(cells, null);
+        const { evalCell } = makeSheetCellEvaluator(new YKeyValue(cvArr), null);
         const result = [];
         for (let r = startRow; r <= endRow; r++) {
             const row = [];

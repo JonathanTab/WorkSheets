@@ -16,6 +16,7 @@
 
     function handleConfirm() {
         if (inputValue?.trim()) {
+            closeTopModal();
             onConfirm(inputValue.trim());
         }
     }

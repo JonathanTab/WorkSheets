@@ -12,11 +12,12 @@
  * 5. Single `v` field stores value OR formula (formulas start with "=")
  */
 import * as Y from 'yjs';
-import { createCellYMap } from './schema.js';
+import { YKeyValue } from 'y-utility/y-keyvalue';
 import { isRichText, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
 import { perfMon } from './perf/PerfMonitor.js';
 import {
     CELL_KEYS,
+    CELL_VALUE_KEYS,
     CELL_TYPE_CONFIG_KEY,
     DEFAULT_ROW_COUNT,
     DEFAULT_COL_COUNT
@@ -33,11 +34,23 @@ export class SheetStore {
     /** @type {Y.Doc} */
     #ydoc;
 
-    /** @type {Y.Map} Y.Map<string, Y.Map> - key is "row,col", value is cell Y.Map */
-    #cells;
+    /** @type {YKeyValue|null} cell values store — { v, t } per "row,col" */
+    #cellValuesKV = null;
 
-    /** @type {Y.Map} Y.Map<string, Object> - key is "h,row,col" or "v,row,col", value is border style */
+    /** @type {YKeyValue|null} cell styles store — formatting + ct + protected per "row,col" */
+    #cellStylesKV = null;
+
+    /** @type {YKeyValue|null} row metadata — { height, hidden, ...formatting } per row index */
+    #rowMetaKV = null;
+
+    /** @type {YKeyValue|null} col metadata — { width, hidden, ...formatting } per col index */
+    #colMetaKV = null;
+
+    /** @type {Y.Array} backing Y.Array for the YKeyValue borders store */
     #borders;
+
+    /** @type {YKeyValue} YKeyValue wrapper for #borders */
+    #bordersKV;
 
     /** @type {Function | null} */
     #cleanup = null;
@@ -102,8 +115,14 @@ export class SheetStore {
     constructor(sheet, ydoc) {
         this.#sheet = sheet;
         this.#ydoc = ydoc;
-        this.#cells = sheet.get('cells');
+        const cvArr = sheet.get('cellValues');
+        const csArr = sheet.get('cellStyles');
+        if (cvArr instanceof Y.Array) this.#cellValuesKV = new YKeyValue(cvArr);
+        if (csArr instanceof Y.Array) this.#cellStylesKV = new YKeyValue(csArr);
+        // rowMeta / colMeta are initialized with observers in #setupObservers → tryAttachRowMeta/tryAttachColMeta
+
         this.#borders = sheet.get('borders');
+        if (this.#borders) this.#bordersKV = new YKeyValue(this.#borders);
 
         // 1. Synchronous initial sync
         this.#syncSheetProps();
@@ -160,41 +179,79 @@ export class SheetStore {
     }
 
     #syncAllCells() {
-        // Build initial state map from Y.Map
         const newCells = new Map();
-
-        this.#cells.forEach((cellYMap, key) => {
-            newCells.set(key, this.#processCellYMap(cellYMap));
-        });
-
-        // Assign to reactive state
+        const allKeys = new Set([
+            ...(this.#cellValuesKV?.map.keys() ?? []),
+            ...(this.#cellStylesKV?.map.keys() ?? []),
+        ]);
+        for (const key of allKeys) {
+            newCells.set(key, this.#processCellData(key));
+        }
         this.cells = newCells;
     }
 
-    #processCellYMap(cellMap) {
-        // Extract only what we need for rendering
-        // Reading from Y.Map is synchronous
-        // Note: v may contain a formula (starting with "=") or a raw value
+    /** Merge cellValues + cellStyles into a single plain render object for key "row,col". */
+    #processCellData(key) {
+        const val = this.#cellValuesKV?.get(key);
+        const sty = this.#cellStylesKV?.get(key);
         return {
-            v: cellMap.get(CELL_KEYS.VALUE),
-            t: cellMap.get(CELL_KEYS.TYPE),
-            ct: cellMap.get(CELL_TYPE_CONFIG_KEY),
-            // Formatting
-            fontFamily: cellMap.get('fontFamily'),
-            fontSize: cellMap.get('fontSize'),
-            bold: cellMap.get('bold'),
-            italic: cellMap.get('italic'),
-            underline: cellMap.get('underline'),
-            strikethrough: cellMap.get('strikethrough'),
-            color: cellMap.get('color'),
-            backgroundColor: cellMap.get('backgroundColor'),
-            border: cellMap.get('border'),
-            horizontalAlign: cellMap.get('horizontalAlign'),
-            verticalAlign: cellMap.get('verticalAlign'),
-            wrapText: cellMap.get('wrapText'),
-            numberFormat: cellMap.get('numberFormat'),
-            exists: true
+            v:               val?.v,
+            t:               val?.t,
+            ct:              sty?.ct,
+            protected:       sty?.protected,
+            fontFamily:      sty?.fontFamily,
+            fontSize:        sty?.fontSize,
+            bold:            sty?.bold,
+            italic:          sty?.italic,
+            underline:       sty?.underline,
+            strikethrough:   sty?.strikethrough,
+            color:           sty?.color,
+            backgroundColor: sty?.backgroundColor,
+            border:          sty?.border,
+            horizontalAlign: sty?.horizontalAlign,
+            verticalAlign:   sty?.verticalAlign,
+            wrapText:        sty?.wrapText,
+            numberFormat:    sty?.numberFormat,
+            exists: true,
         };
+    }
+
+    /** Return merged plain data object for a cell key, or null if the cell does not exist. */
+    #getCellData(key) {
+        const val = this.#cellValuesKV?.get(key);
+        const sty = this.#cellStylesKV?.get(key);
+        if (!val && !sty) return null;
+        return { ...(sty ?? {}), ...(val ?? {}) };
+    }
+
+    /** Split a plain data object and write its parts to cellValues / cellStyles. */
+    #setCellData(key, data) {
+        if (!data) { this.#deleteCellData(key); return; }
+        const valData = {};
+        const styData = {};
+        for (const [k, v] of Object.entries(data)) {
+            if (v === undefined) continue;
+            if (CELL_VALUE_KEYS.has(k)) valData[k] = v;
+            else styData[k] = v;
+        }
+        if (Object.keys(valData).length > 0) this.#cellValuesKV?.set(key, valData);
+        else this.#cellValuesKV?.delete(key);
+        if (Object.keys(styData).length > 0) this.#cellStylesKV?.set(key, styData);
+        else this.#cellStylesKV?.delete(key);
+    }
+
+    /** Delete a cell from both stores. */
+    #deleteCellData(key) {
+        this.#cellValuesKV?.delete(key);
+        this.#cellStylesKV?.delete(key);
+    }
+
+    /** Set of all cell keys present in either store. */
+    #allCellKeys() {
+        return new Set([
+            ...(this.#cellValuesKV?.map.keys() ?? []),
+            ...(this.#cellStylesKV?.map.keys() ?? []),
+        ]);
     }
 
     #setupObservers() {
@@ -209,27 +266,24 @@ export class SheetStore {
         //     counter manually (synchronous, before the next microtask); the same
         //     increment from the observer is a harmless no-op because the $effect in
         //     Grid is idempotent.
-        let rowMetaMap = null;
-        let colMetaMap = null;
-
         const rowMetaHandler = () => { this.rowMetaVersion++; };
         const colMetaHandler = () => { this.colMetaVersion++; };
 
         const tryAttachRowMeta = () => {
-            const map = this.#sheet.get('rowMeta');
-            if (map && map !== rowMetaMap) {
-                if (rowMetaMap) rowMetaMap.unobserveDeep(rowMetaHandler);
-                rowMetaMap = map;
-                rowMetaMap.observeDeep(rowMetaHandler);
-            }
+            const arr = this.#sheet.get('rowMeta');
+            if (!(arr instanceof Y.Array)) return;
+            if (arr === this.#rowMetaKV?.yarray) return;
+            this.#rowMetaKV?.off('change', rowMetaHandler);
+            this.#rowMetaKV = new YKeyValue(arr);
+            this.#rowMetaKV.on('change', rowMetaHandler);
         };
         const tryAttachColMeta = () => {
-            const map = this.#sheet.get('colMeta');
-            if (map && map !== colMetaMap) {
-                if (colMetaMap) colMetaMap.unobserveDeep(colMetaHandler);
-                colMetaMap = map;
-                colMetaMap.observeDeep(colMetaHandler);
-            }
+            const arr = this.#sheet.get('colMeta');
+            if (!(arr instanceof Y.Array)) return;
+            if (arr === this.#colMetaKV?.yarray) return;
+            this.#colMetaKV?.off('change', colMetaHandler);
+            this.#colMetaKV = new YKeyValue(arr);
+            this.#colMetaKV.on('change', colMetaHandler);
         };
 
         // Observe conditionalFormats Y.Array for remote changes
@@ -285,52 +339,42 @@ export class SheetStore {
         };
         this.#sheet.observe(sheetObserver);
 
-        // 2. Observe Cells Y.Map directly
-        const cellObserver = (event) => {
-            // Handle changes to the cells map
-            event.changes.keys.forEach((change, key) => {
-                if (change.action === 'add' || change.action === 'update') {
-                    const cellYMap = this.#cells.get(key);
-                    if (cellYMap) {
-                        this.cells.set(key, this.#processCellYMap(cellYMap));
-                    }
-                } else if (change.action === 'delete') {
-                    this.cells.delete(key);
+        // 2. Observe cellValues YKeyValue changes (value + type updates)
+        const cellValueObserver = (changes) => {
+            for (const [key, change] of changes) {
+                if (change.action === 'delete') {
+                    if (!this.#cellStylesKV?.has(key)) this.cells.delete(key);
+                    else this.cells.set(key, this.#processCellData(key));
+                } else {
+                    this.cells.set(key, this.#processCellData(key));
                 }
-            });
+            }
             this.cellsVersion++;
             perfMon.count('data.cellsVersionBump');
         };
+        this.#cellValuesKV?.on('change', cellValueObserver);
 
-        // 3. Observe cell content changes deeply (for property updates within cells)
-        const cellContentObserver = (events) => {
-            let changed = false;
-            for (const event of events) {
-                // Check if this is a change to a cell's content (not the cells map itself)
-                if (event.path.length > 0 && event.target !== this.#cells) {
-                    const cellKey = event.path[0];
-                    if (typeof cellKey !== 'string') continue;
-
-                    const cellYMap = this.#cells.get(cellKey);
-                    if (cellYMap) {
-                        this.cells.set(cellKey, this.#processCellYMap(cellYMap));
-                        changed = true;
-                    }
+        // 3. Observe cellStyles YKeyValue changes (formatting + ct + protected updates)
+        const cellStyleObserver = (changes) => {
+            for (const [key, change] of changes) {
+                if (change.action === 'delete') {
+                    if (!this.#cellValuesKV?.has(key)) this.cells.delete(key);
+                    else this.cells.set(key, this.#processCellData(key));
+                } else {
+                    this.cells.set(key, this.#processCellData(key));
                 }
             }
-            if (changed) { this.cellsVersion++; perfMon.count('data.cellsVersionBump'); }
+            this.cellsVersion++;
+            perfMon.count('data.cellsVersionBump');
         };
+        this.#cellStylesKV?.on('change', cellStyleObserver);
 
-        this.#cells.observe(cellObserver);
-        this.#cells.observeDeep(cellContentObserver);
-
-        // 4. Observe Borders Y.Map for reactivity
+        // 4. Observe borders YKeyValue for reactivity
         const bordersObserver = () => {
-            // Increment version to trigger re-renders in Grid
             this.bordersVersion++;
             this.#cellBorderCache.clear();
         };
-        this.#borders.observe(bordersObserver);
+        this.#bordersKV?.on('change', bordersObserver);
 
         // 5. Observe printSettings Y.Map changes
         let printSettingsMap = null;
@@ -363,11 +407,11 @@ export class SheetStore {
 
         this.#cleanup = () => {
             this.#sheet.unobserve(sheetObserver);
-            this.#cells.unobserve(cellObserver);
-            this.#cells.unobserveDeep(cellContentObserver);
-            this.#borders.unobserve(bordersObserver);
-            if (rowMetaMap) rowMetaMap.unobserveDeep(rowMetaHandler);
-            if (colMetaMap) colMetaMap.unobserveDeep(colMetaHandler);
+            this.#cellValuesKV?.off('change', cellValueObserver);
+            this.#cellStylesKV?.off('change', cellStyleObserver);
+            this.#bordersKV?.off('change', bordersObserver);
+            this.#rowMetaKV?.off('change', rowMetaHandler);
+            this.#colMetaKV?.off('change', colMetaHandler);
             if (printSettingsMap) printSettingsMap.unobserve(printSettingsHandler);
             if (floatingImagesMap) floatingImagesMap.unobserveDeep(floatingImagesHandler);
         };
@@ -456,7 +500,7 @@ export class SheetStore {
      */
     hasCell(row, col) {
         const key = `${row},${col}`;
-        return this.#cells.has(key);
+        return (this.#cellValuesKV?.has(key) ?? false) || (this.#cellStylesKV?.has(key) ?? false);
     }
 
     /**
@@ -479,26 +523,12 @@ export class SheetStore {
     setCellValue(row, col, value) {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
-            let cellMap = this.#cells.get(key);
             if (value === '' || value === null || value === undefined) {
-                if (cellMap) {
-                    // If cell has other properties (formatting), just clear the value
-                    const hasOtherProps = Array.from(cellMap.keys()).some(
-                        k => k !== CELL_KEYS.VALUE
-                    );
-                    if (hasOtherProps) {
-                        cellMap.delete(CELL_KEYS.VALUE);
-                    } else {
-                        this.#cells.delete(key);
-                    }
-                }
+                // Delete from cellValues; cellStyles entry (formatting) is preserved.
+                this.#cellValuesKV?.delete(key);
             } else {
-                if (!cellMap) {
-                    cellMap = createCellYMap({ v: value });
-                    this.#cells.set(key, cellMap);
-                } else {
-                    cellMap.set(CELL_KEYS.VALUE, value);
-                }
+                const current = this.#cellValuesKV?.get(key) ?? {};
+                this.#cellValuesKV?.set(key, { ...current, v: value });
             }
         });
     }
@@ -512,34 +542,13 @@ export class SheetStore {
     setCellFormula(row, col, formula) {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
-            // If formula is empty/null, clear the cell
             if (!formula || formula === '') {
-                const cellMap = this.#cells.get(key);
-                if (cellMap) {
-                    // If cell has other properties (formatting), just clear the value
-                    const hasOtherProps = Array.from(cellMap.keys()).some(
-                        k => k !== CELL_KEYS.VALUE
-                    );
-                    if (hasOtherProps) {
-                        cellMap.delete(CELL_KEYS.VALUE);
-                    } else {
-                        this.#cells.delete(key);
-                    }
-                }
+                this.#cellValuesKV?.delete(key);
                 return;
             }
-
-            // Ensure formula starts with =
-            const normalizedFormula = formula.startsWith('=') ? formula : '=' + formula;
-
-            // Set the formula as the value
-            let cellMap = this.#cells.get(key);
-            if (!cellMap) {
-                cellMap = createCellYMap({ v: normalizedFormula });
-                this.#cells.set(key, cellMap);
-            } else {
-                cellMap.set(CELL_KEYS.VALUE, normalizedFormula);
-            }
+            const normalized = formula.startsWith('=') ? formula : '=' + formula;
+            const current = this.#cellValuesKV?.get(key) ?? {};
+            this.#cellValuesKV?.set(key, { ...current, v: normalized });
         });
     }
 
@@ -552,27 +561,43 @@ export class SheetStore {
     setCellProperties(row, col, props) {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
-            let cellMap = this.#cells.get(key);
-            if (!cellMap) {
-                cellMap = createCellYMap(props);
-                this.#cells.set(key, cellMap);
-            } else {
-                for (const [k, v] of Object.entries(props)) {
-                    if (v === undefined) cellMap.delete(k);
-                    else cellMap.set(k, v);
+            const valUpdates = {};
+            const styUpdates = {};
+            for (const [k, v] of Object.entries(props)) {
+                if (CELL_VALUE_KEYS.has(k)) valUpdates[k] = v;
+                else styUpdates[k] = v;
+            }
+
+            // Strip inline rich-text overrides when whole-cell formatting is applied.
+            const hasMappedProp = Object.keys(styUpdates).some(p => RUN_STYLE_PROP_MAP[p]);
+            if (hasMappedProp) {
+                const currentV = this.#cellValuesKV?.get(key)?.v;
+                if (isRichText(currentV)) {
+                    valUpdates.v = Object.keys(styUpdates).reduce(
+                        (html, p) => RUN_STYLE_PROP_MAP[p] ? stripHtmlProp(html, p) : html,
+                        currentV
+                    );
                 }
-                // When applying whole-cell formatting to a rich-text cell, strip
-                // inline overrides for that property so the cell-level value wins.
-                const hasMappedProp = Object.keys(props).some(p => RUN_STYLE_PROP_MAP[p]);
-                if (hasMappedProp) {
-                    const currentValue = cellMap.get(CELL_KEYS.VALUE);
-                    if (isRichText(currentValue)) {
-                        const stripped = Object.keys(props).reduce((html, cellProp) => {
-                            return RUN_STYLE_PROP_MAP[cellProp] ? stripHtmlProp(html, cellProp) : html;
-                        }, currentValue);
-                        cellMap.set(CELL_KEYS.VALUE, stripped);
-                    }
+            }
+
+            if (Object.keys(valUpdates).length > 0) {
+                const cur = this.#cellValuesKV?.get(key) ?? {};
+                const upd = { ...cur };
+                for (const [k, v] of Object.entries(valUpdates)) {
+                    if (v === undefined) delete upd[k]; else upd[k] = v;
                 }
+                if (Object.keys(upd).length > 0) this.#cellValuesKV?.set(key, upd);
+                else this.#cellValuesKV?.delete(key);
+            }
+
+            if (Object.keys(styUpdates).length > 0) {
+                const cur = this.#cellStylesKV?.get(key) ?? {};
+                const upd = { ...cur };
+                for (const [k, v] of Object.entries(styUpdates)) {
+                    if (v === undefined) delete upd[k]; else upd[k] = v;
+                }
+                if (Object.keys(upd).length > 0) this.#cellStylesKV?.set(key, upd);
+                else this.#cellStylesKV?.delete(key);
             }
         });
     }
@@ -585,7 +610,7 @@ export class SheetStore {
     clearCell(row, col) {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
-            this.#cells.delete(key);
+            this.#deleteCellData(key);
         });
     }
 
@@ -599,13 +624,11 @@ export class SheetStore {
         const cell = this.getCell(row, col);
         if (cell.ct) return cell.ct;
 
-        const rowMeta = this.#sheet.get('rowMeta');
-        const rMeta = rowMeta?.get(String(row));
-        if (rMeta?.has(CELL_TYPE_CONFIG_KEY)) return rMeta.get(CELL_TYPE_CONFIG_KEY);
+        const rMeta = this.#rowMetaKV?.get(String(row));
+        if (rMeta?.[CELL_TYPE_CONFIG_KEY] !== undefined) return rMeta[CELL_TYPE_CONFIG_KEY];
 
-        const colMeta = this.#sheet.get('colMeta');
-        const cMeta = colMeta?.get(String(col));
-        if (cMeta?.has(CELL_TYPE_CONFIG_KEY)) return cMeta.get(CELL_TYPE_CONFIG_KEY);
+        const cMeta = this.#colMetaKV?.get(String(col));
+        if (cMeta?.[CELL_TYPE_CONFIG_KEY] !== undefined) return cMeta[CELL_TYPE_CONFIG_KEY];
 
         return null;
     }
@@ -627,16 +650,14 @@ export class SheetStore {
      * @returns {Object|null}
      */
     getRowFormatting(rowIndex) {
-        const rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) return null;
-        const meta = rowMeta.get(String(rowIndex));
+        const meta = this.#rowMetaKV?.get(String(rowIndex));
         if (!meta) return null;
         const fmt = {};
         const keys = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'strikethrough',
             'color', 'backgroundColor', 'horizontalAlign', 'verticalAlign', 'wrapText'];
         let hasAny = false;
         for (const k of keys) {
-            if (meta.has(k)) { fmt[k] = meta.get(k); hasAny = true; }
+            if (meta[k] !== undefined) { fmt[k] = meta[k]; hasAny = true; }
         }
         return hasAny ? fmt : null;
     }
@@ -648,21 +669,16 @@ export class SheetStore {
      * @param {Object} props
      */
     setRowFormatting(rowIndex, props) {
+        if (!this.#rowMetaKV) return;
         this.#ydoc.transact(() => {
-            let rowMeta = this.#sheet.get('rowMeta');
-            if (!rowMeta) {
-                rowMeta = new Y.Map();
-                this.#sheet.set('rowMeta', rowMeta);
-            }
-            let meta = rowMeta.get(String(rowIndex));
-            if (!meta) {
-                meta = new Y.Map();
-                rowMeta.set(String(rowIndex), meta);
-            }
+            const cur = this.#rowMetaKV.get(String(rowIndex)) ?? {};
+            const upd = { ...cur };
             for (const [k, v] of Object.entries(props)) {
-                if (v === null || v === undefined) meta.delete(k);
-                else meta.set(k, v);
+                if (v === null || v === undefined) delete upd[k];
+                else upd[k] = v;
             }
+            if (Object.keys(upd).length > 0) this.#rowMetaKV.set(String(rowIndex), upd);
+            else this.#rowMetaKV.delete(String(rowIndex));
         });
     }
 
@@ -673,16 +689,14 @@ export class SheetStore {
      * @returns {Object|null}
      */
     getColFormatting(colIndex) {
-        const colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) return null;
-        const meta = colMeta.get(String(colIndex));
+        const meta = this.#colMetaKV?.get(String(colIndex));
         if (!meta) return null;
         const fmt = {};
         const keys = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'strikethrough',
             'color', 'backgroundColor', 'horizontalAlign', 'verticalAlign', 'wrapText'];
         let hasAny = false;
         for (const k of keys) {
-            if (meta.has(k)) { fmt[k] = meta.get(k); hasAny = true; }
+            if (meta[k] !== undefined) { fmt[k] = meta[k]; hasAny = true; }
         }
         return hasAny ? fmt : null;
     }
@@ -694,21 +708,16 @@ export class SheetStore {
      * @param {Object} props
      */
     setColFormatting(colIndex, props) {
+        if (!this.#colMetaKV) return;
         this.#ydoc.transact(() => {
-            let colMeta = this.#sheet.get('colMeta');
-            if (!colMeta) {
-                colMeta = new Y.Map();
-                this.#sheet.set('colMeta', colMeta);
-            }
-            let meta = colMeta.get(String(colIndex));
-            if (!meta) {
-                meta = new Y.Map();
-                colMeta.set(String(colIndex), meta);
-            }
+            const cur = this.#colMetaKV.get(String(colIndex)) ?? {};
+            const upd = { ...cur };
             for (const [k, v] of Object.entries(props)) {
-                if (v === null || v === undefined) meta.delete(k);
-                else meta.set(k, v);
+                if (v === null || v === undefined) delete upd[k];
+                else upd[k] = v;
             }
+            if (Object.keys(upd).length > 0) this.#colMetaKV.set(String(colIndex), upd);
+            else this.#colMetaKV.delete(String(colIndex));
         });
     }
 
@@ -718,19 +727,11 @@ export class SheetStore {
      * @param {Object} ct
      */
     setColTypeConfig(col, ct) {
+        if (!this.#colMetaKV) return;
         this.#ydoc.transact(() => {
-            let colMeta = this.#sheet.get('colMeta');
-            if (!colMeta) {
-                colMeta = new Y.Map();
-                this.#sheet.set('colMeta', colMeta);
-            }
-            let meta = colMeta.get(String(col));
-            if (!meta) {
-                meta = new Y.Map();
-                colMeta.set(String(col), meta);
-            }
-            if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
-            else meta.set(CELL_TYPE_CONFIG_KEY, ct);
+            const cur = this.#colMetaKV.get(String(col)) ?? {};
+            if (ct === null) { const { [CELL_TYPE_CONFIG_KEY]: _, ...rest } = cur; this.#colMetaKV.set(String(col), rest); }
+            else this.#colMetaKV.set(String(col), { ...cur, [CELL_TYPE_CONFIG_KEY]: ct });
         });
     }
 
@@ -740,19 +741,11 @@ export class SheetStore {
      * @param {Object|null} ct
      */
     setRowTypeConfig(row, ct) {
+        if (!this.#rowMetaKV) return;
         this.#ydoc.transact(() => {
-            let rowMeta = this.#sheet.get('rowMeta');
-            if (!rowMeta) {
-                rowMeta = new Y.Map();
-                this.#sheet.set('rowMeta', rowMeta);
-            }
-            let meta = rowMeta.get(String(row));
-            if (!meta) {
-                meta = new Y.Map();
-                rowMeta.set(String(row), meta);
-            }
-            if (ct === null) meta.delete(CELL_TYPE_CONFIG_KEY);
-            else meta.set(CELL_TYPE_CONFIG_KEY, ct);
+            const cur = this.#rowMetaKV.get(String(row)) ?? {};
+            if (ct === null) { const { [CELL_TYPE_CONFIG_KEY]: _, ...rest } = cur; this.#rowMetaKV.set(String(row), rest); }
+            else this.#rowMetaKV.set(String(row), { ...cur, [CELL_TYPE_CONFIG_KEY]: ct });
         });
     }
 
@@ -784,33 +777,25 @@ export class SheetStore {
         this.#ydoc.transact(() => {
             // 1. Shift all cells at or below rowIndex down by 1
             const cellsToShift = [];
-            this.#cells.forEach((cellYMap, key) => {
+            for (const key of this.#allCellKeys()) {
                 const [row, col] = key.split(',').map(Number);
-                if (row >= rowIndex) {
-                    cellsToShift.push({ key, row, col, cellYMap });
-                }
-            });
+                if (row >= rowIndex) cellsToShift.push({ key, row, col });
+            }
 
-            // Delete old keys and create new ones (in reverse order to avoid overwrites)
             cellsToShift.sort((a, b) => b.row - a.row);
-            for (const { key, row, col, cellYMap } of cellsToShift) {
+            for (const { key, row, col } of cellsToShift) {
                 const newKey = `${row + 1},${col}`;
-                const cellData = this.#processCellYMapToData(cellYMap);
-
-                // Adjust formula references if the cell contains a formula
-                if (cellData.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
+                const cellData = this.#getCellData(key);
+                if (cellData?.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
                     cellData.v = this.#adjustFormulaForRowInsert(cellData.v, rowIndex);
                 }
-
-                // Delete old cell and create new one
-                this.#cells.delete(key);
-                const newCellMap = createCellYMap(cellData);
-                this.#cells.set(newKey, newCellMap);
+                this.#deleteCellData(key);
+                if (cellData) this.#setCellData(newKey, cellData);
             }
 
             // 2. Adjust formulas in non-shifted cells (rows above the insertion)
             this.#adjustFormulasInCells(
-                (row) => row >= rowIndex + 1, // skip shifted cells (already adjusted above)
+                (row) => row >= rowIndex + 1,
                 (formula) => this.#adjustFormulaForRowInsert(formula, rowIndex)
             );
 
@@ -839,33 +824,25 @@ export class SheetStore {
         this.#ydoc.transact(() => {
             // 1. Shift all cells at or to the right of colIndex right by 1
             const cellsToShift = [];
-            this.#cells.forEach((cellYMap, key) => {
+            for (const key of this.#allCellKeys()) {
                 const [row, col] = key.split(',').map(Number);
-                if (col >= colIndex) {
-                    cellsToShift.push({ key, row, col, cellYMap });
-                }
-            });
+                if (col >= colIndex) cellsToShift.push({ key, row, col });
+            }
 
-            // Delete old keys and create new ones (in reverse order by column to avoid overwrites)
             cellsToShift.sort((a, b) => b.col - a.col);
-            for (const { key, row, col, cellYMap } of cellsToShift) {
+            for (const { key, row, col } of cellsToShift) {
                 const newKey = `${row},${col + 1}`;
-                const cellData = this.#processCellYMapToData(cellYMap);
-
-                // Adjust formula references if the cell contains a formula
-                if (cellData.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
+                const cellData = this.#getCellData(key);
+                if (cellData?.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
                     cellData.v = this.#adjustFormulaForColInsert(cellData.v, colIndex);
                 }
-
-                // Delete old cell and create new one
-                this.#cells.delete(key);
-                const newCellMap = createCellYMap(cellData);
-                this.#cells.set(newKey, newCellMap);
+                this.#deleteCellData(key);
+                if (cellData) this.#setCellData(newKey, cellData);
             }
 
             // 2. Adjust formulas in non-shifted cells (columns left of the insertion)
             this.#adjustFormulasInCells(
-                (row, col) => col >= colIndex + 1, // skip shifted cells (already adjusted above)
+                (row, col) => col >= colIndex + 1,
                 (formula) => this.#adjustFormulaForColInsert(formula, colIndex)
             );
 
@@ -893,46 +870,32 @@ export class SheetStore {
     deleteRowAt(rowIndex) {
         this.#ydoc.transact(() => {
             // 1. Delete all cells in the row
-            const keysToDelete = [];
-            this.#cells.forEach((cellYMap, key) => {
-                const [row, col] = key.split(',').map(Number);
-                if (row === rowIndex) {
-                    keysToDelete.push(key);
-                }
-            });
-            for (const key of keysToDelete) {
-                this.#cells.delete(key);
+            for (const key of this.#allCellKeys()) {
+                const [row] = key.split(',').map(Number);
+                if (row === rowIndex) this.#deleteCellData(key);
             }
 
             // 2. Shift all cells below rowIndex up by 1
             const cellsToShift = [];
-            this.#cells.forEach((cellYMap, key) => {
+            for (const key of this.#allCellKeys()) {
                 const [row, col] = key.split(',').map(Number);
-                if (row > rowIndex) {
-                    cellsToShift.push({ key, row, col, cellYMap });
-                }
-            });
+                if (row > rowIndex) cellsToShift.push({ key, row, col });
+            }
 
-            // Shift cells up (in forward order since we're moving up)
             cellsToShift.sort((a, b) => a.row - b.row);
-            for (const { key, row, col, cellYMap } of cellsToShift) {
+            for (const { key, row, col } of cellsToShift) {
                 const newKey = `${row - 1},${col}`;
-                const cellData = this.#processCellYMapToData(cellYMap);
-
-                // Adjust formula references
-                if (cellData.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
+                const cellData = this.#getCellData(key);
+                if (cellData?.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
                     cellData.v = this.#adjustFormulaForRowDelete(cellData.v, rowIndex);
                 }
-
-                // Delete old cell and create new one
-                this.#cells.delete(key);
-                const newCellMap = createCellYMap(cellData);
-                this.#cells.set(newKey, newCellMap);
+                this.#deleteCellData(key);
+                if (cellData) this.#setCellData(newKey, cellData);
             }
 
             // 3. Adjust formulas in non-shifted cells (rows above the deletion)
             this.#adjustFormulasInCells(
-                (row) => row >= rowIndex, // skip shifted cells (already adjusted above; row is now post-shift)
+                (row) => row >= rowIndex,
                 (formula) => this.#adjustFormulaForRowDelete(formula, rowIndex)
             );
 
@@ -954,52 +917,170 @@ export class SheetStore {
     }
 
     /**
+     * Delete multiple rows in a single Yjs transaction.
+     * O(cells) instead of O(n × cells) — does all shifting in one pass.
+     * @param {number[]} rowIndices
+     */
+    deleteRowsAt(rowIndices) {
+        if (!rowIndices.length) return;
+
+        // Sort ascending, deduplicate
+        const sorted = [...new Set(rowIndices)].sort((a, b) => a - b);
+        const deletedSet = new Set(sorted);
+
+        // Number of deleted rows strictly below index r (= how far r shifts up)
+        const shiftFor = (r) => {
+            let lo = 0, hi = sorted.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid] < r) lo = mid + 1; else hi = mid; }
+            return lo;
+        };
+
+        // Apply formula adjustment for all deletions in descending order
+        const adjustFormula = (formula) => {
+            let result = formula;
+            for (let i = sorted.length - 1; i >= 0; i--) {
+                result = this.#adjustFormulaForRowDelete(result, sorted[i]);
+            }
+            return result;
+        };
+
+        this.#ydoc.transact(() => {
+            // ── 1. Cells ───────────────────────────────────────────────────────
+            const allKeys = [...this.#allCellKeys()];
+            const toDelete = [];
+            const toMove   = []; // { key, row, col, newRow } where newRow !== row
+            const toUpdate = []; // { key }  formula-only in-place update
+
+            for (const key of allKeys) {
+                const [row, col] = key.split(',').map(Number);
+                if (deletedSet.has(row)) {
+                    toDelete.push(key);
+                    continue;
+                }
+                const shift = shiftFor(row);
+                const valData = this.#cellValuesKV?.get(key);
+                const hasFormula = typeof valData?.v === 'string' && valData.v.startsWith('=');
+                if (shift > 0) {
+                    toMove.push({ key, row, col, newRow: row - shift, hasFormula, valData });
+                } else if (hasFormula) {
+                    toUpdate.push({ key, valData });
+                }
+            }
+
+            for (const key of toDelete) this.#deleteCellData(key);
+
+            // Move cells ascending so we never overwrite a destination that hasn't been vacated
+            toMove.sort((a, b) => a.row - b.row);
+            for (const { key, col, newRow, hasFormula, valData } of toMove) {
+                const newKey = `${newRow},${col}`;
+                const cellData = this.#getCellData(key);
+                if (hasFormula && cellData) cellData.v = adjustFormula(valData.v);
+                this.#deleteCellData(key);
+                if (cellData) this.#setCellData(newKey, cellData);
+            }
+
+            // In-place formula update for non-moved cells
+            for (const { key, valData } of toUpdate) {
+                this.#cellValuesKV?.set(key, { ...valData, v: adjustFormula(valData.v) });
+            }
+
+            // ── 2. Borders ─────────────────────────────────────────────────────
+            if (this.#bordersKV) {
+                const bToDelete = [];
+                const bToMove   = [];
+                for (const [key, { val: value }] of this.#bordersKV.map) {
+                    const [type, rowStr, colStr] = key.split(',');
+                    const row = Number(rowStr);
+                    const col = Number(colStr);
+                    if (type === 'h') {
+                        if (deletedSet.has(row) || deletedSet.has(row + 1)) { bToDelete.push(key); }
+                        else {
+                            const shift = shiftFor(row);
+                            if (shift > 0) bToMove.push({ key, newKey: `h,${row - shift},${col}`, value });
+                        }
+                    } else if (type === 'v') {
+                        if (deletedSet.has(row)) { bToDelete.push(key); }
+                        else {
+                            const shift = shiftFor(row);
+                            if (shift > 0) bToMove.push({ key, newKey: `v,${row - shift},${col}`, value });
+                        }
+                    }
+                }
+                for (const key of bToDelete) this.#bordersKV.delete(key);
+                bToMove.sort((a, b) => a.newKey.localeCompare(b.newKey));
+                for (const { key, newKey, value } of bToMove) {
+                    this.#bordersKV.delete(key);
+                    this.#bordersKV.set(newKey, value);
+                }
+            }
+
+            // ── 3. Row metadata ────────────────────────────────────────────────
+            if (this.#rowMetaKV) {
+                const rmToDelete = [];
+                const rmToMove   = [];
+                for (const [key, { val: data }] of this.#rowMetaKV.map) {
+                    const row = parseInt(key, 10);
+                    if (deletedSet.has(row)) { rmToDelete.push(key); }
+                    else {
+                        const shift = shiftFor(row);
+                        if (shift > 0) rmToMove.push({ key, newKey: String(row - shift), data });
+                    }
+                }
+                for (const key of rmToDelete) this.#rowMetaKV.delete(key);
+                rmToMove.sort((a, b) => parseInt(a.newKey) - parseInt(b.newKey));
+                for (const { key, newKey, data } of rmToMove) {
+                    this.#rowMetaKV.delete(key);
+                    this.#rowMetaKV.set(newKey, data);
+                }
+            }
+
+            // ── 4. Merges / tables / repeaters (apply each deletion descending) ─
+            for (let i = sorted.length - 1; i >= 0; i--) {
+                const rowIndex = sorted[i];
+                this.mergeEngine.shiftAxes('row', rowIndex, -1);
+                this.#shiftTables('row', rowIndex, -1);
+                this.#shiftRepeaters('row', rowIndex, -1);
+            }
+
+            // ── 5. Row count ───────────────────────────────────────────────────
+            const cur = this.#sheet.get('rowCount') ?? DEFAULT_ROW_COUNT;
+            this.#sheet.set('rowCount', Math.max(1, cur - sorted.length));
+        });
+    }
+
+    /**
      * Delete a column at the specified index (shifts existing columns left)
      * @param {number} colIndex - The index of the column to delete
      */
     deleteColumnAt(colIndex) {
         this.#ydoc.transact(() => {
             // 1. Delete all cells in the column
-            const keysToDelete = [];
-            this.#cells.forEach((cellYMap, key) => {
-                const [row, col] = key.split(',').map(Number);
-                if (col === colIndex) {
-                    keysToDelete.push(key);
-                }
-            });
-            for (const key of keysToDelete) {
-                this.#cells.delete(key);
+            for (const key of this.#allCellKeys()) {
+                const [, col] = key.split(',').map(Number);
+                if (col === colIndex) this.#deleteCellData(key);
             }
 
             // 2. Shift all cells to the right of colIndex left by 1
             const cellsToShift = [];
-            this.#cells.forEach((cellYMap, key) => {
+            for (const key of this.#allCellKeys()) {
                 const [row, col] = key.split(',').map(Number);
-                if (col > colIndex) {
-                    cellsToShift.push({ key, row, col, cellYMap });
-                }
-            });
+                if (col > colIndex) cellsToShift.push({ key, row, col });
+            }
 
-            // Shift cells left (in forward order by column)
             cellsToShift.sort((a, b) => a.col - b.col);
-            for (const { key, row, col, cellYMap } of cellsToShift) {
+            for (const { key, row, col } of cellsToShift) {
                 const newKey = `${row},${col - 1}`;
-                const cellData = this.#processCellYMapToData(cellYMap);
-
-                // Adjust formula references
-                if (cellData.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
+                const cellData = this.#getCellData(key);
+                if (cellData?.v && typeof cellData.v === 'string' && cellData.v.startsWith('=')) {
                     cellData.v = this.#adjustFormulaForColDelete(cellData.v, colIndex);
                 }
-
-                // Delete old cell and create new one
-                this.#cells.delete(key);
-                const newCellMap = createCellYMap(cellData);
-                this.#cells.set(newKey, newCellMap);
+                this.#deleteCellData(key);
+                if (cellData) this.#setCellData(newKey, cellData);
             }
 
             // 3. Adjust formulas in non-shifted cells (columns left of the deletion)
             this.#adjustFormulasInCells(
-                (row, col) => col >= colIndex, // skip shifted cells (already adjusted above; col is post-shift)
+                (row, col) => col >= colIndex,
                 (formula) => this.#adjustFormulaForColDelete(formula, colIndex)
             );
 
@@ -1028,10 +1109,11 @@ export class SheetStore {
     clearCellValue(row, col) {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
-            const cellMap = this.#cells.get(key);
-            if (cellMap) {
-                cellMap.delete(CELL_KEYS.VALUE);
-            }
+            const cur = this.#cellValuesKV?.get(key);
+            if (!cur) return;
+            const { v: _v, ...rest } = cur;
+            if (Object.keys(rest).length > 0) this.#cellValuesKV.set(key, rest);
+            else this.#cellValuesKV.delete(key);
         });
     }
 
@@ -1044,9 +1126,7 @@ export class SheetStore {
      */
     setCellBorder(row, col, edge, style) {
         // Ensure borders map exists
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
+        if (!this.#bordersKV) return;
 
         let edgeKey;
         switch (edge) {
@@ -1068,9 +1148,9 @@ export class SheetStore {
 
         this.#ydoc.transact(() => {
             if (style === null) {
-                this.#borders.delete(edgeKey);
+                this.#bordersKV.delete(edgeKey);
             } else {
-                this.#borders.set(edgeKey, style);
+                this.#bordersKV.set(edgeKey, style);
             }
         });
     }
@@ -1078,35 +1158,22 @@ export class SheetStore {
     // --- Helper methods for insert/delete operations ---
 
     /**
-     * Extract all data from a cell Y.Map as a plain object
-     * @param {Y.Map} cellYMap
-     * @returns {Object}
-     */
-    #processCellYMapToData(cellYMap) {
-        const data = {};
-        cellYMap.forEach((value, key) => {
-            data[key] = value;
-        });
-        return data;
-    }
-
-    /**
      * Adjust formulas in cells that were not shifted during a row/col insert or delete.
      * @param {function} shouldSkip - (row, col) => boolean, returns true for cells already adjusted
      * @param {function} adjustFn - (formula) => string, the formula adjustment function
      */
     #adjustFormulasInCells(shouldSkip, adjustFn) {
-        this.#cells.forEach((cellYMap, key) => {
+        for (const [key, { val: data }] of (this.#cellValuesKV?.map ?? [])) {
             const [row, col] = key.split(',').map(Number);
-            if (shouldSkip(row, col)) return;
-            const val = cellYMap.get(CELL_KEYS.VALUE);
-            if (val && typeof val === 'string' && val.startsWith('=')) {
-                const adjusted = adjustFn(val);
-                if (adjusted !== val) {
-                    cellYMap.set(CELL_KEYS.VALUE, adjusted);
+            if (shouldSkip(row, col)) continue;
+            const v = data.v;
+            if (v && typeof v === 'string' && v.startsWith('=')) {
+                const adjusted = adjustFn(v);
+                if (adjusted !== v) {
+                    this.#cellValuesKV.set(key, { ...data, v: adjusted });
                 }
             }
-        });
+        }
     }
 
     /**
@@ -1225,28 +1292,20 @@ export class SheetStore {
      * @param {number} rowIndex
      */
     #shiftBordersForRowInsert(rowIndex) {
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-        if (!this.#borders) return;
+        if (!this.#bordersKV) return;
 
         const bordersToShift = [];
-
-        this.#borders.forEach((value, key) => {
+        for (const [key, { val: value }] of this.#bordersKV.map) {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
+            if (row >= rowIndex) bordersToShift.push({ key, row, col, type, value });
+        }
 
-            if (row >= rowIndex) {
-                bordersToShift.push({ key, row, col, type, value });
-            }
-        });
-
-        // Shift borders down (in reverse order by row to avoid key collisions)
         bordersToShift.sort((a, b) => b.row - a.row);
         for (const { key, row, col, type, value } of bordersToShift) {
-            this.#borders.delete(key);
-            this.#borders.set(`${type},${row + 1},${col}`, value);
+            this.#bordersKV.delete(key);
+            this.#bordersKV.set(`${type},${row + 1},${col}`, value);
         }
     }
 
@@ -1257,28 +1316,20 @@ export class SheetStore {
      * @param {number} colIndex
      */
     #shiftBordersForColInsert(colIndex) {
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-        if (!this.#borders) return;
+        if (!this.#bordersKV) return;
 
         const bordersToShift = [];
-
-        this.#borders.forEach((value, key) => {
+        for (const [key, { val: value }] of this.#bordersKV.map) {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
+            if (col >= colIndex) bordersToShift.push({ key, row, col, type, value });
+        }
 
-            if (col >= colIndex) {
-                bordersToShift.push({ key, row, col, type, value });
-            }
-        });
-
-        // Shift borders right (in reverse order by col to avoid key collisions)
         bordersToShift.sort((a, b) => b.col - a.col);
         for (const { key, row, col, type, value } of bordersToShift) {
-            this.#borders.delete(key);
-            this.#borders.set(`${type},${row},${col + 1}`, value);
+            this.#bordersKV.delete(key);
+            this.#bordersKV.set(`${type},${row},${col + 1}`, value);
         }
     }
 
@@ -1296,48 +1347,37 @@ export class SheetStore {
      * @param {number} rowIndex
      */
     #shiftBordersForRowDelete(rowIndex) {
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-        if (!this.#borders) return;
+        if (!this.#bordersKV) return;
 
         const bordersToDelete = [];
         const bordersToShift = [];
 
-        this.#borders.forEach((value, key) => {
+        for (const [key, { val: value }] of this.#bordersKV.map) {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
 
             if (type === 'h') {
                 if (row === rowIndex - 1) {
-                    // Top border of the deleted row – remove it
                     bordersToDelete.push(key);
                 } else if (row >= rowIndex) {
-                    // Horizontal borders below the deleted row – shift up
                     bordersToShift.push({ key, newRow: row - 1, col, type, value });
                 }
             } else if (type === 'v') {
                 if (row === rowIndex) {
-                    // Vertical borders exactly on the deleted row – remove them
                     bordersToDelete.push(key);
                 } else if (row > rowIndex) {
-                    // Vertical borders for rows below – shift up
                     bordersToShift.push({ key, newRow: row - 1, col, type, value });
                 }
             }
-        });
-
-        // Delete obsolete borders
-        for (const key of bordersToDelete) {
-            this.#borders.delete(key);
         }
 
-        // Shift remaining borders (in forward order since we're moving up)
+        for (const key of bordersToDelete) this.#bordersKV.delete(key);
+
         bordersToShift.sort((a, b) => a.newRow - b.newRow);
         for (const { key, newRow, col, type, value } of bordersToShift) {
-            this.#borders.delete(key);
-            this.#borders.set(`${type},${newRow},${col}`, value);
+            this.#bordersKV.delete(key);
+            this.#bordersKV.set(`${type},${newRow},${col}`, value);
         }
     }
 
@@ -1355,48 +1395,37 @@ export class SheetStore {
      * @param {number} colIndex
      */
     #shiftBordersForColDelete(colIndex) {
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-        if (!this.#borders) return;
+        if (!this.#bordersKV) return;
 
         const bordersToDelete = [];
         const bordersToShift = [];
 
-        this.#borders.forEach((value, key) => {
+        for (const [key, { val: value }] of this.#bordersKV.map) {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
 
             if (type === 'h') {
                 if (col === colIndex) {
-                    // Horizontal borders in the deleted column – remove them
                     bordersToDelete.push(key);
                 } else if (col > colIndex) {
-                    // Horizontal borders to the right – shift left
                     bordersToShift.push({ key, row, newCol: col - 1, type, value });
                 }
             } else if (type === 'v') {
                 if (col === colIndex - 1) {
-                    // Left border of the deleted column – remove it
                     bordersToDelete.push(key);
                 } else if (col >= colIndex) {
-                    // Vertical borders to the right – shift left
                     bordersToShift.push({ key, row, newCol: col - 1, type, value });
                 }
             }
-        });
-
-        // Delete obsolete borders
-        for (const key of bordersToDelete) {
-            this.#borders.delete(key);
         }
 
-        // Shift remaining borders (in forward order since we're moving left)
+        for (const key of bordersToDelete) this.#bordersKV.delete(key);
+
         bordersToShift.sort((a, b) => a.newCol - b.newCol);
         for (const { key, row, newCol, type, value } of bordersToShift) {
-            this.#borders.delete(key);
-            this.#borders.set(`${type},${row},${newCol}`, value);
+            this.#bordersKV.delete(key);
+            this.#bordersKV.set(`${type},${row},${newCol}`, value);
         }
     }
 
@@ -1405,27 +1434,16 @@ export class SheetStore {
      * @param {number} rowIndex
      */
     #shiftRowMetaForInsert(rowIndex) {
-        const rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) return;
-
-        // Collect metadata for rows at or below the inserted row
-        const metaToShift = [];
-        rowMeta.forEach((meta, key) => {
+        if (!this.#rowMetaKV) return;
+        const toShift = [];
+        for (const [key, { val: data }] of this.#rowMetaKV.map) {
             const row = parseInt(key, 10);
-            if (row >= rowIndex) {
-                metaToShift.push({ key, row, data: meta.toJSON() });
-            }
-        });
-
-        // Shift metadata down (in reverse order)
-        metaToShift.sort((a, b) => b.row - a.row);
-        for (const { key, row, data } of metaToShift) {
-            rowMeta.delete(key);
-            const newMeta = new Y.Map();
-            for (const [k, v] of Object.entries(data)) {
-                newMeta.set(k, v);
-            }
-            rowMeta.set(String(row + 1), newMeta);
+            if (row >= rowIndex) toShift.push({ key, row, data });
+        }
+        toShift.sort((a, b) => b.row - a.row);
+        for (const { key, row, data } of toShift) {
+            this.#rowMetaKV.delete(key);
+            this.#rowMetaKV.set(String(row + 1), data);
         }
     }
 
@@ -1434,27 +1452,16 @@ export class SheetStore {
      * @param {number} colIndex
      */
     #shiftColMetaForInsert(colIndex) {
-        const colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) return;
-
-        // Collect metadata for columns at or to the right of the inserted column
-        const metaToShift = [];
-        colMeta.forEach((meta, key) => {
+        if (!this.#colMetaKV) return;
+        const toShift = [];
+        for (const [key, { val: data }] of this.#colMetaKV.map) {
             const col = parseInt(key, 10);
-            if (col >= colIndex) {
-                metaToShift.push({ key, col, data: meta.toJSON() });
-            }
-        });
-
-        // Shift metadata right (in reverse order)
-        metaToShift.sort((a, b) => b.col - a.col);
-        for (const { key, col, data } of metaToShift) {
-            colMeta.delete(key);
-            const newMeta = new Y.Map();
-            for (const [k, v] of Object.entries(data)) {
-                newMeta.set(k, v);
-            }
-            colMeta.set(String(col + 1), newMeta);
+            if (col >= colIndex) toShift.push({ key, col, data });
+        }
+        toShift.sort((a, b) => b.col - a.col);
+        for (const { key, col, data } of toShift) {
+            this.#colMetaKV.delete(key);
+            this.#colMetaKV.set(String(col + 1), data);
         }
     }
 
@@ -1463,29 +1470,17 @@ export class SheetStore {
      * @param {number} rowIndex
      */
     #shiftRowMetaForDelete(rowIndex) {
-        const rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) return;
-
-        // Delete metadata for the deleted row
-        rowMeta.delete(String(rowIndex));
-
-        // Shift metadata up for rows below the deleted row
-        const metaToShift = [];
-        rowMeta.forEach((meta, key) => {
+        if (!this.#rowMetaKV) return;
+        this.#rowMetaKV.delete(String(rowIndex));
+        const toShift = [];
+        for (const [key, { val: data }] of this.#rowMetaKV.map) {
             const row = parseInt(key, 10);
-            if (row > rowIndex) {
-                metaToShift.push({ key, row, data: meta.toJSON() });
-            }
-        });
-
-        metaToShift.sort((a, b) => a.row - b.row);
-        for (const { key, row, data } of metaToShift) {
-            rowMeta.delete(key);
-            const newMeta = new Y.Map();
-            for (const [k, v] of Object.entries(data)) {
-                newMeta.set(k, v);
-            }
-            rowMeta.set(String(row - 1), newMeta);
+            if (row > rowIndex) toShift.push({ key, row, data });
+        }
+        toShift.sort((a, b) => a.row - b.row);
+        for (const { key, row, data } of toShift) {
+            this.#rowMetaKV.delete(key);
+            this.#rowMetaKV.set(String(row - 1), data);
         }
     }
 
@@ -1494,29 +1489,17 @@ export class SheetStore {
      * @param {number} colIndex
      */
     #shiftColMetaForDelete(colIndex) {
-        const colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) return;
-
-        // Delete metadata for the deleted column
-        colMeta.delete(String(colIndex));
-
-        // Shift metadata left for columns to the right of the deleted column
-        const metaToShift = [];
-        colMeta.forEach((meta, key) => {
+        if (!this.#colMetaKV) return;
+        this.#colMetaKV.delete(String(colIndex));
+        const toShift = [];
+        for (const [key, { val: data }] of this.#colMetaKV.map) {
             const col = parseInt(key, 10);
-            if (col > colIndex) {
-                metaToShift.push({ key, col, data: meta.toJSON() });
-            }
-        });
-
-        metaToShift.sort((a, b) => a.col - b.col);
-        for (const { key, col, data } of metaToShift) {
-            colMeta.delete(key);
-            const newMeta = new Y.Map();
-            for (const [k, v] of Object.entries(data)) {
-                newMeta.set(k, v);
-            }
-            colMeta.set(String(col - 1), newMeta);
+            if (col > colIndex) toShift.push({ key, col, data });
+        }
+        toShift.sort((a, b) => a.col - b.col);
+        for (const { key, col, data } of toShift) {
+            this.#colMetaKV.delete(key);
+            this.#colMetaKV.set(String(col - 1), data);
         }
     }
 
@@ -1637,11 +1620,7 @@ export class SheetStore {
      * @returns {number}
      */
     getRowHeight(rowIndex) {
-        const rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) return this.defaultRowHeight ?? 24;
-
-        const meta = rowMeta.get(String(rowIndex));
-        return meta?.get('height') ?? this.defaultRowHeight ?? 24;
+        return this.#rowMetaKV?.get(String(rowIndex))?.height ?? this.defaultRowHeight ?? 24;
     }
 
     /**
@@ -1650,23 +1629,11 @@ export class SheetStore {
      * @param {number} height
      */
     setRowHeight(rowIndex, height) {
-        let rowMeta = this.#sheet.get('rowMeta');
-        if (!rowMeta) {
-            rowMeta = new Y.Map();
-            this.#sheet.set('rowMeta', rowMeta);
-        }
-
+        if (!this.#rowMetaKV) return;
         this.#ydoc.transact(() => {
-            let meta = rowMeta.get(String(rowIndex));
-            if (!meta) {
-                meta = new Y.Map();
-                rowMeta.set(String(rowIndex), meta);
-            }
-            meta.set('height', height);
+            const cur = this.#rowMetaKV.get(String(rowIndex)) ?? {};
+            this.#rowMetaKV.set(String(rowIndex), { ...cur, height });
         });
-        // rowMetaVersion is incremented by the rowMetaHandler (observeDeep on
-        // rowMeta) when the transaction above commits — covers both local and
-        // remote changes with no manual increment needed.
     }
 
     /**
@@ -1675,11 +1642,7 @@ export class SheetStore {
      * @returns {number}
      */
     getColWidth(colIndex) {
-        const colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) return this.defaultColWidth ?? 100;
-
-        const meta = colMeta.get(String(colIndex));
-        return meta?.get('width') ?? this.defaultColWidth ?? 100;
+        return this.#colMetaKV?.get(String(colIndex))?.width ?? this.defaultColWidth ?? 100;
     }
 
     /**
@@ -1688,23 +1651,31 @@ export class SheetStore {
      * @param {number} width
      */
     setColWidth(colIndex, width) {
-        let colMeta = this.#sheet.get('colMeta');
-        if (!colMeta) {
-            colMeta = new Y.Map();
-            this.#sheet.set('colMeta', colMeta);
-        }
-
+        if (!this.#colMetaKV) return;
         this.#ydoc.transact(() => {
-            let meta = colMeta.get(String(colIndex));
-            if (!meta) {
-                meta = new Y.Map();
-                colMeta.set(String(colIndex), meta);
-            }
-            meta.set('width', width);
+            const cur = this.#colMetaKV.get(String(colIndex)) ?? {};
+            this.#colMetaKV.set(String(colIndex), { ...cur, width });
         });
-        // colMetaVersion is incremented by the colMetaHandler (observeDeep on
-        // colMeta) when the transaction above commits — covers both local and
-        // remote changes with no manual increment needed.
+    }
+
+    /** @returns {Map<number, number>} All custom row heights (index → px) */
+    getRowHeightsMap() {
+        const result = new Map();
+        if (!this.#rowMetaKV) return result;
+        for (const [key, { val: data }] of this.#rowMetaKV.map) {
+            if (data?.height !== undefined) result.set(parseInt(key, 10), data.height);
+        }
+        return result;
+    }
+
+    /** @returns {Map<number, number>} All custom column widths (index → px) */
+    getColWidthsMap() {
+        const result = new Map();
+        if (!this.#colMetaKV) return result;
+        for (const [key, { val: data }] of this.#colMetaKV.map) {
+            if (data?.width !== undefined) result.set(parseInt(key, 10), data.width);
+        }
+        return result;
     }
 
     // --- Merges ---
@@ -1767,24 +1738,15 @@ export class SheetStore {
      * @returns {Object} { top, bottom, left, right } - each is border style or null
      */
     getCellBorders(row, col) {
-        // Ensure borders map exists
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-
         const cacheKey = `${row},${col}`;
         const cached = this.#cellBorderCache.get(cacheKey);
         if (cached) return cached;
 
         const borders = {
-            // Horizontal edge above (row-1, col) = top border
-            top: this.#borders?.get(`h,${row - 1},${col}`) || null,
-            // Horizontal edge below (row, col) = bottom border
-            bottom: this.#borders?.get(`h,${row},${col}`) || null,
-            // Vertical edge left (row, col-1) = left border
-            left: this.#borders?.get(`v,${row},${col - 1}`) || null,
-            // Vertical edge right (row, col) = right border
-            right: this.#borders?.get(`v,${row},${col}`) || null
+            top:    this.#bordersKV?.get(`h,${row - 1},${col}`) || null,
+            bottom: this.#bordersKV?.get(`h,${row},${col}`) || null,
+            left:   this.#bordersKV?.get(`v,${row},${col - 1}`) || null,
+            right:  this.#bordersKV?.get(`v,${row},${col}`) || null,
         };
 
         this.#cellBorderCache.set(cacheKey, borders);
@@ -1797,16 +1759,12 @@ export class SheetStore {
      * @param {Object | null} style - { style, width, color } or null to remove
      */
     setBorder(edgeKey, style) {
-        // Ensure borders map exists
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-
+        if (!this.#bordersKV) return;
         this.#ydoc.transact(() => {
             if (style === null) {
-                this.#borders.delete(edgeKey);
+                this.#bordersKV.delete(edgeKey);
             } else {
-                this.#borders.set(edgeKey, style);
+                this.#bordersKV.set(edgeKey, style);
             }
         });
     }
@@ -1816,17 +1774,13 @@ export class SheetStore {
      * @param {Array<Object>} instructions - Array of { edgeKey, style }
      */
     applyBorders(instructions) {
-        // Ensure borders map exists
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
-
+        if (!this.#bordersKV) return;
         this.#ydoc.transact(() => {
             for (const { edgeKey, style } of instructions) {
                 if (style === null) {
-                    this.#borders.delete(edgeKey);
+                    this.#bordersKV.delete(edgeKey);
                 } else {
-                    this.#borders.set(edgeKey, style);
+                    this.#bordersKV.set(edgeKey, style);
                 }
             }
         });
@@ -1840,37 +1794,26 @@ export class SheetStore {
      * @param {number} endCol
      */
     clearBordersInRange(startRow, endRow, startCol, endCol) {
-        // Ensure borders map exists
-        if (!this.#borders) {
-            this.#borders = this.#sheet.get('borders');
-        }
+        if (!this.#bordersKV) return;
 
         const keysToDelete = [];
 
-        // Horizontal edges within the range
         for (let r = startRow - 1; r <= endRow; r++) {
             for (let c = startCol; c <= endCol; c++) {
                 const key = `h,${r},${c}`;
-                if (this.#borders.has(key)) {
-                    keysToDelete.push(key);
-                }
+                if (this.#bordersKV.has(key)) keysToDelete.push(key);
             }
         }
 
-        // Vertical edges within the range
         for (let r = startRow; r <= endRow; r++) {
             for (let c = startCol - 1; c <= endCol; c++) {
                 const key = `v,${r},${c}`;
-                if (this.#borders.has(key)) {
-                    keysToDelete.push(key);
-                }
+                if (this.#bordersKV.has(key)) keysToDelete.push(key);
             }
         }
 
         this.#ydoc.transact(() => {
-            for (const key of keysToDelete) {
-                this.#borders.delete(key);
-            }
+            for (const key of keysToDelete) this.#bordersKV.delete(key);
         });
     }
 
@@ -2004,19 +1947,13 @@ export class SheetStore {
      * @param {number} endCol
      */
     clearRangeFormatting(startRow, startCol, endRow, endCol) {
-        const formattingKeys = [
-            'fontFamily', 'fontSize', 'bold', 'italic', 'underline',
-            'strikethrough', 'color', 'backgroundColor', 'horizontalAlign',
-            'verticalAlign', 'wrapText', 'numberFormat', 'ct'
-        ];
         this.#ydoc.transact(() => {
-            this.#cells.forEach((cellYMap, key) => {
+            for (const [key] of (this.#cellStylesKV?.map ?? [])) {
                 const [r, c] = key.split(',').map(Number);
-                if (r < startRow || r > endRow || c < startCol || c > endCol) return;
-                for (const k of formattingKeys) {
-                    if (cellYMap.has(k)) cellYMap.delete(k);
+                if (r >= startRow && r <= endRow && c >= startCol && c <= endCol) {
+                    this.#cellStylesKV.delete(key);
                 }
-            });
+            }
         });
     }
 
@@ -2049,18 +1986,17 @@ export class SheetStore {
         this.#ydoc.transact(() => {
             for (let c = startCol; c <= endCol; c++) {
                 const srcKey = `${startRow},${c}`;
-                const srcYMap = this.#cells.get(srcKey);
+                const srcData = this.#getCellData(srcKey);
                 for (let r = startRow + 1; r <= endRow; r++) {
                     const dstKey = `${r},${c}`;
-                    if (srcYMap) {
-                        const data = this.#processCellYMapToData(srcYMap);
+                    if (srcData) {
+                        const data = { ...srcData };
                         if (data.v && typeof data.v === 'string' && data.v.startsWith('=')) {
                             data.v = this.#adjustFormulaByOffset(data.v, r - startRow, 0);
                         }
-                        const newMap = createCellYMap(data);
-                        this.#cells.set(dstKey, newMap);
+                        this.#setCellData(dstKey, data);
                     } else {
-                        this.#cells.delete(dstKey);
+                        this.#deleteCellData(dstKey);
                     }
                 }
             }
@@ -2078,18 +2014,17 @@ export class SheetStore {
         this.#ydoc.transact(() => {
             for (let r = startRow; r <= endRow; r++) {
                 const srcKey = `${r},${startCol}`;
-                const srcYMap = this.#cells.get(srcKey);
+                const srcData = this.#getCellData(srcKey);
                 for (let c = startCol + 1; c <= endCol; c++) {
                     const dstKey = `${r},${c}`;
-                    if (srcYMap) {
-                        const data = this.#processCellYMapToData(srcYMap);
+                    if (srcData) {
+                        const data = { ...srcData };
                         if (data.v && typeof data.v === 'string' && data.v.startsWith('=')) {
                             data.v = this.#adjustFormulaByOffset(data.v, 0, c - startCol);
                         }
-                        const newMap = createCellYMap(data);
-                        this.#cells.set(dstKey, newMap);
+                        this.#setCellData(dstKey, data);
                     } else {
-                        this.#cells.delete(dstKey);
+                        this.#deleteCellData(dstKey);
                     }
                 }
             }
@@ -2138,13 +2073,8 @@ export class SheetStore {
         return this.#sheet;
     }
 
-    /**
-     * Get the cells Y.Map
-     * @returns {Y.Map}
-     */
-    getCells() {
-        return this.#cells;
-    }
+    /** Expose cellValuesKV for external callers (e.g. SpreadsheetSession formula observer). */
+    get cellValuesKV() { return this.#cellValuesKV; }
 
     // --- Lifecycle ---
 

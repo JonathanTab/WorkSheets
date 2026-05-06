@@ -7,9 +7,11 @@
     import MaintenanceOverlay from "./components/MaintenanceOverlay.svelte";
     import { authStore } from "./stores/authStore";
     import storage from "./stores/storage.js";
+    import { checkSchemaVersion, forceUpdate } from "./lib/schemaVersionGuard.js";
 
     let initialized = $state(false);
     let loading = $state(true);
+    let needsSchemaUpdate = $state(false);
 
     let unsubscribeAuth = null;
 
@@ -17,6 +19,17 @@
     onMount(() => {
         (async () => {
             try {
+                // Check schema version before loading any YJS documents.
+                // If the server requires a newer schema version, force an immediate
+                // SW update and reload rather than letting the old client open docs
+                // it can't interpret correctly.
+                const isUpToDate = await checkSchemaVersion();
+                if (!isUpToDate) {
+                    needsSchemaUpdate = true;
+                    forceUpdate();
+                    return;
+                }
+
                 const isAuthenticated = await authStore.initOffline();
 
                 if (isAuthenticated) {
@@ -54,7 +67,12 @@
     <InstallPrompt />
     <MaintenanceOverlay />
 
-    {#if loading}
+    {#if needsSchemaUpdate}
+        <div class="loading-overlay">
+            <div class="spinner"></div>
+            <p>Updating app&hellip; please wait</p>
+        </div>
+    {:else if loading}
         <div class="loading-overlay">
             <div class="spinner"></div>
             <p>Initializing workspace...</p>

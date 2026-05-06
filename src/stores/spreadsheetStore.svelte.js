@@ -85,7 +85,6 @@ export {
     // Schema utilities
     spreadsheetSchema,
     createSheetYMap,
-    createCellYMap,
     createNamedRangeYMap,
     initializeDocument,
 

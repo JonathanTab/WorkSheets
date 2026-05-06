@@ -35,7 +35,7 @@
     import PageSetupPanel from "../PageSetupPanel.svelte";
     import MakeCopyModal from "../../modals/MakeCopyModal.svelte";
     import MoveFileModal from "../../modals/MoveFileModal.svelte";
-    import RenameDocumentModal from "../../modals/RenameDocumentModal.svelte";
+    import PromptModal from "../../modals/PromptModal.svelte";
     import ShareFileModal from "../../modals/ShareFileModal.svelte";
     import VersionHistoryModal from "../../modals/VersionHistoryModal.svelte";
     import ConfirmModal from "../../modals/ConfirmModal.svelte";
@@ -175,8 +175,10 @@
     function openRenameModal() {
         const docId = spreadsheetSession.docId;
         if (!docId) return;
-        openModal(RenameDocumentModal, {
-            currentTitle: spreadsheetSession.docTitle || "Untitled",
+        openModal(PromptModal, {
+            title: "Rename",
+            value: spreadsheetSession.docTitle || "Untitled",
+            confirmText: "Rename",
             onConfirm: async (/** @type {string} */ newTitle) => {
                 await renameDocument(docId, newTitle);
             },

@@ -9,9 +9,74 @@
 
 import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
+import { YKeyValue } from 'y-utility/y-keyvalue';
 import { TableFormulaEvaluator } from '../stores/spreadsheet/features/tableFormulaEval.js';
 
+// ─── Cell KV helpers ────────────────────────────────────────────────────────
+
+/** @param {any} sheetYMap */
+function cellValuesKV(sheetYMap) {
+    const arr = sheetYMap.get('cellValues');
+    return arr instanceof Y.Array ? new YKeyValue(arr) : null;
+}
+
+/** @param {import('yjs').Map} sheetYMap */
+function cellStylesKV(sheetYMap) {
+    const arr = sheetYMap.get('cellStyles');
+    return arr instanceof Y.Array ? new YKeyValue(arr) : null;
+}
+
 // ─── Internal helpers ──────────────────────────────────────────────────────
+
+/** @param {any} a @param {any} b */
+function _cmpValues(a, b) {
+    if (a == null && b == null) return 0;
+    if (a == null) return -1;
+    if (b == null) return 1;
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b));
+}
+
+/**
+ * Compute a _pos for inserting a row at the correct insertSort position.
+ * Reads _pos and colId values directly from rowArr (safe within a Yjs transaction).
+ * @param {import('yjs').Array<any>} rowArr
+ * @param {string} colId
+ * @param {'asc'|'desc'} dir
+ * @param {any} newVal
+ * @returns {number}
+ */
+function _computeInsertPos(rowArr, colId, dir, newVal) {
+    const dirMult = dir === 'desc' ? -1 : 1;
+    const sorted = [];
+    for (let i = 0; i < rowArr.length; i++) {
+        const r = rowArr.get(i);
+        sorted.push({ val: r?.get?.(colId), pos: r?.get?.('_pos') ?? 0 });
+    }
+    sorted.sort((a, b) => b.pos - a.pos);
+    if (!sorted.length) return 1000;
+    for (let i = 0; i < sorted.length; i++) {
+        if (dirMult * _cmpValues(sorted[i].val, newVal) < 0) {
+            const abovePos = i > 0 ? sorted[i - 1].pos : null;
+            return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
+        }
+    }
+    return Math.max(0, sorted[sorted.length - 1].pos - 1000);
+}
+
+/**
+ * Ensure all rows in rowArr have a _pos field, assigning one based on current Y.Array order.
+ * rawIndex 0 = oldest = display bottom → lowest _pos; last index = newest = display top.
+ * Must be called inside a Yjs transaction.
+ * @param {import('yjs').Array<any>} rowArr
+ */
+function _initPos(rowArr) {
+    const n = rowArr.length;
+    for (let i = 0; i < n; i++) {
+        const r = rowArr.get(i);
+        if (r && r.get('_pos') == null) r.set('_pos', (i + 1) * 1000);
+    }
+}
 
 function root(ydoc) {
     return ydoc.getMap('spreadsheet');
@@ -197,9 +262,11 @@ export function deleteSheet(ydoc, sheetId) {
  * @returns {object|null}
  */
 export function getCell(ydoc, sheetId, row, col) {
-    const cells = sheetById(ydoc, sheetId).get('cells');
-    const cell = cells?.get(`${row},${col}`);
-    return cell ? cell.toJSON() : null;
+    const sheet = sheetById(ydoc, sheetId);
+    const key = `${row},${col}`;
+    const val = cellValuesKV(sheet)?.get(key);
+    const sty = cellStylesKV(sheet)?.get(key);
+    return (val || sty) ? { ...(sty ?? {}), ...(val ?? {}) } : null;
 }
 
 /**
@@ -213,18 +280,21 @@ export function getCell(ydoc, sheetId, row, col) {
  */
 export function setCell(ydoc, sheetId, row, col, value, props = {}) {
     const sheet = sheetById(ydoc, sheetId);
-    const cells = sheet.get('cells');
-    const key = `${row},${col}`;
+    const cvKV  = cellValuesKV(sheet);
+    const csKV  = cellStylesKV(sheet);
+    const key   = `${row},${col}`;
+    const VALUE_KEYS = new Set(['v', 't']);
 
     ydoc.transact(() => {
-        let cell = cells.get(key);
-        if (!cell) {
-            cell = new Y.Map();
-            cells.set(key, cell);
-        }
-        cell.set('v', value);
+        /** @type {Record<string,any>} */ const valData = { v: value };
+        /** @type {Record<string,any>} */ const styData = {};
         for (const [k, v] of Object.entries(props)) {
-            cell.set(k, v);
+            if (VALUE_KEYS.has(k)) valData[k] = v;
+            else styData[k] = v;
+        }
+        cvKV?.set(key, { ...(cvKV.get(key) ?? {}), ...valData });
+        if (Object.keys(styData).length > 0) {
+            csKV?.set(key, { ...(csKV.get(key) ?? {}), ...styData });
         }
     });
 }
@@ -237,8 +307,12 @@ export function setCell(ydoc, sheetId, row, col, value, props = {}) {
  * @param {number} col
  */
 export function clearCell(ydoc, sheetId, row, col) {
-    const cells = sheetById(ydoc, sheetId).get('cells');
-    ydoc.transact(() => { cells.delete(`${row},${col}`); });
+    const sheet = sheetById(ydoc, sheetId);
+    const key = `${row},${col}`;
+    ydoc.transact(() => {
+        cellValuesKV(sheet)?.delete(key);
+        cellStylesKV(sheet)?.delete(key);
+    });
 }
 
 /**
@@ -253,13 +327,17 @@ export function clearCell(ydoc, sheetId, row, col) {
  * @returns {(object|null)[][]}
  */
 export function getRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
-    const cells = sheetById(ydoc, sheetId).get('cells');
+    const sheet = sheetById(ydoc, sheetId);
+    const cvKV  = cellValuesKV(sheet);
+    const csKV  = cellStylesKV(sheet);
     const result = [];
     for (let r = startRow; r <= endRow; r++) {
         const row = [];
         for (let c = startCol; c <= endCol; c++) {
-            const cell = cells?.get(`${r},${c}`);
-            row.push(cell ? cell.toJSON() : null);
+            const key = `${r},${c}`;
+            const val = cvKV?.get(key);
+            const sty = csKV?.get(key);
+            row.push((val || sty) ? { ...(sty ?? {}), ...(val ?? {}) } : null);
         }
         result.push(row);
     }
@@ -277,8 +355,15 @@ export function getRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
  * @param {object} [props]    Formatting props applied to every written cell
  */
 export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}) {
-    const cells = sheetById(ydoc, sheetId).get('cells');
-    const hasProps = Object.keys(props).length > 0;
+    const sheet  = sheetById(ydoc, sheetId);
+    const cvKV   = cellValuesKV(sheet);
+    const csKV   = cellStylesKV(sheet);
+    const VALUE_KEYS = new Set(['v', 't']);
+    /** @type {Record<string,any>} */ const sharedSty = {};
+    for (const [k, v] of Object.entries(props)) {
+        if (!VALUE_KEYS.has(k)) sharedSty[k] = v;
+    }
+    const hasSty = Object.keys(sharedSty).length > 0;
 
     ydoc.transact(() => {
         for (let ri = 0; ri < values2d.length; ri++) {
@@ -288,15 +373,8 @@ export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}
                 const value = rowArr[ci];
                 if (value === null || value === undefined) continue;
                 const key = `${startRow + ri},${startCol + ci}`;
-                let cell = cells.get(key);
-                if (!cell) {
-                    cell = new Y.Map();
-                    cells.set(key, cell);
-                }
-                cell.set('v', value);
-                if (hasProps) {
-                    for (const [k, v] of Object.entries(props)) cell.set(k, v);
-                }
+                cvKV?.set(key, { ...(cvKV.get(key) ?? {}), v: value });
+                if (hasSty) csKV?.set(key, { ...(csKV?.get(key) ?? {}), ...sharedSty });
             }
         }
     });
@@ -312,11 +390,15 @@ export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}
  * @param {number} endCol   inclusive
  */
 export function clearRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
-    const cells = sheetById(ydoc, sheetId).get('cells');
+    const sheet = sheetById(ydoc, sheetId);
+    const cvKV  = cellValuesKV(sheet);
+    const csKV  = cellStylesKV(sheet);
     ydoc.transact(() => {
         for (let r = startRow; r <= endRow; r++) {
             for (let c = startCol; c <= endCol; c++) {
-                cells.delete(`${r},${c}`);
+                const key = `${r},${c}`;
+                cvKV?.delete(key);
+                csKV?.delete(key);
             }
         }
     });
@@ -533,13 +615,21 @@ export function insertTableRow(ydoc, sheetId, tableId, rowData) {
     const rowArr = table.get('rows');
     if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
-    const formulaCols = _getFormulaCols(table);
+    const formulaCols    = _getFormulaCols(table);
+    const insertSortColId = table.get('insertSortColId') ?? null;
+    const insertSortDir   = table.get('insertSortDir') ?? 'asc';
 
     ydoc.transact(() => {
         const yRow = new Y.Map();
         for (const [k, v] of Object.entries(rowData)) {
             if (!formulaCols.has(k)) yRow.set(k, v);
         }
+
+        _initPos(rowArr);
+        const newPos = insertSortColId
+            ? _computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (rowData)[insertSortColId])
+            : Math.max(0, .../** @type {any[]} */ (rowArr.toArray()).map(r => r?.get?.('_pos') ?? 0)) + 1000;
+        yRow.set('_pos', newPos);
         rowArr.push([yRow]);
     });
 }
@@ -583,7 +673,9 @@ export function upsertTableRow(ydoc, sheetId, tableId, where, rowData) {
     const rowArr = table.get('rows');
     if (!rowArr) throw new Error(`Table "${tableId}" has no rows array`);
 
-    const formulaCols = _getFormulaCols(table);
+    const formulaCols     = _getFormulaCols(table);
+    const insertSortColId = table.get('insertSortColId') ?? null;
+    const insertSortDir   = table.get('insertSortDir') ?? 'asc';
     const entries = Object.entries(where);
 
     // Find first matching row
@@ -607,6 +699,11 @@ export function upsertTableRow(ydoc, sheetId, tableId, where, rowData) {
             for (const [k, v] of Object.entries(merged)) {
                 if (!formulaCols.has(k)) yRow.set(k, v);
             }
+            _initPos(rowArr);
+            const newPos = insertSortColId
+                ? _computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (merged)[insertSortColId])
+                : Math.max(0, .../** @type {any[]} */ (rowArr.toArray()).map(r => r?.get?.('_pos') ?? 0)) + 1000;
+            yRow.set('_pos', newPos);
             rowArr.push([yRow]);
         }
     });

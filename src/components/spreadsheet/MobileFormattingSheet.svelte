@@ -185,7 +185,9 @@
         if (!sheetStore) return;
         const eff = selectionState.effectiveRange(sheetStore.rowCount, sheetStore.colCount);
         if (!eff) return;
-        for (let row = eff.endRow; row >= eff.startRow; row--) spreadsheetSession.deleteRowAt(row);
+        const rows = [];
+        for (let r = eff.startRow; r <= eff.endRow; r++) rows.push(r);
+        sheetStore.deleteRowsAt(rows);
     }
     function insertColumnLeft() {
         const sheetStore = spreadsheetSession.activeSheetStore;

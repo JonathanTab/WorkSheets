@@ -601,8 +601,35 @@ export class SelectionState {
     }
 
     /**
+     * All bounded ranges for the current selection mode (multi-select aware).
+     * Use instead of effectiveRange() when an operation must cover every selected cell.
+     * @param {number} rowCount
+     * @param {number} colCount
+     * @returns {CellRange[]}
+     */
+    allEffectiveRanges(rowCount, colCount) {
+        const maxRow = Math.max(0, rowCount - 1);
+        const maxCol = Math.max(0, colCount - 1);
+        switch (this.selectionMode) {
+            case 'all':
+                return [{ startRow: 0, endRow: maxRow, startCol: 0, endCol: maxCol }];
+            case 'rows':
+                return this.allRowRanges.map(r => ({
+                    startRow: r.start, endRow: r.end, startCol: 0, endCol: maxCol,
+                }));
+            case 'cols':
+                return this.allColRanges.map(c => ({
+                    startRow: 0, endRow: maxRow, startCol: c.start, endCol: c.end,
+                }));
+            case 'range':
+            default:
+                return this.allRanges;
+        }
+    }
+
+    /**
      * Get a bounded rectangle for the ACTIVE selection (backward compat).
-     * For multi-selection use `allRanges` directly.
+     * For multi-selection use allEffectiveRanges() or allRanges directly.
      * @param {number} rowCount
      * @param {number} colCount
      * @returns {CellRange | null}

@@ -19,6 +19,7 @@ import { get } from 'svelte/store';
 import { SheetStore } from './SheetStore.svelte.js';
 import { spreadsheetSchema, createSheetYMap, initializeDocument } from './schema.js';
 import { SCHEMA_VERSION, META_KEYS, CELL_KEYS } from './constants.js';
+import { YKeyValue } from 'y-utility/y-keyvalue';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
 import { parseFormula } from '../../formulas/parser.js';
 import { evaluate } from '../../formulas/evaluator.js';
@@ -223,20 +224,23 @@ export class SpreadsheetSession {
                 performance.measure('ss:sheetStore', 'ss:sheetStore:start', 'ss:sheetStore:end');
 
                 // Initialize undo manager — track all mutable Y types for this sheet.
-                // Ensure rowMeta/colMeta/tables/repeaters exist (older docs may lack them).
-                const cells = activeSheet.get('cells');
-                const borders = activeSheet.get('borders');
+                const cellValues = activeSheet.get('cellValues');
+                const cellStyles = activeSheet.get('cellStyles');
+                const borders    = activeSheet.get('borders');
                 let rowMeta0 = activeSheet.get('rowMeta');
-                if (!rowMeta0) { rowMeta0 = new Y.Map(); activeSheet.set('rowMeta', rowMeta0); }
+                if (!rowMeta0) { rowMeta0 = new Y.Array(); activeSheet.set('rowMeta', rowMeta0); }
                 let colMeta0 = activeSheet.get('colMeta');
-                if (!colMeta0) { colMeta0 = new Y.Map(); activeSheet.set('colMeta', colMeta0); }
+                if (!colMeta0) { colMeta0 = new Y.Array(); activeSheet.set('colMeta', colMeta0); }
                 let tables0 = activeSheet.get('tables');
                 if (!tables0) { tables0 = new Y.Map(); activeSheet.set('tables', tables0); }
                 let repeaters0 = activeSheet.get('repeaters');
                 if (!repeaters0) { repeaters0 = new Y.Map(); activeSheet.set('repeaters', repeaters0); }
-                if (cells) {
-                    // UndoManager tracks all local changes by default (origin=null)
-                    this.undoManager = new Y.UndoManager([cells, borders, rowMeta0, colMeta0, tables0, repeaters0]);
+                let merges0 = activeSheet.get('merges');
+                if (!merges0) { merges0 = new Y.Array(); activeSheet.set('merges', merges0); }
+                if (cellValues) {
+                    this.undoManager = new Y.UndoManager(
+                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0].filter(Boolean)
+                    );
 
                     // Set up observer to update reactive undo/redo state
                     this.#setupUndoObserver();
@@ -575,10 +579,9 @@ export class SpreadsheetSession {
             const sheetYMap = sheetsMap?.get(targetSheet.id);
             if (!sheetYMap) return FormulaError.REF;
 
-            const cells = sheetYMap.get('cells');
-            if (!cells) return null;
-
-            const { evalCell } = makeSheetCellEvaluator(cells, crossSheetCustomFns);
+            const cvArr = sheetYMap.get('cellValues');
+            if (!cvArr) return null;
+            const { evalCell } = makeSheetCellEvaluator(new YKeyValue(cvArr), crossSheetCustomFns);
             return evalCell(row, col, new Set());
         });
 
@@ -610,124 +613,70 @@ export class SpreadsheetSession {
         }
 
         // Load existing formulas from the sheet and compute initial values
-        const cells = sheet.get('cells');
-        if (cells) {
-            // First pass: load all formulas into the engine
+        const cellValuesKV = this.activeSheetStore?.cellValuesKV
+            ?? (sheet.get('cellValues') instanceof Y.Array ? new YKeyValue(sheet.get('cellValues')) : null);
+
+        if (cellValuesKV) {
+            // First pass: register all formulas into the engine
             const formulaCells = [];
-            cells.forEach((cellYMap, key) => {
-                const v = cellYMap.get?.(CELL_KEYS.VALUE);
+            for (const [key, { val: data }] of cellValuesKV.map) {
+                const v = data?.v;
                 if (typeof v === 'string' && v.startsWith('=')) {
                     const [row, col] = key.split(',').map(Number);
-                    formulaCells.push({ key, row, col, formula: v });
+                    formulaCells.push({ row, col, formula: v });
                 }
-            });
-
-            // Second pass: register all formulas and build the dependency graph.
-            // setFormula evaluates each formula immediately, but in arbitrary order —
-            // dependent cells may not be in computedValues yet, producing stale values.
+            }
             for (const { row, col, formula } of formulaCells) {
                 this.formulaEngine.setFormula(row, col, formula);
             }
-
-            // Third pass: recalculate all formula cells in topological (dependency) order
-            // so that chains like A1=10, B1=A1+5, C1=B1*2 all resolve correctly.
-            // graph.setFormula marks every cell dirty, so recalculateDirty covers them all.
+            // Recalculate in topological order so dependency chains resolve correctly.
             this.formulaEngine.recalculateDirty();
-        }
 
-        // Observe cell changes for formula recalculation
-        if (cells) {
-            const observer = (events) => {
+            // Observe cellValues YKeyValue for formula recalculation on changes.
+            const formulaObserver = (changes) => {
                 if (!this.formulaEngine) return;
 
-                // Collect all changes to process
-                const formulasToSet = [];
+                const formulasToSet  = [];
                 const formulasToClear = [];
-                const valueChanges = [];
+                const valueChanges   = [];
 
-                // Track cell keys handled by top-level events so deep events don't double-process
-                // them. When a new cell Y.Map is added to the cells map, Yjs fires BOTH a
-                // top-level 'add' event on cells AND a deep 'v add' event on the inner Y.Map.
-                // We process the top-level event and skip the redundant deep one.
-                const topLevelHandled = new Set();
-
-                for (const event of events) {
-                    // Top-level: change to the cells Y.Map itself (cell added/deleted/replaced)
-                    if (!event.path || event.path.length === 0) {
-                        if (event.changes.keys) {
-                            event.changes.keys.forEach((change, key) => {
-                                if (change.action === 'add' || change.action === 'update') {
-                                    topLevelHandled.add(key);
-                                    const cellYMap = cells.get(key);
-                                    const v = cellYMap?.get?.(CELL_KEYS.VALUE);
-                                    if (typeof v === 'string' && v.startsWith('=')) {
-                                        const [row, col] = key.split(',').map(Number);
-                                        formulasToSet.push({ row, col, formula: v });
-                                    }
-                                } else if (change.action === 'delete') {
-                                    topLevelHandled.add(key);
-                                    const [row, col] = key.split(',').map(Number);
-                                    formulasToClear.push({ row, col });
-                                }
-                            });
-                        }
-                    }
-
-                    // Deep: change to a property inside an existing cell Y.Map
-                    if (event.path && event.path.length > 0 && event.changes.keys) {
-                        const cellKey = event.path[0];
-                        // Skip if the top-level event already handled this cell (e.g. new cell creation)
-                        if (topLevelHandled.has(cellKey)) continue;
-
-                        const hasValueChange = event.changes.keys.has(CELL_KEYS.VALUE);
-                        if (hasValueChange) {
-                            const [row, col] = cellKey.split(',').map(Number);
-                            const cellYMap = cells.get(cellKey);
-                            const v = cellYMap?.get?.(CELL_KEYS.VALUE);
-                            if (typeof v === 'string' && v.startsWith('=')) {
-                                formulasToSet.push({ row, col, formula: v });
-                            } else {
-                                // Value changed to a non-formula
+                for (const [key, change] of changes) {
+                    const [row, col] = key.split(',').map(Number);
+                    if (change.action === 'delete') {
+                        formulasToClear.push({ row, col });
+                        valueChanges.push({ row, col });
+                    } else {
+                        const newV = change.newValue?.v;
+                        const oldV = change.oldValue?.v;
+                        if (typeof newV === 'string' && newV.startsWith('=')) {
+                            formulasToSet.push({ row, col, formula: newV });
+                        } else {
+                            if (typeof oldV === 'string' && oldV.startsWith('=')) {
                                 formulasToClear.push({ row, col });
-                                valueChanges.push({ row, col });
                             }
+                            valueChanges.push({ row, col });
                         }
                     }
                 }
 
-                // Apply all formula changes
                 for (const { row, col } of formulasToClear) {
                     this.formulaEngine.clearFormula(row, col);
                 }
-
                 for (const { row, col, formula } of formulasToSet) {
                     this.formulaEngine.setFormula(row, col, formula);
                 }
-
-                // Trigger dependent recalculation for non-formula value changes
                 for (const { row, col } of valueChanges) {
                     this.formulaEngine.cellValueChanged(row, col);
                 }
-
-                // Re-evaluate all dirty formula cells in topological order. This ensures
-                // correct results when e.g. IMPORTRANGE fills spill cells that other
-                // formulas depend on, or when a batch paste brings in many interdependent
-                // formulas at once.
                 if (formulasToSet.length > 0) {
                     this.formulaEngine.recalculateDirty();
                 }
-
-                // Note: We do NOT write computed values back to Yjs!
-                // The computed values are stored in the reactive formulaEngine.computedValues
             };
 
-            cells.observeDeep(observer);
-
-            // TABLE_* reactivity is now handled by DocumentTableRegistry.onTableChange,
-            // which covers all sheets (not just the active one). No per-sheet observer needed.
+            cellValuesKV.on('change', formulaObserver);
 
             this.#cleanupFormulaObserver = () => {
-                cells.unobserveDeep(observer);
+                cellValuesKV.off('change', formulaObserver);
             };
         }
     }
@@ -867,21 +816,24 @@ export class SpreadsheetSession {
         if (sheet && this.ydoc) {
             this.activeSheetStore = new SheetStore(sheet, this.ydoc);
 
-            const cells = sheet.get('cells');
-            const borders = sheet.get('borders');
-            // Ensure all mutable Y types exist (older docs may lack some of them).
+            const cellValues = sheet.get('cellValues');
+            const cellStyles = sheet.get('cellStyles');
+            const borders    = sheet.get('borders');
             let rowMeta = sheet.get('rowMeta');
-            if (!rowMeta) { rowMeta = new Y.Map(); sheet.set('rowMeta', rowMeta); }
+            if (!rowMeta) { rowMeta = new Y.Array(); sheet.set('rowMeta', rowMeta); }
             let colMeta = sheet.get('colMeta');
-            if (!colMeta) { colMeta = new Y.Map(); sheet.set('colMeta', colMeta); }
+            if (!colMeta) { colMeta = new Y.Array(); sheet.set('colMeta', colMeta); }
             let tables = sheet.get('tables');
             if (!tables) { tables = new Y.Map(); sheet.set('tables', tables); }
             let repeaters = sheet.get('repeaters');
             if (!repeaters) { repeaters = new Y.Map(); sheet.set('repeaters', repeaters); }
+            let merges = sheet.get('merges');
+            if (!merges) { merges = new Y.Array(); sheet.set('merges', merges); }
 
-            if (cells) {
-                // UndoManager tracks all local changes by default (origin=null)
-                this.undoManager = new Y.UndoManager([cells, borders, rowMeta, colMeta, tables, repeaters]);
+            if (cellValues) {
+                this.undoManager = new Y.UndoManager(
+                    [sheet, cellValues, cellStyles, borders, rowMeta, colMeta, tables, repeaters, merges].filter(Boolean)
+                );
 
                 // Set up observer to update reactive undo/redo state
                 this.#setupUndoObserver();
@@ -965,8 +917,8 @@ export class SpreadsheetSession {
         const sheetYMap = sheetsMap?.get(targetSheet.id);
         if (!sheetYMap) return FormulaError.REF;
 
-        const cells = sheetYMap.get('cells');
-        if (!cells) return null;
+        const cvArr = sheetYMap.get('cellValues');
+        if (!cvArr) return null;
 
         const extMgr = this.#externalDocManager;
         const customFns = extMgr ? new Map([['IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
@@ -975,7 +927,7 @@ export class SpreadsheetSession {
             return extMgr.getRange(String(fileIdOrUrl), rangeStr);
         }]]) : null;
 
-        const { evalCell } = makeSheetCellEvaluator(cells, customFns);
+        const { evalCell } = makeSheetCellEvaluator(new YKeyValue(cvArr), customFns);
         return evalCell(row, col, new Set());
     }
 
@@ -1001,10 +953,10 @@ export class SpreadsheetSession {
 
         const sheetYMap = this.root?.get('sheets')?.get(sheetId);
         if (!sheetYMap) return [];
-        const cells = sheetYMap.get('cells');
-        if (!cells) return [];
+        const cvArr = sheetYMap.get('cellValues');
+        if (!cvArr) return [];
+        const cvKV = new YKeyValue(cvArr);
 
-        // Temporary engine with the same IMPORTRANGE handler so cached data is reused
         const eng = new FormulaEngine();
         if (this.#externalDocManager) {
             const extMgr = this.#externalDocManager;
@@ -1015,25 +967,23 @@ export class SpreadsheetSession {
             });
         }
         eng.setCellValueGetter((r, c) => {
-            const cm = cells.get(`${r},${c}`);
-            if (!cm) return null;
-            const v = cm.get(CELL_KEYS.VALUE);
+            const data = cvKV.get(`${r},${c}`);
+            if (!data) return null;
+            const v = data.v;
             if (typeof v === 'string' && v.startsWith('=')) return null;
             if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
             return v ?? null;
         });
 
-        // Load all formula cells from this sheet
-        cells.forEach((cm, key) => {
-            const v = cm.get?.(CELL_KEYS.VALUE);
+        for (const [key, { val: data }] of cvKV.map) {
+            const v = data?.v;
             if (typeof v === 'string' && v.startsWith('=')) {
                 const [rs, cs] = key.split(',');
                 eng.setFormula(parseInt(rs), parseInt(cs), v);
             }
-        });
+        }
         eng.recalculateAll();
 
-        // Extract the requested range
         const out = [];
         for (let r = startRow; r <= endRow; r++) {
             for (let c = startCol; c <= endCol; c++) {
@@ -1041,8 +991,8 @@ export class SpreadsheetSession {
                 if (key in eng.computedValues) {
                     out.push(eng.computedValues[key]);
                 } else {
-                    const cm = cells.get(key);
-                    const v = cm?.get?.(CELL_KEYS.VALUE);
+                    const data = cvKV.get(key);
+                    const v = data?.v;
                     if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) out.push(Number(v));
                     else out.push(v ?? null);
                 }
@@ -1237,19 +1187,13 @@ export class SpreadsheetSession {
         const sheetsMap = this.root?.get('sheets');
         const sheet = sheetsMap?.get(sheetId);
         if (!sheet || !this.ydoc) return;
-        const cells = sheet.get('cells');
-        if (!cells) return;
+        const cvArr = sheet.get('cellValues');
+        if (!cvArr) return;
+        const cvKV = new YKeyValue(cvArr);
         const key = `${row},${col}`;
         const normalized = formula.startsWith('=') ? formula : '=' + formula;
         this.ydoc.transact(() => {
-            let cellMap = cells.get(key);
-            if (!cellMap) {
-                const newCell = new Y.Map();
-                newCell.set('v', normalized);
-                cells.set(key, newCell);
-            } else {
-                cellMap.set('v', normalized);
-            }
+            cvKV.set(key, { ...(cvKV.get(key) ?? {}), v: normalized });
         });
     }
 
@@ -1268,22 +1212,15 @@ export class SpreadsheetSession {
         const sheetsMap = this.root?.get('sheets');
         const sheet = sheetsMap?.get(sheetId);
         if (!sheet || !this.ydoc) return;
-        const cells = sheet.get('cells');
-        if (!cells) return;
+        const cvArr = sheet.get('cellValues');
+        if (!cvArr) return;
+        const cvKV = new YKeyValue(cvArr);
         const key = `${row},${col}`;
         this.ydoc.transact(() => {
             if (value === '' || value === null || value === undefined) {
-                const cellMap = cells.get(key);
-                if (cellMap) cells.delete(key);
+                cvKV.delete(key);
             } else {
-                let cellMap = cells.get(key);
-                if (!cellMap) {
-                    const newCell = new Y.Map();
-                    newCell.set('v', value);
-                    cells.set(key, newCell);
-                } else {
-                    cellMap.set('v', value);
-                }
+                cvKV.set(key, { ...(cvKV.get(key) ?? {}), v: value });
             }
         });
     }
@@ -1305,6 +1242,11 @@ export class SpreadsheetSession {
     /** Delete the row at rowIndex */
     deleteRowAt(rowIndex) {
         this.activeSheetStore?.deleteRowAt(rowIndex);
+    }
+
+    /** Delete multiple rows in one transaction */
+    deleteRowsAt(rowIndices) {
+        this.activeSheetStore?.deleteRowsAt(rowIndices);
     }
 
     /** Insert a blank column before colIndex */

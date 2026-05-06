@@ -36,7 +36,6 @@ export * from './virtualization/types.js';
 export {
     spreadsheetSchema,
     createSheetYMap,
-    createCellYMap,
     createNamedRangeYMap,
     createTableYMap,
     createTableColumnYMap,

@@ -694,43 +694,12 @@ export class TableStore {
                 yRow.set(k, v);
             }
 
-            if (this.hasManualOrder) {
-                // _pos mode: always append to Y.Array, compute _pos for display position.
-                const newPos = this.insertSortColId
-                    ? this.#computeInsertPos(rowData[this.insertSortColId])
-                    : (Math.max(0, ...this.sortedFilteredRows.map(r => r._pos ?? 0)) + 1000);
-                yRow.set('_pos', newPos);
-                rowArr.push([yRow]);
-                return;
-            }
-
-            // Legacy mode (no _pos): use Y.Array insertion position.
-            // Default: append to end (O(1)) - newest appears at display top.
-            let insertAt = rowArr.length;
-
-            // If insertSort is configured, find position closest to display-top
-            // that maintains sort order. Since display is reversed, "display top"
-            // means the highest raw index that satisfies the sort condition.
-            if (this.insertSortColId) {
-                const colId = this.insertSortColId;
-                const dir = this.insertSortDir === "desc" ? -1 : 1;
-                const newVal = rowData[colId];
-
-                for (let i = 0; i < rowArr.length; i++) {
-                    const rv = rowArr.get(i)?.get?.(colId);
-                    const cmp = this.#cmpValues(rv, newVal);
-                    if (dir * cmp > 0) {
-                        insertAt = i;
-                        break;
-                    }
-                }
-            }
-
-            if (insertAt >= 0 && insertAt < rowArr.length) {
-                rowArr.insert(insertAt, [yRow]);
-            } else {
-                rowArr.push([yRow]);
-            }
+            if (!this.hasManualOrder) this.#initPos(rowArr);
+            const newPos = this.insertSortColId
+                ? this.#computeInsertPos(rowArr, rowData[this.insertSortColId])
+                : Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0)) + 1000;
+            yRow.set('_pos', newPos);
+            rowArr.push([yRow]);
         });
     }
 
@@ -815,29 +784,32 @@ export class TableStore {
     }
 
     /**
-     * Compute a _pos value for a new row with the given insertSort column value.
-     * Walks sortedFilteredRows (desc _pos) to find the right slot.
+     * Compute a _pos value for inserting a row at the correct sort position.
+     * Reads _pos values directly from rowArr (safe to call after #initPos in same transaction).
+     * @param {import('yjs').Array} rowArr
      * @param {any} newVal
      * @returns {number}
      */
-    #computeInsertPos(newVal) {
+    #computeInsertPos(rowArr, newVal) {
         const colId = this.insertSortColId;
         const dir = this.insertSortDir === "desc" ? -1 : 1;
-        const rows = this.sortedFilteredRows;
-        if (!rows.length) return 1000;
 
-        for (let i = 0; i < rows.length; i++) {
-            const rowVal = rows[i][colId];
-            // For asc (dir=1): stop at first row whose value < newVal → insert above it.
-            // For desc (dir=-1): stop at first row whose value > newVal → insert above it.
-            if (dir * this.#cmpValues(rowVal, newVal) < 0) {
-                const abovePos = i > 0 ? (rows[i - 1]._pos ?? 0) : null;
-                const belowPos = rows[i]._pos ?? 0;
-                return abovePos == null ? belowPos + 1000 : (abovePos + belowPos) / 2;
+        const sorted = [];
+        for (let i = 0; i < rowArr.length; i++) {
+            const r = rowArr.get(i);
+            sorted.push({ val: r?.get?.(colId), pos: r?.get?.('_pos') ?? 0 });
+        }
+        sorted.sort((a, b) => b.pos - a.pos); // desc _pos = display order
+
+        if (!sorted.length) return 1000;
+
+        for (let i = 0; i < sorted.length; i++) {
+            if (dir * this.#cmpValues(sorted[i].val, newVal) < 0) {
+                const abovePos = i > 0 ? sorted[i - 1].pos : null;
+                return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
             }
         }
-        // Goes below all existing rows.
-        return Math.max(0, (rows[rows.length - 1]._pos ?? 1000) - 1000);
+        return Math.max(0, sorted[sorted.length - 1].pos - 1000);
     }
 
     // ─── Row ordering (public) ────────────────────────────────────────────────
@@ -921,7 +893,7 @@ export class TableStore {
      * @returns {{ displayIndex: number, placeInOrder: () => void } | null}
      */
     checkOutOfOrder(displayIndex) {
-        if (!this.insertSortColId || !this.hasManualOrder) return null;
+        if (!this.insertSortColId) return null;
         const colId = this.insertSortColId;
         const dir = this.insertSortDir === "desc" ? -1 : 1;
         const rows = this.sortedFilteredRows;
@@ -936,10 +908,13 @@ export class TableStore {
         const result = {
             displayIndex,
             placeInOrder: () => {
-                const newPos = this.#computeInsertPos(val);
                 const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
                 if (!rowArr) return;
-                this.#ydoc.transact(() => this.#setRowPos(rowArr, displayIndex, newPos));
+                this.#ydoc.transact(() => {
+                    if (!this.hasManualOrder) this.#initPos(rowArr);
+                    const newPos = this.#computeInsertPos(rowArr, val);
+                    this.#setRowPos(rowArr, displayIndex, newPos);
+                });
                 this.outOfOrderRow = null;
             },
         };

@@ -196,6 +196,10 @@ export function buildPaneData(params) {
     // Map of row -> { cellCol: overflowRightX }
     const overflowMap = new Map();
 
+    // Index into `cells` where the current row's items begin.
+    // Used to retroactively mark left-overflow shadow cells (right-aligned spill).
+    let rowStartCellIdx = 0;
+
     // Merge primaries whose primary row/col is outside the current range (scrolled off-screen).
     // These are collected from MERGE_SHADOW cells and painted after the main loop so that
     // merged cells remain visible even when their primary row is above the viewport.
@@ -212,6 +216,9 @@ export function buildPaneData(params) {
         // Track the rightmost overflow edge seen so far in this row.
         // Cells whose left edge falls within this boundary are overflow shadows.
         let rowOverflowRightX = -Infinity;
+
+        // Record start of this row's items for retroactive left-overflow shadow marking.
+        rowStartCellIdx = cells.length;
 
         // Cache row-level formatting once per row (shared by all columns in this row)
         // mappedRow for repeaters is resolved per-cell, but for non-repeater rows it's always r
@@ -662,14 +669,32 @@ export function buildPaneData(params) {
                 item.displayValue &&
                 renderContext
             ) {
-                const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics, item.displayValue, sheetCell);
-                if (overflowExtent > 0) {
-                    // Preserve natural column width so gridlines stay at column boundaries
-                    item.naturalWidth = width;
-                    item.width += overflowExtent;
-                    // Track the furthest overflow edge so subsequent cells can detect shadows
-                    const overflowRightX = item.x + item.width;
-                    if (overflowRightX > rowOverflowRightX) rowOverflowRightX = overflowRightX;
+                if (item.hAlign === 'right') {
+                    // Right-aligned: spill LEFT into preceding empty cells.
+                    const leftOverflow = renderContext.getLeftOverflowExtent(r, c, colRange.start, colMetrics, item.displayValue, sheetCell);
+                    if (leftOverflow > 0) {
+                        const originalX = x;
+                        item.x -= leftOverflow;
+                        item.width += leftOverflow;
+                        // Retroactively mark already-processed cells in this row as overflow
+                        // shadows so they suppress their content and intermediate gridlines.
+                        for (let si = rowStartCellIdx; si < cells.length; si++) {
+                            const prev = cells[si];
+                            if (!prev.gridlineOnly && prev.x >= item.x && prev.x < originalX) {
+                                prev.gridlineOnly = true;
+                            }
+                        }
+                    }
+                } else {
+                    // Left/center-aligned: spill RIGHT into following empty cells.
+                    const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics, item.displayValue, sheetCell);
+                    if (overflowExtent > 0) {
+                        item.naturalWidth = width;
+                        item.width += overflowExtent;
+                        // Track the furthest overflow edge so subsequent cells can detect shadows
+                        const overflowRightX = item.x + item.width;
+                        if (overflowRightX > rowOverflowRightX) rowOverflowRightX = overflowRightX;
+                    }
                 }
             }
 

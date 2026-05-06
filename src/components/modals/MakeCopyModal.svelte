@@ -4,7 +4,7 @@
     import Button from "../../lib/ui/Button.svelte";
     import ModalHeader from "../../lib/ui/ModalHeader.svelte";
     import Textbox from "../../lib/ui/Textbox.svelte";
-    import { router } from "../../lib/router.svelte.js";
+    import { getFileRoute } from "../../lib/appTypes.js";
     import {
         folder,
         home,
@@ -69,9 +69,10 @@
                 title: copyTitle.trim() || `Copy of ${file.title ?? "Untitled"}`,
                 folderId: selectedFolderId,
             });
-            closeTopModal();
             if (andOpen) {
-                router.openFile(newFile);
+                window.location.href = getFileRoute(newFile.app, newFile.id);
+            } else {
+                closeTopModal();
             }
         } finally {
             saving = false;

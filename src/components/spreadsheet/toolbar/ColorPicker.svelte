@@ -1,17 +1,17 @@
 <script>
     import { onMount, onDestroy, tick } from "svelte";
 
-    // 7 rows × 10 columns
-    // Row 0: grayscale | Rows 1-6: one hue per column (red→orange→amber→lime→green→teal→sky→indigo→purple→pink)
-    // Each row is a consistent shade level: base → light tint → light-mid → mid → dark → deep
+    // 7 rows × 10 columns — one hue per column: red, orange, amber, lime, green, teal, sky, indigo, purple, pink
+    // Shade levels use a logarithmic curve so dark/deep rows are visually well-separated
+    // L%:  grayscale | base~55% | tint~93% | light-mid~78% | medium~58% | dark~34% | deep~15%
     const PALETTE = [
         ['#000000', '#333333', '#555555', '#777777', '#999999', '#BBBBBB', '#DDDDDD', '#EEEEEE', '#F5F5F5', '#FFFFFF'],
         ['#F44336', '#FF5722', '#FFC107', '#8BC34A', '#4CAF50', '#00BCD4', '#03A9F4', '#3F51B5', '#9C27B0', '#E91E63'],
-        ['#FFEBEE', '#FBE9E7', '#FFF8E1', '#F1F8E9', '#E8F5E9', '#E0F7FA', '#E1F5FE', '#E8EAF6', '#F3E5F5', '#FCE4EC'],
-        ['#EF9A9A', '#FFAB91', '#FFE082', '#C5E1A5', '#A5D6A7', '#80DEEA', '#81D4FA', '#9FA8DA', '#CE93D8', '#F48FB1'],
-        ['#E57373', '#FF8A65', '#FFD54F', '#AED581', '#81C784', '#4DD0E1', '#4FC3F7', '#7986CB', '#BA68C8', '#F06292'],
-        ['#D32F2F', '#E64A19', '#FFA000', '#689F38', '#388E3C', '#0097A7', '#0288D1', '#303F9F', '#7B1FA2', '#C2185B'],
-        ['#B71C1C', '#BF360C', '#FF6F00', '#33691E', '#1B5E20', '#006064', '#01579B', '#1A237E', '#4A148C', '#880E4F'],
+        ['#FFEBEE', '#FBE9E7', '#FFF8E1', '#F9FBE7', '#E8F5E9', '#E0F7FA', '#E1F5FE', '#E8EAF6', '#F3E5F5', '#FCE4EC'],
+        ['#EF9A9A', '#FFAB91', '#FFE082', '#DCE775', '#A5D6A7', '#80DEEA', '#81D4FA', '#9FA8DA', '#CE93D8', '#F48FB1'],
+        ['#E57373', '#FF7043', '#FFD54F', '#C0CA33', '#66BB6A', '#26C6DA', '#29B6F6', '#5C6BC0', '#AB47BC', '#EC407A'],
+        ['#C62828', '#D84315', '#CC8A00', '#558B2F', '#2E7D32', '#00838F', '#0277BD', '#283593', '#6A1B9A', '#AD1457'],
+        ['#7A0000', '#7A2400', '#5C3D00', '#2D4700', '#1B3D22', '#00333D', '#012D4A', '#0D1257', '#2D0040', '#560026'],
     ];
 
     const RECENT_KEY = 'color-picker-recent';

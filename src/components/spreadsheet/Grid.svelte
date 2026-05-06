@@ -562,27 +562,8 @@
 
             virtualizer.setSheetDimensions(rowCount, colCount);
             virtualizer.setFrozenDimensions(frozenRows, frozenCols);
-
-            const rowMeta = sheetStore.getYMap()?.get("rowMeta");
-            const colMeta = sheetStore.getYMap()?.get("colMeta");
-
-            const heights = new Map();
-            if (rowMeta) {
-                rowMeta.forEach((meta, key) => {
-                    const h = meta.get("height");
-                    if (h !== undefined) heights.set(parseInt(key, 10), h);
-                });
-            }
-            virtualizer.syncRowHeights(heights);
-
-            const widths = new Map();
-            if (colMeta) {
-                colMeta.forEach((meta, key) => {
-                    const w = meta.get("width");
-                    if (w !== undefined) widths.set(parseInt(key, 10), w);
-                });
-            }
-            virtualizer.syncColWidths(widths);
+            virtualizer.syncRowHeights(sheetStore.getRowHeightsMap());
+            virtualizer.syncColWidths(sheetStore.getColWidthsMap());
         });
     });
 
@@ -645,6 +626,10 @@
 
     // ─── Canvas setup & resize ─────────────────────────────────────────────────
     $effect(() => {
+        // Track sheetStore so this effect re-runs when the document loads.
+        // The virtualizer init effect (declared above) runs first in the same batch,
+        // so virtualizer is already set by the time we get here.
+        const _sheet = sheetStore;
         if (!canvasEl || !virtualizer) return;
 
         const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
@@ -670,6 +655,7 @@
     });
 
     $effect(() => {
+        const _sheet = sheetStore; // same as data canvas: re-run when sheet loads
         if (!selectCanvasEl || !virtualizer) return;
 
         const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
@@ -1335,44 +1321,63 @@
     }
 
     // ─── DOM overlay position deriveds ────────────────────────────────────────
-    let selectionBorderStyle = $derived.by(() => {
+
+    /** Compute a border style string for a cell range (null = skip). */
+    function rangeBorderStyle(range) {
+        const eff = expandRangeForMerges(range, renderContext?.mergeEngine) ?? range;
+        if (!eff) return null;
+        const isSingle = eff.startRow === eff.endRow && eff.startCol === eff.endCol;
+        if (isSingle) return null;
+        const left = cellContainerLeft(eff.startCol);
+        const top = cellContainerTop(eff.startRow);
+        const right = cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
+        const bottom = cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
+        return `transform:translate(${left}px,${top}px); width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
+    }
+
+    /** One style string per visible selection border (active + extra ranges). */
+    let selectionBorderStyles = $derived.by(() => {
         const mode = selectionState.selectionMode;
-        if (!virtualizer || !renderPlan) return null;
+        if (!virtualizer || !renderPlan) return [];
 
         if (mode === 'range') {
-            // Use the merge-expanded range for the selection border
-            const eff = expandedRange;
-            if (!eff) return null;
-            const isSingle = eff.startRow === eff.endRow && eff.startCol === eff.endCol;
-            if (isSingle) return null; // anchor border covers single-cell case
-            const left = cellContainerLeft(eff.startCol);
-            const top = cellContainerTop(eff.startRow);
-            const right = cellContainerLeft(eff.endCol) + virtualizer.getColWidth(eff.endCol);
-            const bottom = cellContainerTop(eff.endRow) + virtualizer.getRowHeight(eff.endRow);
-            return `transform:translate(${left}px,${top}px); width:${Math.max(0, right - left)}px; height:${Math.max(0, bottom - top)}px;`;
+            const styles = [];
+            // Active range (merge-expanded)
+            const activeStyle = rangeBorderStyle(selectionState.range);
+            if (activeStyle) styles.push(activeStyle);
+            // Extra ranges
+            for (const r of selectionState.extraRanges) {
+                const s = rangeBorderStyle(r);
+                if (s) styles.push(s);
+            }
+            return styles;
         }
 
         if (mode === 'rows') {
-            const sr = selectionState.selectedRows;
-            if (!sr) return null;
-            const top = cellContainerTop(sr.start);
-            const bottom = cellContainerTop(sr.end) + virtualizer.getRowHeight(sr.end);
-            return `transform:translate(${HEADER_WIDTH}px,${top}px); width:${renderPlan.totalWidth}px; height:${Math.max(0, bottom - top)}px;`;
+            const styles = [];
+            for (const sr of selectionState.allRowRanges) {
+                const top = cellContainerTop(sr.start);
+                const bottom = cellContainerTop(sr.end) + virtualizer.getRowHeight(sr.end);
+                styles.push(`transform:translate(${HEADER_WIDTH}px,${top}px); width:${renderPlan.totalWidth}px; height:${Math.max(0, bottom - top)}px;`);
+            }
+            return styles;
         }
 
         if (mode === 'cols') {
-            const sc = selectionState.selectedCols;
-            if (!sc) return null;
-            const left = cellContainerLeft(sc.start);
-            const right = cellContainerLeft(sc.end) + virtualizer.getColWidth(sc.end);
-            return `transform:translate(${left}px,${HEADER_HEIGHT}px); width:${Math.max(0, right - left)}px; height:${renderPlan.totalHeight}px;`;
+            const styles = [];
+            for (const sc of selectionState.allColRanges) {
+                const left = cellContainerLeft(sc.start);
+                const right = cellContainerLeft(sc.end) + virtualizer.getColWidth(sc.end);
+                styles.push(`transform:translate(${left}px,${HEADER_HEIGHT}px); width:${Math.max(0, right - left)}px; height:${renderPlan.totalHeight}px;`);
+            }
+            return styles;
         }
 
         if (mode === 'all') {
-            return `transform:translate(${HEADER_WIDTH}px,${HEADER_HEIGHT}px); width:${renderPlan.totalWidth}px; height:${renderPlan.totalHeight}px;`;
+            return [`transform:translate(${HEADER_WIDTH}px,${HEADER_HEIGHT}px); width:${renderPlan.totalWidth}px; height:${renderPlan.totalHeight}px;`];
         }
 
-        return null;
+        return [];
     });
 
     /**
@@ -1491,6 +1496,32 @@
                 width: virtualizer.getColWidth(col),
                 height: virtualizer.getRowHeight(row),
             };
+
+            // Expand editor bounds to match the overflow area as the user types.
+            // Only for plain text (non-formula) editing of regular cells.
+            const draft = editSessionState.draft;
+            if (draft && renderContext && !editSessionState.isFormulaMode) {
+                // Determine hAlign with same col→row→cell priority as CellPaintData
+                const _sc = sheetStore?.getCell(row, col);
+                let hAlign = 'left';
+                const _colFmt = sheetStore?.getColFormatting?.(col);
+                if (_colFmt?.horizontalAlign) hAlign = _colFmt.horizontalAlign;
+                const _rowFmt = sheetStore?.getRowFormatting?.(row);
+                if (_rowFmt?.horizontalAlign) hAlign = _rowFmt.horizontalAlign;
+                if (_sc?.horizontalAlign) hAlign = _sc.horizontalAlign;
+
+                const colRange = renderPlan?.plans?.body?.colRange ?? { start: 0, end: 9999 };
+                const { leftExtra, rightExtra } = renderContext.getEditorOverflow(
+                    row, col, draft, hAlign, colRange, virtualizer.colMetrics,
+                );
+                if (leftExtra > 0) {
+                    bounds.left -= leftExtra;
+                    bounds.width += leftExtra;
+                }
+                if (rightExtra > 0) {
+                    bounds.width += rightExtra;
+                }
+            }
         }
 
         // Keep in-cell editor visible above the soft keyboard on mobile.
@@ -3385,20 +3416,16 @@
         e.stopPropagation();
 
         let indices = [col];
-        // For 'cols' mode, resize all selected columns
-        if (
-            selectionState.selectionMode === "cols" &&
-            selectionState.selectedCols &&
-            col >= selectionState.selectedCols.start &&
-            col <= selectionState.selectedCols.end
-        ) {
-            indices = [];
-            for (
-                let c = selectionState.selectedCols.start;
-                c <= selectionState.selectedCols.end;
-                c++
-            )
-                indices.push(c);
+        // For 'cols' mode, resize all selected columns (including extra ranges)
+        if (selectionState.selectionMode === "cols") {
+            const allColRanges = selectionState.allColRanges;
+            const inSelection = allColRanges.some(r => col >= r.start && col <= r.end);
+            if (inSelection) {
+                const colSet = new Set();
+                for (const r of allColRanges)
+                    for (let c = r.start; c <= r.end; c++) colSet.add(c);
+                indices = [...colSet].sort((a, b) => a - b);
+            }
         } else if (
             selection &&
             col >= selection.startCol &&
@@ -3425,20 +3452,16 @@
         e.stopPropagation();
 
         let indices = [row];
-        // For 'rows' mode, resize all selected rows
-        if (
-            selectionState.selectionMode === "rows" &&
-            selectionState.selectedRows &&
-            row >= selectionState.selectedRows.start &&
-            row <= selectionState.selectedRows.end
-        ) {
-            indices = [];
-            for (
-                let r = selectionState.selectedRows.start;
-                r <= selectionState.selectedRows.end;
-                r++
-            )
-                indices.push(r);
+        // For 'rows' mode, resize all selected rows (including extra ranges)
+        if (selectionState.selectionMode === "rows") {
+            const allRowRanges = selectionState.allRowRanges;
+            const inSelection = allRowRanges.some(r => row >= r.start && row <= r.end);
+            if (inSelection) {
+                const rowSet = new Set();
+                for (const r of allRowRanges)
+                    for (let i = r.start; i <= r.end; i++) rowSet.add(i);
+                indices = [...rowSet].sort((a, b) => a - b);
+            }
         } else if (
             selection &&
             row >= selection.startRow &&
@@ -3532,10 +3555,14 @@
     function startColResizeTouch(col, e) {
         const touch = e.touches[0];
         let indices = [col];
-        if (selectionState.selectionMode === "cols" && selectionState.selectedCols &&
-            col >= selectionState.selectedCols.start && col <= selectionState.selectedCols.end) {
-            indices = [];
-            for (let c = selectionState.selectedCols.start; c <= selectionState.selectedCols.end; c++) indices.push(c);
+        if (selectionState.selectionMode === "cols") {
+            const allColRanges = selectionState.allColRanges;
+            if (allColRanges.some(r => col >= r.start && col <= r.end)) {
+                const colSet = new Set();
+                for (const r of allColRanges)
+                    for (let c = r.start; c <= r.end; c++) colSet.add(c);
+                indices = [...colSet].sort((a, b) => a - b);
+            }
         }
         resizing = { type: "col", index: col, startPos: touch.clientX, startSize: virtualizer.getColWidth(col), selectedIndices: indices };
         document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
@@ -3546,10 +3573,14 @@
     function startRowResizeTouch(row, e) {
         const touch = e.touches[0];
         let indices = [row];
-        if (selectionState.selectionMode === "rows" && selectionState.selectedRows &&
-            row >= selectionState.selectedRows.start && row <= selectionState.selectedRows.end) {
-            indices = [];
-            for (let r = selectionState.selectedRows.start; r <= selectionState.selectedRows.end; r++) indices.push(r);
+        if (selectionState.selectionMode === "rows") {
+            const allRowRanges = selectionState.allRowRanges;
+            if (allRowRanges.some(r => row >= r.start && row <= r.end)) {
+                const rowSet = new Set();
+                for (const r of allRowRanges)
+                    for (let i = r.start; i <= r.end; i++) rowSet.add(i);
+                indices = [...rowSet].sort((a, b) => a - b);
+            }
         }
         resizing = { type: "row", index: row, startPos: touch.clientY, startSize: virtualizer.getRowHeight(row), selectedIndices: indices };
         document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
@@ -4394,23 +4425,25 @@
      */
     function clearSelection() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        if (ranges.length === 0) return;
 
-        // Handle table cells in the range (sparse map misses these)
+        // Handle table cells in the ranges (sparse map misses these)
         let tableCleared = false;
-        for (let r = eff.startRow; r <= eff.endRow; r++) {
-            for (let c = eff.startCol; c <= eff.endCol; c++) {
-                const ct = renderContext?.getCellType(r, c);
-                if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
-                const info = renderContext?.tableManager?.getCellInfo(r, c);
-                if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
-                if (ct === CELL_TYPE.TABLE_ENTRY) {
-                    info.table.setEntryValue(info.colDef.id, null);
-                } else {
-                    info.table.updateCell(info.dataIndex, info.colDef.id, null);
+        for (const eff of ranges) {
+            for (let r = eff.startRow; r <= eff.endRow; r++) {
+                for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
+                    const info = renderContext?.tableManager?.getCellInfo(r, c);
+                    if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
+                    if (ct === CELL_TYPE.TABLE_ENTRY) {
+                        info.table.setEntryValue(info.colDef.id, null);
+                    } else {
+                        info.table.updateCell(info.dataIndex, info.colDef.id, null);
+                    }
+                    tableCleared = true;
                 }
-                tableCleared = true;
             }
         }
         if (tableCleared) untrack(() => renderScheduler?.invalidateAll());
@@ -4418,8 +4451,7 @@
         // Iterate only regular cells that actually exist (sparse map)
         sheetStore.cells.forEach((_cell, key) => {
             const [r, c] = key.split(",").map(Number);
-            if (r < eff.startRow || r > eff.endRow) return;
-            if (c < eff.startCol || c > eff.endCol) return;
+            if (!ranges.some(eff => r >= eff.startRow && r <= eff.endRow && c >= eff.startCol && c <= eff.endCol)) return;
             // Skip table/repeater/viewport cells (handled above)
             const ct = renderContext?.getCellType(r, c);
             if (
@@ -4504,37 +4536,41 @@
     // ─── Fill Down / Right ────────────────────────────────────────────────────
     function fillDown() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff || eff.startRow === eff.endRow) return;
-        sheetStore.fillDown(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        spreadsheetSession.ydoc?.transact(() => {
+            for (const eff of ranges) {
+                if (eff.startRow === eff.endRow) continue;
+                sheetStore.fillDown(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+            }
+        });
     }
 
     function fillRight() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff || eff.startCol === eff.endCol) return;
-        sheetStore.fillRight(
-            eff.startRow,
-            eff.startCol,
-            eff.endRow,
-            eff.endCol,
-        );
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        spreadsheetSession.ydoc?.transact(() => {
+            for (const eff of ranges) {
+                if (eff.startCol === eff.endCol) continue;
+                sheetStore.fillRight(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
+            }
+        });
     }
 
     // ─── Apply cell type to selection ─────────────────────────────────────────
     function applyTypeToSelection(type, extraOptions = {}) {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        if (ranges.length === 0) return;
         const config = { type, ...extraOptions };
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    // Table cells use column-level type config (set via header) — skip
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_DATA ||
-                        ct === CELL_TYPE.TABLE_ENTRY) continue;
-                    sheetStore.setCellTypeConfig(r, c, config);
+            for (const eff of ranges) {
+                for (let r = eff.startRow; r <= eff.endRow; r++) {
+                    for (let c = eff.startCol; c <= eff.endCol; c++) {
+                        const ct = renderContext?.getCellType(r, c);
+                        if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_DATA ||
+                            ct === CELL_TYPE.TABLE_ENTRY) continue;
+                        sheetStore.setCellTypeConfig(r, c, config);
+                    }
                 }
             }
         });
@@ -4583,27 +4619,23 @@
     // ─── Clear formatting ─────────────────────────────────────────────────────
     function clearFormatting() {
         if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        if (ranges.length === 0) return;
 
-        // Clear per-cell formatting for any table data cells in the range
-        for (let r = eff.startRow; r <= eff.endRow; r++) {
-            for (let c = eff.startCol; c <= eff.endCol; c++) {
-                const ct = renderContext?.getCellType(r, c);
-                if (ct !== CELL_TYPE.TABLE_DATA) continue;
-                const info = renderContext?.tableManager?.getCellInfo(r, c);
-                if (info?.table && info.colDef && info.dataIndex >= 0) {
-                    info.table.clearCellFormatting(info.dataIndex, info.colDef.id);
+        for (const eff of ranges) {
+            // Clear per-cell formatting for any table data cells in the range
+            for (let r = eff.startRow; r <= eff.endRow; r++) {
+                for (let c = eff.startCol; c <= eff.endCol; c++) {
+                    const ct = renderContext?.getCellType(r, c);
+                    if (ct !== CELL_TYPE.TABLE_DATA) continue;
+                    const info = renderContext?.tableManager?.getCellInfo(r, c);
+                    if (info?.table && info.colDef && info.dataIndex >= 0) {
+                        info.table.clearCellFormatting(info.dataIndex, info.colDef.id);
+                    }
                 }
             }
+            sheetStore.clearRangeFormatting(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
         }
-
-        sheetStore.clearRangeFormatting(
-            eff.startRow,
-            eff.startCol,
-            eff.endRow,
-            eff.endCol,
-        );
     }
 
     // ─── Row / Column insert / delete ─────────────────────────────────────────
@@ -4652,8 +4684,7 @@
             if (!eff) return;
             for (let i = eff.startRow; i <= eff.endRow; i++) rows.add(i);
         }
-        const sorted = [...rows].sort((a, b) => b - a);
-        for (const row of sorted) sheetStore.deleteRowAt(row);
+        sheetStore.deleteRowsAt([...rows]);
     }
     function deleteSelectedColumns() {
         if (!sheetStore) return;
@@ -4819,11 +4850,15 @@
     });
 
     function clearContents() {
-        if (!sheetStore || !selection) return;
+        if (!sheetStore) return;
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        if (ranges.length === 0) return;
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = selection.startRow; r <= selection.endRow; r++) {
-                for (let c = selection.startCol; c <= selection.endCol; c++) {
-                    sheetStore.clearCell(r, c);
+            for (const eff of ranges) {
+                for (let r = eff.startRow; r <= eff.endRow; r++) {
+                    for (let c = eff.startCol; c <= eff.endCol; c++) {
+                        sheetStore.clearCell(r, c);
+                    }
                 }
             }
         });
@@ -5501,13 +5536,10 @@
                 />
             </div>
 
-            <!-- Selection border (multi-cell) — fill is on canvas -->
-            {#if selectionBorderStyle}
-                <div
-                    class="selection-border"
-                    style={selectionBorderStyle}
-                ></div>
-            {/if}
+            <!-- Selection border(s) (multi-cell) — fill is on canvas -->
+            {#each selectionBorderStyles as style}
+                <div class="selection-border" {style}></div>
+            {/each}
 
             <!-- Anchor border -->
             {#if anchorBorderStyle}

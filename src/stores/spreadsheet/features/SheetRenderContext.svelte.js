@@ -316,6 +316,103 @@ export class SheetRenderContext {
     }
 
     /**
+     * Left overflow extent: extra pixel width when right-aligned text spills leftward
+     * into adjacent empty cells.
+     *
+     * @param {number} row
+     * @param {number} col
+     * @param {number} visibleColStart - first visible col in this pane
+     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
+     * @param {string} [displayValue]
+     * @param {object} [sheetCell]
+     * @returns {number} extra pixels (0 = no overflow needed)
+     */
+    getLeftOverflowExtent(row, col, visibleColStart, colMetrics, displayValue, sheetCell) {
+        const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
+        if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
+        if (cell.wrapText) return 0;
+        if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
+
+        const dv = displayValue ?? this.getDisplayValue(row, col);
+        const textWidth = measureTextWidth(dv, cell);
+
+        const colWidth = colMetrics.sizeOf(col);
+        const padding = 8;
+        const availableWidth = colWidth - padding;
+
+        if (textWidth <= availableWidth + 0.5) return 0;
+
+        const neededExtra = Math.max(0, textWidth - availableWidth);
+
+        let availableExtra = 0;
+        let c = col - 1;
+        while (c >= visibleColStart && availableExtra < neededExtra) {
+            const adjType = this.getCellType(row, c);
+            if (adjType !== CELL_TYPE.REGULAR) break;
+            const adj = this.#sheetStore.getCell(row, c);
+            if (adj.exists && adj.v !== undefined && adj.v !== null && adj.v !== '') break;
+            availableExtra += colMetrics.sizeOf(c);
+            c--;
+        }
+
+        return availableExtra;
+    }
+
+    /**
+     * Compute editor overflow extents for a given draft text value.
+     * Returns how many extra pixels the editor should extend left and right.
+     *
+     * @param {number} row
+     * @param {number} col
+     * @param {string} draft
+     * @param {'left'|'center'|'right'} hAlign
+     * @param {{start:number, end:number}} colRange  visible col range to limit scanning
+     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
+     * @returns {{leftExtra: number, rightExtra: number}}
+     */
+    getEditorOverflow(row, col, draft, hAlign, colRange, colMetrics) {
+        if (!draft) return { leftExtra: 0, rightExtra: 0 };
+
+        const cell = this.#sheetStore.getCell(row, col);
+        if (cell.wrapText) return { leftExtra: 0, rightExtra: 0 };
+
+        const textWidth = measureTextWidth(draft, cell);
+        const colWidth = colMetrics.sizeOf(col);
+        const padding = 8;
+        const availableWidth = colWidth - padding;
+
+        if (textWidth <= availableWidth + 0.5) return { leftExtra: 0, rightExtra: 0 };
+
+        const neededExtra = textWidth - availableWidth;
+
+        if (hAlign === 'right') {
+            let extra = 0;
+            let c = col - 1;
+            while (c >= (colRange.start ?? 0) && extra < neededExtra) {
+                const adjType = this.getCellType(row, c);
+                if (adjType !== CELL_TYPE.REGULAR) break;
+                const adj = this.#sheetStore.getCell(row, c);
+                if (adj.exists && adj.v != null && adj.v !== '') break;
+                extra += colMetrics.sizeOf(c);
+                c--;
+            }
+            return { leftExtra: extra, rightExtra: 0 };
+        } else {
+            let extra = 0;
+            let c = col + 1;
+            while (c <= (colRange.end ?? 9999) && extra < neededExtra) {
+                const adjType = this.getCellType(row, c);
+                if (adjType !== CELL_TYPE.REGULAR) break;
+                const adj = this.#sheetStore.getCell(row, c);
+                if (adj.exists && adj.v != null && adj.v !== '') break;
+                extra += colMetrics.sizeOf(c);
+                c++;
+            }
+            return { leftExtra: 0, rightExtra: extra };
+        }
+    }
+
+    /**
      * Merge span for a primary cell.
      * @param {number} row
      * @param {number} col

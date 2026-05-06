@@ -256,9 +256,9 @@ export class CanvasRenderer {
             }
 
             // Batch-draw default gridlines in one path to minimise stroke() calls.
-            // gridlineOnly cells (overflow shadows) are included here so column
-            // boundaries stay visible under spilled text. Overflow cells use
-            // naturalWidth so their right/bottom lines stay at the column edge.
+            // gridlineOnly cells (overflow shadows) draw only bottom edges; right edges
+            // are suppressed so no intermediate column boundaries appear within an overflow span.
+            // Overflow source cells draw their right edge at the full extended width.
             if (showGridLines) {
                 // halfPx: offset in CSS pixels that maps to exactly 0.5 physical pixels.
                 // At DPR=2 → 0.25 CSS px; at DPR=1.5 → 0.333 CSS px; at DPR=1 → 0.5 CSS px.
@@ -268,16 +268,17 @@ export class CanvasRenderer {
                 ctx.strokeStyle = this.#theme.gridline;
                 ctx.lineWidth = 1;
                 for (const cell of cells) {
-                    const { x, y, height } = cell;
-                    // Use naturalWidth for overflow cells so the gridline stays
-                    // at the original column boundary, not the extended edge.
-                    const rightW = cell.naturalWidth ?? cell.width;
-                    // right edge
-                    ctx.moveTo(x + rightW - halfPx, y);
-                    ctx.lineTo(x + rightW - halfPx, y + height);
-                    // bottom edge
+                    const { x, y, width, height } = cell;
+                    // bottom edge — always drawn (horizontal row lines stay visible)
                     ctx.moveTo(x, y + height - halfPx);
-                    ctx.lineTo(x + rightW, y + height - halfPx);
+                    ctx.lineTo(x + width, y + height - halfPx);
+                    // right edge — suppressed for overflow shadow cells (gridlineOnly).
+                    // Overflow source cells use 'width' (the extended far edge), erasing
+                    // intermediate column boundaries within the overflow span.
+                    if (!cell.gridlineOnly) {
+                        ctx.moveTo(x + width - halfPx, y);
+                        ctx.lineTo(x + width - halfPx, y + height);
+                    }
                 }
                 ctx.stroke();
             }

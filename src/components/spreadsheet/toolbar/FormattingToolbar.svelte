@@ -464,39 +464,39 @@
         const colCount = sheetStore.colCount;
 
         // For whole-row mode, use setRowTypeConfig
-        if (mode === "rows" && selectionState.selectedRows) {
-            const { start, end } = selectionState.selectedRows;
+        if (mode === "rows") {
             spreadsheetSession.ydoc?.transact(() => {
-                for (let r = start; r <= end; r++) {
-                    sheetStore.setRowTypeConfig(r, config);
+                for (const { start, end } of selectionState.allRowRanges) {
+                    for (let r = start; r <= end; r++) sheetStore.setRowTypeConfig(r, config);
                 }
             });
             return;
         }
 
         // For whole-column mode, use setColTypeConfig
-        if (mode === "cols" && selectionState.selectedCols) {
-            const { start, end } = selectionState.selectedCols;
+        if (mode === "cols") {
             spreadsheetSession.ydoc?.transact(() => {
-                for (let c = start; c <= end; c++) {
-                    sheetStore.setColTypeConfig(c, config);
+                for (const { start, end } of selectionState.allColRanges) {
+                    for (let c = start; c <= end; c++) sheetStore.setColTypeConfig(c, config);
                 }
             });
             return;
         }
 
         // For range/all: set on individual cells
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
+        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
+        if (ranges.length === 0) return;
 
         const renderContext = spreadsheetSession.renderContext;
         spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
-                        ct === CELL_TYPE.TABLE_DATA) continue;
-                    sheetStore.setCellTypeConfig(r, c, config);
+            for (const eff of ranges) {
+                for (let r = eff.startRow; r <= eff.endRow; r++) {
+                    for (let c = eff.startCol; c <= eff.endCol; c++) {
+                        const ct = renderContext?.getCellType(r, c);
+                        if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
+                            ct === CELL_TYPE.TABLE_DATA) continue;
+                        sheetStore.setCellTypeConfig(r, c, config);
+                    }
                 }
             }
         });

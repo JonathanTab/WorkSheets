@@ -26,11 +26,16 @@ export const OVERSCAN_ROWS = OVERSCAN_PX_ROWS;
 export const OVERSCAN_COLS = OVERSCAN_PX_COLS;
 
 // Schema version
-export const SCHEMA_VERSION = '2';
+export const SCHEMA_VERSION = '4';
 
 // Default sheet dimensions
 export const DEFAULT_ROW_COUNT = 1000;
 export const DEFAULT_COL_COUNT = 26;
+
+// Which cell properties live in cellValues (YKeyValue) vs cellStyles (YKeyValue).
+// cellValues = computational data { v, t }
+// cellStyles = display/config data (everything else)
+export const CELL_VALUE_KEYS = new Set(['v', 't']);
 
 // Cell property keys (short names for storage efficiency)
 // Note: Formulas are stored in VALUE ('v') field with '=' prefix

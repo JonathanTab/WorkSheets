@@ -98,6 +98,11 @@ export default defineConfig({
             skipWaiting: true,
             runtimeCaching: [
                 {
+                    // Always fetch fresh so clients detect schema bumps immediately.
+                    urlPattern: /\/schema-version\.json$/,
+                    handler: 'NetworkOnly',
+                },
+                {
                     urlPattern: /\/api\/.*/i,
                     handler: 'NetworkFirst',
                     options: {

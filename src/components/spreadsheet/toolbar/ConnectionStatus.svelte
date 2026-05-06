@@ -105,8 +105,12 @@
         // Return cleanup function
         listenerCleanup = () => {
             console.log("[ConnectionStatus] Cleaning up provider listeners");
-            provider.off("status", handleStatus);
-            provider.off("sync", handleSync);
+            try {
+                provider.off("status", handleStatus);
+                provider.off("sync", handleSync);
+            } catch (e) {
+                // Provider may have been destroyed before cleanup ran
+            }
         };
 
         // NOW check current status after listeners are set up
