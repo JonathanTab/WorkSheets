@@ -722,6 +722,42 @@ export class SheetStore {
     }
 
     /**
+     * Resolve the effective visual style for a cell by applying the same
+     * col→row→cell cascade that CellPaintData uses, so the inline editor
+     * can match the canvas exactly.
+     *
+     * @param {number} row
+     * @param {number} col
+     * @returns {{ fontSize:number|null, fontFamily:string|null, bold:boolean, italic:boolean, underline:boolean, strikethrough:boolean, color:string|null, backgroundColor:string|null, horizontalAlign:string|null, verticalAlign:string|null, wrapText:boolean }}
+     */
+    getEffectiveCellStyle(row, col) {
+        const out = {
+            fontSize: null, fontFamily: null, bold: false, italic: false,
+            underline: false, strikethrough: false, color: null,
+            backgroundColor: null, horizontalAlign: null, verticalAlign: null, wrapText: false,
+        };
+        const apply = (src) => {
+            if (!src) return;
+            if (src.fontSize != null)         out.fontSize        = src.fontSize;
+            if (src.fontFamily != null)        out.fontFamily       = src.fontFamily;
+            if (src.bold)                      out.bold             = true;
+            if (src.italic)                    out.italic           = true;
+            if (src.underline)                 out.underline        = true;
+            if (src.strikethrough)             out.strikethrough    = true;
+            if (src.color != null)             out.color            = src.color;
+            if (src.backgroundColor != null)   out.backgroundColor  = src.backgroundColor;
+            if (src.horizontalAlign != null)   out.horizontalAlign  = src.horizontalAlign;
+            if (src.verticalAlign != null)     out.verticalAlign    = src.verticalAlign;
+            if (src.wrapText)                  out.wrapText         = true;
+        };
+        apply(this.getColFormatting(col));
+        apply(this.getRowFormatting(row));
+        const cell = this.getCell(row, col);
+        if (cell?.exists) apply(cell);
+        return out;
+    }
+
+    /**
      * Set column-level type config
      * @param {number} col
      * @param {Object} ct

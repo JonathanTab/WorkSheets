@@ -89,15 +89,19 @@
         isFormulaMode ? segmentFormula(editValue ?? "") : [],
     );
 
-    // Cell-level formatting for the current edit cell — applied to the editor as base styles
+    // Effective formatting for the current edit cell — applies the same col→row→cell
+    // cascade as CellPaintData so the editor matches the canvas exactly.
     let cellFormatting = $derived.by(() => {
         if (!editSessionState.isEditing || !editSessionState.cell) return null;
         const { row, col } = editSessionState.cell;
         const sheetStore = spreadsheetSession?.activeSheetStore;
         if (!sheetStore) return null;
-        return sheetStore.getCell(row, col);
+        return sheetStore.getEffectiveCellStyle(row, col);
     });
 
+    // Inline style for the rich-text contenteditable editor.
+    // Includes all visual properties (font, color, background) because this
+    // element is never used in formula mode where color must be transparent.
     let richEditStyle = $derived.by(() => {
         const f = cellFormatting;
         const parts = [];
@@ -106,6 +110,20 @@
         if (f?.bold) parts.push('font-weight: bold');
         if (f?.italic) parts.push('font-style: italic');
         if (f?.color) parts.push(`color: ${f.color}`);
+        if (f?.backgroundColor) parts.push(`background: ${f.backgroundColor}`);
+        return parts.length ? parts.join('; ') : null;
+    });
+
+    // Inline style for the plain-text <input> editor.
+    // Excludes color and background because in formula mode the input must be
+    // transparent (CSS handles that via .cell-editor:has(.formula-overlay) rule).
+    let plainEditStyle = $derived.by(() => {
+        const f = cellFormatting;
+        const parts = [];
+        if (f?.fontFamily) parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
+        if (f?.fontSize) parts.push(`font-size: ${f.fontSize}px`);
+        if (f?.bold) parts.push('font-weight: bold');
+        if (f?.italic) parts.push('font-style: italic');
         return parts.length ? parts.join('; ') : null;
     });
 
@@ -447,6 +465,7 @@
                 <input
                     type="text"
                     class="cell-edit-input"
+                    style={plainEditStyle}
                     bind:this={cellEditInputEl}
                     value={editValue}
                     oninput={(e) => {
@@ -494,7 +513,8 @@
         height: 100%;
         border: none;
         padding: 0 4px;
-        font-size: 0.8125rem;
+        font-size: 12px;
+        font-family: system-ui, -apple-system, sans-serif;
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
         color: var(--text-color, #1e293b);
@@ -509,8 +529,8 @@
         min-height: 100%;
         border: none;
         padding: 2px 4px;
-        font-size: 0.8125rem;
-        font-family: var(--cell-font, system-ui, -apple-system, sans-serif);
+        font-size: 12px;
+        font-family: system-ui, -apple-system, sans-serif;
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
         color: var(--text-color, #1e293b);
@@ -524,7 +544,8 @@
         line-height: 1.5;
     }
 
-    .cell-editor:has(.cell-edit-input) .cell-edit-input {
+    /* Monospace only in formula mode — scoped via the overlay presence. */
+    .cell-editor:has(.formula-overlay) .cell-edit-input {
         font-family: monospace;
     }
 
@@ -532,7 +553,7 @@
         position: absolute;
         inset: 0;
         padding: 0 4px;
-        font-size: 0.8125rem;
+        font-size: 12px;
         pointer-events: none;
         overflow: hidden;
         font-family: monospace;
