@@ -4,12 +4,14 @@
     import Button from "../../lib/ui/Button.svelte";
     import ModalHeader from "../../lib/ui/ModalHeader.svelte";
 
-    /** @type {{ file: import('../../lib/FileRegistry/FileRegistry.js').FileDescriptor }} */
-    let { file } = $props();
+    /** @type {{ file: any, itemType?: 'file' | 'folder' }} */
+    let { file, itemType = 'file' } = $props();
 
     const trashSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
     const checkSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
     const linkSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
+    const isFolder = itemType === 'folder';
 
     // Live copy so we can show optimistic UI
     let currentFile = $state({ ...file });
@@ -29,8 +31,9 @@
             })
             .catch(() => {});
         // Keep currentFile in sync with drive store
-        const unsub = storage.drive.files.subscribe((files) => {
-            const updated = files.find((f) => f.id === file.id);
+        const store = isFolder ? storage.drive.folders : storage.drive.files;
+        const unsub = store.subscribe((items) => {
+            const updated = items.find((f) => f.id === file.id);
             if (updated) currentFile = { ...updated };
         });
         return unsub;
@@ -65,11 +68,9 @@
         saving = true;
         try {
             const perms = addPerm === "write" ? ["read", "write"] : ["read"];
-            const updated = await storage.drive.shareFile(
-                currentFile.id,
-                addUsername.trim(),
-                perms,
-            );
+            const updated = isFolder
+                ? await storage.drive.shareFolder(currentFile.id, addUsername.trim(), perms)
+                : await storage.drive.shareFile(currentFile.id, addUsername.trim(), perms);
             currentFile = { ...updated };
             addUsername = "";
             userSearch = "";
@@ -83,10 +84,9 @@
     async function revokeShare(username) {
         saving = true;
         try {
-            const updated = await storage.drive.revokeFile(
-                currentFile.id,
-                username,
-            );
+            const updated = isFolder
+                ? await storage.drive.revokeFolderShare(currentFile.id, username)
+                : await storage.drive.revokeFile(currentFile.id, username);
             currentFile = { ...updated };
         } catch (e) {
             console.error("Revoke failed:", e);
@@ -98,11 +98,9 @@
     async function togglePublicRead() {
         saving = true;
         try {
-            const updated = await storage.drive.setFilePublic(
-                currentFile.id,
-                !currentFile.publicRead,
-                currentFile.publicWrite,
-            );
+            const updated = isFolder
+                ? await storage.drive.setFolderPublic(currentFile.id, !currentFile.publicRead, currentFile.publicWrite)
+                : await storage.drive.setFilePublic(currentFile.id, !currentFile.publicRead, currentFile.publicWrite);
             currentFile = { ...updated };
         } finally {
             saving = false;
@@ -112,11 +110,9 @@
     async function togglePublicWrite() {
         saving = true;
         try {
-            const updated = await storage.drive.setFilePublic(
-                currentFile.id,
-                currentFile.publicRead,
-                !currentFile.publicWrite,
-            );
+            const updated = isFolder
+                ? await storage.drive.setFolderPublic(currentFile.id, currentFile.publicRead, !currentFile.publicWrite)
+                : await storage.drive.setFilePublic(currentFile.id, currentFile.publicRead, !currentFile.publicWrite);
             currentFile = { ...updated };
         } finally {
             saving = false;
@@ -133,7 +129,7 @@
     }
 </script>
 
-<ModalHeader title={'Share "' + (currentFile.title || "Untitled") + '"'} />
+<ModalHeader title={'Share "' + (currentFile.title || currentFile.name || "Untitled") + '"'} />
 
 <div class="share-modal">
     <!-- Current owner -->

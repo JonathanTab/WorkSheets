@@ -718,6 +718,55 @@
         openModal(ShareFileModal, { file });
     }
 
+    function handleShareFolder(folder, e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        openModal(ShareFileModal, { file: folder, itemType: 'folder' });
+    }
+
+    function handleDeleteSelected(e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        const items = displayItems.filter((item) => isSelected(item));
+        const fileItems = items.filter((i) => i.itemType === "file");
+        const folderItems = items.filter((i) => i.itemType === "folder");
+        const count = items.length;
+        openModal(ConfirmModal, {
+            title: `Delete ${count} items`,
+            message: `Delete ${count} selected items? This cannot be undone.`,
+            variant: "danger",
+            confirmText: "Delete",
+            onConfirm: async () => {
+                for (const f of fileItems) {
+                    await registry.drive.deleteFile(f.id).catch(console.error);
+                }
+                for (const f of folderItems) {
+                    await registry.drive.deleteFolder(f.id).catch(console.error);
+                }
+                clearSelection();
+            },
+        });
+    }
+
+    function handleMoveSelected(e) {
+        e?.stopPropagation();
+        closeContextMenu();
+        const fileItems = displayItems.filter(
+            (item) => isSelected(item) && item.itemType === "file",
+        );
+        if (fileItems.length === 0) return;
+        openModal(MoveFileModal, {
+            file: fileItems[0],
+            onConfirm: async (targetFolderId) => {
+                for (const f of fileItems) {
+                    await registry.drive
+                        .moveFile(f.id, targetFolderId)
+                        .catch(console.error);
+                }
+            },
+        });
+    }
+
     function handleVersionHistory(file, e) {
         e?.stopPropagation();
         closeContextMenu();
@@ -773,6 +822,12 @@
     function showContextMenu(e, item, type) {
         e.preventDefault();
         e.stopPropagation();
+        // If the right-clicked item isn't in the current selection, select only it
+        if (!isSelected(item)) {
+            selectedItems = new Set([itemKey(item)]);
+            lastSelectedKey = itemKey(item);
+            focusedItemKey = itemKey(item);
+        }
         let x = e.clientX;
         let y = e.clientY;
         if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
@@ -2480,6 +2535,17 @@
                     {@html arrowRight} Paste
                 </button>
             {/if}
+        {:else if contextMenu.area === "item" && selectedItems.size > 1}
+            <div class="ctx-header">{selectedItems.size} items selected</div>
+            {#if displayItems.some((i) => isSelected(i) && i.itemType === "file")}
+                <button class="ctx-item" onclick={handleMoveSelected}>
+                    {@html move} Move to…
+                </button>
+            {/if}
+            <hr class="ctx-sep" />
+            <button class="ctx-item danger" onclick={handleDeleteSelected}>
+                {@html trash} Delete {selectedItems.size} items
+            </button>
         {:else if contextMenu.type === "file" && tab === "trash"}
             <button
                 class="ctx-item"
@@ -2567,6 +2633,12 @@
                 onclick={(e) => startRenameFolder(contextMenu.item, e)}
             >
                 {@html edit} Rename
+            </button>
+            <button
+                class="ctx-item"
+                onclick={(e) => handleShareFolder(contextMenu.item, e)}
+            >
+                {@html share} Share…
             </button>
             <hr class="ctx-sep" />
             <button
@@ -3857,6 +3929,14 @@
 
     .ctx-item.danger {
         color: var(--color-error, #ef4444);
+    }
+
+    .ctx-header {
+        padding: 0.375rem 0.75rem 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--color-text-secondary);
+        pointer-events: none;
     }
 
     .ctx-sep {
