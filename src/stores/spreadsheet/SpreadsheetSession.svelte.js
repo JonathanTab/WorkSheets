@@ -237,17 +237,9 @@ export class SpreadsheetSession {
                 if (!repeaters0) { repeaters0 = new Y.Map(); activeSheet.set('repeaters', repeaters0); }
                 let merges0 = activeSheet.get('merges');
                 if (!merges0) { merges0 = new Y.Array(); activeSheet.set('merges', merges0); }
-                if (cellValues) {
-                    this.undoManager = new Y.UndoManager(
-                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0].filter(Boolean)
-                    );
-
-                    // Set up observer to update reactive undo/redo state
-                    this.#setupUndoObserver();
-                }
-
-                // Create document-wide table registry before TableManager so the
-                // manager can borrow stores instead of creating duplicates.
+                // Create document-wide table registry before the undo manager so
+                // its migration (which creates root.tables) runs first, ensuring
+                // root.tables exists when we hand it to Y.UndoManager.
                 performance.mark('ss:tableRegistry:start');
                 this.tableRegistry = new DocumentTableRegistry(root, ydoc);
                 performance.mark('ss:tableRegistry:end');
@@ -256,6 +248,19 @@ export class SpreadsheetSession {
                 this.tableRegistry.onTableChange = () => {
                     this.formulaEngine?.recalculateTableDependents();
                 };
+
+                if (cellValues) {
+                    // Also track root.tables so source-table row/column mutations
+                    // (insertRow, updateCell, insertColumn, …) are undoable.
+                    // Source tables live in root.tables, not in the per-sheet tables map.
+                    const rootTables = root.get('tables');
+                    this.undoManager = new Y.UndoManager(
+                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0, rootTables].filter(Boolean)
+                    );
+
+                    // Set up observer to update reactive undo/redo state
+                    this.#setupUndoObserver();
+                }
 
                 // Create TableManager before formula engine so TABLE_* functions are
                 // registered before formulas are evaluated on first load.
@@ -831,8 +836,11 @@ export class SpreadsheetSession {
             if (!merges) { merges = new Y.Array(); sheet.set('merges', merges); }
 
             if (cellValues) {
+                // Also track root.tables so source-table row/column mutations
+                // (insertRow, updateCell, insertColumn, …) are undoable.
+                const rootTables = this.root?.get('tables');
                 this.undoManager = new Y.UndoManager(
-                    [sheet, cellValues, cellStyles, borders, rowMeta, colMeta, tables, repeaters, merges].filter(Boolean)
+                    [sheet, cellValues, cellStyles, borders, rowMeta, colMeta, tables, repeaters, merges, rootTables].filter(Boolean)
                 );
 
                 // Set up observer to update reactive undo/redo state
