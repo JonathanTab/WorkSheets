@@ -52,8 +52,10 @@
     import { RenderScheduler } from "../../stores/spreadsheet/rendering/RenderScheduler.js";
     import { HitTestEngine } from "../../stores/spreadsheet/rendering/HitTestEngine.js";
     import { buildPaneData } from "../../stores/spreadsheet/rendering/CellPaintData.js";
+    import { buildRenderRuns, hitTestLink } from "../../stores/spreadsheet/textFormatRuns.js";
     import { perfMon } from "../../stores/spreadsheet/perf/PerfMonitor.js";
     import GridOverlays from "./grid/GridOverlays.svelte";
+    import LinkPopover from "./grid/LinkPopover.svelte";
     import ColHeaders from "./grid/ColHeaders.svelte";
     import RowHeaders from "./grid/RowHeaders.svelte";
     import ContextMenu from "../ui/ContextMenu.svelte";
@@ -73,7 +75,6 @@
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../modals/AlertModal.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
-    import { isRichText } from "../../stores/spreadsheet/richText.js";
     import SelectionHandles from "./grid/SelectionHandles.svelte";
     import MobileCellActionBar from "./grid/MobileCellActionBar.svelte";
 
@@ -190,6 +191,10 @@
     // ─── Fill-handle drag state ────────────────────────────────────────────────
     // null | { srcRange: CellRange, fillRange: CellRange|null, direction: string|null }
     let fillHandleDrag = $state(null);
+
+    // ─── Link popover (shown when hovering a cell with link runs) ────────────
+    // null | { url, cellLeft, cellTop, cellWidth, cellHeight }
+    let hoveredLink = $state(null);
 
     // ─── Table row drag / grip hover ─────────────────────────────────────────
     let tableGripHoverRow = $state(-1); // grid row whose grip is hovered (-1 = none)
@@ -2116,6 +2121,33 @@
             untrack(() => renderScheduler?.invalidateAll());
         }
 
+        // Link hover detection — re-measure on demand (only when cell has tfr with links)
+        if (hit.region === 'cell' && hit.row >= 0 && hit.col >= 0 && !editSessionState.isEditing) {
+            const cellData = sheetStore?.getCell(hit.row, hit.col);
+            if (cellData?.tfr?.some(r => r.format?.link)) {
+                const cellW    = virtualizer.getColWidth(hit.col);
+                const cellH    = virtualizer.getRowHeight(hit.row);
+                const cellLeft = cellContainerLeft(hit.col);
+                const cellTop  = cellContainerTop(hit.row);
+                const xInCell  = localX - cellLeft;
+                const yInCell  = localY - cellTop;
+                const style    = sheetStore.getEffectiveCellStyle(hit.row, hit.col);
+                const theme    = canvasRenderer?.theme ?? {};
+                const runs     = buildRenderRuns(cellData.v ?? '', cellData.tfr);
+                const url      = hitTestLink(xInCell, yInCell, runs, cellW, cellH, style, theme);
+                if (url) {
+                    hoveredLink = { url, cellLeft, cellTop, cellWidth: cellW, cellHeight: cellH };
+                    currentCursor = 'pointer';
+                } else {
+                    hoveredLink = null;
+                }
+            } else {
+                hoveredLink = null;
+            }
+        } else if (hit.region !== 'cell') {
+            hoveredLink = null;
+        }
+
         if (isFormulaEditMode && isSelectingRange && hit.region === "cell") {
             rangeEndCell = { row: hit.row, col: hit.col };
             return;
@@ -2783,8 +2815,8 @@
         if (uiEditorTypes.has(ct?.type)) return "grid";
 
         const rawValue = getTableAwareEditValue(row, col, cellType);
-        // Rich-text content must be edited in the cell editor to preserve markup.
-        if (isRichText(rawValue)) return "grid";
+        // Cells with inline formatting (tfr) always open in the grid contenteditable.
+        if (sheetStore?.getCell(row, col)?.tfr?.length) return "grid";
         return "formulaBar";
     }
 
@@ -3060,12 +3092,13 @@
                     ? "datetime-local"
                     : null;
 
+        const initialTfr = seedText !== null ? null : (sheetStore?.getCell(row, col)?.tfr ?? null);
         editSessionState.beginEdit(
             row,
             col,
             seedText !== null ? seedText : (rawValue ?? ""),
             surface,
-            { pickerMode, sheetId: spreadsheetSession.activeSheetId },
+            { pickerMode, sheetId: spreadsheetSession.activeSheetId, initialTfr },
         );
     }
 
@@ -3075,56 +3108,59 @@
      */
     function persistEditOnSheet(sheetId, payload) {
         if (!payload) return;
-        const { row, col, value } = payload;
+        const { row, col, value, tfr } = payload;
         const targetSheetId = sheetId || spreadsheetSession.activeSheetId;
 
         if (typeof value === "string" && value.startsWith("=")) {
-            spreadsheetSession.setCellFormulaOnSheet(
-                targetSheetId,
-                row,
-                col,
-                value,
-            );
-        } else {
-            // Get the cell type config from the target sheet's store for value parsing
+            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, row, col, value);
+        } else if (tfr && tfr.length > 0) {
+            // Rich text: store plain value + runs together
             const targetStore =
-                targetSheetId === spreadsheetSession.activeSheetId
-                    ? sheetStore
-                    : null; // For non-active sheets skip type-config parsing; value is used as-is
+                targetSheetId === spreadsheetSession.activeSheetId ? sheetStore : null;
             const ct = targetStore?.getCellTypeConfig(row, col);
             const parsedValue = CellTypeRegistry.parseInput(ct, value);
-            spreadsheetSession.setCellValueOnSheet(
-                targetSheetId,
-                row,
-                col,
-                parsedValue,
-            );
+            targetStore?.setCellValueWithRuns(row, col, parsedValue, tfr);
+        } else {
+            const targetStore =
+                targetSheetId === spreadsheetSession.activeSheetId ? sheetStore : null;
+            const ct = targetStore?.getCellTypeConfig(row, col);
+            const parsedValue = CellTypeRegistry.parseInput(ct, value);
+            spreadsheetSession.setCellValueOnSheet(targetSheetId, row, col, parsedValue);
         }
     }
 
     /**
      * Persist a cell edit to the correct store (table or sheet).
      * Routes to commitTableDataCell, commitTableEntryCell, renameColumn, or persistEditOnSheet.
+     * value may be a plain string or { value, tfr } for rich text.
      */
-    function persistCellEdit(sheetId, row, col, value) {
+    function persistCellEdit(sheetId, row, col, value, tfr = null) {
+        // Unpack if caller passed a { value, tfr } object
+        let plainValue = value;
+        let runsTfr    = tfr;
+        if (value !== null && typeof value === 'object' && 'value' in value) {
+            plainValue = value.value;
+            runsTfr    = value.tfr ?? null;
+        }
+
         const cellType = renderContext?.getCellType(row, col);
         if (cellType === CELL_TYPE.TABLE_DATA) {
-            commitTableDataCell(renderContext.tableManager.getCellInfo(row, col), row, col, value);
+            commitTableDataCell(renderContext.tableManager.getCellInfo(row, col), row, col, plainValue);
             return;
         }
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
-            commitTableEntryCell(renderContext.tableManager.getCellInfo(row, col), value);
+            commitTableEntryCell(renderContext.tableManager.getCellInfo(row, col), plainValue);
             return;
         }
         if (cellType === CELL_TYPE.TABLE_HEADER) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef) {
-                const newName = String(value ?? "").trim();
+                const newName = String(plainValue ?? "").trim();
                 if (newName) info.table.renameColumn(info.colDef.id, newName);
             }
             return;
         }
-        persistEditOnSheet(sheetId, { row, col, value });
+        persistEditOnSheet(sheetId, { row, col, value: plainValue, tfr: runsTfr });
     }
 
     /**
@@ -3300,7 +3336,7 @@
         const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value);
+        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
         if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
             spreadsheetSession.setActiveSheet(editingSheetId);
     }
@@ -3313,7 +3349,7 @@
         const payload = editSessionState.commit();
         if (!payload) return;
 
-        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value);
+        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
 
         if (editCellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(payload.row, payload.col);
@@ -3331,18 +3367,22 @@
 
     function commitEdit(value = undefined) {
         if (value !== undefined && editSessionState.isEditing) {
-            // Pickers and rich-text editors pass an explicit value; session state
-            // may hold stale/async content so we bypass editSessionState.commit().
+            // Pickers and contenteditable pass an explicit value.
+            // Value may be a plain string or { value, tfr } from the rich text editor.
             const editRow = editSessionState.cell.row;
             const editCol = editSessionState.cell.col;
             const editingSheetId = editSessionState.editingSheetId;
             const editCellType = renderContext?.getCellType(editRow, editCol);
-            // Capture entry-row ref before cancel (for rich-text Enter navigation).
             const entryInfo = editCellType === CELL_TYPE.TABLE_ENTRY
                 ? renderContext?.tableManager?.getCellInfo(editRow, editCol)
                 : null;
             editSessionState.cancel();
-            persistCellEdit(editingSheetId, editRow, editCol, value);
+            // Unpack { value, tfr } if needed
+            const plainValue = (value !== null && typeof value === 'object' && 'value' in value)
+                ? value.value : value;
+            const tfr = (value !== null && typeof value === 'object' && 'tfr' in value)
+                ? value.tfr : null;
+            persistCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
             if (entryInfo?.table)
                 lastTableEntryEditInfo = { row: editRow, col: editCol, table: entryInfo.table };
             if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
@@ -4243,6 +4283,12 @@
             case "y":
                 if (e.ctrlKey || e.metaKey) {
                     spreadsheetSession.redo();
+                    e.preventDefault();
+                }
+                break;
+            case "p":
+                if (e.ctrlKey || e.metaKey) {
+                    document.dispatchEvent(new CustomEvent('openPdfExport'));
                     e.preventDefault();
                 }
                 break;
@@ -5807,10 +5853,10 @@
                     const dRow = kind === "tab" ? 0 : 1;
                     const dCol = kind === "tab" ? dir : 0;
                     if (editSessionState.isEditing) {
-                        // Session still active (formula/plain text) — commit+move together
+                        // Session still active (formula mode) — commit+move together
                         commitEditAndMove(dRow, dCol);
                     } else {
-                        // Rich text path: session was committed inside commitRichValue().
+                        // Text editor called commitEdit() before onTabCommit — session already ended.
                         // Check if we just committed a TABLE_ENTRY cell.
                         if (lastTableEntryEditInfo) {
                             const { row, col, table } = lastTableEntryEditInfo;
@@ -5823,6 +5869,9 @@
                     }
                 }}
             />
+
+            <!-- Link popover (shown when hovering a cell with a hyperlink run) -->
+            <LinkPopover link={hoveredLink} />
 
             <!-- Floating images layer (over-grid, draggable/resizable) -->
             {#if sheetStore && virtualizer && renderPlan}

@@ -123,14 +123,6 @@
             </div>
         {/if}
 
-        <!-- Manual order indicator -->
-        {#if table?.hasManualOrder}
-            <div class="manual-order-row">
-                <span class="manual-order-badge">⇕ Custom order</span>
-                <button class="reset-order-btn" onclick={() => table?.resetOrder()} title="Revert to newest-first order">Reset order</button>
-            </div>
-        {/if}
-
         <!-- Position -->
         <div class="pos-display">
             <span class="pos-text">

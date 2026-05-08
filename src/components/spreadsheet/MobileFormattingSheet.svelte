@@ -87,12 +87,15 @@
     });
 
     function applyFormatting(property, value) {
-        if (editSessionState.isEditing && editSessionState.richFormatApplier) {
-            const propMap = { bold: ["fontWeight","bold"], italic: ["fontStyle","italic"],
-                underline: ["underline",null], color: ["color",value],
-                fontSize: ["fontSize",value], fontFamily: ["fontFamily",value] };
-            const mapped = propMap[property];
-            if (mapped && editSessionState.richFormatApplier(mapped[0], mapped[1] ?? value)) return;
+        if (editSessionState.isEditing && editSessionState.applyInlineFormat) {
+            const tfrPropMap = {
+                bold: 'bold', italic: 'italic', underline: 'underline',
+                strikethrough: 'strikethrough', color: 'foregroundColor',
+                fontSize: 'fontSize', fontFamily: 'fontFamily',
+            };
+            const tfrProp = tfrPropMap[property];
+            const toggleProps = new Set(['bold', 'italic', 'underline', 'strikethrough']);
+            if (tfrProp && editSessionState.applyInlineFormat(tfrProp, toggleProps.has(property) ? undefined : value)) return;
         }
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;

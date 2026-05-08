@@ -4,6 +4,11 @@
     import FormattingToolbar from "./toolbar/FormattingToolbar.svelte";
     import PresenceIndicator from "./PresenceIndicator.svelte";
     import UserMenu from "../UserMenu.svelte";
+    import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
+    import { storage } from "../../stores/storage.js";
+    import { openModal } from "../../lib/ui/modalStore.svelte.js";
+    import ShareFileModal from "../modals/ShareFileModal.svelte";
+    import { share as shareIcon } from "../../lib/icons/index.js";
 
     let {
         onClose = undefined,
@@ -14,6 +19,14 @@
         tablesPanelOpen = false,
         registry = null,
     } = $props();
+
+    function openShareModal() {
+        const docId = spreadsheetSession.docId;
+        if (!docId) return;
+        const file = storage.drive.getFile(docId);
+        if (!file) return;
+        openModal(ShareFileModal, { file });
+    }
 </script>
 
 <div class="toolbar">
@@ -30,6 +43,14 @@
             {/if}
             <DocumentName />
             <MenuBar {onShowTablesPanel} />
+            <button
+                class="share-pill"
+                onclick={openShareModal}
+                title="Share document"
+            >
+                {@html shareIcon}
+                Share
+            </button>
         </div>
         <div class="row1-right">
             <PresenceIndicator {awareness} {currentUser} />
@@ -155,6 +176,44 @@
         outline-offset: 1px;
     }
 
+    .share-pill {
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.25rem 0.75rem;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: #fff;
+        background: var(--color-primary, #3b82f6);
+        border: none;
+        border-radius: 999px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition:
+            background 0.12s,
+            transform 0.1s;
+        line-height: 1;
+    }
+
+    .share-pill :global(svg) {
+        width: 13px;
+        height: 13px;
+        flex-shrink: 0;
+    }
+
+    .share-pill:hover {
+        background: var(--color-primary-hover, #2563eb);
+    }
+
+    .share-pill:active {
+        transform: scale(0.96);
+    }
+
+    .share-pill:focus-visible {
+        outline: 2px solid var(--color-primary);
+        outline-offset: 2px;
+    }
+
     /* ── Mobile: tighter rows ── */
     @media (max-width: 600px) {
         .toolbar-row {
@@ -167,6 +226,9 @@
         .close-btn {
             padding: 6px 10px;
             font-size: 0.875rem;
+        }
+        .share-pill {
+            padding: 0.3rem 0.625rem;
         }
     }
 </style>

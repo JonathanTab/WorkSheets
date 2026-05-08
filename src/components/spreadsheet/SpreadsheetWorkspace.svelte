@@ -7,6 +7,7 @@
     import MobileToolbar from "./MobileToolbar.svelte";
     import HistoryPanel from "../HistoryPanel.svelte";
     import DocumentTablesPanel from "./features/DocumentTablesPanel.svelte";
+    import PdfExportView from "./PdfExportView.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import {
@@ -39,6 +40,20 @@
     // ── Page break overlay state ───────────────────────────────────────────────
     let showPageBreaks = $state(false);
     let pageBreakPrintSettings = $state(null);
+
+    // ── PDF export view ────────────────────────────────────────────────────────
+    let showPdfExport = $state(false);
+
+    // Show page breaks in the grid while the export view is open
+    $effect(() => {
+        if (showPdfExport) {
+            const settings = spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {};
+            document.dispatchEvent(new CustomEvent('togglePageBreaks', { detail: { show: true, settings } }));
+        } else {
+            document.dispatchEvent(new CustomEvent('togglePageBreaks', { detail: { show: false, settings: null } }));
+        }
+    });
+
     let currentLoadedDocId = $state.raw(null); // Track what we've actually loaded (raw to avoid reactivity)
     let isLoadInProgress = false; // Guard against concurrent loads
 
@@ -115,6 +130,10 @@
         pageBreakPrintSettings = e.detail.settings ?? null;
     }
 
+    function handleOpenPdfExport() {
+        showPdfExport = true;
+    }
+
     const APP_NAME = "Scriptorium";
 
     $effect(() => {
@@ -129,6 +148,7 @@
             loadDoc(docId);
         }
         document.addEventListener("togglePageBreaks", handleTogglePageBreaks);
+        document.addEventListener("openPdfExport", handleOpenPdfExport);
     });
 
     // Use $effect only for docId changes after mount
@@ -141,10 +161,8 @@
     });
 
     onDestroy(() => {
-        document.removeEventListener(
-            "togglePageBreaks",
-            handleTogglePageBreaks,
-        );
+        document.removeEventListener("togglePageBreaks", handleTogglePageBreaks);
+        document.removeEventListener("openPdfExport", handleOpenPdfExport);
         // Optionally unload document when leaving
         // unloadDocument();
     });
@@ -459,6 +477,10 @@
         </div>
     {/if}
 </div>
+
+{#if showPdfExport}
+    <PdfExportView onclose={() => (showPdfExport = false)} />
+{/if}
 
 <style>
     .spreadsheet-workspace {

@@ -47,7 +47,7 @@ function _cmpValues(a, b) {
  * @returns {number}
  */
 function _computeInsertPos(rowArr, colId, dir, newVal) {
-    const dirMult = dir === 'desc' ? -1 : 1;
+    const dirMult = dir === 'asc' ? -1 : 1; // asc=ascending=lowest first, desc=highest first
     const sorted = [];
     for (let i = 0; i < rowArr.length; i++) {
         const r = rowArr.get(i);
@@ -56,7 +56,7 @@ function _computeInsertPos(rowArr, colId, dir, newVal) {
     sorted.sort((a, b) => b.pos - a.pos);
     if (!sorted.length) return 1000;
     for (let i = 0; i < sorted.length; i++) {
-        if (dirMult * _cmpValues(sorted[i].val, newVal) < 0) {
+        if (dirMult * _cmpValues(sorted[i].val, newVal) <= 0) {
             const abovePos = i > 0 ? sorted[i - 1].pos : null;
             return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
         }
@@ -564,9 +564,9 @@ export function getTableRowsWithFormulas(ydoc, sheetId, tableId) {
         });
     }
 
-    // Evaluate formula columns
-    const cumReverse = sortColId === null || sortDir === 'desc';
-    const evaluator = new TableFormulaEvaluator(sortedRows, columns, cumReverse);
+    // Evaluate formula columns — canonical order is always newest-first, so cumulative
+    // formulas always accumulate from bottom upward.
+    const evaluator = new TableFormulaEvaluator(sortedRows, columns, true);
 
     return sortedRows.map((_, i) => {
         const row = {};

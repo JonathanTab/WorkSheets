@@ -9,9 +9,6 @@
         selectionState,
     } from "../../stores/spreadsheetStore.svelte.js";
     import { clipboardManager } from "../../stores/spreadsheet/index.js";
-    import { VectorPrintEngine } from "../../stores/spreadsheet/rendering/VectorPrintEngine.js";
-    import { AxisMetrics } from "../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
-    import { ROW_HEIGHT, COL_WIDTH } from "../../stores/spreadsheetStore.svelte.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../modals/AlertModal.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
@@ -19,60 +16,22 @@
     import ConditionalFormatPanel from "./ConditionalFormatPanel.svelte";
     import DataValidationPanel from "./DataValidationPanel.svelte";
     import FormulaDocsPanel from "./FormulaDocsPanel.svelte";
-    import PageSetupPanel from "./PageSetupPanel.svelte";
 
     let { open = false, onClose = undefined } = $props();
 
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
     let showFormulaDocs = $state(false);
-    let showPageSetup = $state(false);
     let showTableCreate = $state(false);
     let showRepeaterCreate = $state(false);
-    let isExportingPDF = $state(false);
 
     function showAlert(title, message, type = "info") {
         openModal(AlertModal, { title, message, type });
     }
 
-    function buildMetricsForPrint(sheetStore) {
-        const rowM = new AxisMetrics(sheetStore.defaultRowHeight ?? ROW_HEIGHT);
-        rowM.setCount(sheetStore.rowCount);
-        const rowMeta = sheetStore.getYMap()?.get("rowMeta");
-        const heights = new Map();
-        if (rowMeta) rowMeta.forEach((meta, key) => {
-            const h = meta.get("height");
-            if (h !== undefined) heights.set(parseInt(key, 10), h);
-        });
-        rowM.loadOverrides(heights);
-        const colM = new AxisMetrics(sheetStore.defaultColWidth ?? COL_WIDTH);
-        colM.setCount(sheetStore.colCount);
-        const colMeta = sheetStore.getYMap()?.get("colMeta");
-        const widths = new Map();
-        if (colMeta) colMeta.forEach((meta, key) => {
-            const w = meta.get("width");
-            if (w !== undefined) widths.set(parseInt(key, 10), w);
-        });
-        colM.loadOverrides(widths);
-        return { rowMetrics: rowM, colMetrics: colM };
-    }
-
-    async function exportPDF() {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore || isExportingPDF) return;
-        isExportingPDF = true;
+    function openPdfExport() {
         onClose?.();
-        try {
-            const { rowMetrics, colMetrics } = buildMetricsForPrint(sheetStore);
-            const engine = new VectorPrintEngine();
-            const printSettings = sheetStore.getPrintSettings?.() ?? {};
-            await engine.exportPDF(sheetStore, rowMetrics, colMetrics, printSettings,
-                spreadsheetSession.renderContext);
-        } catch (e) {
-            showAlert("Export Failed", e.message ?? "PDF export failed.", "error");
-        } finally {
-            isExportingPDF = false;
-        }
+        document.dispatchEvent(new CustomEvent('openPdfExport'));
     }
 
     function undo() { spreadsheetSession.undo(); onClose?.(); }
@@ -102,10 +61,7 @@
 
         <div class="menu-divider"></div>
         <div class="menu-group-label">File</div>
-        <button class="menu-item" onclick={exportPDF} disabled={isExportingPDF}>
-            {isExportingPDF ? "Exporting…" : "⬇ Export PDF"}
-        </button>
-        <button class="menu-item" onclick={() => { showPageSetup = true; onClose?.(); }}>🖨 Page setup</button>
+        <button class="menu-item" onclick={openPdfExport}>⬇ Export PDF / Print</button>
 
         <div class="menu-divider"></div>
         <div class="menu-group-label">Help</div>
@@ -136,9 +92,7 @@
     <FormulaDocsPanel onClose={() => (showFormulaDocs = false)} />
 {/if}
 
-{#if showPageSetup}
-    <PageSetupPanel onClose={() => (showPageSetup = false)} />
-{/if}
+
 
 <style>
     .menu-sheet {

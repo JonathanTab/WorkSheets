@@ -14,7 +14,6 @@
     import AlignmentPicker from "./AlignmentPicker.svelte";
     import MenuDropdown from "./MenuDropdown.svelte";
     import CellTypeConfigurator from "./CellTypeConfigurator.svelte";
-    import PageSetupPanel from "../PageSetupPanel.svelte";
 
     // Font size options
     const fontSizes = [
@@ -265,24 +264,26 @@
      */
     function applyFormatting(property, value) {
         // When editing, try to apply inline formatting to the current text selection.
-        // richFormatApplier returns true if a selection existed and formatting was applied,
+        // applyInlineFormat returns true if a selection existed and formatting was applied,
         // false if the cursor was collapsed (fall through to cell-level formatting).
-        if (editSessionState.isEditing && editSessionState.richFormatApplier) {
-            const propMap = {
-                bold: ["fontWeight", "bold"],
-                italic: ["fontStyle", "italic"],
-                underline: ["underline", null],
-                strikethrough: ["strikethrough", null],
-                color: ["color", value],
-                fontSize: ["fontSize", value],
-                fontFamily: ["fontFamily", value],
+        if (editSessionState.isEditing && editSessionState.applyInlineFormat) {
+            // Map toolbar property names to TextFormat property names
+            const tfrPropMap = {
+                bold:          'bold',
+                italic:        'italic',
+                underline:     'underline',
+                strikethrough: 'strikethrough',
+                color:         'foregroundColor',
+                fontSize:      'fontSize',
+                fontFamily:    'fontFamily',
             };
-            const mapped = propMap[property];
-            if (mapped) {
-                const applied = editSessionState.richFormatApplier(
-                    mapped[0],
-                    mapped[1] ?? value,
-                );
+            const tfrProp = tfrPropMap[property];
+            if (tfrProp) {
+                // Toggle props (bold/italic/underline/strikethrough) pass undefined
+                // so applyInlineFormat uses toggleFormatInRange
+                const toggleProps = new Set(['bold', 'italic', 'underline', 'strikethrough']);
+                const tfrValue = toggleProps.has(property) ? undefined : value;
+                const applied = editSessionState.applyInlineFormat(tfrProp, tfrValue);
                 if (applied) return;
             }
         }
@@ -367,6 +368,40 @@
                 }
             }
         });
+    }
+
+    // ── Link button state ────────────────────────────────────────────────────
+    let linkInputVisible = $state(false);
+    let linkInputValue   = $state('');
+    let linkInputEl      = $state(null);
+
+    function openLinkInput() {
+        linkInputValue   = '';
+        linkInputVisible = true;
+        setTimeout(() => linkInputEl?.focus(), 0);
+    }
+
+    function applyLink() {
+        const url = linkInputValue.trim();
+        if (url && editSessionState.applyInlineFormat) {
+            // Prepend https:// if no protocol given
+            const uri = /^https?:\/\//i.test(url) ? url : 'https://' + url;
+            editSessionState.applyInlineFormat('link', { uri });
+        }
+        linkInputVisible = false;
+        linkInputValue   = '';
+    }
+
+    function removeLink() {
+        if (editSessionState.applyInlineFormat) {
+            editSessionState.applyInlineFormat('link', null);
+        }
+        linkInputVisible = false;
+    }
+
+    function handleLinkKeydown(e) {
+        if (e.key === 'Enter') { e.preventDefault(); applyLink(); }
+        if (e.key === 'Escape') { e.preventDefault(); linkInputVisible = false; }
     }
 
     // Toggle handlers
@@ -507,20 +542,6 @@
         applyFormatting("verticalAlign", align);
     }
 
-    // Page setup / Print handler
-    let showPageSetupPanel = $state(false);
-
-    function handlePrint() {
-        showPageSetupPanel = true;
-    }
-
-    // Show page break overlay while Page Setup panel is open
-    $effect(() => {
-        const settings = spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {};
-        document.dispatchEvent(new CustomEvent('togglePageBreaks', {
-            detail: { show: showPageSetupPanel, settings }
-        }));
-    });
 
 
     // Clipboard handlers
@@ -611,8 +632,7 @@
         </button>
         <button
             class="toolbar-btn"
-            class:active={showPageSetupPanel}
-            onclick={handlePrint}
+            onclick={() => document.dispatchEvent(new CustomEvent('openPdfExport'))}
             title="Page Setup & Export PDF (Ctrl+P)"
         >
             {@html printer}
@@ -769,7 +789,34 @@
         >
             <u>U</u>
         </button>
+        {#if editSessionState.isEditing && editSessionState.applyInlineFormat}
+            <button
+                class="toolbar-btn"
+                onclick={openLinkInput}
+                title="Insert link"
+            >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <path d="M6.5 9.5a3.5 3.5 0 0 0 5 0l2-2a3.5 3.5 0 0 0-5-5l-1 1"/>
+                    <path d="M9.5 6.5a3.5 3.5 0 0 0-5 0l-2 2a3.5 3.5 0 0 0 5 5l1-1"/>
+                </svg>
+            </button>
+        {/if}
     </div>
+
+    {#if linkInputVisible}
+        <div class="link-input-row">
+            <input
+                bind:this={linkInputEl}
+                bind:value={linkInputValue}
+                class="link-input"
+                type="text"
+                placeholder="https://example.com"
+                onkeydown={handleLinkKeydown}
+            />
+            <button class="link-apply-btn" onclick={applyLink}>Apply</button>
+            <button class="link-remove-btn" onclick={removeLink} title="Remove link">✕</button>
+        </div>
+    {/if}
 
     <div class="divider"></div>
 
@@ -822,11 +869,6 @@
     <div class="spacer"></div>
 </div>
 
-{#if showPageSetupPanel}
-    <PageSetupPanel
-        onclose={() => (showPageSetupPanel = false)}
-    />
-{/if}
 
 <style>
     .formatting-toolbar {
@@ -1001,4 +1043,59 @@
             font-size: 0.8rem;
         }
     }
+
+    .link-input-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-top: 1px solid var(--toolbar-border, #e2e8f0);
+        background: var(--toolbar-bg, #f8fafc);
+        flex-shrink: 0;
+    }
+
+    .link-input {
+        flex: 1;
+        height: 26px;
+        border: 1px solid var(--input-border, #cbd5e1);
+        border-radius: 4px;
+        padding: 0 6px;
+        font-size: 12px;
+        min-width: 0;
+        background: var(--input-bg, #fff);
+        color: var(--text-color, #1e293b);
+        outline: none;
+    }
+
+    .link-input:focus {
+        border-color: var(--editor-outline, #3b82f6);
+    }
+
+    .link-apply-btn {
+        height: 26px;
+        padding: 0 10px;
+        border: none;
+        border-radius: 4px;
+        background: var(--editor-outline, #3b82f6);
+        color: #fff;
+        font-size: 12px;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+
+    .link-apply-btn:hover { opacity: 0.85; }
+
+    .link-remove-btn {
+        height: 26px;
+        padding: 0 6px;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-muted, #94a3b8);
+        font-size: 13px;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+
+    .link-remove-btn:hover { color: var(--text-color, #1e293b); }
 </style>

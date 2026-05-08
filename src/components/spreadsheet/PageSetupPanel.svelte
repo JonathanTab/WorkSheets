@@ -212,27 +212,11 @@
     function buildMetrics(sheetStore) {
         const rowM = new AxisMetrics(sheetStore.defaultRowHeight ?? ROW_HEIGHT);
         rowM.setCount(sheetStore.rowCount);
-        const rowMeta = sheetStore.getYMap()?.get('rowMeta');
-        const heights = new Map();
-        if (rowMeta) {
-            rowMeta.forEach((meta, key) => {
-                const h = meta.get('height');
-                if (h !== undefined) heights.set(parseInt(key, 10), h);
-            });
-        }
-        rowM.loadOverrides(heights);
+        rowM.loadOverrides(sheetStore.getRowHeightsMap());
 
         const colM = new AxisMetrics(sheetStore.defaultColWidth ?? COL_WIDTH);
         colM.setCount(sheetStore.colCount);
-        const colMeta = sheetStore.getYMap()?.get('colMeta');
-        const widths = new Map();
-        if (colMeta) {
-            colMeta.forEach((meta, key) => {
-                const w = meta.get('width');
-                if (w !== undefined) widths.set(parseInt(key, 10), w);
-            });
-        }
-        colM.loadOverrides(widths);
+        colM.loadOverrides(sheetStore.getColWidthsMap());
 
         return { rowMetrics: rowM, colMetrics: colM };
     }

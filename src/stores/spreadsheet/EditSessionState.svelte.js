@@ -1,5 +1,4 @@
 import { formulaEditState } from './FormulaEditState.svelte.js';
-import { isRichText, richTextToPlain } from './richText.js';
 
 /**
  * EditSessionState - Canonical editing lifecycle for spreadsheet cells.
@@ -33,39 +32,37 @@ export class EditSessionState {
     pickerMode = $state(null);
 
     /**
-     * When editing a rich-text cell, holds the initial HTML string for the contenteditable.
-     * null when editing plain text (contenteditable is initialized from draft).
-     * @type {string|null}
+     * The text format runs loaded from the cell when editing began.
+     * null when the cell has no inline formatting.
+     * @type {Array|null}
      */
-    richTextValue = $state(null);
+    initialTfr = $state(null);
 
     /**
-     * Live HTML content of the contenteditable editor, kept in sync on every input
-     * and after every formatting operation. Used by commit() so that clicking away
-     * (which triggers commitCurrentEdit before the blur fires) still commits the
-     * correct rich HTML rather than the plain-text draft.
+     * Live plain text from the contenteditable, kept in sync on every input.
+     * Used by commit() so clickaway-triggered commits get the latest text.
      * @type {string|null}
      */
-    liveRichHtml = $state(null);
+    livePlainText = $state(null);
 
     /**
-     * The original value when editing began (HTML if rich text, plain text otherwise).
-     * Used to determine whether to return HTML or plain text on commit.
-     * @type {string|null}
+     * Live tfr from the contenteditable, kept in sync after every format
+     * operation and on commit. null when there is no inline formatting.
+     * @type {Array|null}
      */
-    originalValue = $state(null);
+    liveTfr = $state(null);
 
     /**
-     * Callback set by the rich text editor component so the toolbar can
-     * apply inline formatting to the current selection.
-     * Signature: (prop: string, value: any) => void
+     * Callback set by GridOverlays so the toolbar can apply inline formatting
+     * to the current text selection.
+     * Signature: (prop: string, value: any) => boolean
+     * Returns true if formatting was applied to a selection.
      * @type {Function|null}
      */
-    richFormatApplier = null;
+    applyInlineFormat = null;
 
     /**
      * The sheet ID where this edit was initiated.
-     * Used to track cross-sheet formula editing so we can return to the origin sheet on commit/cancel.
      * @type {string | null}
      */
     editingSheetId = $state(null);
@@ -104,13 +101,9 @@ export class EditSessionState {
      * @param {'grid' | 'formulaBar'} [surface]
      */
     requestFocus(surface = this.surface) {
-        const handle = this.#focusHandles.get(surface);
-        if (!handle) return;
-
-        // Next tick ensures DOM is mounted before focusing.
         setTimeout(() => {
-            const active = this.#focusHandles.get(surface);
-            active?.();
+            const handle = this.#focusHandles.get(surface);
+            handle?.();
         }, 0);
     }
 
@@ -122,9 +115,7 @@ export class EditSessionState {
     switchSurface(surface, opts = {}) {
         const { focus = true } = opts;
         this.surface = surface;
-        if (focus) {
-            this.requestFocus(surface);
-        }
+        if (focus) this.requestFocus(surface);
     }
 
     /**
@@ -141,33 +132,25 @@ export class EditSessionState {
      * Begin editing a cell.
      * @param {number} row
      * @param {number} col
-     * @param {any} initialValue
+     * @param {any} initialValue  plain text (or formula string)
      * @param {'grid' | 'formulaBar'} [surface]
      * @param {Object} [options]
+     * @param {Array|null} [options.initialTfr]  text format runs for the cell
      */
     beginEdit(row, col, initialValue = '', surface = 'grid', options = {}) {
-        let html = null;
-        let text = '';
-        if (isRichText(initialValue)) {
-            html = initialValue;
-            text = richTextToPlain(initialValue);
-        } else {
-            text = toText(initialValue);
-        }
+        const text = _toText(initialValue);
 
-        this.phase = 'editing';
-        this.cell = { row, col };
-        // For rich text: store HTML for eventual commit, but draft stays as plain for display
-        // For plain text: draft is the actual value that will be committed
-        this.draft = text;
-        this.richTextValue = html;
-        // Store the original value so we can detect if it was modified
-        this.originalValue = isRichText(html) ? html : text;
-        this.cursorStart = text.length;
-        this.cursorEnd = text.length;
-        this.surface = surface;
+        this.phase          = 'editing';
+        this.cell           = { row, col };
+        this.draft          = text;
+        this.initialTfr     = options.initialTfr ?? null;
+        this.livePlainText  = null;
+        this.liveTfr        = null;
+        this.cursorStart    = text.length;
+        this.cursorEnd      = text.length;
+        this.surface        = surface;
         this.sessionId++;
-        this.pickerMode = options.pickerMode || null;
+        this.pickerMode     = options.pickerMode || null;
         this.editingSheetId = options.sheetId ?? null;
 
         formulaEditState.startEditing(row, col, text);
@@ -185,14 +168,14 @@ export class EditSessionState {
     updateDraft(value, cursorStart = null, cursorEnd = null) {
         if (!this.isEditing) return;
 
-        const text = toText(value);
+        const text = _toText(value);
         this.draft = text;
 
         const nextStart = cursorStart ?? text.length;
-        const nextEnd = cursorEnd ?? nextStart;
+        const nextEnd   = cursorEnd   ?? nextStart;
 
-        this.cursorStart = clamp(nextStart, 0, text.length);
-        this.cursorEnd = clamp(nextEnd, 0, text.length);
+        this.cursorStart = _clamp(nextStart, 0, text.length);
+        this.cursorEnd   = _clamp(nextEnd,   0, text.length);
 
         formulaEditState.updateValue(text, this.cursorStart);
     }
@@ -205,14 +188,13 @@ export class EditSessionState {
     setCursor(start, end = start) {
         if (!this.isEditing) return;
         const textLength = this.draft.length;
-        this.cursorStart = clamp(start, 0, textLength);
-        this.cursorEnd = clamp(end, 0, textLength);
+        this.cursorStart = _clamp(start, 0, textLength);
+        this.cursorEnd   = _clamp(end,   0, textLength);
         formulaEditState.cursorPosition = this.cursorStart;
     }
 
     /**
-     * Insert or replace a formula reference at current cursor position.
-     * If cursor is within an existing reference token, replace that token.
+     * Insert or replace a formula reference at the current cursor position.
      * @param {string} ref
      */
     insertReference(ref) {
@@ -220,25 +202,23 @@ export class EditSessionState {
 
         const value = this.draft;
         const start = Math.min(this.cursorStart, this.cursorEnd);
-        const end = Math.max(this.cursorStart, this.cursorEnd);
+        const end   = Math.max(this.cursorStart, this.cursorEnd);
 
         let replaceStart = start;
-        let replaceEnd = end;
+        let replaceEnd   = end;
 
-        // If there is no active selection, replace the token under cursor.
         if (start === end) {
-            const refPositions = findReferencePositions(value);
+            const refPositions = _findReferencePositions(value);
             for (const pos of refPositions) {
                 if (start >= pos.start && start <= pos.end) {
                     replaceStart = pos.start;
-                    replaceEnd = pos.end;
+                    replaceEnd   = pos.end;
                     break;
                 }
             }
         }
 
-        const newValue =
-            value.substring(0, replaceStart) + ref + value.substring(replaceEnd);
+        const newValue  = value.substring(0, replaceStart) + ref + value.substring(replaceEnd);
         const newCursor = replaceStart + ref.length;
 
         this.updateDraft(newValue, newCursor, newCursor);
@@ -246,18 +226,40 @@ export class EditSessionState {
     }
 
     /**
+     * Append a formula reference after the current cursor position.
+     * @param {string} ref
+     */
+    appendReference(ref) {
+        if (!this.isEditing || !this.isFormulaMode) return;
+
+        const value  = this.draft;
+        const pos    = Math.max(this.cursorStart, this.cursorEnd);
+        const before = value.substring(0, pos);
+        const after  = value.substring(pos);
+
+        const lastChar  = before.trimEnd().slice(-1);
+        const needsComma = lastChar && !',;(+-*/='.includes(lastChar);
+        const prefix    = needsComma ? ',' : '';
+
+        const newValue  = before + prefix + ref + after;
+        const newCursor = pos + prefix.length + ref.length;
+
+        this.updateDraft(newValue, newCursor, newCursor);
+        this.requestFocus(this.surface);
+    }
+
+    /**
      * Commit current edit and return payload to persist.
-     * For rich text sessions, uses liveRichHtml (kept in sync by the contenteditable)
-     * so that commitCurrentEdit() always saves HTML, not just the plain-text draft.
-     * @returns {{ row: number, col: number, value: string } | null}
+     * @returns {{ row: number, col: number, value: string, tfr: Array|null } | null}
      */
     commit() {
         if (!this.isEditing || !this.cell) return null;
 
         const payload = {
-            row: this.cell.row,
-            col: this.cell.col,
-            value: this.liveRichHtml ?? this.draft
+            row:   this.cell.row,
+            col:   this.cell.col,
+            value: this.livePlainText ?? this.draft,
+            tfr:   this.liveTfr,
         };
 
         this.#stopEditing();
@@ -272,69 +274,34 @@ export class EditSessionState {
         this.#stopEditing();
     }
 
-    /**
-     * Append a formula reference after the current cursor position (for multi-select).
-     * Inserts a comma separator unless the preceding character is already an operator/open-paren.
-     * @param {string} ref
-     */
-    appendReference(ref) {
-        if (!this.isEditing || !this.isFormulaMode) return;
-
-        const value = this.draft;
-        const pos = Math.max(this.cursorStart, this.cursorEnd);
-
-        const before = value.substring(0, pos);
-        const after = value.substring(pos);
-
-        // Only add comma if the char before cursor isn't already a separator/operator
-        const lastChar = before.trimEnd().slice(-1);
-        const needsComma = lastChar && !',;(+-*/='.includes(lastChar);
-        const prefix = needsComma ? ',' : '';
-
-        const newValue = before + prefix + ref + after;
-        const newCursor = pos + prefix.length + ref.length;
-
-        this.updateDraft(newValue, newCursor, newCursor);
-        this.requestFocus(this.surface);
-    }
-
     #stopEditing() {
-        this.phase = 'idle';
-        this.cell = null;
-        this.draft = '';
-        this.richTextValue = null;
-        this.liveRichHtml = null;
-        this.originalValue = null;
-        this.richFormatApplier = null;
-        this.cursorStart = 0;
-        this.cursorEnd = 0;
-        this.surface = 'grid';
-        this.pickerMode = null;
+        this.phase          = 'idle';
+        this.cell           = null;
+        this.draft          = '';
+        this.initialTfr     = null;
+        this.livePlainText  = null;
+        this.liveTfr        = null;
+        this.applyInlineFormat = null;
+        this.cursorStart    = 0;
+        this.cursorEnd      = 0;
+        this.surface        = 'grid';
+        this.pickerMode     = null;
         this.editingSheetId = null;
         this.sessionId++;
         formulaEditState.stopEditing();
     }
 }
 
-/**
- * Find all reference token ranges in a formula.
- * Cross-sheet refs (Sheet1!A1, 'My Sheet'!A1:B5) are treated as single tokens
- * so that clicking a cell while in formula mode replaces the whole cross-sheet
- * ref rather than just the cell-address part (which would leave a dangling "Sheet1!").
- * @param {string} formula
- * @returns {Array<{start: number, end: number}>}
- */
-function findReferencePositions(formula) {
+// ─── Reference parsing (formula mode) ────────────────────────────────────────
+
+function _findReferencePositions(formula) {
     const positions = [];
     if (!formula) return positions;
 
     const content = formula.startsWith('=') ? formula.slice(1) : formula;
-    const offset = formula.startsWith('=') ? 1 : 0;
-
+    const offset  = formula.startsWith('=') ? 1 : 0;
     let match;
 
-    // 1. Cross-sheet refs first (highest priority, treated as whole tokens).
-    //    Matches: Sheet1!A1, Sheet1!A1:B5, 'Sheet Name'!A1, 'Sheet''s Name'!A1:B5
     const crossSheetRegex = /(?:'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
     const crossSheetPositions = [];
     while ((match = crossSheetRegex.exec(content)) !== null) {
@@ -342,12 +309,10 @@ function findReferencePositions(formula) {
         positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
     }
 
-    // Helper: is a content-relative position covered by a cross-sheet token?
     function inCrossSheet(idx) {
         return crossSheetPositions.some(r => idx >= r.start && idx < r.end);
     }
 
-    // 2. Plain ranges (A1:B5) not inside a cross-sheet ref.
     const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
     const rangePositions = [];
     while ((match = rangeRegex.exec(content)) !== null) {
@@ -357,7 +322,6 @@ function findReferencePositions(formula) {
         }
     }
 
-    // 3. Individual cell refs not inside a cross-sheet token or range.
     const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
     while ((match = cellRegex.exec(content)) !== null) {
         if (!inCrossSheet(match.index) &&
@@ -369,11 +333,11 @@ function findReferencePositions(formula) {
     return positions.sort((a, b) => a.start - b.start);
 }
 
-function clamp(value, min, max) {
+function _clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-function toText(value) {
+function _toText(value) {
     if (value === null || value === undefined) return '';
     return String(value);
 }

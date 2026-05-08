@@ -441,7 +441,7 @@ function _getCachedEvalPlan(columns, nameToId) {
  *
  * @param {object[]} rows         Sorted/filtered rows (plain objects, colId → value).
  * @param {object[]} columns      Column defs: [{id, name, isNonEntry, formula, defaultFormula, ...}].
- * @param {boolean}  cumReverse   True when display is newest-first (no sort or desc sort).
+ * @param {boolean}  cumReverse   True when cumulative functions accumulate from bottom upward (always pass true).
  * @param {((name: string) => {getValue,getRowCount,resolveColId,getColumn}|null)|null} tableResolver
  * @param {((formula: string) => any)|null} sheetValueEval
  */

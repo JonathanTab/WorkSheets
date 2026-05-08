@@ -95,7 +95,6 @@ function measureTextWidth(text, cell = {}) {
 function inferCellType(value) {
     if (value == null || value === '') return null;
     if (typeof value === 'boolean') return { type: 'checkbox' };
-    if (typeof value === 'string' && /^https?:\/\//i.test(value)) return { type: 'url' };
     return null;
 }
 

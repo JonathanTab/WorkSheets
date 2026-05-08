@@ -535,10 +535,6 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
             drawTextContent(pdf, cell, cx + accentOff, cy, cw - accentOff, ch, s);
             break;
 
-        case 'url':
-            drawTextContent(pdf, { ...cell, underline: true }, cx, cy, cw, ch, s, '#1a73e8');
-            break;
-
         case 'checkbox':
             drawCheckboxVec(pdf, cx, cy, cw, ch, !!cell.rawValue, s);
             break;

@@ -428,7 +428,7 @@
                                     value=""
                                     onchange={e => {
                                         const val = /** @type {HTMLSelectElement} */ (e.target).value;
-                                        if (val) store.setInsertSort(val, 'asc');
+                                        if (val) store.setInsertSort(val, 'desc');
                                     }}
                                 >
                                     <option value="">— none —</option>
@@ -443,8 +443,8 @@
                                     value={store.insertSortDir}
                                     onchange={e => store.setInsertSort(store.insertSortColId, /** @type {HTMLSelectElement} */ (e.target).value)}
                                 >
-                                    <option value="asc">Highest first</option>
-                                    <option value="desc">Lowest first</option>
+                                    <option value="desc">Highest first</option>
+                                    <option value="asc">Lowest first</option>
                                 </select>
                             {/if}
                         </div>

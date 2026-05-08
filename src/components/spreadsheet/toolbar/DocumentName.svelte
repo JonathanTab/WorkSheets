@@ -7,13 +7,12 @@
     import { openModal } from "../../../lib/ui/modalStore.svelte.js";
     import ConnectionStatus from "./ConnectionStatus.svelte";
     import MoveFileModal from "../../modals/MoveFileModal.svelte";
-    import ShareFileModal from "../../modals/ShareFileModal.svelte";
-    import { folder as folderIcon, share as shareIcon } from "../../../lib/icons/index.js";
+    import { folder as folderIcon } from "../../../lib/icons/index.js";
 
     let isEditing = $state(false);
     let editValue = $state("");
-    let inputRef  = $state(null);
-    let isSaving  = $state(false);
+    let inputRef = $state(null);
+    let isSaving = $state(false);
 
     let documentTitle = $derived(spreadsheetSession.docTitle || "Untitled");
 
@@ -49,7 +48,7 @@
     }
 
     function handleKeydown(e) {
-        if (e.key === "Enter")  finishEditing();
+        if (e.key === "Enter") finishEditing();
         if (e.key === "Escape") isEditing = false;
     }
 
@@ -64,14 +63,6 @@
                 await storage.drive.moveFile(docId, targetFolderId);
             },
         });
-    }
-
-    function openShareModal() {
-        const docId = spreadsheetSession.docId;
-        if (!docId) return;
-        const file = storage.drive.getFile(docId);
-        if (!file) return;
-        openModal(ShareFileModal, { file });
     }
 
     // Folder breadcrumb for current doc
@@ -100,22 +91,22 @@
             {#if folderPath}
                 <span class="folder-hint">{folderPath} /</span>
             {/if}
-            <button class="name-display" onclick={startEditing} title="Click to rename">
-                {documentTitle}
-            </button>
             <button
-                class="move-btn"
-                onclick={openMoveModal}
-                title="Move to folder"
-                aria-label="Move to folder"
+                class="name-display"
+                onclick={startEditing}
+                title="Click to rename"
             >
-                {@html folderIcon}
+                {documentTitle}
             </button>
         </div>
     {/if}
-    <button class="share-pill" onclick={openShareModal} title="Share document">
-        {@html shareIcon}
-        Share
+    <button
+        class="move-btn"
+        onclick={openMoveModal}
+        title="Move to folder"
+        aria-label="Move to folder"
+    >
+        {@html folderIcon}
     </button>
     <ConnectionStatus />
 </div>
@@ -184,7 +175,9 @@
         color: var(--color-text-secondary);
         cursor: pointer;
         padding: 0;
-        transition: background 0.1s, color 0.1s;
+        transition:
+            background 0.1s,
+            color 0.1s;
         flex-shrink: 0;
     }
 
@@ -196,42 +189,6 @@
     .move-btn:hover {
         background: var(--color-fill);
         color: var(--color-text);
-    }
-
-    .share-pill {
-        display: flex;
-        align-items: center;
-        gap: 0.3rem;
-        padding: 0.25rem 0.75rem;
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: #fff;
-        background: var(--color-primary, #3b82f6);
-        border: none;
-        border-radius: 999px;
-        cursor: pointer;
-        white-space: nowrap;
-        transition: background 0.12s, transform 0.1s;
-        line-height: 1;
-    }
-
-    .share-pill :global(svg) {
-        width: 13px;
-        height: 13px;
-        flex-shrink: 0;
-    }
-
-    .share-pill:hover {
-        background: var(--color-primary-hover, #2563eb);
-    }
-
-    .share-pill:active {
-        transform: scale(0.96);
-    }
-
-    .share-pill:focus-visible {
-        outline: 2px solid var(--color-primary);
-        outline-offset: 2px;
     }
 
     /* ── Mobile ── */
@@ -247,9 +204,6 @@
         }
         .folder-hint {
             display: none;
-        }
-        .share-pill {
-            padding: 0.3rem 0.625rem;
         }
     }
 </style>

@@ -204,6 +204,8 @@ export class CanvasRenderer {
         Object.assign(this.#theme, overrides);
     }
 
+    get theme() { return this.#theme; }
+
     destroy() {
         this.#canvas = null;
         this.#ctx = null;
@@ -552,9 +554,6 @@ export class CanvasRenderer {
             case 'rating':
                 this.#paintRatingContent(ctx, cell);
                 break;
-            case 'url':
-                this.#paintUrlContent(ctx, cell);
-                break;
             case 'dropdown':
                 this.#paintDropdownContent(ctx, cell);
                 break;
@@ -780,21 +779,26 @@ export class CanvasRenderer {
             for (const run of lineRuns) {
                 const font = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
                 if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
-                const color = run.c || defaultColor;
+                const isLink  = !!run.link;
+                const color   = isLink ? (this.#theme.linkColor ?? '#1a73e8') : (run.c || defaultColor);
                 ctx.fillStyle = color;
                 ctx.fillText(run.t, runX, lineY);
 
                 const tw = ctx.measureText(run.t).width;
-                const doUnderline = run.u !== undefined ? run.u : defaultUnderline;
-                const doStrike = run.s !== undefined ? run.s : defaultStrikethrough;
+                const doUnderline = isLink || (run.u !== undefined ? run.u : defaultUnderline);
+                const doStrike    = run.s !== undefined ? run.s : defaultStrikethrough;
 
                 if (doUnderline || doStrike) {
+                    // Use the run's effective font size so decorations sit correctly
+                    // under/through text of any size. Matches plain-text path: textY + fontSize/2 + 1.
+                    const runFontSize = run.f || defaultFontSize;
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 1;
                     if (doUnderline) {
+                        const underlineY = lineY + runFontSize / 2 + 1;
                         ctx.beginPath();
-                        ctx.moveTo(runX, lineY + defaultFontSize / 2 + 2);
-                        ctx.lineTo(runX + tw, lineY + defaultFontSize / 2 + 2);
+                        ctx.moveTo(runX, underlineY);
+                        ctx.lineTo(runX + tw, underlineY);
                         ctx.stroke();
                     }
                     if (doStrike) {
@@ -1058,44 +1062,6 @@ export class CanvasRenderer {
      */
     #paintRatingContent(ctx, cell) {
         drawRating(ctx, cell.x, cell.y, cell.width, cell.height, cell.rawValue ?? 0, cell.ratingMax ?? 5);
-    }
-
-    /**
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {import('./CellPaintData.js').CellPaintItem} cell
-     */
-    #paintUrlContent(ctx, cell) {
-        const text = cell.displayValue;
-        if (!text) return;
-
-        const font = this.#buildFont(cell);
-        if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
-        ctx.fillStyle = this.#theme.urlColor;
-        ctx.textBaseline = 'middle';
-        ctx.textAlign = 'left';
-
-        const textX = Math.round(cell.x + 4);
-        const fontSize = cell.fontSize || this.#theme.defaultFontSize;
-        const vAlign = cell.vAlign || 'middle';
-        let textY;
-        if (vAlign === 'top') {
-            textY = Math.round(cell.y + 4 + fontSize / 2);
-        } else if (vAlign === 'bottom') {
-            textY = Math.round(cell.y + cell.height - 4 - fontSize / 2);
-        } else {
-            textY = Math.round(cell.y + cell.height / 2);
-        }
-
-        ctx.fillText(text, textX, textY);
-
-        // Underline
-        const tw = ctx.measureText(text).width;
-        ctx.strokeStyle = this.#theme.urlColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(textX, textY + 7);
-        ctx.lineTo(textX + tw, textY + 7);
-        ctx.stroke();
     }
 
     /**

@@ -5,10 +5,6 @@
     } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { segmentFormula } from "../../formulas/reference-highlighter.js";
-    import {
-        isRichText,
-        richTextToPlain,
-    } from "../../stores/spreadsheet/richText.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { untrack } from "svelte";
     import FormulaValuePopup from "./FormulaValuePopup.svelte";
@@ -73,12 +69,10 @@
         selectedCell ? `${selectedCell.row},${selectedCell.col}` : null,
     );
 
-    // Display value - show formula if present, plain text for rich text cells
+    // Display value — formula bar always shows plain text (v field directly)
     let displayValue = $derived(() => {
         if (!selectedCell) return "";
         const raw = getTableAwareEditValue(selectedCell.row, selectedCell.col);
-        // Convert rich text to plain text for display in the formula bar
-        if (isRichText(raw)) return richTextToPlain(raw);
         return raw ?? "";
     });
 
@@ -91,16 +85,14 @@
     let isEditing = $derived(editSessionState.isEditing);
     let editValue = $derived(editSessionState.draft);
 
-    // Check if selected cell contains rich text (whether editing or not)
-    let selectedCellHasRichText = $derived(() => {
+    // Check if selected cell has inline formatting (tfr) — those must be edited on the grid
+    let selectedCellHasTfr = $derived(() => {
         if (!selectedCell) return false;
-        const rawVal = editStartValue();
-        return isRichText(rawVal);
+        return !!spreadsheetSession.activeSheetStore?.getCell(selectedCell.row, selectedCell.col)?.tfr?.length;
     });
 
-    // During editing, also check active edit session state
     let hasRichText = $derived(
-        editSessionState.richTextValue !== null || selectedCellHasRichText(),
+        !!editSessionState.initialTfr || selectedCellHasTfr(),
     );
 
     // Check if we're editing a formula
@@ -114,10 +106,8 @@
     function startEdit() {
         if (!selectedCell) return;
 
-        // Rich text cells must be edited in the cell editor, not the formula bar.
-        // Check both the active session state AND the raw cell value (when not yet editing).
-        const rawVal = editStartValue();
-        if (hasRichText || isRichText(rawVal)) return;
+        // Cells with inline formatting must be edited in the grid contenteditable.
+        if (hasRichText) return;
 
         // If already editing this cell (on grid), switch surface to formula bar
         if (
@@ -393,21 +383,18 @@
         </div>
         <div class="divider"></div>
         <div class="formula-input">
-            {#if selectedCellHasRichText()}
-                <!-- Show rich text notice when rich text cell is selected (regardless of editing) -->
-                <div class="edit-container rich-text-notice">
-                    <span class="notice-text">
-                        Edit rich text formatting in the cell ⬇️
-                    </span>
-                </div>
-            {:else if isEditing}
+            {#if isEditing}
                 <div class="edit-container" class:has-formula={isFormulaMode}>
                     <input
                         type="text"
                         bind:this={editInputEl}
                         value={editValue}
+                        readonly={hasRichText}
                         onmousedown={(e) => {
                             e.stopPropagation();
+                            // Rich text cells stay in the grid contenteditable — clicking the
+                            // formula bar just focuses it for reading, not for editing.
+                            if (hasRichText) return;
                             // Switch to formula bar surface BEFORE blur fires on grid cell
                             // This prevents the grid cell's blur handler from committing
                             if (editSessionState.isEditing) {
@@ -640,25 +627,6 @@
         position: relative;
     }
 
-    .edit-container.rich-text-notice {
-        display: flex;
-        align-items: center;
-        padding: 0.25rem 0.5rem;
-        background: var(--info-bg, #eff6ff);
-        border: 2px solid var(--info-border, #3b82f6);
-        border-radius: 4px;
-        height: 28px;
-        box-sizing: border-box;
-    }
-
-    .notice-text {
-        font-size: 0.875rem;
-        color: var(--info-text, #1e40af);
-        font-style: italic;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
 
     .edit-input {
         width: 100%;

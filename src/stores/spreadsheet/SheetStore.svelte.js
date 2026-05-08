@@ -13,7 +13,7 @@
  */
 import * as Y from 'yjs';
 import { YKeyValue } from 'y-utility/y-keyvalue';
-import { isRichText, stripHtmlProp, RUN_STYLE_PROP_MAP } from './richText.js';
+import { applyFormatToRange, normalizeTfr } from './textFormatRuns.js';
 import { perfMon } from './perf/PerfMonitor.js';
 import {
     CELL_KEYS,
@@ -197,6 +197,7 @@ export class SheetStore {
         return {
             v:               val?.v,
             t:               val?.t,
+            tfr:             val?.tfr,
             ct:              sty?.ct,
             protected:       sty?.protected,
             fontFamily:      sty?.fontFamily,
@@ -524,12 +525,36 @@ export class SheetStore {
         const key = `${row},${col}`;
         this.#ydoc.transact(() => {
             if (value === '' || value === null || value === undefined) {
-                // Delete from cellValues; cellStyles entry (formatting) is preserved.
                 this.#cellValuesKV?.delete(key);
             } else {
                 const current = this.#cellValuesKV?.get(key) ?? {};
-                this.#cellValuesKV?.set(key, { ...current, v: value });
+                // Clear any stale tfr when setting a plain value
+                const upd = { ...current, v: value };
+                delete upd.tfr;
+                this.#cellValuesKV?.set(key, upd);
             }
+        });
+    }
+
+    /**
+     * Set cell plain text value + optional TextFormatRuns in one transaction.
+     * @param {number} row
+     * @param {number} col
+     * @param {string} value   plain text
+     * @param {Array|null} tfr text format runs (null = no inline formatting)
+     */
+    setCellValueWithRuns(row, col, value, tfr) {
+        const key = `${row},${col}`;
+        this.#ydoc.transact(() => {
+            if (value === '' || value === null || value === undefined) {
+                this.#cellValuesKV?.delete(key);
+                return;
+            }
+            const current = this.#cellValuesKV?.get(key) ?? {};
+            const upd = { ...current, v: value };
+            if (tfr && tfr.length > 0) upd.tfr = tfr;
+            else delete upd.tfr;
+            this.#cellValuesKV?.set(key, upd);
         });
     }
 
@@ -568,15 +593,29 @@ export class SheetStore {
                 else styUpdates[k] = v;
             }
 
-            // Strip inline rich-text overrides when whole-cell formatting is applied.
-            const hasMappedProp = Object.keys(styUpdates).some(p => RUN_STYLE_PROP_MAP[p]);
-            if (hasMappedProp) {
-                const currentV = this.#cellValuesKV?.get(key)?.v;
-                if (isRichText(currentV)) {
-                    valUpdates.v = Object.keys(styUpdates).reduce(
-                        (html, p) => RUN_STYLE_PROP_MAP[p] ? stripHtmlProp(html, p) : html,
-                        currentV
-                    );
+            // When a whole-cell format property is set, strip any matching run-level
+            // overrides from tfr so the cell-level value wins uniformly.
+            const TFR_PROP_MAP = {
+                bold: 'bold', italic: 'italic', underline: 'underline',
+                strikethrough: 'strikethrough', color: 'foregroundColor',
+                fontSize: 'fontSize', fontFamily: 'fontFamily',
+            };
+            const strippedProps = Object.keys(styUpdates)
+                .map(p => TFR_PROP_MAP[p])
+                .filter(Boolean);
+            if (strippedProps.length > 0) {
+                const cellVals = this.#cellValuesKV?.get(key);
+                const existingTfr = cellVals?.tfr;
+                if (existingTfr?.length) {
+                    const plainText = cellVals?.v ?? '';
+                    let newTfr = existingTfr;
+                    for (const prop of strippedProps) {
+                        newTfr = applyFormatToRange(
+                            newTfr, 0, plainText.length,
+                            { [prop]: null }, plainText.length
+                        );
+                    }
+                    valUpdates.tfr = normalizeTfr(newTfr, plainText.length);
                 }
             }
 
@@ -584,7 +623,7 @@ export class SheetStore {
                 const cur = this.#cellValuesKV?.get(key) ?? {};
                 const upd = { ...cur };
                 for (const [k, v] of Object.entries(valUpdates)) {
-                    if (v === undefined) delete upd[k]; else upd[k] = v;
+                    if (v === undefined || v === null) delete upd[k]; else upd[k] = v;
                 }
                 if (Object.keys(upd).length > 0) this.#cellValuesKV?.set(key, upd);
                 else this.#cellValuesKV?.delete(key);

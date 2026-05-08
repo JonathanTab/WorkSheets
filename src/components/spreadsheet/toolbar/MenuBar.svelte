@@ -15,16 +15,9 @@
         filter,
         info,
         imageIcon,
-        link,
         functionIcon,
     } from "../../../lib/icons/index.js";
     import { clipboardManager } from "../../../stores/spreadsheet/index.js";
-    import { VectorPrintEngine } from "../../../stores/spreadsheet/rendering/VectorPrintEngine.js";
-    import { AxisMetrics } from "../../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
-    import {
-        ROW_HEIGHT,
-        COL_WIDTH,
-    } from "../../../stores/spreadsheetStore.svelte.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
     import { openModal } from "../../../lib/ui/modalStore.svelte.js";
@@ -32,7 +25,6 @@
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
     import DataValidationPanel from "../DataValidationPanel.svelte";
     import FormulaDocsPanel from "../FormulaDocsPanel.svelte";
-    import PageSetupPanel from "../PageSetupPanel.svelte";
     import MakeCopyModal from "../../modals/MakeCopyModal.svelte";
     import MoveFileModal from "../../modals/MoveFileModal.svelte";
     import PromptModal from "../../modals/PromptModal.svelte";
@@ -47,11 +39,13 @@
 
     let { showTablesPanel = false, onShowTablesPanel = undefined } = $props();
 
-    let isExportingPDF = $state(false);
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
     let showFormulaDocs = $state(false);
-    let showPageSetup = $state(false);
+
+    function openPdfExport() {
+        document.dispatchEvent(new CustomEvent('openPdfExport'));
+    }
 
     // Helper to show alert modal
     function showAlert(title, message, type = "info") {
@@ -69,73 +63,6 @@
         }
     }
 
-    /** Build AxisMetrics from sheetStore metadata for PDF export. */
-    function buildMetricsForPrint(sheetStore) {
-        const rowM = new AxisMetrics(sheetStore.defaultRowHeight ?? ROW_HEIGHT);
-        rowM.setCount(sheetStore.rowCount);
-        const rowMeta = sheetStore.getYMap()?.get("rowMeta");
-        const heights = new Map();
-        if (rowMeta) {
-            rowMeta.forEach((meta, key) => {
-                const h = meta.get("height");
-                if (h !== undefined) heights.set(parseInt(key, 10), h);
-            });
-        }
-        rowM.loadOverrides(heights);
-
-        const colM = new AxisMetrics(sheetStore.defaultColWidth ?? COL_WIDTH);
-        colM.setCount(sheetStore.colCount);
-        const colMeta = sheetStore.getYMap()?.get("colMeta");
-        const widths = new Map();
-        if (colMeta) {
-            colMeta.forEach((meta, key) => {
-                const w = meta.get("width");
-                if (w !== undefined) widths.set(parseInt(key, 10), w);
-            });
-        }
-        colM.loadOverrides(widths);
-
-        return { rowMetrics: rowM, colMetrics: colM };
-    }
-
-    async function exportPDF() {
-        if (isExportingPDF) return;
-        const renderContext = spreadsheetSession.renderContext;
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!renderContext || !sheetStore) {
-            showAlert("Export PDF", "No active sheet to export.", "warning");
-            return;
-        }
-        isExportingPDF = true;
-        try {
-            const { rowMetrics, colMetrics } = buildMetricsForPrint(sheetStore);
-            const printSettings = sheetStore.getPrintSettings?.() ?? {};
-            const engine = new VectorPrintEngine();
-            const docName =
-                spreadsheetSession.docTitle || sheetStore.name || "sheet";
-            await engine.downloadPDF(
-                {
-                    printSettings,
-                    renderContext,
-                    sheetStore,
-                    session: spreadsheetSession,
-                    rowMetrics,
-                    colMetrics,
-                    docName,
-                },
-                `${docName}.pdf`,
-            );
-        } catch (err) {
-            console.error("PDF export failed:", err);
-            showAlert(
-                "Export PDF",
-                "PDF export failed. See console for details.",
-                "warning",
-            );
-        } finally {
-            isExportingPDF = false;
-        }
-    }
 
     // Dialog state for table/repeater creation
     let showCreateTableDialog = $state(false);
@@ -290,7 +217,7 @@
                     label: "PDF Document (.pdf)",
                     icon: download,
                     isSvgIcon: true,
-                    action: exportPDF,
+                    action: openPdfExport,
                 },
                 {
                     label: "Web Page (.html)",
@@ -326,14 +253,14 @@
         },
         { divider: true },
         {
-            label: "Page setup",
-            action: () => (showPageSetup = true),
+            label: "Page setup & export PDF…",
+            action: openPdfExport,
         },
         {
-            label: isExportingPDF ? "Printing…" : "Print",
+            label: "Print",
             icon: printer,
             isSvgIcon: true,
-            action: exportPDF,
+            action: openPdfExport,
             shortcut: "Ctrl+P",
         },
     ];
@@ -413,63 +340,57 @@
     let showGridlines = $state(true);
     let showFormulaBar = $state(true);
     let showRowColHeaders = $state(true);
+    let showPageBreakMarkers = $state(false);
 
-    const viewItems = [
+    function togglePageBreakMarkers() {
+        showPageBreakMarkers = !showPageBreakMarkers;
+        const settings = showPageBreakMarkers
+            ? (spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {})
+            : null;
+        document.dispatchEvent(new CustomEvent('togglePageBreaks', {
+            detail: { show: showPageBreakMarkers, settings },
+        }));
+    }
+
+    let viewItems = $derived([
         {
             label: showGridlines ? "Hide Gridlines" : "Show Gridlines",
             action: () => {
                 showGridlines = !showGridlines;
-                // Toggle gridlines on renderContext
                 const sheetStore = spreadsheetSession.activeSheetStore;
-                if (sheetStore) {
-                    sheetStore.setGridlinesVisible?.(showGridlines);
-                }
+                if (sheetStore) sheetStore.setGridlinesVisible?.(showGridlines);
             },
         },
         {
             label: showFormulaBar ? "Hide Formula Bar" : "Show Formula Bar",
-            action: () => {
-                showFormulaBar = !showFormulaBar;
-            },
+            action: () => { showFormulaBar = !showFormulaBar; },
         },
         {
-            label: showRowColHeaders
-                ? "Hide Row & Column Headers"
-                : "Show Row & Column Headers",
-            action: () => {
-                showRowColHeaders = !showRowColHeaders;
-            },
+            label: showRowColHeaders ? "Hide Row & Column Headers" : "Show Row & Column Headers",
+            action: () => { showRowColHeaders = !showRowColHeaders; },
+        },
+        {
+            label: showPageBreakMarkers ? "Hide Page Break Markers" : "Show Page Break Markers",
+            action: togglePageBreakMarkers,
         },
         { divider: true },
         {
             label: "Freeze",
             submenu: [
-                {
-                    label: "No Frozen Rows",
-                    action: () => setFreezeRows(0),
-                },
+                { label: "No Frozen Rows", action: () => setFreezeRows(0) },
                 {
                     label: "Freeze to Current Row",
-                    action: () => {
-                        const anchor = selectionState.anchor;
-                        if (anchor) setFreezeRows(anchor.row + 1);
-                    },
+                    action: () => { const anchor = selectionState.anchor; if (anchor) setFreezeRows(anchor.row + 1); },
                 },
                 { divider: true },
-                {
-                    label: "No Frozen Columns",
-                    action: () => setFreezeCols(0),
-                },
+                { label: "No Frozen Columns", action: () => setFreezeCols(0) },
                 {
                     label: "Freeze to Current Column",
-                    action: () => {
-                        const anchor = selectionState.anchor;
-                        if (anchor) setFreezeCols(anchor.col + 1);
-                    },
+                    action: () => { const anchor = selectionState.anchor; if (anchor) setFreezeCols(anchor.col + 1); },
                 },
             ],
         },
-    ];
+    ]);
 
     function setFreezeRows(count) {
         const sheetStore = spreadsheetSession.activeSheetStore;
@@ -523,12 +444,6 @@
             icon: imageIcon,
             isSvgIcon: true,
             action: () => insertImageInCell(),
-        },
-        {
-            label: "Link",
-            icon: link,
-            isSvgIcon: true,
-            action: () => insertLink(),
         },
         { divider: true },
         {
@@ -866,18 +781,6 @@
         showAlert("Insert Image", "Click the cell and use the image picker");
     }
 
-    function insertLink() {
-        const anchor = selectionState.anchor;
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!anchor || !sheetStore) return;
-        const url = prompt("Enter URL:");
-        if (url) {
-            sheetStore.setCellTypeConfig(anchor.row, anchor.col, {
-                type: "url",
-            });
-            sheetStore.setCellValue(anchor.row, anchor.col, url);
-        }
-    }
 
     function exportCSV() {
         const sheetStore = spreadsheetSession.activeSheetStore;
@@ -1043,9 +946,6 @@ Ctrl+/ - Show keyboard shortcuts`;
     <FormulaDocsPanel onclose={() => (showFormulaDocs = false)} />
 {/if}
 
-{#if showPageSetup}
-    <PageSetupPanel onclose={() => (showPageSetup = false)} />
-{/if}
 
 <style>
     .menu-bar {

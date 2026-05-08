@@ -33,15 +33,16 @@ export const DEFAULT_ROW_COUNT = 1000;
 export const DEFAULT_COL_COUNT = 26;
 
 // Which cell properties live in cellValues (YKeyValue) vs cellStyles (YKeyValue).
-// cellValues = computational data { v, t }
+// cellValues = computational data { v, t, tfr }
 // cellStyles = display/config data (everything else)
-export const CELL_VALUE_KEYS = new Set(['v', 't']);
+export const CELL_VALUE_KEYS = new Set(['v', 't', 'tfr']);
 
 // Cell property keys (short names for storage efficiency)
 // Note: Formulas are stored in VALUE ('v') field with '=' prefix
 export const CELL_KEYS = {
     VALUE: 'v',
     TYPE: 't',
+    TEXT_FORMAT_RUNS: 'tfr',
     PROTECTED: 'protected',
     // Formatting
     FONT_FAMILY: 'fontFamily',

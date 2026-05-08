@@ -194,28 +194,18 @@ export class TableStore {
     insertSortColId = $state(null);
     insertSortDir = $state("asc");
 
-    // ── Cumulative direction ───────────────────────────────────────────────────
-    // When true, cumulative functions accumulate from the bottom of the display
-    // upward (suffix sum: oldest rows at bottom contribute first). This matches
-    // the default newest-first display and any desc sort, so that CUMSUM(amount)
-    // at a given row always means "total of this row and all chronologically
-    // earlier (older) rows below it."
-    cumReverse = $derived(this.sortColId === null || this.sortDir === "desc");
-
     // ── Sorted+filtered view (plain $state — updated imperatively) ───────────
     // Using $state instead of $derived.by so that changes always propagate to
     // components regardless of Svelte's cross-boundary reactive graph.
     sortedFilteredRows = $state([]);
 
-    // Set by checkOutOfOrder() after a cell edit — cleared by reorderRow/resetOrder.
+    // Set by checkOutOfOrder() after a cell edit — cleared by reorderRow.
     outOfOrderRow = $state(null);
 
     #rebuildView(rebuildAllRowsEval = true) {
-        // Use _pos (desc) as inherent order when any row carries it and no view sort overrides.
-        const hasPos = this.rows.some(r => r._pos != null);
-        let result = (hasPos && !this.sortColId)
-            ? [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0))
-            : [...this.rows].reverse();
+        // Canonical order is always _pos desc (highest = newest = top).
+        // Display sort is applied on top of this base as a temporary view layer.
+        let result = [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0));
 
         // 1. Apply transparent view-definition filters (views only, from persistedFilters)
         for (const [colId, f] of Object.entries(this.viewDefinitionFilters)) {
@@ -243,9 +233,8 @@ export class TableStore {
         }
 
         this.sortedFilteredRows = result;
-        const cumReverse = this.sortColId === null || this.sortDir === 'desc';
-        // Evaluate formulas against the full schema (including hidden columns on views)
-        // so row formulas can reference source columns not currently visible.
+        // Cumulative formulas always accumulate from bottom upward: oldest rows at bottom
+        // contribute first. Canonical order is always newest-first, so this never changes.
         const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
 
         // Snapshot Svelte proxy rows to plain objects before handing to the formula
@@ -253,12 +242,12 @@ export class TableStore {
         // #buildComputedCache fires the Svelte proxy get handler, adding ~60ms of
         // overhead per evaluation on tables with formula columns.
         const plainRows = result.map(r => ({ ...r }));
-        this.#eval = new TableFormulaEvaluator(plainRows, evalColumns, cumReverse, this.#tableResolver, this.#sheetFormulaEval);
+        this.#eval = new TableFormulaEvaluator(plainRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
 
         // Views delegate getFullValue/getFullRowCount to the source store — no #allRowsEval needed.
         if (!this.#sourceStore && (rebuildAllRowsEval || !this.#allRowsEval)) {
             const plainAllRows = this.rows.map(r => ({ ...r }));
-            this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, cumReverse, this.#tableResolver, this.#sheetFormulaEval);
+            this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
         }
     }
 
@@ -660,9 +649,9 @@ export class TableStore {
 
     /**
      * Insert a row of data.
-     * Appends to end of raw array (O(1)) - newest rows appear at top of display.
-     * If insertSort is configured, finds the position closest to display-top that
-     * maintains sort order (i.e., the highest raw index where value fits).
+     * Assigns a _pos higher than all existing rows so the new entry appears at top,
+     * unless insertSort is configured — in that case _pos is computed to place the
+     * row at the top of its sort-value group.
      * @param {Object} rowData  colId → value
      */
     insertRow(rowData) {
@@ -694,7 +683,7 @@ export class TableStore {
                 yRow.set(k, v);
             }
 
-            if (!this.hasManualOrder) this.#initPos(rowArr);
+            this.#initPos(rowArr);
             const newPos = this.insertSortColId
                 ? this.#computeInsertPos(rowArr, rowData[this.insertSortColId])
                 : Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0)) + 1000;
@@ -752,19 +741,17 @@ export class TableStore {
     }
 
     /**
-     * Assign _pos to every row in the raw Y.Array based on current display order.
-     * Top display row (sortedFilteredRows[0]) gets the highest _pos.
+     * Assign _pos to any row in the raw Y.Array that is missing it.
+     * rawIndex 0 = oldest inserted = lowest _pos (display bottom).
+     * rawIndex n-1 = newest inserted = highest _pos (display top).
      * Must be called inside a Yjs transaction.
      * @param {import('yjs').Array} rowArr
      */
     #initPos(rowArr) {
-        const n = this.sortedFilteredRows.length;
-        for (let di = 0; di < n; di++) {
-            const row = this.sortedFilteredRows[di];
-            const rawIndex = this.rows.findIndex(r => r === row);
-            if (rawIndex < 0) continue;
-            const yRow = rowArr.get(rawIndex);
-            if (yRow) yRow.set('_pos', (n - di) * 1000);
+        const n = rowArr.length;
+        for (let i = 0; i < n; i++) {
+            const r = rowArr.get(i);
+            if (r && r.get('_pos') == null) r.set('_pos', (i + 1) * 1000);
         }
     }
 
@@ -792,7 +779,7 @@ export class TableStore {
      */
     #computeInsertPos(rowArr, newVal) {
         const colId = this.insertSortColId;
-        const dir = this.insertSortDir === "desc" ? -1 : 1;
+        const dir = this.insertSortDir === "asc" ? -1 : 1; // asc=ascending=lowest first, desc=highest first
 
         const sorted = [];
         for (let i = 0; i < rowArr.length; i++) {
@@ -804,7 +791,7 @@ export class TableStore {
         if (!sorted.length) return 1000;
 
         for (let i = 0; i < sorted.length; i++) {
-            if (dir * this.#cmpValues(sorted[i].val, newVal) < 0) {
+            if (dir * this.#cmpValues(sorted[i].val, newVal) <= 0) {
                 const abovePos = i > 0 ? sorted[i - 1].pos : null;
                 return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
             }
@@ -816,7 +803,6 @@ export class TableStore {
 
     /**
      * Move a row from one display index to another.
-     * Initialises _pos on all rows on the first call (opt-in to manual-order mode).
      * @param {number} fromDisplayIndex
      * @param {number} toDisplayIndex
      */
@@ -826,7 +812,7 @@ export class TableStore {
         if (!rowArr) return;
 
         this.#ydoc.transact(() => {
-            if (!this.hasManualOrder) this.#initPos(rowArr);
+            this.#initPos(rowArr);
 
             // Build display list with the moved row removed to find its new neighbours.
             const rows = this.sortedFilteredRows;
@@ -871,21 +857,6 @@ export class TableStore {
     }
 
     /**
-     * Remove all _pos fields, reverting the table to newest-first inherent order.
-     */
-    resetOrder() {
-        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
-        if (!rowArr) return;
-        this.#ydoc.transact(() => {
-            for (let i = 0; i < rowArr.length; i++) {
-                const yRow = rowArr.get(i);
-                if (yRow?.has?.('_pos')) yRow.delete('_pos');
-            }
-        });
-        this.outOfOrderRow = null;
-    }
-
-    /**
      * Check whether the row at displayIndex is out of insertSort order after an edit.
      * Returns null when the row is in order (or insertSort is not configured).
      * Returns an object with placeInOrder() when the row should be moved.
@@ -895,7 +866,7 @@ export class TableStore {
     checkOutOfOrder(displayIndex) {
         if (!this.insertSortColId) return null;
         const colId = this.insertSortColId;
-        const dir = this.insertSortDir === "desc" ? -1 : 1;
+        const dir = this.insertSortDir === "asc" ? -1 : 1;
         const rows = this.sortedFilteredRows;
         const val = rows[displayIndex]?.[colId];
         const prevVal = displayIndex > 0 ? rows[displayIndex - 1]?.[colId] : null;
@@ -911,7 +882,7 @@ export class TableStore {
                 const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
                 if (!rowArr) return;
                 this.#ydoc.transact(() => {
-                    if (!this.hasManualOrder) this.#initPos(rowArr);
+                    this.#initPos(rowArr);
                     const newPos = this.#computeInsertPos(rowArr, val);
                     this.#setRowPos(rowArr, displayIndex, newPos);
                 });
@@ -922,10 +893,6 @@ export class TableStore {
         return result;
     }
 
-    /** True when any row carries a _pos field (manual-order mode is active). */
-    get hasManualOrder() {
-        return this.rows.some(r => r._pos != null);
-    }
 
     /**
      * Update a single cell in a display-indexed row.
@@ -1271,7 +1238,7 @@ export class TableStore {
         });
     }
 
-    setInsertSort(colId, dir = "asc") {
+    setInsertSort(colId, dir = "desc") {
         const sortMap = this.#sourceYMap ?? this.#tableYMap;
         this.#ydoc.transact(() => {
             sortMap.set("insertSortColId", colId);
@@ -1453,25 +1420,32 @@ export class TableStore {
 
         let inserted = 0, skipped = 0;
 
-        this.#ydoc.transact(() => {
-            for (const srcRow of dataRows) {
-                // Skip entirely blank rows (common with Excel trailing selections)
-                if (srcRow.every(cell => !String(cell ?? '').trim())) {
-                    skipped++;
-                    continue;
-                }
+        // Pre-filter to know how many rows will actually be inserted so we can assign
+        // _pos values that place the first pasted row at the top of the pasted group.
+        const nonBlankRows = dataRows.filter(
+            srcRow => !srcRow.every(cell => !String(cell ?? '').trim())
+        );
+        skipped = dataRows.length - nonBlankRows.length;
 
+        this.#ydoc.transact(() => {
+            this.#initPos(rowArr);
+            const basePos = Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0));
+            const n = nonBlankRows.length;
+
+            nonBlankRows.forEach((srcRow, ri) => {
                 const yRow = new Y.Map();
                 for (let i = 0; i < srcRow.length; i++) {
                     const colDef = colMap[i];
                     if (!colDef) continue;
                     const raw = String(srcRow[i] ?? '').trim();
-                    if (!raw) continue; // leave cell absent rather than storing ""
+                    if (!raw) continue;
                     yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
                 }
+                // First pasted row gets the highest _pos (top of pasted group).
+                yRow.set('_pos', basePos + (n - ri) * 1000);
                 rowArr.push([yRow]);
                 inserted++;
-            }
+            });
         });
 
         return { inserted, skipped };

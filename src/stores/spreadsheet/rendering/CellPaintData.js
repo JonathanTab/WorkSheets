@@ -19,7 +19,7 @@
 
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
-import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
+import { buildRenderRuns } from '../textFormatRuns.js';
 
 /**
  * @typedef {Object} CellPaintItem
@@ -31,7 +31,7 @@ import { isRichText, htmlStringToRuns, runsToPlainText } from '../richText.js';
  * @property {number} height     CSS height
  * @property {boolean} [selected]  @deprecated  Selection is now on the SelectionRenderer canvas
  * @property {boolean} [isAnchor]  @deprecated  Selection is now on the SelectionRenderer canvas
- * @property {'text'|'checkbox'|'rating'|'url'|'image'|'dropdown'} renderType
+ * @property {'text'|'checkbox'|'rating'|'image'|'dropdown'} renderType
  * @property {string} [displayValue]
  * @property {string|null} [bgColor]
  * @property {string|null} [textColor]
@@ -385,9 +385,6 @@ export function buildPaneData(params) {
                 item.rawValue = Number(cellRawValue) || 0;
                 item.ratingMax = ct.max || 5;
                 item.hAlign = 'center';
-            } else if (ct?.type === 'url') {
-                item.renderType = 'url';
-                item.displayValue = dispV != null ? String(dispV) : '';
             } else if (ct?.type === 'dropdown') {
                 item.renderType = 'dropdown';
                 item.displayValue = dispV != null ? String(dispV) : '';
@@ -412,11 +409,12 @@ export function buildPaneData(params) {
                     formattedValue = CellTypeRegistry.formatValue(ct, dispV);
                 }
 
-                if (isRichText(formattedValue)) {
-                    const runs = htmlStringToRuns(formattedValue);
-                    item.richTextRuns = runs;
-                    item.displayValue = runsToPlainText(runs);
-                    item.clipContent = true;
+                const cellTfr = sheetCell?.tfr;
+                if (cellTfr?.length) {
+                    const plainText = formattedValue != null ? String(formattedValue) : '';
+                    item.richTextRuns = buildRenderRuns(plainText, cellTfr);
+                    item.displayValue = plainText;
+                    item.clipContent  = true;
                 } else {
                     item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
@@ -705,7 +703,7 @@ export function buildPaneData(params) {
                 item.clipContent = true;
             }
             // Non-text render types have their own internal layout that can overflow
-            if (item.renderType !== 'text' && item.renderType !== 'url' && item.renderType !== 'dropdown') {
+            if (item.renderType !== 'text' && item.renderType !== 'dropdown') {
                 item.clipContent = true;
             }
 
@@ -768,11 +766,12 @@ export function buildPaneData(params) {
             clipContent: true,
         };
 
-        // Content (rich text or plain)
-        if (isRichText(dispV)) {
-            const runs = htmlStringToRuns(dispV);
-            item.richTextRuns = runs;
-            item.displayValue = runsToPlainText(runs);
+        // Content — same tfr-based path as regular cells
+        const mergeTfr = sheetCell?.tfr;
+        if (mergeTfr?.length) {
+            const plainText = dispV != null ? String(dispV) : '';
+            item.richTextRuns = buildRenderRuns(plainText, mergeTfr);
+            item.displayValue = plainText;
         } else {
             item.displayValue = dispV != null ? String(dispV) : '';
         }

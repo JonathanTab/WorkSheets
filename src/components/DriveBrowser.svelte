@@ -1616,21 +1616,18 @@
                     <span class="nav-icon">{@html folder}</span>
                     <span class="nav-label">My Drive</span>
                 </button>
-                {#if tab === "drive"}
-                    <button
-                        class="nav-action"
-                        onclick={handleCreateFolder}
-                        title="New Folder"
-                    >
-                        {@html newFolder}
-                    </button>
-                {/if}
-                {#if (tab === "drive" || isInternalDragging) && rootFolders.length > 0}
+                <button
+                    class="nav-action"
+                    onclick={handleCreateFolder}
+                    title="New Folder"
+                >
+                    {@html newFolder}
+                </button>
+                {#if rootFolders.length > 0}
                     <span
                         class="tree-expand nav-expand"
                         onclick={(e) => {
                             e.stopPropagation();
-                            // Toggle all root folders
                             const allExpanded = rootFolders.every((f) =>
                                 isFolderExpanded(f.id),
                             );
@@ -1659,8 +1656,8 @@
                 {/if}
             </div>
 
-            <!-- Folder Tree (drive tab, or any tab while dragging so items can be dropped into folders) -->
-            {#if (tab === "drive" || isInternalDragging) && rootFolders.length > 0}
+            <!-- Folder Tree — always visible so users can discover the file manager from any tab -->
+            {#if rootFolders.length > 0}
                 <div class="folder-tree">
                     <FolderTree
                         folders={rootFolders}
@@ -1675,10 +1672,6 @@
                         onFolderDrop={handleDropOnFolder}
                         onContextMenu={showFolderTreeContextMenu}
                     />
-                </div>
-            {:else if tab === "drive"}
-                <div class="folder-tree">
-                    <div class="tree-empty">No folders yet</div>
                 </div>
             {/if}
 
@@ -1960,6 +1953,35 @@
                     </div>
                 </div>
             {/if}
+            <!-- Folders quick-access strip on Recent tab -->
+            {#if tab === "recent" && !searchQuery && rootFolders.length > 0}
+                <div class="folders-strip">
+                    <div class="folders-strip-header">
+                        <span class="folders-strip-label">{@html folder} Folders</span>
+                        <button class="folders-strip-link" onclick={() => switchTab("drive")}>
+                            My Drive →
+                        </button>
+                    </div>
+                    <div class="folders-strip-items">
+                        {#each rootFolders.slice(0, 8) as f (f.id)}
+                            <button
+                                class="folder-chip"
+                                onclick={() => navigateFolder(f.id)}
+                                oncontextmenu={(e) => showFolderTreeContextMenu(e, f)}
+                            >
+                                <span class="folder-chip-icon">{@html folder}</span>
+                                <span class="folder-chip-name">{f.name}</span>
+                            </button>
+                        {/each}
+                        {#if rootFolders.length > 8}
+                            <button class="folder-chip folder-chip-more" onclick={() => switchTab("drive")}>
+                                +{rootFolders.length - 8} more
+                            </button>
+                        {/if}
+                    </div>
+                </div>
+            {/if}
+
             {#if displayItems.length === 0}
                 <div class="empty-state">
                     <div class="empty-icon">{@html spreadsheet}</div>
@@ -3368,6 +3390,98 @@
         flex: 1;
         overflow: auto;
         padding: 0 1rem;
+    }
+
+    /* Folders strip (Recent tab) */
+    .folders-strip {
+        padding: 1rem 0 0;
+        border-bottom: 1px solid var(--color-border);
+        margin-bottom: 0.25rem;
+    }
+
+    .folders-strip-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.625rem;
+    }
+
+    .folders-strip-label {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--color-text-muted);
+    }
+
+    .folders-strip-label :global(svg) {
+        width: 13px;
+        height: 13px;
+    }
+
+    .folders-strip-link {
+        font-size: 0.75rem;
+        color: var(--color-primary, #3b82f6);
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0;
+    }
+
+    .folders-strip-link:hover {
+        text-decoration: underline;
+    }
+
+    .folders-strip-items {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding-bottom: 0.875rem;
+    }
+
+    .folder-chip {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.375rem 0.75rem;
+        border: 1px solid var(--color-border);
+        border-radius: 20px;
+        background: var(--color-surface);
+        color: var(--color-text);
+        font-size: 0.8125rem;
+        cursor: pointer;
+        transition: background 0.12s, border-color 0.12s;
+        max-width: 160px;
+    }
+
+    .folder-chip:hover {
+        background: var(--color-fill);
+        border-color: var(--color-border-strong, var(--color-border));
+    }
+
+    .folder-chip-icon {
+        display: flex;
+        color: var(--color-text-muted);
+        flex-shrink: 0;
+    }
+
+    .folder-chip-icon :global(svg) {
+        width: 14px;
+        height: 14px;
+    }
+
+    .folder-chip-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .folder-chip-more {
+        color: var(--color-text-muted);
+        font-style: italic;
     }
 
     .empty-state {
