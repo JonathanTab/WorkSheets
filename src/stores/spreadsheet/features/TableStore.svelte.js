@@ -277,12 +277,14 @@ export class TableStore {
      * @param {import('yjs').Doc} ydoc
      * @param {import('yjs').Map<any> | null} [sourceTableYMap]  Source Y.Map for view tables (Yjs mutations + sort/column observers).
      * @param {TableStore | null} [sourceStore]  Live source TableStore for views. When provided, rows and allColumns are borrowed from it.
+     * @param {((name: string) => TableStore|null) | null} [tableResolver]  Cross-table resolver. Pass at construction to avoid a second #rebuildView() call from setTableResolver().
      */
-    constructor(tableYMap, ydoc, sourceTableYMap = null, sourceStore = null) {
+    constructor(tableYMap, ydoc, sourceTableYMap = null, sourceStore = null, tableResolver = null) {
         this.#tableYMap = tableYMap;
         this.#ydoc = ydoc;
         this.#sourceYMap = sourceTableYMap;
         this.#sourceStore = sourceStore;
+        if (tableResolver) this.#tableResolver = tableResolver;
         this.#migrateColumnsIfNeeded();
         this.#syncFromYjs();
         this.#observeYjs();
@@ -1637,6 +1639,7 @@ export class TableStore {
      * @param {((name: string) => any) | null} fn
      */
     setTableResolver(fn) {
+        if (this.#tableResolver === fn) return;
         this.#tableResolver = fn;
         if (this.#eval) this.#rebuildView();
     }

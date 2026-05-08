@@ -324,8 +324,8 @@ export class DocumentTableRegistry {
         // instead of re-reading and re-parsing from Yjs on every change.
         const sourceStore = sourceTableId ? (this.#stores.get(sourceTableId) ?? null) : null;
 
-        const store = new TableStore(tableYMap, this.#ydoc, sourceTableYMap, sourceStore);
-        store.setTableResolver(name => this.getByName(name));
+        const tableResolver = (name) => this.getByName(name);
+        const store = new TableStore(tableYMap, this.#ydoc, sourceTableYMap, sourceStore, tableResolver);
         this.#stores.set(tableId, store);
         this.#sheetOf.set(tableId, sheetId ?? '');
         this.#nameIndex.set((store.name ?? '').toUpperCase(), tableId);

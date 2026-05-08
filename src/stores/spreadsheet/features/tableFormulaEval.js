@@ -328,6 +328,33 @@ export function buildTableFunctions(resolveTableByName) {
 const CROSS_ROW_PATTERN = /\b(PREV|NEXT|ROWVAL|WINDOW)\s*\(/i;
 const COL_REF_PATTERN   = /\{([^}]+)\}/g;
 
+// Pre-compiled regex patterns for row helpers and aggregate functions.
+// These were previously created with `new RegExp(...)` inside hot loops
+// (per-row × per-function × up to 20 passes), which is slow when a browser
+// extension intercepts RegExp construction. Using module-level literals avoids
+// repeated object creation and extension overhead entirely.
+const ROW_HELPER_RE = /** @type {Record<string, RegExp>} */ ({
+    WINDOW:    /\bWINDOW\s*\(/i,
+    ROWVAL:    /\bROWVAL\s*\(/i,
+    PREV:      /\bPREV\s*\(/i,
+    NEXT:      /\bNEXT\s*\(/i,
+});
+
+const AGGREGATE_RE = /** @type {Record<string, RegExp>} */ ({
+    RUNNINGIFS: /\bRUNNINGIFS\s*\(/i,
+    RUNNINGIF:  /\bRUNNINGIF\s*\(/i,
+    SUMIFS:     /\bSUMIFS\s*\(/i,
+    SUMIF:      /\bSUMIF\s*\(/i,
+    AVGIF:      /\bAVGIF\s*\(/i,
+    MINIF:      /\bMINIF\s*\(/i,
+    MAXIF:      /\bMAXIF\s*\(/i,
+    COUNTIF:    /\bCOUNTIF\s*\(/i,
+    AVG:        /\bAVG\s*\(/i,
+    MIN:        /\bMIN\s*\(/i,
+    MAX:        /\bMAX\s*\(/i,
+    SUM:        /\bSUM\s*\(/i,
+});
+
 // Module-level cache for evaluation plans.
 // Key: column fingerprint string (ids + formulas).
 // Bounded at 100 entries (LRU-style eviction of oldest).
@@ -718,7 +745,7 @@ export class TableFormulaEvaluator {
         for (let pass = 0; pass < 20; pass++) {
             let replaced = false;
             for (const fn of ROW_HELPERS) {
-                const m = new RegExp(`\\b${fn}\\s*\\(`, 'i').exec(expr);
+                const m = ROW_HELPER_RE[fn].exec(expr);
                 if (!m) continue;
                 replaced = true;
                 const openIdx  = m.index + m[0].length - 1;
@@ -741,7 +768,7 @@ export class TableFormulaEvaluator {
         for (let pass = 0; pass < 20; pass++) {
             let replaced = false;
             for (const fn of ROW_HELPERS) {
-                const m = new RegExp(`\\b${fn}\\s*\\(`, 'i').exec(expr);
+                const m = ROW_HELPER_RE[fn].exec(expr);
                 if (!m) continue;
                 replaced = true;
                 const openIdx  = m.index + m[0].length - 1;
@@ -812,7 +839,7 @@ export class TableFormulaEvaluator {
         for (let pass = 0; pass < 20; pass++) {
             let replaced = false;
             for (const fn of KNOWN) {
-                const m = new RegExp(`\\b${fn}\\s*\\(`, 'i').exec(expr);
+                const m = AGGREGATE_RE[fn].exec(expr);
                 if (!m) continue;
                 replaced = true;
                 const openIdx  = m.index + m[0].length - 1;

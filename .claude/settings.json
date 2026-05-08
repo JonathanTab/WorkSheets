@@ -18,7 +18,9 @@
       "Bash(pnpm add *)",
       "Bash(pnpm --version)",
       "Bash(pnpm config *)",
-      "Read(//c/Users/Jon/code/plainTab/**)"
+      "Read(//c/Users/Jon/code/plainTab/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(node -e ' *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Jon\\code\\instrumenta\\instrumenta"
