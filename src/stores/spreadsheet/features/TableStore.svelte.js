@@ -771,18 +771,21 @@ export class TableStore {
     }
 
     /**
-     * Compute a _pos value for inserting a row at the correct sort position.
+     * Compute a _pos value for placing a row at the correct insertSort position.
      * Reads _pos values directly from rowArr (safe to call after #initPos in same transaction).
      * @param {import('yjs').Array} rowArr
      * @param {any} newVal
+     * @param {number} [excludeRawIndex]  Raw index of a row to exclude (used when repositioning
+     *                                    an existing row so it doesn't interfere with the search).
      * @returns {number}
      */
-    #computeInsertPos(rowArr, newVal) {
+    #computeInsertPos(rowArr, newVal, excludeRawIndex = -1) {
         const colId = this.insertSortColId;
         const dir = this.insertSortDir === "asc" ? -1 : 1; // asc=ascending=lowest first, desc=highest first
 
         const sorted = [];
         for (let i = 0; i < rowArr.length; i++) {
+            if (i === excludeRawIndex) continue;
             const r = rowArr.get(i);
             sorted.push({ val: r?.get?.(colId), pos: r?.get?.('_pos') ?? 0 });
         }
@@ -881,10 +884,18 @@ export class TableStore {
             placeInOrder: () => {
                 const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
                 if (!rowArr) return;
+                // Resolve the target row's raw index now (before the transaction) so
+                // we can exclude it from the position search — without exclusion the
+                // row's own _pos would be found first and it would barely move.
+                const targetRow = this.sortedFilteredRows[displayIndex];
+                if (!targetRow) return;
+                const rawIndex = this.rows.findIndex(r => r === targetRow);
+                if (rawIndex < 0) return;
                 this.#ydoc.transact(() => {
                     this.#initPos(rowArr);
-                    const newPos = this.#computeInsertPos(rowArr, val);
-                    this.#setRowPos(rowArr, displayIndex, newPos);
+                    const newPos = this.#computeInsertPos(rowArr, val, rawIndex);
+                    const yRow = rowArr.get(rawIndex);
+                    if (yRow) yRow.set('_pos', newPos);
                 });
                 this.outOfOrderRow = null;
             },
