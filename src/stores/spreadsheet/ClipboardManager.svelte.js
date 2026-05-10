@@ -721,7 +721,17 @@ class ClipboardManager {
         }
 
         const { v } = this.inferValueFromText(rawText, tdStyle);
-        const cell  = { v, displayValue: rawText || null, isFormula: false, ...styleProps };
+        const cell  = {
+            v,
+            displayValue: rawText || null,
+            isFormula: false,
+            // Explicit false booleans prevent destination style "leak-through" on paste.
+            bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+            ...styleProps,
+        };
         if (url) cell.url = url;
         return cell;
     }
@@ -759,13 +769,16 @@ class ClipboardManager {
             const s    = { ...style };
             const cs   = node.style;
             if (cs) {
-                if (cs.fontWeight === 'bold')         s.bold = true;
-                else if (cs.fontWeight === 'normal')  delete s.bold;
+                const weight = cs.fontWeight?.toLowerCase?.() || '';
+                const weightNum = parseInt(weight, 10);
+                if (weight === 'bold' || weight === 'bolder' || (!isNaN(weightNum) && weightNum >= 600)) s.bold = true;
+                else if (weight === 'normal' || (!isNaN(weightNum) && weightNum < 600)) delete s.bold;
                 if (cs.fontStyle  === 'italic')       s.italic = true;
                 else if (cs.fontStyle === 'normal')   delete s.italic;
-                if (cs.textDecoration) {
-                    if (cs.textDecoration.includes('underline'))    s.underline = true;
-                    if (cs.textDecoration.includes('line-through')) s.strikethrough = true;
+                const textDecoration = `${cs.textDecoration || ''} ${cs.textDecorationLine || ''}`.toLowerCase();
+                if (textDecoration) {
+                    if (textDecoration.includes('underline'))    s.underline = true;
+                    if (textDecoration.includes('line-through')) s.strikethrough = true;
                 }
                 if (cs.color)      s.foregroundColor = cs.color;
                 if (cs.fontSize) {
@@ -860,20 +873,27 @@ class ClipboardManager {
             }
         }
 
-        const fwMatch = style.match(/font-weight:\s*(\w+)/);
+        const fwMatch = style.match(/font-weight:\s*([^;]+)/i);
         if (fwMatch) {
-            const fw = fwMatch[1];
-            props.bold = fw === 'bold' || fw === 'bolder' || (parseInt(fw, 10) >= 700);
+            const fw = fwMatch[1].trim().toLowerCase();
+            const n = parseInt(fw, 10);
+            if (fw === 'bold' || fw === 'bolder' || (!isNaN(n) && n >= 600)) props.bold = true;
+            else if (fw === 'normal' || (!isNaN(n) && n < 600)) props.bold = false;
         }
 
         const fiMatch = style.match(/font-style:\s*(\w+)/);
         if (fiMatch) props.italic = fiMatch[1] === 'italic' || fiMatch[1] === 'oblique';
 
-        const tdMatch = style.match(/text-decoration:\s*([^;]+)/);
-        if (tdMatch) {
-            const dec = tdMatch[1];
-            if (dec.includes('underline'))   props.underline     = true;
+        const tdMatch = style.match(/text-decoration:\s*([^;]+)/i);
+        const tdlMatch = style.match(/text-decoration-line:\s*([^;]+)/i);
+        const dec = `${tdMatch?.[1] || ''} ${tdlMatch?.[1] || ''}`.toLowerCase();
+        if (dec) {
+            if (dec.includes('underline')) props.underline = true;
             if (dec.includes('line-through')) props.strikethrough = true;
+            if (dec.includes('none')) {
+                props.underline = false;
+                props.strikethrough = false;
+            }
         }
 
         const colorMatch = style.match(/(?:^|[\s;])color:\s*([^;]+)/);
@@ -903,8 +923,18 @@ class ClipboardManager {
     parseCellBorderCSS(style) {
         const borders = {};
         if (!style) return borders;
+        const shorthand = style.match(/(?:^|;)\s*border:\s*([^;]+)/i);
+        if (shorthand) {
+            const parsed = this.parseBorderValue(shorthand[1].trim());
+            if (parsed) {
+                borders.top = parsed;
+                borders.right = parsed;
+                borders.bottom = parsed;
+                borders.left = parsed;
+            }
+        }
         for (const edge of ['top', 'right', 'bottom', 'left']) {
-            const match = style.match(new RegExp(`border-${edge}:\\s*([^;]+)`));
+            const match = style.match(new RegExp(`(?:^|;)\\s*border-${edge}:\\s*([^;]+)`, 'i'));
             if (match) {
                 const parsed = this.parseBorderValue(match[1].trim());
                 if (parsed) borders[edge] = parsed;
@@ -915,9 +945,18 @@ class ClipboardManager {
 
     parseBorderValue(value) {
         if (!value || value.trim() === 'none') return null;
-        const match = value.match(/^(\d+(?:\.\d+)?)px\s+(solid|dashed|dotted|double)\s+(\S+)/);
-        if (match) return { width: parseFloat(match[1]), style: match[2], color: match[3] };
-        return null;
+        const trimmed = value.trim().toLowerCase();
+        const styleMatch = trimmed.match(/\b(solid|dashed|dotted|double)\b/);
+        const widthMatch = trimmed.match(/(\d+(?:\.\d+)?)(px|pt)?/);
+        const colorMatch = trimmed.match(/(#[0-9a-f]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|[a-z]+)\s*$/i);
+
+        if (!styleMatch) return null;
+        const unit = widthMatch?.[2] || 'px';
+        const rawWidth = widthMatch ? parseFloat(widthMatch[1]) : 1;
+        const width = unit === 'pt' ? Math.round(rawWidth * 4 / 3) : rawWidth;
+        const color = colorMatch ? colorMatch[1] : '#000000';
+
+        return { width, style: styleMatch[1], color };
     }
 
     inferValueFromText(text, style = '') {
@@ -1076,7 +1115,15 @@ class ClipboardManager {
             if (code === 210 || code === 211) isFormula = true;
             if (code === 1219) mergePrimaries.push({ row, col });
 
-            const cellData = { v, displayValue, isFormula };
+            const cellData = {
+                v,
+                displayValue,
+                isFormula,
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+            };
             if (code === 2755 && hyperlinkIdx < hyperlinkPool.length) {
                 cellData.url = hyperlinkPool[hyperlinkIdx++];
             }
@@ -1107,21 +1154,18 @@ class ClipboardManager {
         }
 
         if (formulaStreamRaw.length > 0 && formulaPool.length > 0) {
-            let cellIdx = 0, i = 0;
-            while (i < formulaStreamRaw.length) {
-                const val = formulaStreamRaw[i];
-                if (val < 0) { cellIdx += Math.abs(val); i++; }
-                else {
-                    if (cellIdx < nonEmptyCells.length && val < formulaPool.length) {
-                        const { row, col } = nonEmptyCells[cellIdx];
-                        const cell = grid[row][col];
-                        if (cell) {
-                            cell.formula  = this.r1c1ToA1(formulaPool[val], row, col);
-                            cell.isFormula = true;
-                        }
-                    }
-                    cellIdx++; i++;
-                }
+            // Formula stream uses the same compact RLE shape as other streams in this payload.
+            // Decode first, then map 1:1 over non-empty cells.
+            const formulaStream = this.decodeRLE(formulaStreamRaw);
+            const limit = Math.min(formulaStream.length, nonEmptyCells.length);
+            for (let i = 0; i < limit; i++) {
+                const poolIdx = formulaStream[i];
+                if (poolIdx == null || poolIdx < 0 || poolIdx >= formulaPool.length) continue;
+                const { row, col } = nonEmptyCells[i];
+                const cell = grid[row]?.[col];
+                if (!cell) continue;
+                cell.formula = this.r1c1ToA1(formulaPool[poolIdx], row, col);
+                cell.isFormula = true;
             }
         }
 
@@ -1152,20 +1196,30 @@ class ClipboardManager {
             if (bits & 0x08) cell.strikethrough = true;
         }
 
-        // Merge formatting from HTML (more reliable for bold/italic/etc.)
-        if (htmlData?.cells) {
-            for (let r = 0; r < Math.min(numRows, htmlData.cells.length); r++) {
-                for (let c = 0; c < Math.min(numCols, htmlData.cells[r]?.length || 0); c++) {
-                    const compactCell = grid[r]?.[c];
-                    const htmlCell    = htmlData.cells[r]?.[c];
-                    if (!compactCell || !htmlCell) continue;
-                    if (htmlCell.bold)          compactCell.bold          = true;
-                    if (htmlCell.italic)        compactCell.italic        = true;
-                    if (htmlCell.underline)     compactCell.underline     = true;
-                    if (htmlCell.strikethrough) compactCell.strikethrough = true;
-                    if (!compactCell.url && htmlCell.url) compactCell.url = htmlCell.url;
-                }
-            }
+        // When Google provides HTML, treat HTML cell content/styles as authoritative.
+        // Compact JSON is still used for data validations and fallback metadata.
+        let outputCells = grid;
+        if (htmlData?.cells?.length) {
+            const htmlRows = htmlData.cells.length;
+            const htmlCols = htmlData.cells[0]?.length || 0;
+            outputCells = Array.from({ length: htmlRows }, (_, r) =>
+                Array.from({ length: htmlCols }, (_, c) => {
+                    const htmlCell = htmlData.cells[r]?.[c] || { v: null, displayValue: null, isFormula: false };
+                    const compactCell = grid[r]?.[c] || null;
+                    const out = { ...htmlCell };
+                    if (!out.url && compactCell?.url) out.url = compactCell.url;
+                    // Keep formula fidelity from compact JSON while preserving HTML styling.
+                    if (compactCell?.formula) {
+                        out.formula = compactCell.formula;
+                        out.isFormula = true;
+                    } else if (!out.formula && typeof out.v === 'string' && out.v.startsWith('=')) {
+                        // Fallback: if HTML text itself is a formula-like token, preserve it as a formula.
+                        out.formula = out.v;
+                        out.isFormula = true;
+                    }
+                    return out;
+                })
+            );
         }
 
         // Parse data validations
@@ -1183,9 +1237,12 @@ class ClipboardManager {
         }
 
         return {
-            cells: grid, borders: htmlData?.borders || [], merges,
+            cells: outputCells,
+            borders: htmlData?.borders || [],
+            merges: htmlData?.merges || merges,
             dataValidations: parsedValidations,
-            rowCount: numRows, colCount: numCols,
+            rowCount: htmlData?.rowCount || numRows,
+            colCount: htmlData?.colCount || numCols,
             colWidths: htmlData?.colWidths || null,
             rowHeights: htmlData?.rowHeights || null,
         };
@@ -1330,6 +1387,18 @@ class ClipboardManager {
         const anchor = getSelectionState()?.anchor;
         const range  = getSelectionState()?.range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
         if (!range || !sheetStore) return;
+
+        // Try to route menu/context paste through native onpaste first so it can
+        // use the same clipboard MIME payloads as Ctrl+V when browser allows it.
+        this._pendingPasteMode = mode;
+        try {
+            if (typeof document !== 'undefined' && typeof document.execCommand === 'function') {
+                const dispatched = document.execCommand('paste');
+                if (dispatched) return;
+            }
+        } catch (_) {
+            // Programmatic paste blocked; continue with async clipboard fallback.
+        }
 
         let data       = null;
         let isInternal = false;
@@ -1560,9 +1629,10 @@ class ClipboardManager {
         const destEndRow    = isSingleCell ? targetRange.endRow : destStartRow + srcRowCount - 1;
         const destEndCol    = isSingleCell ? targetRange.endCol : destStartCol + srcColCount - 1;
 
-        const includesValues    = ['full', 'values',   'valuesFormat'  ].includes(mode);
-        const includesFormulas  = ['full', 'formulas', 'formulasFormat'].includes(mode);
-        const includesFormatting= ['full', 'formatting','valuesFormat', 'formulasFormat'].includes(mode);
+        const pastePlan = this.getPasteModePlan(mode, isInternal);
+        const includesValues = pastePlan.includesValues;
+        const includesFormulas = pastePlan.includesFormulas;
+        const includesFormatting = pastePlan.includesFormatting;
 
         for (let r = destStartRow; r <= destEndRow; r++) {
             for (let c = destStartCol; c <= destEndCol; c++) {
@@ -1587,12 +1657,13 @@ class ClipboardManager {
                     ? c - ((this.clipboardData?.range?.startCol ?? destStartCol) + srcCol)
                     : c - srcCol;
 
-                if (includesFormulas && (cell.isFormula || cell.formula)) {
+                // Keep special-paste modes explicit so behavior is deterministic.
+                if (pastePlan.formulasOnly) {
+                    this.applyFormulaOnly(sheetStore, cell, r, c, rowOffset, colOffset, isInternal);
+                } else if (includesFormulas && (cell.isFormula || cell.formula)) {
                     this.applyValue(sheetStore, cell, r, c, rowOffset, colOffset, isInternal);
                 } else if (includesValues) {
                     this.applyValueOnly(sheetStore, cell, r, c);
-                } else if (mode === 'formulas') {
-                    this.applyFormulaOnly(sheetStore, cell, r, c, rowOffset, colOffset, isInternal);
                 }
 
                 if (includesFormatting) {
@@ -1601,8 +1672,13 @@ class ClipboardManager {
             }
         }
 
-        if (includesFormatting && borders?.length > 0) {
-            this.applyBorders(sheetStore, borders, destStartRow, destStartCol, destEndRow, destEndCol);
+        // External clipboard border payloads (especially Google HTML) can be sparse and
+        // cause inconsistent "random" border artifacts in formatting-only modes.
+        // Keep border pasting for:
+        // - internal clipboard payloads, and
+        // - full external paste
+        if (includesFormatting && pastePlan.includesBorders && borders?.length > 0) {
+            this.applyBorders(sheetStore, borders, destStartRow, destStartCol, destEndRow, destEndCol, pastePlan.clearExistingBorders);
         }
 
         if (mode === 'full' && !isSingleCell && merges?.length > 0) {
@@ -1655,10 +1731,27 @@ class ClipboardManager {
         }
     }
 
+    getPasteModePlan(mode, isInternal) {
+        const includesValues = ['full', 'values', 'valuesFormat'].includes(mode);
+        const includesFormulas = ['full', 'formulas', 'formulasFormat'].includes(mode);
+        const includesFormatting = ['full', 'formatting', 'valuesFormat', 'formulasFormat'].includes(mode);
+        const formulasOnly = mode === 'formulas';
+        // Keep border semantics aligned across formatting-capable modes to avoid
+        // mode-specific divergence between "full" and special formatting pastes.
+        const includesBorders = includesFormatting;
+        const clearExistingBorders = includesFormatting;
+        return { includesValues, includesFormulas, includesFormatting, includesBorders, clearExistingBorders, formulasOnly, isInternal };
+    }
+
     applyValue(sheetStore, cell, row, col, rowOffset, colOffset, isInternal) {
         // Google Sheets compact JSON provides a separate .formula field
         if (cell.formula) {
             sheetStore.setCellFormula(row, col, this.adjustFormula(cell.formula, rowOffset, colOffset));
+            return;
+        }
+        // External sources sometimes expose formula-like text in v without .formula.
+        if (!isInternal && cell.isFormula && typeof cell.v === 'string' && cell.v.startsWith('=')) {
+            sheetStore.setCellFormula(row, col, this.adjustFormula(cell.v, rowOffset, colOffset));
             return;
         }
         // Internal copy: cell.v IS the formula string (starts with '=')
@@ -1694,10 +1787,10 @@ class ClipboardManager {
     applyFormulaOnly(sheetStore, cell, row, col, rowOffset, colOffset, isInternal) {
         if (cell.formula) {
             sheetStore.setCellFormula(row, col, this.adjustFormula(cell.formula, rowOffset, colOffset));
+        } else if (typeof cell.v === 'string' && cell.v.startsWith('=')) {
+            sheetStore.setCellFormula(row, col, this.adjustFormula(cell.v, rowOffset, colOffset));
         } else if (cell.isFormula && isInternal && cell.v) {
             sheetStore.setCellFormula(row, col, this.adjustFormula(cell.v, rowOffset, colOffset));
-        } else if (cell.v !== null && cell.v !== undefined && !cell.isFormula) {
-            sheetStore.setCellValue(row, col, cell.v);
         }
     }
 
@@ -1723,8 +1816,8 @@ class ClipboardManager {
         if (cell.ct) sheetStore.setCellTypeConfig(row, col, cell.ct);
     }
 
-    applyBorders(sheetStore, borders, startRow, startCol, endRow, endCol) {
-        sheetStore.clearBordersInRange(startRow, endRow, startCol, endCol);
+    applyBorders(sheetStore, borders, startRow, startCol, endRow, endCol, clearExisting = true) {
+        if (clearExisting) sheetStore.clearBordersInRange(startRow, endRow, startCol, endCol);
         for (const border of borders) {
             const row = startRow + border.relRow;
             const col = startCol + border.relCol;
