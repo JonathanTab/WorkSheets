@@ -355,7 +355,10 @@ export class DocumentTableRegistry {
         const rowArr = (sourceTableYMap ?? tableYMap).get('rows');
         if (rowArr && !this.#trackedRowArrs.has(rowArr)) {
             this.#trackedRowArrs.add(rowArr);
-            const rowObs = () => this.onTableChange?.();
+            const rowObs = () => {
+                this.#invalidateNonEntryEvals();
+                this.onTableChange?.();
+            };
             rowArr.observeDeep(rowObs);
             this.#observers.push(() => rowArr.unobserveDeep(rowObs));
         }
@@ -486,6 +489,15 @@ export class DocumentTableRegistry {
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
+
+    /** Rebuild formula evaluators for all tables that have isNonEntry formula columns. */
+    #invalidateNonEntryEvals() {
+        for (const store of this.#stores.values()) {
+            if (store.columns.some(c => c.isNonEntry && c.defaultFormula)) {
+                store.invalidate();
+            }
+        }
+    }
 
     destroy() {
         for (const cleanup of this.#observers) cleanup();

@@ -576,7 +576,7 @@
         <p class="subtitle">Access Instrumenta tools</p>
         <button class="btn-primary" id="signin-btn">Sign In</button>
         <div class="auth-msg" id="auth-msg"></div>
-        <div class="card-footer">Instrumenta.cf</div>
+        <div class="card-footer">instrumenta.cc</div>
     </div>
 </div>
 
@@ -678,8 +678,8 @@
 <script>
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const AUTH_URL         = 'https://instrumenta.cf/api/auth.php';
-const API_BASE         = 'https://instrumenta.cf/api/sheets';
+const AUTH_URL         = 'https://instrumenta.cc/api/auth.php';
+const API_BASE         = 'https://instrumenta.cc/api/sheets';
 const FILE_ID          = '00bc049ff4cd67c83313bc34';
 const SHEET_ID         = 'sheet-1';
 const TABLE_ID         = 'table-1774359687333-ovn2m';
@@ -962,7 +962,7 @@ async function validateToken(token) {
 
 function openLoginPopup() {
     const popup = window.open(
-        'https://instrumenta.cf/mobilelogin.php',
+        'https://instrumenta.cc/mobilelogin.php',
         'Login',
         'width=400,height=580,scrollbars=yes,resizable=yes'
     );
@@ -972,7 +972,7 @@ function openLoginPopup() {
 }
 
 window.addEventListener('message', async (event) => {
-    if (event.origin !== 'https://instrumenta.cf') return;
+    if (event.origin !== 'https://instrumenta.cc') return;
     if (event.data?.type !== 'AUTH_SUCCESS') return;
     const token = event.data.token || event.data.apikey;
     if (!token) return;

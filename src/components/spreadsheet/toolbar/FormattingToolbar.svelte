@@ -423,6 +423,28 @@
         applyFormatting("underline", newValue);
     }
 
+    // The effective font size for display and +/- stepping:
+    // During inline editing, prefer the run-level size at the selection over cell-level.
+    let displayFontSize = $derived.by(() => {
+        if (editSessionState.isEditing) {
+            const s = editSessionState.inlineSelFontSize;
+            if (typeof s === 'number') return s;
+            if (s === 'mixed') return '';
+        }
+        const sf = selectedFormatting?.fontSize;
+        if (sf === 'mixed') return '';
+        return sf || 12;
+    });
+
+    function getStepBaseFontSize() {
+        if (editSessionState.isEditing) {
+            const s = editSessionState.inlineSelFontSize;
+            if (typeof s === 'number') return s;
+        }
+        const sf = selectedFormatting?.fontSize;
+        return typeof sf === 'number' ? sf : 12;
+    }
+
     // Font size handler
     function handleFontSizeChange(e) {
         const size = parseInt(e.target.value, 10);
@@ -432,13 +454,13 @@
     }
 
     function decrementFontSize() {
-        const current = selectedFormatting?.fontSize || 12;
+        const current = getStepBaseFontSize();
         const idx = fontSizes.findLastIndex(s => s < current);
         if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
     }
 
     function incrementFontSize() {
-        const current = selectedFormatting?.fontSize || 12;
+        const current = getStepBaseFontSize();
         const idx = fontSizes.findIndex(s => s > current);
         if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
     }
@@ -745,7 +767,7 @@
         <input
             type="text"
             class="font-size-input"
-            value={selectedFormatting?.fontSize || 12}
+            value={displayFontSize}
             onchange={handleFontSizeChange}
             disabled={!hasSelection}
             size="3"

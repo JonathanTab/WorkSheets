@@ -18,9 +18,9 @@ import { createSvelteRegistry } from '../lib/FileRegistry/svelte/index.js';
 import { authStore } from './authStore.js';
 
 const APP_NAME = 'scriptorium';
-const BASE_URL = 'https://instrumenta.cf/api/storage.php';
-const WS_URL = 'wss://instrumenta.cf/congruum/';
-const BLOB_URL = 'https://instrumenta.cf/api/blob-storage.php';
+const BASE_URL = 'https://instrumenta.cc/api/storage.php';
+const WS_URL = 'wss://instrumenta.cc/congruum/';
+const BLOB_URL = 'https://instrumenta.cc/api/blob-storage.php';
 
 export const storage = createSvelteRegistry({
     appName: APP_NAME,

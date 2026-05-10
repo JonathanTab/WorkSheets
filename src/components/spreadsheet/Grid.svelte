@@ -3383,8 +3383,9 @@
             const tfr = (value !== null && typeof value === 'object' && 'tfr' in value)
                 ? value.tfr : null;
             persistCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
-            if (entryInfo?.table)
-                lastTableEntryEditInfo = { row: editRow, col: editCol, table: entryInfo.table };
+            lastTableEntryEditInfo = entryInfo?.table
+                ? { row: editRow, col: editCol, table: entryInfo.table }
+                : null;
             if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
                 spreadsheetSession.setActiveSheet(editingSheetId);
         } else {

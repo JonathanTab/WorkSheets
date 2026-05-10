@@ -45,11 +45,11 @@ try {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const PORT            = Number(process.env.PORT            ?? 3456);
+const PORT = Number(process.env.PORT ?? 3456);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '*').split(',').map(s => s.trim());
-const BASE_URL        = process.env.STORAGE_BASE_URL  ?? 'https://instrumenta.cf/api/storage.php';
-const BLOB_URL        = process.env.BLOB_STORAGE_URL  ?? 'https://instrumenta.cf/api/blob-storage.php';
-const WS_URL          = process.env.YJS_WS_URL        ?? 'wss://instrumenta.cf/congruum/';
+const BASE_URL = process.env.STORAGE_BASE_URL ?? 'https://instrumenta.cc/api/storage.php';
+const BLOB_URL = process.env.BLOB_STORAGE_URL ?? 'https://instrumenta.cc/api/blob-storage.php';
+const WS_URL = process.env.YJS_WS_URL ?? 'wss://instrumenta.cc/congruum/';
 
 // ─── Per-token client cache ──────────────────────────────────────────────────
 // Each unique API key gets its own SpreadsheetClient with a persistent
@@ -102,17 +102,17 @@ server.listen(PORT, () => console.log(`spreadsheet-api listening on :${PORT}`));
  * returns the same values the browser would show.
  */
 function resolveTableColumnOptions(ydoc, tableName, columnId, client) {
-    const sheets  = client.listSheets(ydoc);
-    const nameUp  = tableName.toUpperCase();
-    const colUp   = columnId.toUpperCase();
+    const sheets = client.listSheets(ydoc);
+    const nameUp = tableName.toUpperCase();
+    const colUp = columnId.toUpperCase();
 
     for (const sheet of sheets) {
         const tables = client.listTables(ydoc, sheet.id);
-        const table  = tables.find(t => (t.name ?? '').toUpperCase() === nameUp);
+        const table = tables.find(t => (t.name ?? '').toUpperCase() === nameUp);
         if (!table) continue;
 
         const col = table.columns.find(c =>
-            (c.id   ?? '').toUpperCase() === colUp ||
+            (c.id ?? '').toUpperCase() === colUp ||
             (c.name ?? '').toUpperCase() === colUp
         );
         if (!col) return [];
@@ -137,7 +137,7 @@ function resolveTableColumnOptions(ydoc, tableName, columnId, client) {
  * Formula cells store their last-computed result in the `v` property.
  */
 function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
-    let sheetId  = defaultSheetId;
+    let sheetId = defaultSheetId;
     let cellRange = rangeStr.trim();
 
     // Parse optional cross-sheet prefix: 'Sheet Name'!A1:A10  or  SheetName!A1:A10
@@ -160,7 +160,7 @@ function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
 
     const parts = cellRange.trim().toUpperCase().split(':');
     const start = parseRef(parts[0]);
-    const end   = parts[1] ? parseRef(parts[1]) : start;
+    const end = parts[1] ? parseRef(parts[1]) : start;
     if (!start || !end) return [];
 
     // Resolve a single cell's effective value, evaluating formulas if needed.
@@ -208,8 +208,8 @@ async function route(req, res) {
         return json(res, 401, { error: `Scriptorium auth failed: ${err.message}` });
     }
 
-    const url    = new URL(req.url, 'http://localhost');
-    const p      = url.pathname;
+    const url = new URL(req.url, 'http://localhost');
+    const p = url.pathname;
     const method = req.method;
     let m;
 
@@ -228,7 +228,7 @@ async function route(req, res) {
 
     // GET /file/:fileId/sheet/:sheetId/tables
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/tables$/))) {
-        const ydoc   = await openDoc(client, m[1]);
+        const ydoc = await openDoc(client, m[1]);
         const tables = client.listTables(ydoc, m[2]);
         return json(res, 200, tables.map(t => ({ id: t.id, name: t.name, mode: t.mode })));
     }
@@ -236,18 +236,18 @@ async function route(req, res) {
     // GET /file/:fileId/sheet/:sheetId/table/:tableId/schema
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/schema$/))) {
         const [, fileId, sheetId, tableId] = m;
-        const ydoc   = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId);
         const tables = client.listTables(ydoc, sheetId);
-        const table  = tables.find(t => t.id === tableId);
+        const table = tables.find(t => t.id === tableId);
         if (!table) return json(res, 404, { error: `Table "${tableId}" not found` });
 
         const sheets = client.listSheets(ydoc);
         const columns = table.columns.map(col => {
             const base = {
-                id:        col.id,
-                name:      col.name,
-                type:      col.type      ?? null,
-                required:  col.required  ?? false,
+                id: col.id,
+                name: col.name,
+                type: col.type ?? null,
+                required: col.required ?? false,
                 isFormula: col.isNonEntry ?? false,
             };
             if (col.typeConfig) {
@@ -271,7 +271,7 @@ async function route(req, res) {
     // GET /file/:fileId/sheet/:sheetId/table/:tableId/rows[?colNames=1&formulas=1]
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
         const [, fileId, sheetId, tableId] = m;
-        const useNames    = url.searchParams.get('colNames') === '1';
+        const useNames = url.searchParams.get('colNames') === '1';
         const withFormulas = url.searchParams.get('formulas') !== '0'; // default on
         const ydoc = await openDoc(client, fileId);
 
@@ -281,8 +281,8 @@ async function route(req, res) {
             : client.getTableRows(ydoc, sheetId, tableId);
 
         if (useNames) {
-            const tables  = client.listTables(ydoc, sheetId);
-            const table   = tables.find(t => t.id === tableId);
+            const tables = client.listTables(ydoc, sheetId);
+            const table = tables.find(t => t.id === tableId);
             const idToName = table
                 ? new Map(table.columns.map(c => [c.id, c.name]))
                 : new Map();
@@ -298,8 +298,8 @@ async function route(req, res) {
     // POST /file/:fileId/sheet/:sheetId/table/:tableId/rows
     if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
         const [, fileId, sheetId, tableId] = m;
-        const body     = await readJsonBody(req);
-        const ydoc     = await openDoc(client, fileId);
+        const body = await readJsonBody(req);
+        const ydoc = await openDoc(client, fileId);
         const resolved = client.resolveColumnNames(ydoc, sheetId, tableId, body);
         client.insertTableRow(ydoc, sheetId, tableId, resolved);
         return json(res, 200, { ok: true });
@@ -331,11 +331,11 @@ async function route(req, res) {
     // POST /blobs  (raw binary body; Content-Type, X-Filename, X-Parent-Id headers)
     if (method === 'POST' && p === '/blobs') {
         const mimeType = req.headers['content-type'] ?? 'application/octet-stream';
-        const filename = req.headers['x-filename']   ?? 'upload';
-        const parentId = req.headers['x-parent-id']  ?? null;
-        const chunks   = [];
+        const filename = req.headers['x-filename'] ?? 'upload';
+        const parentId = req.headers['x-parent-id'] ?? null;
+        const chunks = [];
         for await (const chunk of req) chunks.push(chunk);
-        const buf  = Buffer.concat(chunks);
+        const buf = Buffer.concat(chunks);
         const blob = await client.uploadBlob(
             { title: filename, filename, mimeType, size: buf.length, parentId },
             buf,

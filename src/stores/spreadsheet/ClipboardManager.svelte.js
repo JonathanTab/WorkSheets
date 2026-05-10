@@ -35,6 +35,8 @@
  *   allow context menu paste to use the full-fidelity in-memory data.
  */
 
+import { buildRenderRuns, normalizeTfr } from './textFormatRuns.js';
+
 // ─── MIME types ──────────────────────────────────────────────────────────────
 
 /** App-specific MIME — readable via native copy/paste events (Firefox, Safari) */
@@ -334,6 +336,7 @@ class ClipboardManager {
                     v:            cell.exists ? cell.v : (dispVal !== '' ? dispVal : null),
                     isFormula:    cell.exists && cell.v && String(cell.v).startsWith('='),
                     displayValue: dispVal !== '' ? dispVal : null,
+                    tfr:          cell.tfr              || null,
                     ct:           ct            || null,
                     numberFormat: cell.numberFormat     || null,
                     fontFamily:   cell.fontFamily       || null,
@@ -526,18 +529,13 @@ class ClipboardManager {
                 if (cell.wrapText === false) styles.push('white-space:nowrap');
 
                 const styleAttr  = ` style="${styles.join(';')}"`;
-                const displayVal = this.escapeHtml(String(cell.displayValue ?? cell.v ?? ''));
-
                 let spanAttrs = '';
                 if (mergeInfo?.isPrimary) {
                     if (mergeInfo.rowspan > 1) spanAttrs += ` rowspan="${mergeInfo.rowspan}"`;
                     if (mergeInfo.colspan > 1) spanAttrs += ` colspan="${mergeInfo.colspan}"`;
                 }
 
-                const content = cell.url
-                    ? `<a href="${this.escapeHtml(cell.url)}">${displayVal}</a>`
-                    : displayVal;
-
+                const content = this._cellContentHtml(cell);
                 html += `<td${spanAttrs}${styleAttr}>${content}</td>`;
             }
             html += '</tr>';
@@ -545,6 +543,41 @@ class ClipboardManager {
 
         html += '</table>';
         return html;
+    }
+
+    _cellContentHtml(cell) {
+        const str = String(cell.v ?? cell.displayValue ?? '');
+        if (cell.tfr && str) return this._serializeRichTextHtml(str, cell.tfr);
+        const escaped = this.escapeHtml(str);
+        return cell.url ? `<a href="${this.escapeHtml(cell.url)}">${escaped}</a>` : escaped;
+    }
+
+    _serializeRichTextHtml(plainText, tfr) {
+        const runs = buildRenderRuns(plainText, tfr);
+        return runs.map(run => {
+            const parts   = run.t.split('\n');
+            const encoded = parts.map((part, idx) => {
+                const esc = this.escapeHtml(part);
+                return idx < parts.length - 1 ? (esc ? `${esc}<br>` : '<br>') : esc;
+            }).join('');
+
+            const styles = [];
+            if (run.f)           styles.push(`font-size:${Math.round(run.f * 0.75)}pt`);
+            if (run.ff)          styles.push(`font-family:${run.ff}`);
+            if (run.b === true)  styles.push('font-weight:bold');
+            if (run.b === false) styles.push('font-weight:normal');
+            if (run.i === true)  styles.push('font-style:italic');
+            if (run.i === false) styles.push('font-style:normal');
+            const dec = [];
+            if (run.u) dec.push('underline');
+            if (run.s) dec.push('line-through');
+            if (dec.length) styles.push(`text-decoration:${dec.join(' ')}`);
+            if (run.c) styles.push(`color:${run.c}`);
+
+            const styleAttr = styles.length ? ` style="${styles.join(';')}"` : '';
+            if (run.link) return `<a href="${this.escapeHtml(run.link)}"${styleAttr}>${encoded}</a>`;
+            return styles.length ? `<span${styleAttr}>${encoded}</span>` : encoded;
+        }).join('');
     }
 
     escapeHtml(text) {
@@ -656,22 +689,34 @@ class ClipboardManager {
     }
 
     parseHTMLCell(td, tdStyle, isGoogleSheets) {
+        const styleProps = this.parseHTMLStyleProps(tdStyle);
+
+        // Try rich-text parse: multiple spans with varying styles → tfr
+        const richResult = this._parseInnerSpansToTfr(td);
+        if (richResult) {
+            return {
+                v:            richResult.plainText,
+                displayValue: richResult.plainText || null,
+                isFormula:    false,
+                ...styleProps,
+                tfr: richResult.tfr,
+            };
+        }
+
+        // Plain cell: extract text + optional whole-cell anchor link
         const anchor  = td.querySelector('a');
         let url       = null;
         let rawText   = td.textContent?.trim() ?? '';
-
         if (anchor) {
             url     = anchor.getAttribute('href') || null;
             rawText = anchor.textContent?.trim() || rawText;
         }
 
-        const styleProps = this.parseHTMLStyleProps(tdStyle);
-
-        // Infer font-size from inner spans if not on td
+        // Infer font-size from inner spans when absent from td style
         if (!styleProps.fontSize) {
             for (const span of td.querySelectorAll('span[style]')) {
-                const spanProps = this.parseHTMLStyleProps(span.getAttribute('style') || '');
-                if (spanProps.fontSize) { styleProps.fontSize = spanProps.fontSize; break; }
+                const sp = this.parseHTMLStyleProps(span.getAttribute('style') || '');
+                if (sp.fontSize) { styleProps.fontSize = sp.fontSize; break; }
             }
         }
 
@@ -679,6 +724,122 @@ class ClipboardManager {
         const cell  = { v, displayValue: rawText || null, isFormula: false, ...styleProps };
         if (url) cell.url = url;
         return cell;
+    }
+
+    /**
+     * Walk the inner DOM of a <td> to collect text runs with accumulated inline styles.
+     * Returns { plainText, tfr } when multiple distinct run styles are found (rich text),
+     * or null when the cell is plain / uniformly styled (cell-level props suffice).
+     */
+    _parseInnerSpansToTfr(td) {
+        const flatRuns = [];
+
+        function walk(node, style) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                const text = node.textContent;
+                if (!text) return;
+                const last = flatRuns[flatRuns.length - 1];
+                if (last && last._key === style._key) {
+                    last.text += text;
+                } else {
+                    flatRuns.push({ text, ...style });
+                }
+                return;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+            const tag = node.tagName.toLowerCase();
+            if (tag === 'br') {
+                if (flatRuns.length > 0) flatRuns[flatRuns.length - 1].text += '\n';
+                else flatRuns.push({ text: '\n', _key: '{}' });
+                return;
+            }
+
+            // Accumulate style from this element
+            const s    = { ...style };
+            const cs   = node.style;
+            if (cs) {
+                if (cs.fontWeight === 'bold')         s.bold = true;
+                else if (cs.fontWeight === 'normal')  delete s.bold;
+                if (cs.fontStyle  === 'italic')       s.italic = true;
+                else if (cs.fontStyle === 'normal')   delete s.italic;
+                if (cs.textDecoration) {
+                    if (cs.textDecoration.includes('underline'))    s.underline = true;
+                    if (cs.textDecoration.includes('line-through')) s.strikethrough = true;
+                }
+                if (cs.color)      s.foregroundColor = cs.color;
+                if (cs.fontSize) {
+                    const m = cs.fontSize.match(/^(\d+(?:\.\d+)?)(pt|px|em|rem)$/);
+                    if (m) {
+                        const v = parseFloat(m[1]);
+                        s.fontSize = m[2] === 'pt' ? Math.round(v * 4 / 3)
+                                   : m[2] === 'px' ? Math.round(v)
+                                   : Math.round(v * 16);
+                    }
+                }
+                if (cs.fontFamily) s.fontFamily = cs.fontFamily.trim().replace(/^['"]|['"]$/g, '');
+            }
+            if (tag === 'b' || tag === 'strong') s.bold = true;
+            if (tag === 'i' || tag === 'em')     s.italic = true;
+            if (tag === 'u')                     s.underline = true;
+            if (tag === 's' || tag === 'strike') s.strikethrough = true;
+            const dataLink = node.getAttribute?.('data-link');
+            if (dataLink) s.link = { uri: dataLink };
+            if (tag === 'a') {
+                const href = node.getAttribute('href');
+                if (href && !href.startsWith('#') && !href.startsWith('javascript:')) s.link = { uri: href };
+            }
+
+            // Recompute cache key after accumulating styles for this element
+            const { _key: _old, text: _t, ...fmt } = s;
+            s._key = JSON.stringify(fmt);
+
+            for (const child of node.childNodes) walk(child, s);
+        }
+
+        // Walk children of td with empty initial style
+        for (const child of td.childNodes) walk(child, { _key: '{}' });
+
+        if (flatRuns.length === 0) return null;
+
+        // No formatting at all → let cell-level props handle it
+        const hasFormatting = flatRuns.some(r => r._key !== '{}');
+        if (!hasFormatting) return null;
+
+        // All runs identical → uniform style, no run-level variation needed
+        const firstKey = flatRuns[0]._key;
+        if (flatRuns.every(r => r._key === firstKey)) return null;
+
+        const plainText = flatRuns.map(r => r.text).join('');
+        if (!plainText) return null;
+
+        // Build tfr from flat runs
+        let offset  = 0;
+        const tfrRuns = [];
+        let prevKey = '';
+        for (const run of flatRuns) {
+            const { text, _key, ...rawStyle } = run;
+            const fmt = {};
+            if (rawStyle.bold !== undefined)        fmt.bold            = rawStyle.bold;
+            if (rawStyle.italic !== undefined)      fmt.italic          = rawStyle.italic;
+            if (rawStyle.underline)                 fmt.underline       = true;
+            if (rawStyle.strikethrough)             fmt.strikethrough   = true;
+            if (rawStyle.foregroundColor)           fmt.foregroundColor = rawStyle.foregroundColor;
+            if (rawStyle.fontSize)                  fmt.fontSize        = rawStyle.fontSize;
+            if (rawStyle.fontFamily)                fmt.fontFamily      = rawStyle.fontFamily;
+            if (rawStyle.link)                      fmt.link            = rawStyle.link;
+            const key = JSON.stringify(fmt);
+            if (key !== prevKey) {
+                tfrRuns.push({ startIndex: offset, format: fmt });
+                prevKey = key;
+            }
+            offset += text.length;
+        }
+
+        const tfr = normalizeTfr(tfrRuns, plainText.length);
+        if (!tfr) return null;
+
+        return { plainText, tfr };
     }
 
     parseHTMLStyleProps(style) {
@@ -1504,7 +1665,11 @@ class ClipboardManager {
         if (cell.isFormula && isInternal && cell.v) {
             sheetStore.setCellFormula(row, col, this.adjustFormula(cell.v, rowOffset, colOffset));
         } else if (cell.v !== null && cell.v !== undefined) {
-            sheetStore.setCellValue(row, col, cell.v);
+            if (cell.tfr) {
+                sheetStore.setCellValueWithRuns(row, col, String(cell.v), cell.tfr);
+            } else {
+                sheetStore.setCellValue(row, col, cell.v);
+            }
         }
     }
 
@@ -1513,11 +1678,16 @@ class ClipboardManager {
         // result is stored, not the formula string.
         // For regular cells: prefer cell.v to preserve typed values (booleans, numbers).
         // Falling back to the opposite ensures something is stored when one is null.
-        const value = (cell.isFormula || cell.formula)
+        const isFormulaCell = cell.isFormula || cell.formula;
+        const value = isFormulaCell
             ? (cell.displayValue ?? cell.v)
             : (cell.v ?? cell.displayValue);
         if (value !== null && value !== undefined) {
-            sheetStore.setCellValue(row, col, value);
+            if (!isFormulaCell && cell.tfr) {
+                sheetStore.setCellValueWithRuns(row, col, String(value), cell.tfr);
+            } else {
+                sheetStore.setCellValue(row, col, value);
+            }
         }
     }
 

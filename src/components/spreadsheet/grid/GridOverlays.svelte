@@ -25,6 +25,7 @@
         applyFormatToRange,
         toggleFormatInRange,
         getFormatAtIndex,
+        queryFormatInRange,
         getCharOffset,
         restoreSelection,
         normalizeTfr,
@@ -49,6 +50,7 @@
 
     let cellEditInputEl = $state(null);
     let richEditEl      = $state(null);
+    let _suppressNextBlur = false;
 
     // Saved selection offsets — updated on every selectionchange while the rich
     // editor is focused, so toolbar interactions that move focus (font-size input,
@@ -157,11 +159,13 @@
                 const range = sel.getRangeAt(0);
                 savedSelStart = getCharOffset(richEditEl, range.startContainer, range.startOffset);
                 savedSelEnd   = getCharOffset(richEditEl, range.endContainer,   range.endOffset);
+                _updateInlineSelFontSize();
             }
             document.addEventListener('selectionchange', onSelectionChange);
 
             return () => {
                 editSessionState.applyInlineFormat = null;
+                editSessionState.inlineSelFontSize = null;
                 document.removeEventListener('selectionchange', onSelectionChange);
             };
         }
@@ -174,6 +178,29 @@
         const { plainText, tfr } = htmlToTfr(richEditEl.innerHTML);
         editSessionState.livePlainText = plainText || richEditEl.innerText || '';
         editSessionState.liveTfr       = tfr;
+        _updateInlineSelFontSize();
+    }
+
+    function _updateInlineSelFontSize() {
+        const tfr = editSessionState.liveTfr;
+        if (!tfr) { editSessionState.inlineSelFontSize = null; return; }
+        const plainText = editSessionState.livePlainText ?? '';
+        const textLen   = plainText.length;
+        if (textLen === 0 || savedSelStart < 0) { editSessionState.inlineSelFontSize = null; return; }
+
+        const start = Math.max(0, savedSelStart);
+        const end   = savedSelEnd;
+
+        let size;
+        if (end <= start) {
+            size = getFormatAtIndex(tfr, Math.min(start, textLen - 1))?.fontSize ?? null;
+        } else {
+            const clampedEnd = Math.min(end, textLen);
+            if (start >= clampedEnd) { editSessionState.inlineSelFontSize = null; return; }
+            const val = queryFormatInRange(tfr, start, clampedEnd, textLen, 'fontSize');
+            size = (val === undefined) ? null : val; // keep 'mixed' as-is
+        }
+        editSessionState.inlineSelFontSize = size ?? null;
     }
 
     // ── Commit helpers ────────────────────────────────────────────────────────
@@ -201,6 +228,7 @@
 
     function handleRichBlur() {
         if (!richEditEl) return;
+        if (_suppressNextBlur) { _suppressNextBlur = false; return; }
         const html      = richEditEl.innerHTML;
         const innerText = richEditEl.innerText;
 
@@ -233,11 +261,13 @@
     function handleRichKeydown(e) {
         if (e.key === 'Escape') {
             e.stopPropagation();
+            _suppressNextBlur = true;
             onCancelEdit?.();
         } else if (e.key === 'Tab') {
             e.stopPropagation();
             e.preventDefault();
             if (onTabCommit) {
+                _suppressNextBlur = true;
                 _commitRichFromElement();
                 onTabCommit(e.shiftKey ? -1 : 1, 'tab');
             } else {
@@ -247,9 +277,11 @@
             e.stopPropagation();
             e.preventDefault();
             if (onTabCommit) {
+                _suppressNextBlur = true;
                 _commitRichFromElement();
                 onTabCommit(1);
             } else {
+                _suppressNextBlur = true;
                 _commitRichFromElement();
             }
         } else if (e.key === 'Enter' && e.ctrlKey) {

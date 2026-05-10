@@ -119,7 +119,7 @@
             editSessionState.beginEdit(
                 selectedCell.row,
                 selectedCell.col,
-                rawVal,
+                editStartValue(),
                 "formulaBar",
                 { sheetId: spreadsheetSession.activeSheetId },
             );

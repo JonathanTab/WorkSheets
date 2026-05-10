@@ -27,9 +27,9 @@ import { NodeYjsRuntime } from './runtime.js';
 import * as ops from './operations.js';
 
 const DEFAULTS = {
-    baseUrl: 'https://instrumenta.cf/api/storage.php',
-    blobUrl: 'https://instrumenta.cf/api/blob-storage.php',
-    wsUrl:   'wss://instrumenta.cf/congruum/',
+    baseUrl: 'https://instrumenta.cc/api/storage.php',
+    blobUrl: 'https://instrumenta.cc/api/blob-storage.php',
+    wsUrl: 'wss://instrumenta.cc/congruum/',
 };
 
 export class SpreadsheetClient {
@@ -44,12 +44,12 @@ export class SpreadsheetClient {
         const { apiKey, baseUrl, blobUrl, wsUrl } = { ...DEFAULTS, ...opts };
         if (!apiKey) throw new Error('SpreadsheetClient: apiKey is required');
 
-        this._apiKey  = apiKey;
-        this._api     = new StorageAPI(baseUrl, blobUrl, () => apiKey);
+        this._apiKey = apiKey;
+        this._api = new StorageAPI(baseUrl, blobUrl, () => apiKey);
         this._runtime = new NodeYjsRuntime(wsUrl, apiKey);
 
         /** @type {Map<string, import('yjs').Doc>} fileId → ydoc */
-        this._docs  = new Map();
+        this._docs = new Map();
         /** @type {Map<string, object>} id → FileDescriptor */
         this._files = new Map();
     }
@@ -115,7 +115,7 @@ export class SpreadsheetClient {
     findFile(title, opts = {}) {
         for (const f of this._files.values()) {
             if (f.deleted) continue;
-            if (opts.app   && f.app   !== opts.app)   continue;
+            if (opts.app && f.app !== opts.app) continue;
             if (opts.scope && f.scope !== opts.scope) continue;
             if (f.title === title) return f;
         }
@@ -152,34 +152,34 @@ export class SpreadsheetClient {
 
     // ─── Sheets ─────────────────────────────────────────────────────────────
 
-    listSheets(ydoc)                    { return ops.listSheets(ydoc); }
-    getSheetMeta(ydoc, sheetId)         { return ops.getSheetMeta(ydoc, sheetId); }
-    createSheet(ydoc, name, opts)       { return ops.createSheet(ydoc, name, opts); }
-    renameSheet(ydoc, sheetId, name)    { return ops.renameSheet(ydoc, sheetId, name); }
-    deleteSheet(ydoc, sheetId)          { return ops.deleteSheet(ydoc, sheetId); }
+    listSheets(ydoc) { return ops.listSheets(ydoc); }
+    getSheetMeta(ydoc, sheetId) { return ops.getSheetMeta(ydoc, sheetId); }
+    createSheet(ydoc, name, opts) { return ops.createSheet(ydoc, name, opts); }
+    renameSheet(ydoc, sheetId, name) { return ops.renameSheet(ydoc, sheetId, name); }
+    deleteSheet(ydoc, sheetId) { return ops.deleteSheet(ydoc, sheetId); }
 
     // ─── Cells ──────────────────────────────────────────────────────────────
 
-    getCell(ydoc, sheetId, row, col)              { return ops.getCell(ydoc, sheetId, row, col); }
-    setCell(ydoc, sheetId, row, col, value, props){ return ops.setCell(ydoc, sheetId, row, col, value, props); }
-    clearCell(ydoc, sheetId, row, col)            { return ops.clearCell(ydoc, sheetId, row, col); }
-    getRange(ydoc, sheetId, r1, c1, r2, c2)       { return ops.getRange(ydoc, sheetId, r1, c1, r2, c2); }
-    setRange(ydoc, sheetId, r, c, values, props)  { return ops.setRange(ydoc, sheetId, r, c, values, props); }
-    clearRange(ydoc, sheetId, r1, c1, r2, c2)     { return ops.clearRange(ydoc, sheetId, r1, c1, r2, c2); }
+    getCell(ydoc, sheetId, row, col) { return ops.getCell(ydoc, sheetId, row, col); }
+    setCell(ydoc, sheetId, row, col, value, props) { return ops.setCell(ydoc, sheetId, row, col, value, props); }
+    clearCell(ydoc, sheetId, row, col) { return ops.clearCell(ydoc, sheetId, row, col); }
+    getRange(ydoc, sheetId, r1, c1, r2, c2) { return ops.getRange(ydoc, sheetId, r1, c1, r2, c2); }
+    setRange(ydoc, sheetId, r, c, values, props) { return ops.setRange(ydoc, sheetId, r, c, values, props); }
+    clearRange(ydoc, sheetId, r1, c1, r2, c2) { return ops.clearRange(ydoc, sheetId, r1, c1, r2, c2); }
 
     // ─── Tables ─────────────────────────────────────────────────────────────
 
-    listTables(ydoc, sheetId)                          { return ops.listTables(ydoc, sheetId); }
-    findTableByName(ydoc, sheetId, name)               { return ops.findTableByName(ydoc, sheetId, name); }
-    resolveColumnNames(ydoc, sheetId, tableId, data)   { return ops.resolveColumnNames(ydoc, sheetId, tableId, data); }
-    getTableRows(ydoc, sheetId, tableId)               { return ops.getTableRows(ydoc, sheetId, tableId); }
+    listTables(ydoc, sheetId) { return ops.listTables(ydoc, sheetId); }
+    findTableByName(ydoc, sheetId, name) { return ops.findTableByName(ydoc, sheetId, name); }
+    resolveColumnNames(ydoc, sheetId, tableId, data) { return ops.resolveColumnNames(ydoc, sheetId, tableId, data); }
+    getTableRows(ydoc, sheetId, tableId) { return ops.getTableRows(ydoc, sheetId, tableId); }
     /** Like getTableRows() but also evaluates formula/computed columns. */
-    getTableRowsWithFormulas(ydoc, sheetId, tableId)   { return ops.getTableRowsWithFormulas(ydoc, sheetId, tableId); }
-    findTableRows(ydoc, sheetId, tableId, where)       { return ops.findTableRows(ydoc, sheetId, tableId, where); }
-    insertTableRow(ydoc, sheetId, tableId, rowData)    { return ops.insertTableRow(ydoc, sheetId, tableId, rowData); }
-    updateTableRow(ydoc, sheetId, tableId, idx, data)  { return ops.updateTableRow(ydoc, sheetId, tableId, idx, data); }
-    upsertTableRow(ydoc, sheetId, tableId, where, data){ return ops.upsertTableRow(ydoc, sheetId, tableId, where, data); }
-    deleteTableRow(ydoc, sheetId, tableId, rowIndex)   { return ops.deleteTableRow(ydoc, sheetId, tableId, rowIndex); }
+    getTableRowsWithFormulas(ydoc, sheetId, tableId) { return ops.getTableRowsWithFormulas(ydoc, sheetId, tableId); }
+    findTableRows(ydoc, sheetId, tableId, where) { return ops.findTableRows(ydoc, sheetId, tableId, where); }
+    insertTableRow(ydoc, sheetId, tableId, rowData) { return ops.insertTableRow(ydoc, sheetId, tableId, rowData); }
+    updateTableRow(ydoc, sheetId, tableId, idx, data) { return ops.updateTableRow(ydoc, sheetId, tableId, idx, data); }
+    upsertTableRow(ydoc, sheetId, tableId, where, data) { return ops.upsertTableRow(ydoc, sheetId, tableId, where, data); }
+    deleteTableRow(ydoc, sheetId, tableId, rowIndex) { return ops.deleteTableRow(ydoc, sheetId, tableId, rowIndex); }
 
     // ─── Blobs ──────────────────────────────────────────────────────────────
 
@@ -191,14 +191,14 @@ export class SpreadsheetClient {
      */
     async uploadBlob(opts, data) {
         const file = await this._api.createFile({
-            type:     'blob',
-            title:    opts.title,
+            type: 'blob',
+            title: opts.title,
             mimeType: opts.mimeType ?? 'application/octet-stream',
-            size:     opts.size     ?? null,
+            size: opts.size ?? null,
             filename: opts.filename ?? opts.title ?? null,
             parentId: opts.parentId ?? null,
-            scope:    opts.scope    ?? 'app',
-            app:      opts.app      ?? 'scriptorium',
+            scope: opts.scope ?? 'app',
+            app: opts.app ?? 'scriptorium',
         });
         const blob = data instanceof Blob ? data : new Blob([data], { type: opts.mimeType ?? 'application/octet-stream' });
         await this._api.uploadBlob(file.id, blob);

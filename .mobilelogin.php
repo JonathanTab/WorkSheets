@@ -190,7 +190,7 @@
     </div>
 
     <div class="footer">
-        Instrumenta.cf
+        Instrumenta.cc
     </div>
 </div>
 

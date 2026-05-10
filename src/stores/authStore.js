@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-const AUTH_URL = 'https://instrumenta.cf/api/auth.php';
+const AUTH_URL = 'https://instrumenta.cc/api/auth.php';
 const USER_CACHE = 'scriptorium:user'; // only stores {username} — not a secret
 const DEV_API_KEY = 'scriptorium:dev_api_key'; // dev-only API key for testing
 
@@ -47,7 +47,7 @@ function createAuthStore() {
     // postMessage fires, so trySessionAuth() will succeed immediately.
     if (browser) {
         messageListener = (event) => {
-            if (event.origin !== 'https://instrumenta.cf') return;
+            if (event.origin !== 'https://instrumenta.cc') return;
             if (event.data?.type === 'AUTH_SUCCESS') trySessionAuth();
         };
         window.addEventListener('message', messageListener);
@@ -179,7 +179,7 @@ function createAuthStore() {
 
         // Open popup BEFORE any await — browsers block popups after async gaps
         const popup = window.open(
-            'https://instrumenta.cf/mobilelogin.php',
+            'https://instrumenta.cc/mobilelogin.php',
             'Login',
             'width=400,height=580,scrollbars=yes,resizable=yes'
         );

@@ -9,7 +9,7 @@
 #
 # Configure these:
 SERVER_USER="${DEPLOY_USER:-jon}"
-SERVER_HOST="${DEPLOY_HOST:-instrumenta.cf}"
+SERVER_HOST="${DEPLOY_HOST:-instrumenta.cc}"
 SERVER_REPO_PATH="${DEPLOY_REPO_PATH:-/var/www/scriptorium}"
 WEBROOT="${DEPLOY_WEBROOT:-/var/www/html}"
 

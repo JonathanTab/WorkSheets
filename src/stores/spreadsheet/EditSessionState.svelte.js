@@ -53,6 +53,14 @@ export class EditSessionState {
     liveTfr = $state(null);
 
     /**
+     * The effective font size at the current inline selection or cursor position.
+     * Updated by GridOverlays on selectionchange and after every _syncLive.
+     * null = no run-level override (cell-level applies), 'mixed' = multiple values.
+     * @type {number | 'mixed' | null}
+     */
+    inlineSelFontSize = $state(null);
+
+    /**
      * Callback set by GridOverlays so the toolbar can apply inline formatting
      * to the current text selection.
      * Signature: (prop: string, value: any) => boolean
@@ -275,12 +283,13 @@ export class EditSessionState {
     }
 
     #stopEditing() {
-        this.phase          = 'idle';
-        this.cell           = null;
-        this.draft          = '';
-        this.initialTfr     = null;
-        this.livePlainText  = null;
-        this.liveTfr        = null;
+        this.phase             = 'idle';
+        this.cell              = null;
+        this.draft             = '';
+        this.initialTfr        = null;
+        this.livePlainText     = null;
+        this.liveTfr           = null;
+        this.inlineSelFontSize = null;
         this.applyInlineFormat = null;
         this.cursorStart    = 0;
         this.cursorEnd      = 0;

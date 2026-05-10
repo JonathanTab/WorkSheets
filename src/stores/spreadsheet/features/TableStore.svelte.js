@@ -599,7 +599,7 @@ export class TableStore {
             const srcDefsMap = src.get("columnDefs");
             const srcOrderArr = src.get("columnOrder");
             if (srcDefsMap && srcOrderArr) {
-                const colObs = () => this.#syncColumns();
+                const colObs = () => { this.#syncColumns(); this.#rebuildView(); };
                 srcDefsMap.observeDeep(colObs);
                 srcOrderArr.observe(colObs);
                 this.#observers.push(() => {
@@ -629,7 +629,7 @@ export class TableStore {
             const defsMap = m.get("columnDefs");
             const orderArr = m.get("columnOrder");
             if (defsMap && orderArr) {
-                const colObs = () => this.#syncColumns();
+                const colObs = () => { this.#syncColumns(); this.#rebuildView(); };
                 defsMap.observeDeep(colObs);
                 orderArr.observe(colObs);
                 this.#observers.push(() => {
@@ -1589,6 +1589,11 @@ export class TableStore {
     getFullRowCount() {
         if (this.#sourceStore) return this.#sourceStore.getFullRowCount();
         return this.rows.length;
+    }
+
+    /** Rebuild the formula evaluator — called when an external table this one references changes. */
+    invalidate() {
+        this.#rebuildView();
     }
 
     getFullValue(rawIndex, colId) {

@@ -61,6 +61,7 @@
 
 import { parseFormula } from '../../../formulas/parser.js';
 import { evaluate } from '../../../formulas/evaluator.js';
+import { parseLocalDate } from '../cellTypes/types/date.js';
 
 // ─── Shared formula helpers ───────────────────────────────────────────────────
 
@@ -110,14 +111,15 @@ export function resultToExpr(val) {
 /** Compare a row value against a filter condition. */
 export function matchCondition(rowVal, op, filterVal) {
     const rv = rowVal, fv = filterVal;
-    if (typeof rv === 'string' && typeof fv === 'string' && rv.includes('-') && fv.includes('-')) {
-        const rvD = Date.parse(rv), fvD = Date.parse(fv);
-        if (!isNaN(rvD) && !isNaN(fvD)) {
+    if (typeof rv === 'string' && typeof fv === 'string') {
+        const rvDate = parseLocalDate(rv), fvDate = parseLocalDate(fv);
+        if (rvDate && fvDate) {
+            const rvT = rvDate.getTime(), fvT = fvDate.getTime();
             switch (op) {
-                case '=': case '==': return rvD === fvD;
-                case '<>': case '!=': return rvD !== fvD;
-                case '>': return rvD > fvD; case '<': return rvD < fvD;
-                case '>=': return rvD >= fvD; case '<=': return rvD <= fvD;
+                case '=': case '==': return rvT === fvT;
+                case '<>': case '!=': return rvT !== fvT;
+                case '>': return rvT > fvT; case '<': return rvT < fvT;
+                case '>=': return rvT >= fvT; case '<=': return rvT <= fvT;
             }
         }
     }
