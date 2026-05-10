@@ -466,6 +466,10 @@
         // tab/currentFolderId are updated by the route-sync $effect
     }
 
+    function goToInstrumentaTools() {
+        window.location.href = "/";
+    }
+
     // ---- File actions ----
     // Accepts a full file/item object (which has .app) or falls back to a plain id lookup.
     function openDocument(itemOrId) {
@@ -1545,43 +1549,44 @@
             </button>
         </div>
 
-        <!-- New Button -->
+        <!-- Sidebar actions -->
         <div class="sidebar-section">
-            <Button
-                onclick={handleCreateSheet}
-                icon={plus}
-                iconPosition="left"
-                className="new-btn"
-            >
-                New Spreadsheet
-            </Button>
-            <Button
-                onclick={handleCreateDoc}
-                icon={plus}
-                iconPosition="left"
-                variant="secondary"
-                className="new-btn"
-            >
-                New Document
-            </Button>
-            <Button
-                onclick={handleCreateSvg}
-                icon={plus}
-                iconPosition="left"
-                variant="secondary"
-                className="new-btn"
-            >
-                New Drawing
-            </Button>
-            <Button
-                onclick={handleCreateFolder}
-                icon={newFolder}
-                iconPosition="left"
-                variant="secondary"
-                className="new-btn"
-            >
-                New Folder
-            </Button>
+            <button class="tools-home-btn" onclick={goToInstrumentaTools}>
+                <span class="tools-home-chevron">{@html chevronRight}</span>
+                <img src="/favicon.svg" alt="" />
+                <span>Instrumenta</span>
+            </button>
+
+            <div class="new-menu-wrap sidebar-new-wrap" bind:this={newMenuTriggerRef}>
+                <Button
+                    onclick={toggleNewMenu}
+                    size="md"
+                    icon={plus}
+                    iconPosition="left"
+                    className="new-btn new-btn-prominent"
+                    fullWidth={true}
+                >
+                    New
+                </Button>
+                {#if newMenuOpen}
+                    <div class="new-menu" bind:this={newMenuRef}>
+                        <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSheet(); }}>
+                            {@html spreadsheet} New Spreadsheet
+                        </button>
+                        <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateDoc(); }}>
+                            {@html fileText} New Document
+                        </button>
+                        <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSvg(); }}>
+                            {@html penTool} New Drawing
+                        </button>
+                        <div class="new-menu-divider"></div>
+                        <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateFolder(); }}>
+                            {@html newFolder} New Folder
+                        </button>
+                    </div>
+                {/if}
+            </div>
+
             <Button
                 onclick={handleUploadFiles}
                 icon={upload}
@@ -1757,33 +1762,6 @@
                 </div>
             </div>
             <div class="header-actions">
-                <div class="new-menu-wrap mobile-hidden" bind:this={newMenuTriggerRef}>
-                    <Button
-                        onclick={toggleNewMenu}
-                        size="sm"
-                        icon={plus}
-                        iconPosition="left"
-                    >
-                        New
-                    </Button>
-                    {#if newMenuOpen}
-                        <div class="new-menu" bind:this={newMenuRef}>
-                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSheet(); }}>
-                                {@html spreadsheet} New Spreadsheet
-                            </button>
-                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateDoc(); }}>
-                                {@html fileText} New Document
-                            </button>
-                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateSvg(); }}>
-                                {@html penTool} New Drawing
-                            </button>
-                            <div class="new-menu-divider"></div>
-                            <button class="new-menu-item" onclick={() => { closeNewMenu(); handleCreateFolder(); }}>
-                                {@html newFolder} New Folder
-                            </button>
-                        </div>
-                    {/if}
-                </div>
                 <UserMenu {registry} />
             </div>
         </header>
@@ -2761,10 +2739,89 @@
 
     .sidebar-section {
         padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
     }
 
     .new-btn {
         width: 100%;
+    }
+
+    .tools-home-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+        height: 2rem;
+        padding: 0 0.125rem;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-align: left;
+        cursor: pointer;
+        transition:
+            color 0.15s,
+            transform 0.15s;
+    }
+
+    .tools-home-btn:hover {
+        color: var(--color-text);
+    }
+
+    .tools-home-btn:active {
+        transform: translateY(1px);
+    }
+
+    .tools-home-btn img {
+        width: 1rem;
+        height: 1rem;
+        flex-shrink: 0;
+    }
+
+    .tools-home-btn span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .tools-home-chevron {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-text-muted);
+        transform: rotate(180deg);
+        transition: transform 0.15s, color 0.15s;
+    }
+
+    .tools-home-chevron :global(svg) {
+        width: 0.95rem;
+        height: 0.95rem;
+    }
+
+    .tools-home-btn:hover .tools-home-chevron {
+        color: var(--color-text);
+        transform: translateX(-2px) rotate(180deg);
+    }
+
+    .sidebar-new-wrap {
+        width: 100%;
+    }
+
+    .new-btn-prominent {
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2), 0 6px 14px rgba(0, 119, 255, 0.2);
+        font-weight: 600;
+    }
+
+    .new-btn-prominent:hover {
+        filter: brightness(1.04);
+    }
+
+    .new-btn-prominent:active {
+        transform: translateY(1px);
     }
 
     /* Navigation */
@@ -3159,12 +3216,12 @@
     .new-menu {
         position: absolute;
         top: calc(100% + 4px);
-        right: 0;
+        left: 0;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: 8px;
         box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-        min-width: 170px;
+        min-width: 100%;
         z-index: 200;
         overflow: hidden;
     }
