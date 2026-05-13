@@ -1140,12 +1140,24 @@ export class FileRegistry extends EventEmitter {
 
     /**
      * Create a manual snapshot of an actively open document.
-     * @param {string} fileId @param {string} [description] @returns {Promise<{ id: string }>}
+     * @param {string} fileId
+     * @param {string} [description]
+     * @param {string|null} [appType]  'sheets' | 'docs' | 'svg'
+     * @returns {Promise<{ id: string }>}
      */
-    async createSnapshot(fileId, description) {
+    async createSnapshot(fileId, description, appType) {
         const file = this._files.get(fileId);
         if (!file?.roomId) throw new Error('No active room for file');
-        return this._yjsApi.createSnapshot(file.roomId, description);
+        return this._yjsApi.createSnapshot(file.roomId, description, appType ?? null);
+    }
+
+    /**
+     * Get last-edit metadata for a file from the Yjs server.
+     * @param {string} fileId
+     * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
+     */
+    async getFileMeta(fileId) {
+        return this._yjsApi.getFileMeta(fileId);
     }
 
     /**

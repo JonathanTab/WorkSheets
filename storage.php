@@ -1322,6 +1322,40 @@ try {
             respond(['snapshots' => $data['snapshots'] ?? []]);
         }
 
+        case 'snapshot_create': {
+            // Creates a manual snapshot, forwarding appType supplied by the client.
+            requirePost();
+            $user        = requireAuth();
+            $fileId      = post('file_id');
+            $roomId      = post('room_id');
+            $description = post('description') ?: null;
+            $appType     = post('app_type')   ?: null;
+            if (!$fileId || !$roomId) error('file_id and room_id required');
+            if (!canWriteFile($db, $fileId, $user)) error('Access denied', 403);
+
+            $result = yjsPost('api/snapshots', [
+                'roomId'      => $roomId,
+                'description' => $description,
+                'appType'     => $appType,
+            ]);
+            respond(['id' => $result['id'] ?? null]);
+        }
+
+        case 'file_meta': {
+            // Proxy last-edit metadata from the Yjs server.
+            $user   = requireAuth();
+            $fileId = trim($_GET['file_id'] ?? '');
+            if (!$fileId) error('file_id required');
+            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
+
+            try {
+                $meta = yjsGet('api/files/' . urlencode($fileId) . '/meta');
+                respond($meta);
+            } catch (Exception $e) {
+                respond(['last_edit_at' => null, 'last_edit_by' => null]);
+            }
+        }
+
         case 'snapshot_data': {
             // Returns raw binary — caller (client) decodes as Y.Doc for diffing.
             $user       = requireAuth();

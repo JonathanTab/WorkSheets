@@ -148,31 +148,13 @@ export class YjsRuntime {
 
         const ydoc = new Y.Doc();
 
-        // 1. Persistence first (Offline-first)
+        // 1. Start IndexedDB persistence
         console.log(`[YjsRuntime] Initializing IndexedDB persistence for ${roomId}...`);
         const persistence = new IndexeddbPersistence(roomId, ydoc);
 
-        // Wait for persistence to load local data with timeout
-        await new Promise((resolve) => {
-            if (persistence.synced) {
-                console.log(`[YjsRuntime] Persistence already synced for ${roomId}`);
-                resolve();
-                return;
-            }
-
-            const timeout = setTimeout(() => {
-                console.warn(`[YjsRuntime] Persistence sync timeout for ${roomId}, proceeding anyway`);
-                resolve();
-            }, PERSISTENCE_TIMEOUT);
-
-            persistence.once('synced', () => {
-                clearTimeout(timeout);
-                console.log(`[YjsRuntime] Persistence synced for ${roomId}`);
-                resolve();
-            });
-        });
-
-        // 2. WebSocket second
+        // 2. Start WebSocket in parallel with IndexedDB — on slow devices (e.g. mobile Safari)
+        //    IndexedDB can take seconds to sync. Starting the WebSocket immediately means
+        //    we can resolve as soon as either source delivers data.
         console.log(`[YjsRuntime] Connecting WebSocket for ${roomId}...`);
         /** @type {Record<string, string>} */
         const wsParams = {};
@@ -207,16 +189,50 @@ export class YjsRuntime {
             });
         }
 
-        // 3. If IndexedDB was empty (first time this client opens this doc),
-        // wait for the WebSocket to deliver the server's state before returning.
+        // 3. Wait for IndexedDB OR WebSocket to deliver data, whichever is first.
+        await new Promise((resolve) => {
+            if (persistence.synced) {
+                console.log(`[YjsRuntime] Persistence already synced for ${roomId}`);
+                resolve();
+                return;
+            }
+
+            let resolved = false;
+            const done = () => {
+                if (resolved) return;
+                resolved = true;
+                clearTimeout(timeout);
+                resolve();
+            };
+
+            const timeout = setTimeout(() => {
+                console.warn(`[YjsRuntime] Persistence sync timeout for ${roomId}, proceeding anyway`);
+                done();
+            }, PERSISTENCE_TIMEOUT);
+
+            persistence.once('synced', () => {
+                console.log(`[YjsRuntime] Persistence synced for ${roomId}`);
+                done();
+            });
+
+            // Resolve early if WebSocket delivers server state first (speeds up slow-IndexedDB devices)
+            if (navigator.onLine) {
+                provider.once('sync', () => {
+                    console.log(`[YjsRuntime] WebSocket synced before persistence for ${roomId}`);
+                    done();
+                });
+            }
+        });
+
+        // 4. If no data arrived from either source yet, wait for WebSocket.
         //
         // Why: if the caller initializes the doc structure on an empty doc and
         // the server's state arrives moments later, CRDT conflict resolution may
         // displace the client-created structures, leaving the UI watching orphaned
         // objects and showing a blank document until reload.
         //
-        // If IndexedDB already had data we return immediately — normal
-        // offline-first path, no waiting needed.
+        // WebSocket is already connecting (started above), so this wait is shorter
+        // than in the old sequential flow.
         const hasLocalData = ydoc.store.clients.size > 0;
         if (!hasLocalData && navigator.onLine) {
             await new Promise((resolve) => {

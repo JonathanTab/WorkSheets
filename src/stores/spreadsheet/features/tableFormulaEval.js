@@ -654,7 +654,7 @@ export class TableFormulaEvaluator {
                 }
                 if (def.isNonEntry) {
                     // Always computed
-                    const val = this.#evalFormula(formula, i);
+                    const val = this.#evalFormula(formula, i, colId);
                     this.#computed[i].set(colId, val);
                 } else {
                     // defaultFormula: use stored value if present (override), else compute
@@ -662,7 +662,7 @@ export class TableFormulaEvaluator {
                     if (stored !== undefined && stored !== null) {
                         this.#computed[i].set(colId, this.#resolveMaybeFormula(stored));
                     } else {
-                        const val = this.#evalFormula(formula, i);
+                        const val = this.#evalFormula(formula, i, colId);
                         this.#computed[i].set(colId, val);
                     }
                 }
@@ -691,14 +691,24 @@ export class TableFormulaEvaluator {
 
     // ─── Formula evaluation ───────────────────────────────────────────────────
 
-    #evalFormula(formula, rowIndex) {
+    #evalFormula(formula, rowIndex, colId = null) {
         let expr = formula.trim();
         if (expr.startsWith('=')) expr = expr.slice(1).trimStart();
-        expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
-        expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
-        expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount()));
-        expr = this.#substituteColRefs(expr, rowIndex);
-        expr = this.#substituteRowHelpers(expr, rowIndex);
+        // Fast string guards before regex: includes() is a plain scan with no polyfill overhead.
+        if (expr.includes('ROW')) {
+            expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
+            expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
+        }
+        if (expr.includes('COUNT')) {
+            expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount()));
+        }
+        if (expr.includes('{')) {
+            expr = this.#substituteColRefs(expr, rowIndex);
+        }
+        // Cross-row helpers only exist in columns flagged at plan time — skip the loop entirely for others.
+        if (!colId || this.#crossRowCols.has(colId)) {
+            expr = this.#substituteRowHelpers(expr, rowIndex);
+        }
         expr = this.#substituteAggregateFuncs(expr, rowIndex);
         return this.#evalExpression(expr);
     }
@@ -743,6 +753,8 @@ export class TableFormulaEvaluator {
     // ─── Row reference helpers ────────────────────────────────────────────────
 
     #substituteRowHelpers(expr, rowIndex) {
+        if (!expr.includes('PREV') && !expr.includes('NEXT') &&
+            !expr.includes('ROWVAL') && !expr.includes('WINDOW')) return expr;
         const ROW_HELPERS = ['WINDOW', 'ROWVAL', 'PREV', 'NEXT'];
         for (let pass = 0; pass < 20; pass++) {
             let replaced = false;
@@ -835,6 +847,8 @@ export class TableFormulaEvaluator {
     // ─── Aggregate function substitution ─────────────────────────────────────
 
     #substituteAggregateFuncs(expr, rowIndex) {
+        if (!expr.includes('SUM') && !expr.includes('AVG') && !expr.includes('MIN') &&
+            !expr.includes('MAX') && !expr.includes('COUNT') && !expr.includes('RUNNING')) return expr;
         const KNOWN = ['RUNNINGIFS', 'RUNNINGIF', 'SUMIFS', 'SUMIF',
                        'AVGIF', 'MINIF', 'MAXIF', 'COUNTIF',
                        'AVG', 'MIN', 'MAX', 'SUM'];

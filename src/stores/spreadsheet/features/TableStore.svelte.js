@@ -795,6 +795,9 @@ export class TableStore {
 
         if (!sorted.length) return 1000;
 
+        // Blank value always goes to the top regardless of sort direction.
+        if (newVal == null || newVal === '') return sorted[0].pos + 1000;
+
         for (let i = 0; i < sorted.length; i++) {
             if (dir * this.#cmpValues(sorted[i].val, newVal) <= 0) {
                 const abovePos = i > 0 ? sorted[i - 1].pos : null;

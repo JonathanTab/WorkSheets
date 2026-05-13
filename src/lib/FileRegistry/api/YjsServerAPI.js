@@ -86,10 +86,25 @@ export class YjsServerAPI {
      * Create a manual snapshot for an active room.
      * @param {string} roomId
      * @param {string} [description]
+     * @param {string|null} [appType]  'sheets' | 'docs' | 'svg'
      * @returns {Promise<{ id: string }>}
      */
-    async createSnapshot(roomId, description) {
-        const res = await this._post('api/snapshots', { roomId, description: description ?? null });
+    async createSnapshot(roomId, description, appType) {
+        const res = await this._post('api/snapshots', {
+            roomId,
+            description: description ?? null,
+            appType: appType ?? null,
+        });
+        return res.json();
+    }
+
+    /**
+     * Get last-edit metadata for a file (who changed it and when).
+     * @param {string} fileId
+     * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
+     */
+    async getFileMeta(fileId) {
+        const res = await this._get(`api/files/${encodeURIComponent(fileId)}/meta`);
         return res.json();
     }
 
@@ -135,4 +150,6 @@ export class YjsServerAPI {
  * @property {'auto'|'manual'|'room_empty'} trigger
  * @property {string|null} created_by  comma-separated usernames
  * @property {string|null} description
+ * @property {string|null} diff_json  generic structural diff vs previous snapshot (JSON string)
+ * @property {string|null} app_type   'sheets' | 'docs' | 'svg'
  */

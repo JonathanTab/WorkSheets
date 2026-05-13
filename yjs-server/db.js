@@ -4,6 +4,7 @@ import * as Y from 'yjs';
 import path from 'path';
 import fs from 'fs';
 import { randomBytes } from 'crypto';
+import { computeGenericDiff } from './diff.js';
 
 let levelPersistence;
 let sqliteDb;
@@ -37,18 +38,31 @@ export function initDb(levelDbPath, sqlitePath) {
             trigger      TEXT NOT NULL DEFAULT 'auto',
             created_by   TEXT,
             description  TEXT,
-            change_count INTEGER
+            change_count INTEGER,
+            diff_json    TEXT,
+            app_type     TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_snap_file ON snapshots(file_id);
         CREATE INDEX IF NOT EXISTS idx_snap_room  ON snapshots(room_id);
         CREATE INDEX IF NOT EXISTS idx_snap_time  ON snapshots(created_at);
+
+        CREATE TABLE IF NOT EXISTS file_meta (
+            file_id      TEXT PRIMARY KEY,
+            last_edit_at INTEGER,
+            last_edit_by TEXT
+        );
     `);
 
-    // Migrate existing databases that don't have change_count yet
-    try {
-        sqliteDb.exec(`ALTER TABLE snapshots ADD COLUMN change_count INTEGER`);
-    } catch { /* column already exists — safe to ignore */ }
+    // Migrate existing databases
+    const migrations = [
+        `ALTER TABLE snapshots ADD COLUMN change_count INTEGER`,
+        `ALTER TABLE snapshots ADD COLUMN diff_json TEXT`,
+        `ALTER TABLE snapshots ADD COLUMN app_type TEXT`,
+    ];
+    for (const sql of migrations) {
+        try { sqliteDb.exec(sql); } catch { /* column already exists */ }
+    }
 
     return { levelPersistence, sqliteDb };
 }
@@ -109,7 +123,9 @@ export async function writeDocState(roomId, ydoc) {
 }
 
 /**
- * Create a snapshot of the current doc state.
+ * Create a snapshot of the current doc state, then asynchronously compute
+ * a generic structural diff vs. the previous snapshot for this file.
+ *
  * @param {string} roomId
  * @param {string|null} fileId
  * @param {Y.Doc} ydoc
@@ -117,29 +133,75 @@ export async function writeDocState(roomId, ydoc) {
  * @param {string|null} createdBy - comma-separated usernames
  * @param {number} changeCount - number of state-vector advances since last snapshot
  * @param {string|null} [description] - optional user-provided label
+ * @param {string|null} [appType] - 'sheets' | 'docs' | 'svg'
  * @returns {string} snapshot id
  */
-export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, description = null) {
+export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, description = null, appType = null) {
     const id = `snap_${randomBytes(8).toString('hex')}`;
+    const effectiveFileId = fileId ?? roomId;
     const state = Y.encodeStateAsUpdate(ydoc);
     sqliteDb.prepare(
-        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, fileId ?? roomId, roomId, Buffer.from(state), Date.now(), trigger, createdBy ?? null, changeCount ?? null, description ?? null);
+        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description, app_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, effectiveFileId, roomId, Buffer.from(state), Date.now(), trigger, createdBy ?? null, changeCount ?? null, description ?? null, appType ?? null);
     console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger} changes=${changeCount ?? '?'}`);
+
+    // Compute diff asynchronously — does not block the save
+    setImmediate(() => _computeAndStoreDiff(id, effectiveFileId, state));
+
     return id;
 }
+
+/**
+ * Compute and store the generic structural diff for a snapshot vs. its predecessor.
+ * Called asynchronously after saveSnapshot.
+ * @param {string} snapshotId
+ * @param {string} fileId
+ * @param {Uint8Array} newState
+ */
+function _computeAndStoreDiff(snapshotId, fileId, newState) {
+    try {
+        const prev = sqliteDb.prepare(
+            'SELECT state FROM snapshots WHERE file_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1'
+        ).get(fileId, snapshotId);
+
+        let diffJson;
+        if (!prev) {
+            diffJson = JSON.stringify({ v: 1, entries: [], isInitial: true });
+        } else {
+            const prevDoc = new Y.Doc({ gc: false });
+            Y.applyUpdate(prevDoc, new Uint8Array(prev.state));
+
+            const newDoc = new Y.Doc({ gc: false });
+            Y.applyUpdate(newDoc, new Uint8Array(newState));
+
+            const diff = computeGenericDiff(prevDoc, newDoc);
+            diffJson = JSON.stringify(diff);
+
+            prevDoc.destroy();
+            newDoc.destroy();
+
+            console.log(`[diff] Computed for ${snapshotId}: ${diff.entries.length} entries`);
+        }
+
+        sqliteDb.prepare('UPDATE snapshots SET diff_json = ? WHERE id = ?').run(diffJson, snapshotId);
+    } catch (err) {
+        console.error(`[diff] Failed for ${snapshotId}:`, err.message);
+    }
+}
+
+const SNAP_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, diff_json, app_type';
 
 /** @returns {object[]} snapshot metadata (no binary state) */
 export function listSnapshotsByRoom(roomId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100'
+        `SELECT ${SNAP_COLS} FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100`
     ).all(roomId);
 }
 
 /** @returns {object[]} */
 export function listSnapshotsByFile(fileId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100'
+        `SELECT ${SNAP_COLS} FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100`
     ).all(fileId);
 }
 
@@ -152,8 +214,33 @@ export function getSnapshotData(snapshotId) {
 /** @returns {object|null} metadata without binary */
 export function getSnapshotMeta(snapshotId) {
     return sqliteDb.prepare(
-        'SELECT id, file_id, room_id, created_at, trigger, created_by, change_count, description FROM snapshots WHERE id = ?'
+        `SELECT ${SNAP_COLS} FROM snapshots WHERE id = ?`
     ).get(snapshotId) ?? null;
+}
+
+/**
+ * Record the most recent meaningful edit for a file.
+ * Rate-limited at the call site — this writes unconditionally.
+ * @param {string} fileId
+ * @param {string} username
+ * @param {number} at - Unix ms
+ */
+export function updateFileLastEdit(fileId, username, at) {
+    sqliteDb.prepare(`
+        INSERT INTO file_meta (file_id, last_edit_at, last_edit_by) VALUES (?, ?, ?)
+        ON CONFLICT(file_id) DO UPDATE SET last_edit_at = excluded.last_edit_at, last_edit_by = excluded.last_edit_by
+    `).run(fileId, at, username);
+}
+
+/**
+ * Get the last-edit metadata for a file.
+ * @param {string} fileId
+ * @returns {{ last_edit_at: number, last_edit_by: string }|null}
+ */
+export function getFileLastEdit(fileId) {
+    return sqliteDb.prepare(
+        'SELECT last_edit_at, last_edit_by FROM file_meta WHERE file_id = ?'
+    ).get(fileId) ?? null;
 }
 
 /**

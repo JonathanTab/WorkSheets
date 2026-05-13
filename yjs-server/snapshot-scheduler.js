@@ -275,7 +275,9 @@ export class SnapshotScheduler {
     /** Persist the snapshot and update entry bookkeeping. */
     _commitSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, entry) {
         try {
-            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, changeCount ?? 0);
+            // Pass appType from the WSSharedDoc instance if available
+            const appType = ydoc?.appType ?? null;
+            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, changeCount ?? 0, null, appType);
         } catch (err) {
             console.error(`[snapshot-scheduler] Failed to save snapshot for ${roomId}:`, err);
             return;

@@ -4,6 +4,7 @@
     import FormattingToolbar from "./toolbar/FormattingToolbar.svelte";
     import PresenceIndicator from "./PresenceIndicator.svelte";
     import UserMenu from "../UserMenu.svelte";
+    import LastEditBadge from "../history/LastEditBadge.svelte";
     import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
     import { storage } from "../../stores/storage.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
@@ -18,6 +19,7 @@
         onShowTablesPanel = undefined,
         tablesPanelOpen = false,
         registry = null,
+        historyManager = null,
     } = $props();
 
     function openShareModal() {
@@ -53,6 +55,9 @@
             </button>
         </div>
         <div class="row1-right">
+            {#if historyManager}
+                <LastEditBadge lastEdit={historyManager.lastEdit} />
+            {/if}
             <PresenceIndicator {awareness} {currentUser} />
             {#if onShowHistory}
                 <button

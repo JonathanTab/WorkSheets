@@ -1,22 +1,22 @@
 ## Cheap-Worker Delegation Tools (Token Saving)
 
-Three CLI tools delegate bulk I/O to a cheap worker model. Use them to save tokens.
+Three CLI tools delegate bulk I/O to a cheap worker model. Use them to save tokens. Run them with powershell.
 
 ### ask-kimi — bulk reading
 For reading files >400 lines, or when you'd otherwise read 3+ files:
 
-```bash
-ask-kimi --paths <file1> <file2>... --question "<specific question>"
+```powershell
+$env:PYTHONIOENCODING = \"utf-8\"; C:\\Users\\Jon\\.local\\bin\\ask-kimi.bat --paths <file1> <file2>... --question "<specific question>"
 ```
 
-Returns a structured summary. Use that instead of reading files yourself.
+Use this to gain an understanding of relevant files while doing research or exploring. make it read all the possible  relevant files and ask it to summarize the structure, purpose, or operation file with line numbers according to the topic you are exploring. Use it instead of reading files yourself.
 Only read files directly when you need to make edits to specific lines.
 
 ### kimi-write — boilerplate generation
 For generating tests, config files, docstrings, or repetitive code patterns:
 
-```bash
-kimi-write --spec "<what to write>" --context <existing-similar-file> --target <output-path>
+```powershell
+$env:PYTHONIOENCODING = \"utf-8\"; C:\\Users\\Jon\\.local\\bin\\kimi-write.bat --spec "<what to write>" --context <existing-similar-file> --target <output-path>
 ```
 
 Then review the output and edit only what needs fixing.
@@ -24,8 +24,8 @@ Then review the output and edit only what needs fixing.
 ### extract-chat — chat transcript extraction
 Extracts human-readable text from Claude Code JSONL transcripts:
 
-```bash
-extract-chat <session.jsonl> -o /tmp/chat.txt
+```powershell
+$env:PYTHONIOENCODING = \"utf-8\"; C:\\Users\\Jon\\.local\\bin\\extract-chat.bat <session.jsonl> -o /tmp/chat.txt
 ```
 
 ### Documentation workflow (MANDATORY)

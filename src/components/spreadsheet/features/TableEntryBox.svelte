@@ -12,6 +12,7 @@
 
     let { table, onclose = null } = $props();
     let rootEl = $state(null);
+    let anyInputFocused = $state(false);
 
     let columns = $derived(table?.columns ?? []);
 
@@ -148,6 +149,8 @@
                             oninput={(e) =>
                                 setField(rowIdx, col.id, e.target.value)}
                             onkeydown={(e) => e.key === "Enter" && submit()}
+                            onfocus={() => (anyInputFocused = true)}
+                            onblur={() => (anyInputFocused = false)}
                         />
                         {#if errors[rowIdx]?.[col.id]}
                             <span class="field-error"
@@ -174,6 +177,9 @@
         <button class="add-row-btn" onclick={addRow} type="button"
             >+ Add row</button
         >
+        {#if anyInputFocused}
+            <span class="enter-hint"><kbd>↵</kbd> to insert</span>
+        {/if}
         <div class="footer-actions">
             <button class="clear-btn" onclick={clear} type="button"
                 >Clear</button
@@ -388,5 +394,28 @@
 
     .submit-btn:hover {
         background: var(--accent-hover, #2563eb);
+    }
+
+    .enter-hint {
+        font-size: 10px;
+        color: var(--muted, #64748b);
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        pointer-events: none;
+    }
+
+    .enter-hint kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--table-header-bg, #f1f5f9);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 3px;
+        padding: 1px 4px;
+        font-family: inherit;
+        font-size: 10px;
+        line-height: 1.4;
+        color: var(--muted, #64748b);
     }
 </style>

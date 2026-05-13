@@ -5,11 +5,16 @@
     import SheetTabs from "./SheetTabs.svelte";
     import Toolbar from "./Toolbar.svelte";
     import MobileToolbar from "./MobileToolbar.svelte";
-    import HistoryPanel from "../HistoryPanel.svelte";
+    import HistoryPanel from "../history/HistoryPanel.svelte";
+    import HistoryViewer from "../history/HistoryViewer.svelte";
+    import SpreadsheetHistoryViewer from "../history/SpreadsheetHistoryViewer.svelte";
     import DocumentTablesPanel from "./features/DocumentTablesPanel.svelte";
     import PdfExportView from "./PdfExportView.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
+    import { HistoryManager } from "../../lib/history/HistoryManager.svelte.js";
+    import { LastEditTracker } from "../../lib/history/LastEditTracker.svelte.js";
+    import "../../lib/history/apps/sheetsInterpreter.js";
     import {
         spreadsheetSession,
         selectionState,
@@ -27,6 +32,18 @@
 
     let isLoading = $state(true);
     let error = $state(null);
+
+    // ── History system ─────────────────────────────────────────────────────────
+    let historyManager = $state(/** @type {HistoryManager|null} */ (null));
+    let lastEditTracker = /** @type {LastEditTracker|null} */ (null);
+
+    const sheetsAdapter = {
+        diffFn: computeSpreadsheetDiff,
+        ViewerComponent: SpreadsheetHistoryViewer,
+        isContentChange: (_update, origin) => origin !== null,
+    };
+
+    // Show history panel (sidebar), viewer is managed by historyManager.viewerOpen
     let showHistory = $state(false);
     let showTablesPanel = $state(false);
     let tablesPanelTableId = $state(/** @type {string|null} */ (null));
@@ -163,8 +180,35 @@
     onDestroy(() => {
         document.removeEventListener("togglePageBreaks", handleTogglePageBreaks);
         document.removeEventListener("openPdfExport", handleOpenPdfExport);
+        lastEditTracker?.destroy();
         // Optionally unload document when leaving
         // unloadDocument();
+    });
+
+    // Re-create HistoryManager + LastEditTracker whenever the doc or registry changes
+    $effect(() => {
+        const ydoc = spreadsheetSession.ydoc;
+        const user = currentUser;
+        if (!ydoc || !registry || !docId) return;
+
+        // Destroy old tracker
+        lastEditTracker?.destroy();
+
+        const hm = new HistoryManager({ fileId: docId, registry, appType: 'sheets' });
+        historyManager = hm;
+        hm.loadFileMeta();
+
+        lastEditTracker = new LastEditTracker({
+            ydoc,
+            username: user,
+            historyManager: hm,
+            isContentChange: sheetsAdapter.isContentChange,
+        });
+
+        return () => {
+            lastEditTracker?.destroy();
+            lastEditTracker = null;
+        };
     });
 
     function handleCellEdit(row, col, value) {
@@ -286,12 +330,9 @@
         </div>
     {:else}
         <div class="workspace-outer">
-            {#if showHistory && registry}
+            {#if showHistory && historyManager}
                 <HistoryPanel
-                    {registry}
-                    fileId={docId}
-                    currentDoc={spreadsheetSession.ydoc ?? null}
-                    diffFn={computeSpreadsheetDiff}
+                    {historyManager}
                     onClose={() => { showHistory = false; }}
                 />
             {/if}
@@ -319,10 +360,11 @@
                         onClose={handleCloseDocument}
                         {awareness}
                         {currentUser}
-                        onShowHistory={registry ? () => { showHistory = true; } : undefined}
+                        onShowHistory={registry ? () => { showHistory = !showHistory; } : undefined}
                         onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; tablesPanelTableId = null; tablesPanelColId = null; }}
                         tablesPanelOpen={showTablesPanel}
                         {registry}
+                        {historyManager}
                     />
                 {/if}
 
@@ -388,6 +430,7 @@
                                         info.colDef.id,
                                         parsed,
                                     );
+                                    spreadsheetSession.requestGridRepaint?.();
                                 }
                                 return;
                             }
@@ -480,6 +523,14 @@
 
 {#if showPdfExport}
     <PdfExportView onclose={() => (showPdfExport = false)} />
+{/if}
+
+{#if historyManager?.viewerOpen}
+    <HistoryViewer
+        {historyManager}
+        currentDoc={spreadsheetSession.ydoc ?? null}
+        adapter={sheetsAdapter}
+    />
 {/if}
 
 <style>

@@ -296,6 +296,30 @@ export class FormulaEngine {
     }
 
     /**
+     * Register a formula into the dependency graph without evaluating it.
+     * Use during bulk load: call this for every formula, then call recalculateDirty()
+     * once to evaluate everything in correct topological order.
+     */
+    registerFormula(row, col, formula) {
+        const key = cellKey(row, col);
+        try {
+            const ast = cachedParseFormula(formula);
+            if (!ast) {
+                this.#graph.setFormula(row, col, null, null, []);
+                delete this.computedValues[key];
+                return;
+            }
+            const refs = extractCellRefs(ast);
+            this.#graph.setFormula(row, col, formula, ast, refs);
+            this.#graph.dirtyCells.add(key);
+        } catch (err) {
+            console.error(`Error registering formula at ${key}:`, err);
+            this.#graph.setFormula(row, col, null, null, []);
+            this.computedValues[key] = FormulaError.ERROR;
+        }
+    }
+
+    /**
      * Clear a formula from the engine
      * @param {number} row
      * @param {number} col

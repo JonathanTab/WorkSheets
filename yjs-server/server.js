@@ -36,6 +36,8 @@ import {
     getSnapshotMeta,
     prepareRestore,
     getSqliteDb,
+    updateFileLastEdit,
+    getFileLastEdit,
 } from './db.js';
 import { SnapshotScheduler } from './snapshot-scheduler.js';
 
@@ -71,25 +73,46 @@ const messageAwareness = 1;
  * @param {WSSharedDoc} doc
  * @param {any} _tr
  */
-const updateHandler = (update, _origin, doc, _tr) => {
+const updateHandler = (update, origin, doc, _tr) => {
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, messageSync);
     syncProtocol.writeUpdate(encoder, update);
     const message = encoding.toUint8Array(encoder);
     doc.conns.forEach((_, conn) => send(doc, conn, message));
-    // Pass update size for intelligent snapshot decisions
     scheduler.markDirty(doc.name, doc.fileId, doc, update.byteLength);
+
+    // Track last-edit per file, debounced. Skip awareness-only origins.
+    if (doc.fileId && origin !== null) {
+        const now = Date.now();
+        const last = lastEditWritten.get(doc.fileId) ?? 0;
+        if (now - last >= LAST_EDIT_DEBOUNCE_MS) {
+            lastEditWritten.set(doc.fileId, now);
+            // Pick any connected user to attribute the edit
+            const username = doc.connUsers.size > 0
+                ? [...doc.connUsers.values()].find(Boolean) ?? null
+                : null;
+            if (username) {
+                try { updateFileLastEdit(doc.fileId, username, now); } catch { /* ignore */ }
+            }
+        }
+    }
 };
+
+// Per-room rate-limiter for last-edit writes (fileId → lastWrittenMs)
+const lastEditWritten = new Map();
+const LAST_EDIT_DEBOUNCE_MS = 10_000;
 
 class WSSharedDoc extends Y.Doc {
     /**
      * @param {string} name
      * @param {string|null} fileId
+     * @param {string|null} appType
      */
-    constructor(name, fileId) {
+    constructor(name, fileId, appType) {
         super({ gc: GC_ENABLED });
         this.name = name;
         this.fileId = fileId;
+        this.appType = appType;
 
         /** @type {Map<WebSocket, Set<number>>} conn → clientID set */
         this.conns = new Map();
@@ -141,13 +164,13 @@ const docs = new Map();
 
 /**
  * Get or create a doc. Synchronous — bindDocState loads state in background.
- * Matches the reference `getYDoc` using map.setIfUndefined.
  * @param {string} name
  * @param {string|null} fileId
+ * @param {string|null} appType
  * @returns {WSSharedDoc}
  */
-const getDoc = (name, fileId) => map.setIfUndefined(docs, name, () => {
-    const doc = new WSSharedDoc(name, fileId);
+const getDoc = (name, fileId, appType) => map.setIfUndefined(docs, name, () => {
+    const doc = new WSSharedDoc(name, fileId, appType);
     bindDocState(name, doc); // fire-and-forget; state loads in background
     return doc;
 });
@@ -218,10 +241,11 @@ const closeConn = (doc, conn) => {
  * @param {string} name
  * @param {string|null} fileId
  * @param {string} username
+ * @param {string|null} appType
  */
-const setupWSConnection = (conn, name, fileId, username) => {
+const setupWSConnection = (conn, name, fileId, username, appType) => {
     conn.binaryType = 'arraybuffer';
-    const doc = getDoc(name, fileId);
+    const doc = getDoc(name, fileId, appType);
     doc.conns.set(conn, new Set());
     doc.connUsers.set(conn, username);
 
@@ -374,15 +398,25 @@ async function handleHttp(req, res, url) {
         return _json(res, 200, { snapshots });
     }
 
-    // POST /api/snapshots { roomId, description? }
+    // POST /api/snapshots { roomId, description?, appType? }
     if (pathname === '/api/snapshots' && req.method === 'POST') {
         const body = await _readBody(req);
-        const { roomId, description } = body;
+        const { roomId, description, appType } = body;
         if (!roomId) return _json(res, 400, { error: 'roomId required' });
         const doc = docs.get(roomId);
         if (!doc) return _json(res, 404, { error: 'Room not active (no connected clients)' });
-        const id = saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null);
+        // appType from body (PHP-provided) takes precedence over doc's stored value
+        const resolvedAppType = appType ?? doc.appType ?? null;
+        if (resolvedAppType && !doc.appType) doc.appType = resolvedAppType;
+        const id = saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null, resolvedAppType);
         return _json(res, 200, { id });
+    }
+
+    // GET /api/files/:fileId/meta
+    const fileMetaMatch = pathname.match(/^\/api\/files\/([^/]+)\/meta$/);
+    if (fileMetaMatch && req.method === 'GET') {
+        const meta = getFileLastEdit(fileMetaMatch[1]);
+        return _json(res, 200, meta ?? { last_edit_at: null, last_edit_by: null });
     }
 
     // GET /api/snapshot/:id/data  (binary)
@@ -418,8 +452,8 @@ async function handleHttp(req, res, url) {
 // ---------------------------------------------------------------------------
 // WebSocket upgrade — authenticate then hand off to setupWSConnection
 // ---------------------------------------------------------------------------
-wss.on('connection', (ws, _req, name, fileId, username) => {
-    setupWSConnection(ws, name, fileId, username);
+wss.on('connection', (ws, _req, name, fileId, username, appType) => {
+    setupWSConnection(ws, name, fileId, username, appType);
 });
 
 server.on('upgrade', (req, socket, head) => {
@@ -447,8 +481,9 @@ server.on('upgrade', (req, socket, head) => {
     }
 
     const fileId = url.searchParams.get('fileId') ?? null;
+    const appType = url.searchParams.get('appType') ?? null;
     wss.handleUpgrade(req, socket, head, ws => {
-        wss.emit('connection', ws, req, name, fileId, auth.username);
+        wss.emit('connection', ws, req, name, fileId, auth.username, appType);
     });
 });
 

@@ -82,6 +82,9 @@ export class SpreadsheetSession {
     /** @type {SheetRenderContext | null} */
     renderContext = $state.raw(null);
 
+    /** Callback registered by Grid to trigger a canvas repaint from outside. */
+    requestGridRepaint = null;
+
     /** @type {TableManager | null} */
     tableManager = $state.raw(null);
 
@@ -622,19 +625,18 @@ export class SpreadsheetSession {
             ?? (sheet.get('cellValues') instanceof Y.Array ? new YKeyValue(sheet.get('cellValues')) : null);
 
         if (cellValuesKV) {
-            // First pass: register all formulas into the engine
-            const formulaCells = [];
+            // Register all formulas into the dependency graph without evaluating them,
+            // then recalculate once in topological order. This avoids the O(2N) double-
+            // evaluation that occurs when setFormula() eagerly evaluates each formula as
+            // it's registered (before all dependencies exist).
             for (const [key, { val: data }] of cellValuesKV.map) {
                 const v = data?.v;
                 if (typeof v === 'string' && v.startsWith('=')) {
                     const [row, col] = key.split(',').map(Number);
-                    formulaCells.push({ row, col, formula: v });
+                    this.formulaEngine.registerFormula(row, col, v);
                 }
             }
-            for (const { row, col, formula } of formulaCells) {
-                this.formulaEngine.setFormula(row, col, formula);
-            }
-            // Recalculate in topological order so dependency chains resolve correctly.
+            // Single evaluation pass in correct dependency order.
             this.formulaEngine.recalculateDirty();
 
             // Observe cellValues YKeyValue for formula recalculation on changes.

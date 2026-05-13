@@ -648,6 +648,7 @@
             canvasRenderer = new CanvasRenderer(canvasEl);
             renderScheduler = new RenderScheduler(performPaint);
             rendererCanvasEl = canvasEl;
+            spreadsheetSession.requestGridRepaint = () => untrack(() => renderScheduler?.invalidateAll());
         }
 
         canvasRenderer.resize(w, h);
@@ -918,6 +919,10 @@
         const ctx = canvasEl.getContext('2d');
         if (!ctx) return;
 
+        const dpr = window.devicePixelRatio ?? 1;
+        ctx.save();
+        ctx.scale(dpr, dpr);
+
         for (const table of renderContext.tableManager.stores.values()) {
             if (table.isSourceOnly || table.sortColId) continue;
 
@@ -949,6 +954,8 @@
                 }
             }
         }
+
+        ctx.restore();
     }
 
     // ─── Incremental scroll paint ──────────────────────────────────────────────
@@ -1562,6 +1569,44 @@
         }
 
         return bounds;
+    });
+
+    let isEditingEntryRow = $derived.by(() => {
+        if (!editSessionState.isEditing) return false;
+        const row = editSessionState.cell?.row;
+        const col = editSessionState.cell?.col;
+        if (row == null || col == null) return false;
+        return renderContext?.getCellType(row, col) === CELL_TYPE.TABLE_ENTRY;
+    });
+
+    let selectedEntryRowInfo = $derived.by(() => {
+        const a = anchor;
+        if (!a || !virtualizer || !renderPlan) return null;
+        if (renderContext?.getCellType(a.row, a.col) !== CELL_TYPE.TABLE_ENTRY) return null;
+        return renderContext.tableManager?.getCellInfo(a.row, a.col) ?? null;
+    });
+
+    let entryRowHasValues = $derived.by(() => {
+        const buf = selectedEntryRowInfo?.table?.entryBuffer;
+        if (!buf) return false;
+        return Object.values(buf).some(v => v !== null && v !== undefined && v !== '');
+    });
+
+    let entryRowHintStyle = $derived.by(() => {
+        if (!selectedEntryRowInfo) return "display:none;";
+        if (!isEditingEntryRow && !entryRowHasValues) return "display:none;";
+        let left, top, height;
+        if (isEditingEntryRow && editorBoundsForOverlay) {
+            const b = editorBoundsForOverlay;
+            left = b.left; top = b.top; height = b.height;
+        } else {
+            const a = anchor;
+            if (!a) return "display:none;";
+            left = cellContainerLeft(a.col);
+            top = cellContainerTop(a.row);
+            height = virtualizer?.getRowHeight(a.row) ?? 24;
+        }
+        return `left:${left}px; top:${top + height + 4}px;`;
     });
 
     let dropdownOverlayStyle = $derived.by(() => {
@@ -4648,6 +4693,7 @@
                         : displayStr;
                 if (cellType === CELL_TYPE.TABLE_ENTRY) {
                     info.table.setEntryValue(info.colDef.id, val);
+                    untrack(() => renderScheduler?.invalidateAll());
                 } else {
                     info.table.updateCell(info.dataIndex, info.colDef.id, val);
                     untrack(() => renderScheduler?.invalidateAll());
@@ -5838,6 +5884,11 @@
                 </div>
             {/if}
 
+            <!-- Entry-row insert hint -->
+            <div class="entry-row-hint" style={entryRowHintStyle}>
+                <kbd>↵</kbd> to insert row
+            </div>
+
             <!-- Cell editor (GridOverlays: input + formula overlay + FormulaValuePopup) -->
             <GridOverlays
                 bind:this={overlaysRef}
@@ -6091,6 +6142,60 @@
 {/if}
 
 <style>
+    .entry-row-hint {
+        position: absolute;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        background: var(--surface-bg, #fff);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 4px;
+        padding: 2px 7px 2px 5px;
+        font-size: 11px;
+        color: var(--muted, #64748b);
+        pointer-events: none;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        white-space: nowrap;
+    }
+
+    .entry-row-hint kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--table-header-bg, #f1f5f9);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 3px;
+        padding: 0 4px;
+        font-family: inherit;
+        font-size: 10px;
+        line-height: 1.6;
+        color: var(--muted, #64748b);
+    }
+
+    .entry-row-insert-btn {
+        pointer-events: auto;
+        background: var(--table-header-bg, #f1f5f9);
+        color: var(--muted, #64748b);
+        border: 1px solid var(--cell-border, #e2e8f0);
+        border-radius: 3px;
+        padding: 0 8px;
+        font-size: 11px;
+        font-weight: 500;
+        cursor: pointer;
+        font-family: inherit;
+        line-height: 1.6;
+        text-decoration: underline;
+        text-decoration-color: var(--cell-border, #e2e8f0);
+        text-underline-offset: 2px;
+    }
+
+    .entry-row-insert-btn:hover {
+        border-color: var(--muted, #64748b);
+        color: var(--text, #1e293b);
+        text-decoration-color: var(--muted, #64748b);
+    }
+
     .grid-root {
         width: 100%;
         height: 100%;
