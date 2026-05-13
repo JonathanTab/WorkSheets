@@ -40,7 +40,7 @@
     const sheetsAdapter = {
         diffFn: computeSpreadsheetDiff,
         ViewerComponent: SpreadsheetHistoryViewer,
-        isContentChange: (_update, origin) => origin !== null,
+        isContentChange: (_update, origin) => origin === null,
     };
 
     // Show history panel (sidebar), viewer is managed by historyManager.viewerOpen

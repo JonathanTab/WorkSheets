@@ -38,9 +38,15 @@ export class LastEditTracker {
 }
 
 /**
- * Default content-change filter: accepts all non-null origin updates.
- * Awareness-only updates from y-protocols have origin = null.
+ * Default content-change filter: only local edits made by this client.
+ *
+ * Yjs origin conventions:
+ *   null              → local user edit (no explicit origin set)
+ *   WebSocketProvider → remote update received via WebSocket (initial sync, other users)
+ *   Symbol/object     → persistence load, undo manager, etc.
+ *
+ * We only want null so we don't fire on the initial document sync.
  */
 function _defaultIsContentChange(_update, origin) {
-    return origin !== null;
+    return origin === null;
 }

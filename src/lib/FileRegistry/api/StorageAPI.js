@@ -504,6 +504,15 @@ export class StorageAPI {
     }
 
     /**
+     * Get last-edit metadata for a file (proxied through PHP to the Yjs server).
+     * @param {string} fileId
+     * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
+     */
+    async getFileMeta(fileId) {
+        return this._get({ action: 'file_meta', file_id: fileId });
+    }
+
+    /**
      * Restore a file to a snapshot version.
      * Creates a fresh Yjs room with the snapshot state and updates the file record.
      * All current clients will need to reconnect to the new room.

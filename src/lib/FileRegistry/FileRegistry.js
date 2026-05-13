@@ -1152,12 +1152,12 @@ export class FileRegistry extends EventEmitter {
     }
 
     /**
-     * Get last-edit metadata for a file from the Yjs server.
+     * Get last-edit metadata for a file (proxied through PHP to the Yjs server).
      * @param {string} fileId
      * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
      */
     async getFileMeta(fileId) {
-        return this._yjsApi.getFileMeta(fileId);
+        return this._api.getFileMeta(fileId);
     }
 
     /**

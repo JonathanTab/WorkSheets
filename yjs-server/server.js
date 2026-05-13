@@ -38,6 +38,7 @@ import {
     getSqliteDb,
     updateFileLastEdit,
     getFileLastEdit,
+    PERSISTENCE_ORIGIN,
 } from './db.js';
 import { SnapshotScheduler } from './snapshot-scheduler.js';
 
@@ -81,8 +82,9 @@ const updateHandler = (update, origin, doc, _tr) => {
     doc.conns.forEach((_, conn) => send(doc, conn, message));
     scheduler.markDirty(doc.name, doc.fileId, doc, update.byteLength);
 
-    // Track last-edit per file, debounced. Skip awareness-only origins.
-    if (doc.fileId && origin !== null) {
+    // Track last-edit per file, debounced.
+    // Skip persistence-load origin (fires when a room first opens from LevelDB).
+    if (doc.fileId && origin !== null && origin !== PERSISTENCE_ORIGIN) {
         const now = Date.now();
         const last = lastEditWritten.get(doc.fileId) ?? 0;
         if (now - last >= LAST_EDIT_DEBOUNCE_MS) {

@@ -68,8 +68,8 @@ export function initDb(levelDbPath, sqlitePath) {
 }
 
 // Sentinel origin used when applying persisted state so the update listener
-// does not try to re-store it.
-const PERSISTENCE_ORIGIN = Symbol('y-leveldb-persistence');
+// does not try to re-store it. Exported so server.js can filter it out too.
+export const PERSISTENCE_ORIGIN = Symbol('y-leveldb-persistence');
 
 /**
  * Bind a Y.Doc to leveldb persistence.
