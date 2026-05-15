@@ -2,7 +2,7 @@ module.exports = {
     apps: [{
         name: 'yjs-server',
         script: './server.js',
-        cwd: '/home/isidore/scriptorium/yjs-server',
+        cwd: '/var/www/scriptorium/yjs-server',
         env: {
             PORT: 1889,
             HOST: '0.0.0.0',
