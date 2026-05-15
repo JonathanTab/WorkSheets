@@ -5,6 +5,7 @@
     import SheetTabs from "./SheetTabs.svelte";
     import Toolbar from "./Toolbar.svelte";
     import MobileToolbar from "./MobileToolbar.svelte";
+    import MobileInputBar from "./MobileInputBar.svelte";
     import HistoryPanel from "../history/HistoryPanel.svelte";
     import HistoryViewer from "../history/HistoryViewer.svelte";
     import SpreadsheetHistoryViewer from "../history/SpreadsheetHistoryViewer.svelte";
@@ -49,6 +50,7 @@
     let tablesPanelTableId = $state(/** @type {string|null} */ (null));
     let tablesPanelColId   = $state(/** @type {string|null} */ (null));
     let formulaBarRef = $state(null);
+    let mobileInputBarRef = $state(null);
 
     // ── Awareness / presence ───────────────────────────────────────────────────
     let awareness = $derived(spreadsheetSession.awareness);
@@ -368,10 +370,10 @@
                     />
                 {/if}
 
-                <!-- Formula Bar: static on desktop, floating on mobile -->
+                <!-- Formula Bar: static on desktop only -->
+                {#if !mobileState.isMobile}
                 <FormulaBar
                     bind:this={formulaBarRef}
-                    floating={mobileState.isMobile}
                     {selectedCell}
                     onEdit={(value, row, col, sheetId) => {
                         // Use provided row/col if available (from editingCell tracking)
@@ -474,13 +476,64 @@
                         }
                     }}
                 />
+                {/if}
+
+                <!-- Mobile input bar: faux formula bar + tools (idle) / entry bar + symbols (editing) -->
+                {#if mobileState.isMobile}
+                <MobileInputBar
+                    bind:this={mobileInputBarRef}
+                    {selectedCell}
+                    onEdit={(value, row, col, sheetId) => {
+                        const targetRow = row ?? selectionState.anchor?.row;
+                        const targetCol = col ?? selectionState.anchor?.col;
+                        if (targetRow === undefined || targetCol === undefined) return;
+                        const renderContext = spreadsheetSession.renderContext;
+                        if (renderContext) {
+                            const cellType = renderContext.getCellType(targetRow, targetCol);
+                            if (cellType === CELL_TYPE.TABLE_DATA) {
+                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                                    const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                                }
+                                return;
+                            }
+                            if (cellType === CELL_TYPE.TABLE_ENTRY) {
+                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                                    const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                                    info.table.setEntryValue(info.colDef.id, parsed);
+                                    spreadsheetSession.requestGridRepaint?.();
+                                }
+                                return;
+                            }
+                            if (cellType === CELL_TYPE.TABLE_HEADER) {
+                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
+                                if (info?.table && info.colDef) {
+                                    const newName = String(value ?? "").trim();
+                                    if (newName) info.table.renameColumn(info.colDef.id, newName);
+                                }
+                                return;
+                            }
+                        }
+                        const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
+                        if (typeof value === "string" && value.startsWith("=")) {
+                            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
+                        } else {
+                            spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
+                        }
+                    }}
+                />
+                {/if}
 
                 <!-- Main Grid -->
                 <div class="grid-container">
                     <Grid
                         {showPageBreaks}
                         requestMobileKeyboardFocus={() =>
-                            formulaBarRef?.captureKeyboardFocus?.()}
+                            mobileState.isMobile
+                                ? mobileInputBarRef?.captureKeyboardFocus?.()
+                                : formulaBarRef?.captureKeyboardFocus?.()}
                         printSettings={pageBreakPrintSettings ??
                             spreadsheetSession.activeSheetStore?.getPrintSettings() ??
                             null}
@@ -650,9 +703,10 @@
         background: rgba(255, 255, 255, 0.25);
     }
 
-    /* ── Mobile layout: formula bar floats at bottom ── */
+    /* ── Mobile layout: input bar floats at bottom ── */
     .workspace-container.mobile .grid-container {
-        /* Grid fills up to the fixed-bottom formula bar + sheet tabs */
         border-bottom: none;
+        /* Reserve space for MobileInputBar: faux bar (44px) + tools (44px) */
+        padding-bottom: 88px;
     }
 </style>

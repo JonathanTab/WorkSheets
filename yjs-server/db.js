@@ -158,35 +158,113 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCou
  * @param {string} fileId
  * @param {Uint8Array} newState
  */
-function _computeAndStoreDiff(snapshotId, fileId, newState) {
+function _computeAndStoreDiff(snapshotId, fileId, newStateBytes) {
     try {
-        const prev = sqliteDb.prepare(
-            'SELECT state FROM snapshots WHERE file_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1'
-        ).get(fileId, snapshotId);
+        // Find the correct predecessor: must be strictly BEFORE this snapshot in time.
+        // Without the created_at < constraint, backfilling an old snapshot would
+        // compare it against the MOST RECENT snapshot (a future state), which
+        // produces massive spurious diffs.
+        //
+        // Prefer the same room (avoids cross-room confusion after snapshot restores).
+        const current = sqliteDb.prepare('SELECT created_at, room_id FROM snapshots WHERE id = ?').get(snapshotId);
+
+        let prevRow = null;
+        if (current) {
+            // 1. Same-room predecessor
+            prevRow = sqliteDb.prepare(
+                'SELECT state FROM snapshots WHERE file_id = ? AND room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT 1'
+            ).get(fileId, current.room_id, current.created_at);
+
+            // 2. Any same-file predecessor (e.g. first snapshot after a room restore)
+            if (!prevRow) {
+                prevRow = sqliteDb.prepare(
+                    'SELECT state FROM snapshots WHERE file_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT 1'
+                ).get(fileId, current.created_at);
+            }
+        }
 
         let diffJson;
-        if (!prev) {
+        if (!prevRow) {
             diffJson = JSON.stringify({ v: 1, entries: [], isInitial: true });
         } else {
-            const prevDoc = new Y.Doc({ gc: false });
-            Y.applyUpdate(prevDoc, new Uint8Array(prev.state));
+            const prevStateBytes = _toUint8Array(prevRow.state);
+            const newDocBytes    = _toUint8Array(newStateBytes);
 
+            const prevDoc = new Y.Doc({ gc: false });
+            Y.applyUpdate(prevDoc, prevStateBytes);
             const newDoc = new Y.Doc({ gc: false });
-            Y.applyUpdate(newDoc, new Uint8Array(newState));
+            Y.applyUpdate(newDoc, newDocBytes);
 
             const diff = computeGenericDiff(prevDoc, newDoc);
             diffJson = JSON.stringify(diff);
 
             prevDoc.destroy();
             newDoc.destroy();
-
-            console.log(`[diff] Computed for ${snapshotId}: ${diff.entries.length} entries`);
+            console.log(`[diff] ${snapshotId}: ${diff.entries.length} entries`);
         }
 
         sqliteDb.prepare('UPDATE snapshots SET diff_json = ? WHERE id = ?').run(diffJson, snapshotId);
     } catch (err) {
         console.error(`[diff] Failed for ${snapshotId}:`, err.message);
     }
+}
+
+/** Safely convert Buffer or Uint8Array to Uint8Array without sharing memory. */
+function _toUint8Array(buf) {
+    if (buf instanceof Buffer) return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (buf instanceof Uint8Array) return buf;
+    return new Uint8Array(buf);
+}
+
+/**
+ * Backfill diff_json for all snapshots of a file that have none yet.
+ * Called once at startup or via the API endpoint.
+ * Processes oldest→newest so each diff has access to the prior result.
+ * @param {string} fileId
+ * @returns {number} count of snapshots processed
+ */
+export function backfillDiffs(fileId) {
+    const snaps = sqliteDb.prepare(
+        'SELECT id, state, created_at FROM snapshots WHERE file_id = ? AND diff_json IS NULL ORDER BY created_at ASC'
+    ).all(fileId);
+
+    if (snaps.length === 0) return 0;
+
+    let processed = 0;
+    for (const snap of snaps) {
+        _computeAndStoreDiff(snap.id, fileId, _toUint8Array(snap.state));
+        processed++;
+    }
+    console.log(`[diff] Backfilled ${processed} snapshots for file ${fileId}`);
+    return processed;
+}
+
+/**
+ * Backfill diffs for ALL files.
+ * @param {boolean} [force=false]  If true, clears existing diff_json and recomputes everything.
+ * Runs in the background — does not block.
+ */
+export function backfillAllDiffs(force = false) {
+    setImmediate(() => {
+        try {
+            if (force) {
+                sqliteDb.prepare('UPDATE snapshots SET diff_json = NULL').run();
+                console.log('[diff] Cleared all existing diffs for full recompute');
+            }
+
+            const files = sqliteDb.prepare(
+                'SELECT DISTINCT file_id FROM snapshots WHERE diff_json IS NULL'
+            ).all().map(r => r.file_id);
+
+            if (files.length === 0) { console.log('[diff] All diffs up to date'); return; }
+            console.log(`[diff] Backfilling ${files.length} files…`);
+            let total = 0;
+            for (const fileId of files) total += backfillDiffs(fileId);
+            console.log(`[diff] Backfill complete — ${total} snapshots updated`);
+        } catch (err) {
+            console.error('[diff] Backfill error:', err.message);
+        }
+    });
 }
 
 const SNAP_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, diff_json, app_type';

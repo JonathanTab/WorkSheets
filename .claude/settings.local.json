@@ -10,7 +10,8 @@
       "Bash(find /c/Users/Jon/code/plainTab/src -type f \\\\\\(-name *.ts -o -name *.tsx -o -name *.js -o -name *.jsx \\\\\\))",
       "Read(//c/Users/Jon/.claude/projects/c--Users-Jon-code-plainTab/c4d2321d-a105-4328-bb94-2610aec4d3c6/tool-results/**)",
       "Read(//c/Users/Jon/code/instrumenta/**)",
-      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; C:\\\\Users\\\\Jon\\\\.local\\\\bin\\\\ask-kimi.bat *)"
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; C:\\\\Users\\\\Jon\\\\.local\\\\bin\\\\ask-kimi.bat *)",
+      "Bash(Sort-Object)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jon\\.claude\\projects\\c--Users-Jon-code-plainTab\\memory"

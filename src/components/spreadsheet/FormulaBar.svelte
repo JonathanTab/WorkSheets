@@ -37,7 +37,7 @@
         return spreadsheetSession.getCellEditValue(row, col);
     }
 
-    let { selectedCell = null, onEdit, floating = false } = $props();
+    let { selectedCell = null, onEdit } = $props();
 
     let previousCellKey = $state(null); // Track previous cell to detect actual cell changes
     let editInputEl = $state(null);
@@ -163,12 +163,6 @@
         selectionState.endSelection();
     }
 
-    function navigateMobile(dRow, dCol) {
-        if (isEditing) commitEdit({ blurKeyboard: false });
-        moveSelection(dRow, dCol);
-        if (mobileState.isMobile) captureKeyboardFocus();
-    }
-
     function getEditingTableContext() {
         const cell = editSessionState.cell;
         if (!cell) return null;
@@ -178,28 +172,6 @@
         const info = renderContext.tableManager?.getCellInfo(cell.row, cell.col);
         if (!info?.table || !info.colDef) return null;
         return { cellType, info, row: cell.row, col: cell.col };
-    }
-
-    function commitAndMoveDown() {
-        const tableCtx = getEditingTableContext();
-        if (isEditing) commitEdit({ blurKeyboard: false });
-
-        if (tableCtx?.cellType === CELL_TYPE.TABLE_ENTRY) {
-            tableCtx.info.table.commitEntry();
-            const firstEditable = tableCtx.info.table.columns.findIndex(
-                (c) => !c.isNonEntry,
-            );
-            if (firstEditable >= 0) {
-                const targetCol = tableCtx.info.table.startCol + firstEditable;
-                selectionState.startSelection(tableCtx.row, targetCol);
-                selectionState.endSelection();
-            }
-            if (mobileState.isMobile) captureKeyboardFocus();
-            return;
-        }
-
-        moveSelection(1, 0);
-        if (mobileState.isMobile) captureKeyboardFocus();
     }
 
     export function captureKeyboardFocus() {
@@ -247,8 +219,7 @@
 
     function handleKeydown(e) {
         if (e.key === "Enter") {
-            if (mobileState.isMobile) commitAndMoveDown();
-            else commitEdit();
+            commitEdit();
             e.preventDefault();
         } else if (e.key === "Escape") {
             cancelEdit();
@@ -297,7 +268,6 @@
     $effect(() => {
         editSessionState.setFocusHandle("formulaBar", () => {
             if (editInputEl) focusNoScroll(editInputEl);
-            else if (mobileState.isMobile) focusNoScroll(captureInputEl);
             // Double rAF: first frame lets iOS settle, second corrects any residual scroll.
             requestAnimationFrame(() => {
                 enforcePageTop();
@@ -347,13 +317,7 @@
     });
 </script>
 
-<div
-    class="formula-bar"
-    class:floating
-    style={floating
-        ? `bottom: ${Math.max(mobileState.viewportKeyboardHeight, 36)}px`
-        : ""}
->
+<div class="formula-bar">
     <div class="formula-bar-row">
         <div class="cell-reference">
             {cellRef || "-"}
@@ -463,22 +427,6 @@
         autocorrect="off"
         spellcheck="false"
     />
-    {#if mobileState.isMobile}
-        <div class="mobile-nav-row">
-            <button class="mobile-nav-btn" onclick={() => navigateMobile(0, -1)}>
-                Prev
-            </button>
-            <button class="mobile-nav-btn" onclick={() => navigateMobile(0, 1)}>
-                Next
-            </button>
-            <button class="mobile-nav-btn primary" onclick={() => commitEdit({ blurKeyboard: true })}>
-                Commit
-            </button>
-            <button class="mobile-nav-btn primary" onclick={commitAndMoveDown}>
-                Newline
-            </button>
-        </div>
-    {/if}
 </div>
 
 <style>
@@ -576,30 +524,6 @@
         pointer-events: none;
         left: 0;
         bottom: 0;
-    }
-
-    .mobile-nav-row {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0.375rem;
-        padding: 0.375rem 0.5rem 0.5rem;
-        border-top: 1px solid var(--border-color, #e2e8f0);
-    }
-
-    .mobile-nav-btn {
-        border: 1px solid var(--border-color, #cbd5e1);
-        border-radius: 8px;
-        background: var(--formula-nav-btn-bg, #f8fafc);
-        color: var(--text-color, #0f172a);
-        font-size: 0.8125rem;
-        font-weight: 600;
-        padding: 0.5rem 0.375rem;
-        min-height: 36px;
-        touch-action: manipulation;
-    }
-
-    .mobile-nav-btn.primary {
-        background: var(--formula-nav-btn-primary-bg, #e2e8f0);
     }
 
     .display-value {
@@ -714,52 +638,5 @@
     .formula-function {
         font-weight: 600;
         color: var(--function-color, #7c3aed);
-    }
-
-    /* ── Floating mode (mobile) ── */
-    .formula-bar.floating {
-        position: fixed;
-        left: 0;
-        right: 0;
-        z-index: 200;
-        border-top: 1px solid var(--color-border, #e2e8f0);
-        border-bottom: none;
-        box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.1);
-    }
-
-    /* ── Mobile: taller touch targets ── */
-    @media (max-width: 600px) {
-        .formula-bar-row {
-            min-height: 44px;
-            padding: 0.25rem 0.5rem;
-        }
-        .edit-buttons button {
-            width: 34px;
-            height: 34px;
-            font-size: 1rem;
-        }
-        .cell-reference {
-            min-width: 50px;
-            font-size: 0.8rem;
-            padding: 0.2rem 0.4rem;
-        }
-        .display-value {
-            height: 36px;
-            line-height: 28px;
-            font-size: 0.875rem;
-        }
-        .edit-input {
-            height: 36px;
-            font-size: 16px;
-            line-height: 24px;
-        }
-        .formula-overlay {
-            font-size: 16px;
-            line-height: 24px;
-        }
-        .mobile-nav-btn {
-            min-height: 40px;
-            font-size: 0.875rem;
-        }
     }
 </style>

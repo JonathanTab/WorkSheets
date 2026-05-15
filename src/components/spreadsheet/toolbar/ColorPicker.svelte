@@ -141,10 +141,12 @@
     >
         <div class="icon-stack">
             {#if variant === "fill"}
-                <svg viewBox="0 0 16 16" fill="none" class="picker-icon">
-                    <path d="M2 5.5 L4 13 H12 L14 5.5 Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="currentColor" fill-opacity="0.13"/>
-                    <line x1="2" y1="5.5" x2="14" y2="5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-                    <path d="M5.5 5.5 Q8 1.5 10.5 5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">
+                    <!-- brush handle -->
+                    <path d="M10 2 L13.5 5.5 L7 10.5 L5.5 9 Z" stroke-width="1.2" fill="currentColor" fill-opacity="0.15"/>
+                    <line x1="10" y1="2" x2="13.5" y2="5.5" stroke-width="1.2"/>
+                    <!-- ferrule -->
+                    <path d="M7 10.5 L5.5 9 L4.5 10.5 Q4 11.5 5.5 12 Q7 12.5 7 10.5 Z" stroke-width="1.1" fill="currentColor" fill-opacity="0.25"/>
                 </svg>
             {:else}
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="picker-icon">

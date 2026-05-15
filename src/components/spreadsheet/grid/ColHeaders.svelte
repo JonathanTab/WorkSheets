@@ -54,22 +54,21 @@
                     tabindex="-1"
                 >
                     <span>{colHeader?.(col)}</span>
-                    <div
-                        class="resize-handle col-resize"
-                        onmousedown={(e) => onStartColResize?.(col, e)}
-                        role="separator"
-                        aria-orientation="vertical"
-                    ></div>
-                    {#if mobileState.isMobile}
+                    {#if !mobileState.isMobile}
                         <div
-                            class="resize-handle-touch col-resize-touch"
+                            class="resize-handle col-resize"
+                            onmousedown={(e) => onStartColResize?.(col, e)}
+                            role="separator"
+                            aria-orientation="vertical"
+                        ></div>
+                    {:else if isColSelected?.(col)}
+                        <div
+                            class="col-corner-handle"
                             ontouchstart={(e) => { e.preventDefault(); e.stopPropagation(); onStartColResizeTouch?.(col, e); }}
                             role="separator"
                             aria-orientation="vertical"
                             aria-label="Resize column"
-                        >
-                            <div class="resize-pill"></div>
-                        </div>
+                        ></div>
                     {/if}
                 </div>
             {/each}
@@ -105,22 +104,21 @@
                     tabindex="-1"
                 >
                     <span>{colHeader?.(col)}</span>
-                    <div
-                        class="resize-handle col-resize"
-                        onmousedown={(e) => onStartColResize?.(col, e)}
-                        role="separator"
-                        aria-orientation="vertical"
-                    ></div>
-                    {#if mobileState.isMobile}
+                    {#if !mobileState.isMobile}
                         <div
-                            class="resize-handle-touch col-resize-touch"
+                            class="resize-handle col-resize"
+                            onmousedown={(e) => onStartColResize?.(col, e)}
+                            role="separator"
+                            aria-orientation="vertical"
+                        ></div>
+                    {:else if isColSelected?.(col)}
+                        <div
+                            class="col-corner-handle"
                             ontouchstart={(e) => { e.preventDefault(); e.stopPropagation(); onStartColResizeTouch?.(col, e); }}
                             role="separator"
                             aria-orientation="vertical"
                             aria-label="Resize column"
-                        >
-                            <div class="resize-pill"></div>
-                        </div>
+                        ></div>
                     {/if}
                 </div>
             {/each}
@@ -206,35 +204,23 @@
         cursor: col-resize;
     }
 
-    /* Mobile: wide touch target for column resize */
-    .resize-handle-touch {
+    /* Mobile: corner grab handle shown only on selected column */
+    .col-corner-handle {
         position: absolute;
-        z-index: 31;
-        top: 0;
+        right: 0;
         bottom: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        width: 18px;
+        height: 18px;
+        z-index: 35;
         touch-action: none;
         cursor: col-resize;
-    }
-
-    .col-resize-touch {
-        right: 0;
-        width: 16px;
-    }
-
-    .resize-pill {
-        width: 2px;
-        height: 60%;
-        border-radius: 1px;
         background: var(--color-primary, #3b82f6);
-        opacity: 0.4;
-        pointer-events: none;
+        border-radius: 3px 0 0 0;
+        opacity: 0.75;
     }
 
-    .col-resize-touch:active .resize-pill {
-        opacity: 0.9;
+    .col-corner-handle:active {
+        opacity: 1;
     }
 
     /* ── Freeze handle ── */

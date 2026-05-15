@@ -38,6 +38,7 @@ import {
     getSqliteDb,
     updateFileLastEdit,
     getFileLastEdit,
+    backfillAllDiffs,
     PERSISTENCE_ORIGIN,
 } from './db.js';
 import { SnapshotScheduler } from './snapshot-scheduler.js';
@@ -56,6 +57,10 @@ const GC_ENABLED = process.env.GC !== 'false' && process.env.GC !== '0';
 // ---------------------------------------------------------------------------
 initDb(LEVELDB_PATH, SQLITE_PATH);
 const scheduler = new SnapshotScheduler(saveSnapshot, getSqliteDb());
+
+// Recompute ALL diffs on startup — the predecessor query was fixed, so existing
+// diffs computed with the old query (comparing against future snapshots) are wrong.
+backfillAllDiffs(true);
 
 // ---------------------------------------------------------------------------
 // Message type constants (y-protocols)
@@ -419,6 +424,14 @@ async function handleHttp(req, res, url) {
     if (fileMetaMatch && req.method === 'GET') {
         const meta = getFileLastEdit(fileMetaMatch[1]);
         return _json(res, 200, meta ?? { last_edit_at: null, last_edit_by: null });
+    }
+
+    // POST /api/backfill-diffs  — recompute diff_json for all snapshots
+    // Body: { force?: boolean }  — force=true clears and recomputes everything
+    if (pathname === '/api/backfill-diffs' && req.method === 'POST') {
+        const body = await _readBody(req);
+        backfillAllDiffs(body.force === true);
+        return _json(res, 200, { ok: true, message: 'Backfill started in background' });
     }
 
     // GET /api/snapshot/:id/data  (binary)

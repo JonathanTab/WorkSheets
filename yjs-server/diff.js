@@ -3,6 +3,60 @@ import * as Y from 'yjs';
 const MAX_DEPTH = 4;
 
 /**
+ * Determine the concrete shared type class for an AbstractType instance.
+ * Based on the guessType pattern from the Yjs inspector (yjs#563 workaround).
+ *
+ * Internal fields used (stable in Yjs 13.x):
+ *   type._map        Map<string, Item>  — YMap key-value store
+ *   type._length     number             — item count in linked list
+ *   type._first      Item | null        — head of linked list (alias for _start)
+ *   item.content     Content            — payload (ContentString / ContentFormat / ContentType / ContentAny)
+ *
+ * @param {Y.AbstractType} t
+ * @returns {typeof Y.Map | typeof Y.Array | typeof Y.Text | null}
+ */
+function _guessType(t) {
+    // 1. Exact constructor match (already upgraded)
+    if (t.constructor === Y.Map)   return Y.Map;
+    if (t.constructor === Y.Array) return Y.Array;
+    if (t.constructor === Y.Text)  return Y.Text;
+    // 2. Non-empty internal _map → YMap
+    if (t._map && t._map.size > 0) return Y.Map;
+    // 3. Non-empty linked list → YArray or YText
+    if (t._length > 0) {
+        const first = t._first ?? t._start;
+        if (first?.content instanceof Y.ContentString ||
+            first?.content instanceof Y.ContentFormat) return Y.Text;
+        return Y.Array;
+    }
+    // 4. Empty — cannot distinguish; default to Map (most common root type)
+    return Y.Map;
+}
+
+/**
+ * Force a root-level doc.share entry to its concrete class via the public API.
+ * doc.getMap/getArray/getText "upgrades" an AbstractType in-place and returns
+ * the correctly-typed instance so public methods (keys(), get(), etc.) work.
+ *
+ * @param {Y.Doc} doc
+ * @param {string} key
+ * @returns {Y.Map | Y.Array | Y.Text | null}
+ */
+function _resolveType(doc, key) {
+    const t = doc.share.get(key);
+    if (!t) return null;
+    try {
+        const TypeClass = _guessType(t);
+        if (TypeClass === Y.Map)   return doc.getMap(key);
+        if (TypeClass === Y.Array) return doc.getArray(key);
+        if (TypeClass === Y.Text)  return doc.getText(key);
+        return doc.getMap(key); // fallback
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Compute a generic structural diff between two Y.Doc instances.
  * Schema-agnostic: sees only Y.Map/Y.Array/Y.Text structure and key/count changes.
  * Client apps interpret the path-based entries into human-readable summaries.
@@ -14,7 +68,16 @@ const MAX_DEPTH = 4;
 export function computeGenericDiff(docA, docB) {
     const entries = [];
 
+    // After _resolveType, root types are properly cast. Nested types come from
+    // Y.Map.get() which returns item.content.type — already a proper Y.Map/Array/Text.
+    // instanceof checks work correctly on these; no need for AbstractType fallbacks.
+
+    function isMapLike(t)   { return t instanceof Y.Map; }
+    function isArrayLike(t) { return t instanceof Y.Array; }
+    function isTextLike(t)  { return t instanceof Y.Text; }
+
     function diffMap(path, mapA, mapB, depth) {
+        // Use the public Y.Map API — types are properly cast at this point.
         const keysA = new Set(mapA.keys());
         const keysB = new Set(mapB.keys());
 
@@ -40,7 +103,7 @@ export function computeGenericDiff(docA, docB) {
                     }
                 }
             } else if (aIsType !== bIsType) {
-                modified++; // type changed (shouldn't happen in practice)
+                modified++;
             } else if (vA !== vB) {
                 modified++;
             }
@@ -51,12 +114,11 @@ export function computeGenericDiff(docA, docB) {
         }
     }
 
-    function diffArray(path, arrA, arrB, depth) {
+    function diffArray(path, arrA, arrB) {
         const lenA = arrA.length;
         const lenB = arrB.length;
         const delta = lenB - lenA;
 
-        // Check for modifications within same-length arrays by sampling elements
         let modified = 0;
         if (delta === 0 && lenA > 0) {
             const checkCount = Math.min(lenA, 50);
@@ -65,9 +127,7 @@ export function computeGenericDiff(docA, docB) {
                 const vA = arrA.get(i);
                 const vB = arrB.get(i);
                 if (vA instanceof Y.AbstractType && vB instanceof Y.AbstractType) {
-                    if (JSON.stringify(vA.toJSON()) !== JSON.stringify(vB.toJSON())) {
-                        modified++;
-                    }
+                    if (JSON.stringify(vA.toJSON()) !== JSON.stringify(vB.toJSON())) modified++;
                 } else if (vA !== vB) {
                     modified++;
                 }
@@ -83,43 +143,39 @@ export function computeGenericDiff(docA, docB) {
         const strA = textA.toString();
         const strB = textB.toString();
         if (strA === strB) return;
-        const inserted = Math.max(0, strB.length - strA.length);
-        const deleted = Math.max(0, strA.length - strB.length);
-        entries.push({ path, type: 'text', inserted, deleted });
+        entries.push({
+            path, type: 'text',
+            inserted: Math.max(0, strB.length - strA.length),
+            deleted:  Math.max(0, strA.length - strB.length),
+        });
     }
 
     function diffTypes(path, typeA, typeB, depth) {
-        if (typeA instanceof Y.Map && typeB instanceof Y.Map) {
+        if (isMapLike(typeA) && isMapLike(typeB)) {
             diffMap(path, typeA, typeB, depth);
-        } else if (typeA instanceof Y.Array && typeB instanceof Y.Array) {
-            diffArray(path, typeA, typeB, depth);
-        } else if (typeA instanceof Y.Text && typeB instanceof Y.Text) {
+        } else if (isArrayLike(typeA) && isArrayLike(typeB)) {
+            diffArray(path, typeA, typeB);
+        } else if (isTextLike(typeA) && isTextLike(typeB)) {
             diffText(path, typeA, typeB);
         }
-        // Mismatched types (Map vs Array etc.) are silently skipped
+        // Mismatched types silently skipped
     }
 
-    // Enumerate all top-level shared types from both docs
+    // Enumerate all top-level shared types. doc.share entries are AbstractType
+    // until accessed via getMap/getArray/getText — _resolveType does that upgrade.
     const allKeys = new Set([...docA.share.keys(), ...docB.share.keys()]);
 
     for (const key of allKeys) {
-        // Skip internal Yjs metadata keys
         if (key.startsWith('_')) continue;
 
-        const typeA = docA.share.get(key);
-        const typeB = docB.share.get(key);
+        const typeA = _resolveType(docA, key);
+        const typeB = _resolveType(docB, key);
 
         if (!typeA || !typeB) {
-            // Type only in one doc
-            const type = (typeA ?? typeB);
+            const type = typeA ?? typeB;
+            if (!type) continue;
             const typeLabel = type instanceof Y.Map ? 'map' : type instanceof Y.Array ? 'array' : 'text';
-            entries.push({
-                path: [key],
-                type: typeLabel,
-                added: typeB ? 1 : 0,
-                removed: typeA ? 1 : 0,
-                modified: 0,
-            });
+            entries.push({ path: [key], type: typeLabel, added: typeB ? 1 : 0, removed: typeA ? 1 : 0, modified: 0 });
             continue;
         }
 
