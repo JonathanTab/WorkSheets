@@ -169,6 +169,30 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Force a full teardown and reload of the current document.
+     * Used after a history restore: YjsRuntime.clearAndSwitchRoom() has already
+     * destroyed the old Y.Doc and loaded a fresh one under the new roomId.
+     * We must tear down session state without touching YjsRuntime, then
+     * re-initialize from the already-live new doc.
+     */
+    async reload() {
+        const docId = this.docId;
+        if (!docId) return;
+        if (this.#loadPromise) {
+            await this.#loadPromise;
+        }
+        // Use #teardownSession (not unload) so we don't destroy the new Yjs doc
+        // that clearAndSwitchRoom already loaded into the runtime.
+        this.#teardownSession();
+        this.#loadPromise = this.#doLoad(docId);
+        try {
+            await this.#loadPromise;
+        } finally {
+            this.#loadPromise = null;
+        }
+    }
+
+    /**
      * Internal load implementation
      * @param {string} docId
      */
@@ -180,7 +204,9 @@ export class SpreadsheetSession {
         performance.mark('ss:load:start');
 
         try {
-            // Cleanup previous session
+            // Tear down previous session state and release the old Yjs runtime doc.
+            // We call unload() (not #teardownSession) so the old doc's providers are
+            // properly disconnected before we open the new one.
             console.log('[SpreadsheetSession] Unloading previous session...');
             await this.unload();
             console.log('[SpreadsheetSession] Previous session unloaded');
@@ -322,23 +348,21 @@ export class SpreadsheetSession {
     }
 
     /**
-     * Unload the current document
+     * Tear down all session-level state (observers, engines, stores) without
+     * touching the YjsRuntime. Called by both unload() and reload().
      */
-    async unload() {
-        // Cleanup awareness observer
+    #teardownSession() {
         if (this.#cleanupAwarenessObserver) {
             this.#cleanupAwarenessObserver();
             this.#cleanupAwarenessObserver = null;
         }
         this.remoteSelections = [];
 
-        // Cleanup undo observer
         if (this.#cleanupUndoObserver) {
             this.#cleanupUndoObserver();
             this.#cleanupUndoObserver = null;
         }
 
-        // Cleanup formula engine
         if (this.#cleanupFormulaObserver) {
             this.#cleanupFormulaObserver();
             this.#cleanupFormulaObserver = null;
@@ -348,58 +372,48 @@ export class SpreadsheetSession {
             this.formulaEngine = null;
         }
 
-        // Cleanup external doc manager
         if (this.#externalDocManager) {
             this.#externalDocManager.destroy();
             this.#externalDocManager = null;
         }
 
-        // Cleanup TableManager
         if (this.tableManager) {
             this.tableManager.destroy();
             this.tableManager = null;
         }
 
-        // Cleanup TableRegistry (after TableManager so borrowed stores are released first)
         if (this.tableRegistry) {
             this.tableRegistry.destroy();
             this.tableRegistry = null;
         }
 
-        // Cleanup RepeaterEngine
         if (this.repeaterEngine) {
             this.repeaterEngine.destroy();
             this.repeaterEngine = null;
         }
 
-        // Cleanup SheetRenderContext
         if (this.renderContext) {
             this.renderContext.destroy();
             this.renderContext = null;
         }
 
-        // Cleanup SheetStore
         if (this.activeSheetStore) {
             this.activeSheetStore.destroy();
             this.activeSheetStore = null;
         }
 
-        // Destroy all cached sheet engines
         this.#clearSheetEngineCache();
 
-        // Cleanup observers
         if (this.#cleanupObserver) {
             this.#cleanupObserver();
             this.#cleanupObserver = null;
         }
 
-        // Cleanup storage listener
         if (this.#cleanupStorageListener) {
             this.#cleanupStorageListener();
             this.#cleanupStorageListener = null;
         }
 
-        // Reset state
         this.docId = null;
         this.ydoc = null;
         this.root = null;
@@ -411,6 +425,19 @@ export class SpreadsheetSession {
         this.docTitle = '';
         this.#canUndo = false;
         this.#canRedo = false;
+    }
+
+    /**
+     * Unload the current document, releasing YjsRuntime resources.
+     */
+    async unload() {
+        const unloadingDocId = this.docId;
+        this.#teardownSession();
+        // Release the Yjs runtime document (providers, IndexedDB) now that all
+        // local observers are detached.
+        if (unloadingDocId) {
+            storage._runtime?.unload(unloadingDocId);
+        }
     }
 
     /**
@@ -639,10 +666,14 @@ export class SpreadsheetSession {
             // Single evaluation pass in correct dependency order.
             this.formulaEngine.recalculateDirty();
 
+            // Capture the engine and sheet name at observer creation time so the
+            // observer works correctly even when this sheet is cached (i.e. when
+            // this.formulaEngine points to a different sheet's engine).
+            const capturedEngine = this.formulaEngine;
+            const capturedSheetName = this.sheets.find(s => s.id === this.activeSheetId)?.name ?? '';
+
             // Observe cellValues YKeyValue for formula recalculation on changes.
             const formulaObserver = (changes) => {
-                if (!this.formulaEngine) return;
-
                 const formulasToSet  = [];
                 const formulasToClear = [];
                 const valueChanges   = [];
@@ -667,16 +698,31 @@ export class SpreadsheetSession {
                 }
 
                 for (const { row, col } of formulasToClear) {
-                    this.formulaEngine.clearFormula(row, col);
+                    capturedEngine.clearFormula(row, col);
                 }
                 for (const { row, col, formula } of formulasToSet) {
-                    this.formulaEngine.setFormula(row, col, formula);
+                    capturedEngine.setFormula(row, col, formula);
                 }
                 for (const { row, col } of valueChanges) {
-                    this.formulaEngine.cellValueChanged(row, col);
+                    capturedEngine.cellValueChanged(row, col);
                 }
                 if (formulasToSet.length > 0) {
-                    this.formulaEngine.recalculateDirty();
+                    capturedEngine.recalculateDirty();
+                }
+
+                // Propagate this sheet's changes to any other engine (active or cached)
+                // that has cross-sheet references pointing at this sheet.
+                if (capturedSheetName && (valueChanges.length > 0 || formulasToClear.length > 0 || formulasToSet.length > 0)) {
+                    // Active engine (when a different sheet is currently active)
+                    if (this.formulaEngine && this.formulaEngine !== capturedEngine) {
+                        this.formulaEngine.invalidateCrossSheetDependencies(capturedSheetName);
+                    }
+                    // Cached engines
+                    for (const [, entry] of this.#sheetEngineCache) {
+                        if (entry.formulaEngine !== capturedEngine) {
+                            entry.formulaEngine.invalidateCrossSheetDependencies(capturedSheetName);
+                        }
+                    }
                 }
             };
 

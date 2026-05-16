@@ -275,7 +275,7 @@ export class SheetRenderContext {
     getOverflowExtent(row, col, visibleColEnd, colMetrics, displayValue, sheetCell) {
         const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
-        if (cell.wrapText) return 0;
+        if (cell.wrapText && cell.wrapText !== 'overflow') return 0;
         // Rich text cells always clip; HTML string width can't be measured as plain text
         if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
@@ -329,7 +329,7 @@ export class SheetRenderContext {
     getLeftOverflowExtent(row, col, visibleColStart, colMetrics, displayValue, sheetCell) {
         const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
-        if (cell.wrapText) return 0;
+        if (cell.wrapText && cell.wrapText !== 'overflow') return 0;
         if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
         const dv = displayValue ?? this.getDisplayValue(row, col);

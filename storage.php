@@ -351,9 +351,14 @@ function canReadFolder(PDO $db, string $folderId, string $user): bool {
                 JOIN folder_shares fs ON fs.folder_id = fc.ancestor_id
                 WHERE fc.descendant_id = fol.id AND fs.username = ? AND fs.can_read = 1
             )
+            OR EXISTS (
+                SELECT 1 FROM folder_closure fc2
+                JOIN folders anc ON anc.id = fc2.ancestor_id
+                WHERE fc2.descendant_id = fol.id AND fc2.depth > 0 AND anc.owner = ?
+            )
         )
     ");
-    $stmt->execute([$folderId, $user, $user]);
+    $stmt->execute([$folderId, $user, $user, $user]);
     return (bool)$stmt->fetch();
 }
 
@@ -371,9 +376,14 @@ function canWriteFolder(PDO $db, string $folderId, string $user): bool {
                 JOIN folder_shares fs ON fs.folder_id = fc.ancestor_id
                 WHERE fc.descendant_id = fol.id AND fs.username = ? AND fs.can_write = 1
             )
+            OR EXISTS (
+                SELECT 1 FROM folder_closure fc2
+                JOIN folders anc ON anc.id = fc2.ancestor_id
+                WHERE fc2.descendant_id = fol.id AND fc2.depth > 0 AND anc.owner = ?
+            )
         )
     ");
-    $stmt->execute([$folderId, $user, $user]);
+    $stmt->execute([$folderId, $user, $user, $user]);
     return (bool)$stmt->fetch();
 }
 
@@ -558,6 +568,11 @@ try {
                                 JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
                                 WHERE fc.descendant_id = f.folder_id AND fsh.username = :user AND fsh.can_read = 1
                             )
+                            OR EXISTS (
+                                SELECT 1 FROM folder_closure fc2
+                                JOIN folders anc ON anc.id = fc2.ancestor_id
+                                WHERE fc2.descendant_id = f.folder_id AND fc2.depth > 0 AND anc.owner = :user
+                            )
                         ))
                         OR (f.parent_id IS NOT NULL AND EXISTS (
                             SELECT 1 FROM files p
@@ -572,6 +587,11 @@ try {
                                         SELECT 1 FROM folder_closure fc
                                         JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
                                         WHERE fc.descendant_id = p.folder_id AND fsh.username = :user AND fsh.can_read = 1
+                                    )
+                                    OR EXISTS (
+                                        SELECT 1 FROM folder_closure fc2
+                                        JOIN folders anc ON anc.id = fc2.ancestor_id
+                                        WHERE fc2.descendant_id = p.folder_id AND fc2.depth > 0 AND anc.owner = :user
                                     )
                                 ))
                             )
@@ -593,6 +613,11 @@ try {
                             SELECT 1 FROM folder_closure fc
                             JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
                             WHERE fc.descendant_id = fol.id AND fsh.username = :user AND fsh.can_read = 1
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM folder_closure fc2
+                            JOIN folders anc ON anc.id = fc2.ancestor_id
+                            WHERE fc2.descendant_id = fol.id AND fc2.depth > 0 AND anc.owner = :user
                         )
                     )
                     GROUP BY fol.id
@@ -1296,6 +1321,11 @@ try {
                               JOIN folder_shares fsh ON fsh.folder_id = fc.ancestor_id
                               WHERE fc.descendant_id = f.folder_id AND fsh.username = :user AND fsh.can_read = 1
                           )
+                          OR EXISTS (
+                              SELECT 1 FROM folder_closure fc2
+                              JOIN folders anc ON anc.id = fc2.ancestor_id
+                              WHERE fc2.descendant_id = f.folder_id AND fc2.depth > 0 AND anc.owner = :user
+                          )
                       ))
                   )
                   $extraClauses
@@ -1339,21 +1369,6 @@ try {
                 'appType'     => $appType,
             ]);
             respond(['id' => $result['id'] ?? null]);
-        }
-
-        case 'file_meta': {
-            // Proxy last-edit metadata from the Yjs server.
-            $user   = requireAuth();
-            $fileId = trim($_GET['file_id'] ?? '');
-            if (!$fileId) error('file_id required');
-            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
-
-            try {
-                $meta = yjsGet('api/files/' . urlencode($fileId) . '/meta');
-                respond($meta);
-            } catch (Exception $e) {
-                respond(['last_edit_at' => null, 'last_edit_by' => null]);
-            }
         }
 
         case 'snapshot_data': {

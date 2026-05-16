@@ -34,7 +34,9 @@
     import DocFindReplace from './DocFindReplace.svelte';
     import DocFloatingToolbar from './DocFloatingToolbar.svelte';
     import DocPageSetupPanel from './DocPageSetupPanel.svelte';
-    import HistoryPanel from '../HistoryPanel.svelte';
+    import HistoryPanel from '../history/HistoryPanel.svelte';
+    import HistoryViewer from '../history/HistoryViewer.svelte';
+    import { HistoryManager } from '../../lib/history/HistoryManager.svelte.js';
 
     let { docId, registry = null } = $props();
 
@@ -232,6 +234,19 @@
     let triggerLinkDialog = $state(null); // set by DocToolbar via bind
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+    // ── History ───────────────────────────────────────────────────────────────
+    let historyManager = $state(/** @type {HistoryManager|null} */ (null));
+
+    $effect(() => {
+        const ydoc = docSession.ydoc;
+        if (!ydoc || !registry || !docId) return;
+        const hm = new HistoryManager({ fileId: docId, registry, appType: 'docs' });
+        historyManager = hm;
+        hm.loadSnapshots();
+        const unsubFileMeta = registry.subscribeFileMeta(docId, (meta) => hm.receiveFileMeta(meta));
+        return () => unsubFileMeta();
+    });
+
     function destroyView() {
         if (view) { view.destroy(); view = null; pmState = null; }
     }
@@ -265,11 +280,9 @@
         </div>
     {:else}
         <div class="workspace-outer">
-            {#if showHistory && registry}
+            {#if showHistory && historyManager}
                 <HistoryPanel
-                    {registry}
-                    fileId={docId}
-                    currentDoc={docSession.ydoc ?? null}
+                    {historyManager}
                     onClose={() => { showHistory = false; }}
                 />
             {/if}
@@ -335,6 +348,13 @@
 
 {#if showPageSetup}
     <DocPageSetupPanel onclose={() => { showPageSetup = false; }} />
+{/if}
+
+{#if historyManager?.viewerOpen}
+    <HistoryViewer
+        {historyManager}
+        currentDoc={docSession.ydoc ?? null}
+    />
 {/if}
 
 <style>

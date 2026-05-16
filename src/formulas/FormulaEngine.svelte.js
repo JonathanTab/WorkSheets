@@ -58,6 +58,20 @@ export class FormulaEngine {
      */
     #spillSources = new Map();
 
+    /**
+     * Cross-sheet dependency index: sheetName -> Set<formulaCellKey>
+     * Lets invalidateCrossSheetDependencies() find all formulas that reference a given sheet.
+     * @type {Map<string, Set<string>>}
+     */
+    #crossSheetDepsBySheet = new Map();
+
+    /**
+     * Per-formula cross-sheet sheets: formulaCellKey -> Set<sheetName>
+     * Used to clean up #crossSheetDepsBySheet when a formula is updated or cleared.
+     * @type {Map<string, Set<string>>}
+     */
+    #crossSheetDepsByFormula = new Map();
+
     // Reactive computed values - key: "row,col" -> value: computed result
     // This is Svelte 5 reactive state, so UI updates automatically
     // Includes both formula anchor values and spill cell values.
@@ -86,6 +100,64 @@ export class FormulaEngine {
      */
     setCrossSheetGetter(fn) {
         this.#getCrossSheetValue = fn;
+    }
+
+    /**
+     * Walk an AST and collect all sheet names referenced by SheetRef nodes.
+     * @param {Object} ast
+     * @returns {Set<string>}
+     */
+    #extractCrossSheetNames(ast) {
+        const names = new Set();
+        const visit = (node) => {
+            if (!node) return;
+            if (node.type === 'SheetRef') names.add(node.sheet);
+            if (node.left) visit(node.left);
+            if (node.right) visit(node.right);
+            if (node.operand) visit(node.operand);
+            if (node.args) node.args.forEach(visit);
+            if (node.ref) visit(node.ref);
+        };
+        visit(ast);
+        return names;
+    }
+
+    /**
+     * Update the cross-sheet dependency index for a formula cell.
+     * Pass ast=null when the formula is being cleared.
+     * @param {string} key  formulaCellKey ("row,col")
+     * @param {Object|null} ast
+     */
+    #updateCrossSheetDeps(key, ast) {
+        const oldSheets = this.#crossSheetDepsByFormula.get(key);
+        if (oldSheets) {
+            for (const name of oldSheets) {
+                this.#crossSheetDepsBySheet.get(name)?.delete(key);
+            }
+            this.#crossSheetDepsByFormula.delete(key);
+        }
+        if (!ast) return;
+        const sheets = this.#extractCrossSheetNames(ast);
+        if (sheets.size === 0) return;
+        this.#crossSheetDepsByFormula.set(key, sheets);
+        for (const name of sheets) {
+            if (!this.#crossSheetDepsBySheet.has(name)) this.#crossSheetDepsBySheet.set(name, new Set());
+            this.#crossSheetDepsBySheet.get(name).add(key);
+        }
+    }
+
+    /**
+     * Mark all formulas that reference the given sheet as dirty and recalculate.
+     * Called by SpreadsheetSession when another sheet's cells change.
+     * @param {string} sheetName
+     */
+    invalidateCrossSheetDependencies(sheetName) {
+        const deps = this.#crossSheetDepsBySheet.get(sheetName);
+        if (!deps || deps.size === 0) return;
+        for (const key of deps) {
+            this.#graph.dirtyCells.add(key);
+        }
+        this.recalculateDirty();
     }
 
     /**
@@ -270,6 +342,7 @@ export class FormulaEngine {
 
             if (!ast) {
                 // Not a formula, clear from graph
+                this.#updateCrossSheetDeps(key, null);
                 this.#graph.setFormula(row, col, null, null, []);
                 delete this.computedValues[key];
                 return { value: null, error: null, refs: [] };
@@ -277,6 +350,9 @@ export class FormulaEngine {
 
             // Extract cell references
             const refs = extractCellRefs(ast);
+
+            // Track cross-sheet dependencies for this formula
+            this.#updateCrossSheetDeps(key, ast);
 
             // Update dependency graph
             this.#graph.setFormula(row, col, formula, ast, refs);
@@ -288,6 +364,7 @@ export class FormulaEngine {
             return { value, error: isError(value) ? value : null, refs };
         } catch (err) {
             console.error(`Error parsing formula at ${key}:`, err);
+            this.#updateCrossSheetDeps(key, null);
             this.#graph.setFormula(row, col, null, null, []);
             const errorValue = FormulaError.ERROR;
             this.computedValues[key] = errorValue;
@@ -310,6 +387,7 @@ export class FormulaEngine {
                 return;
             }
             const refs = extractCellRefs(ast);
+            this.#updateCrossSheetDeps(key, ast);
             this.#graph.setFormula(row, col, formula, ast, refs);
             this.#graph.dirtyCells.add(key);
         } catch (err) {
@@ -327,6 +405,7 @@ export class FormulaEngine {
     clearFormula(row, col) {
         const key = cellKey(row, col);
         this.#clearSpill(key);
+        this.#updateCrossSheetDeps(key, null);
         this.#graph.setFormula(row, col, null, null, []);
         delete this.computedValues[key];
     }
@@ -563,6 +642,8 @@ export class FormulaEngine {
         this.#pendingChanges.clear();
         this.#spillRanges.clear();
         this.#spillSources.clear();
+        this.#crossSheetDepsBySheet.clear();
+        this.#crossSheetDepsByFormula.clear();
     }
 
     /**

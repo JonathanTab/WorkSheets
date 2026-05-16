@@ -556,7 +556,7 @@ export function buildPaneData(params) {
                 if (colFmt.fontFamily) item.fontFamily = colFmt.fontFamily;
                 if (colFmt.horizontalAlign) item.hAlign = colFmt.horizontalAlign;
                 if (colFmt.verticalAlign) item.vAlign = colFmt.verticalAlign;
-                if (colFmt.wrapText) item.wrapText = true;
+                if (colFmt.wrapText) item.wrapText = colFmt.wrapText;
             }
             // Row-level formatting (overrides col)
             // Use pre-cached value for non-repeater cells; re-fetch for repeater rows
@@ -574,7 +574,7 @@ export function buildPaneData(params) {
                 if (rowFmt.fontFamily) item.fontFamily = rowFmt.fontFamily;
                 if (rowFmt.horizontalAlign) item.hAlign = rowFmt.horizontalAlign;
                 if (rowFmt.verticalAlign) item.vAlign = rowFmt.verticalAlign;
-                if (rowFmt.wrapText) item.wrapText = true;
+                if (rowFmt.wrapText) item.wrapText = rowFmt.wrapText;
             }
             // Cell-level formatting (highest priority, overrides row/col)
             if (applySheetFmt && sheetCell?.exists) {
@@ -588,7 +588,7 @@ export function buildPaneData(params) {
                 if (sheetCell.fontFamily) item.fontFamily = sheetCell.fontFamily;
                 if (sheetCell.horizontalAlign) item.hAlign = sheetCell.horizontalAlign;
                 if (sheetCell.verticalAlign) item.vAlign = sheetCell.verticalAlign;
-                if (sheetCell.wrapText) item.wrapText = true;
+                if (sheetCell.wrapText) item.wrapText = sheetCell.wrapText;
             }
 
             // Custom borders (sparse)
@@ -662,7 +662,7 @@ export function buildPaneData(params) {
             if (
                 cellType === CELL_TYPE.REGULAR &&
                 item.renderType === 'text' &&
-                !item.wrapText &&
+                (!item.wrapText || item.wrapText === 'overflow') &&
                 !item.richTextRuns &&
                 item.displayValue &&
                 renderContext
@@ -699,7 +699,8 @@ export function buildPaneData(params) {
             // Mark cells that need content clipping (ctx.save/clip/restore in renderer).
             // wrapText and merged cells need clipping; so do table headers (complex layout).
             // Plain single-line text cells that don't overflow are left as clipContent:false.
-            if (item.wrapText || cellType === CELL_TYPE.MERGE_PRIMARY) {
+            // "overflow" mode explicitly allows text to spill into adjacent cells — no clip.
+            if ((item.wrapText && item.wrapText !== 'overflow') || cellType === CELL_TYPE.MERGE_PRIMARY) {
                 item.clipContent = true;
             }
             // Non-text render types have their own internal layout that can overflow
@@ -789,7 +790,7 @@ export function buildPaneData(params) {
             if (raColFmt.fontFamily) item.fontFamily = raColFmt.fontFamily;
             if (raColFmt.horizontalAlign) item.hAlign = raColFmt.horizontalAlign;
             if (raColFmt.verticalAlign) item.vAlign = raColFmt.verticalAlign;
-            if (raColFmt.wrapText) item.wrapText = true;
+            if (raColFmt.wrapText) item.wrapText = raColFmt.wrapText;
         }
         const raRowFmt = effectiveSheetStore?.getRowFormatting?.(pr) ?? null;
         if (raRowFmt) {
@@ -803,7 +804,7 @@ export function buildPaneData(params) {
             if (raRowFmt.fontFamily) item.fontFamily = raRowFmt.fontFamily;
             if (raRowFmt.horizontalAlign) item.hAlign = raRowFmt.horizontalAlign;
             if (raRowFmt.verticalAlign) item.vAlign = raRowFmt.verticalAlign;
-            if (raRowFmt.wrapText) item.wrapText = true;
+            if (raRowFmt.wrapText) item.wrapText = raRowFmt.wrapText;
         }
         if (sheetCell?.exists) {
             if (sheetCell.backgroundColor) item.bgColor = sheetCell.backgroundColor;
@@ -816,7 +817,7 @@ export function buildPaneData(params) {
             if (sheetCell.fontFamily) item.fontFamily = sheetCell.fontFamily;
             if (sheetCell.horizontalAlign) item.hAlign = sheetCell.horizontalAlign;
             if (sheetCell.verticalAlign) item.vAlign = sheetCell.verticalAlign;
-            if (sheetCell.wrapText) item.wrapText = true;
+            if (sheetCell.wrapText) item.wrapText = sheetCell.wrapText;
         }
 
         // Merged cells always default to top alignment when vAlign not explicitly set

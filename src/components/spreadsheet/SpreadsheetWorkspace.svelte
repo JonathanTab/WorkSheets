@@ -14,7 +14,6 @@
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import { HistoryManager } from "../../lib/history/HistoryManager.svelte.js";
-    import { LastEditTracker } from "../../lib/history/LastEditTracker.svelte.js";
     import "../../lib/history/apps/sheetsInterpreter.js";
     import {
         spreadsheetSession,
@@ -36,7 +35,6 @@
 
     // ── History system ─────────────────────────────────────────────────────────
     let historyManager = $state(/** @type {HistoryManager|null} */ (null));
-    let lastEditTracker = /** @type {LastEditTracker|null} */ (null);
 
     const sheetsAdapter = {
         diffFn: computeSpreadsheetDiff,
@@ -183,34 +181,26 @@
         document.removeEventListener("togglePageBreaks", handleTogglePageBreaks);
         document.removeEventListener("openPdfExport", handleOpenPdfExport);
         lastEditTracker?.destroy();
-        // Optionally unload document when leaving
-        // unloadDocument();
+        unloadDocument();
     });
 
-    // Re-create HistoryManager + LastEditTracker whenever the doc or registry changes
+    // Re-create HistoryManager whenever the doc or registry changes, and wire up
+    // the server-pushed file-meta sideband (replaces LastEditTracker + loadFileMeta).
     $effect(() => {
         const ydoc = spreadsheetSession.ydoc;
-        const user = currentUser;
         if (!ydoc || !registry || !docId) return;
 
-        // Destroy old tracker
-        lastEditTracker?.destroy();
-
-        const hm = new HistoryManager({ fileId: docId, registry, appType: 'sheets' });
-        historyManager = hm;
-        hm.loadFileMeta();
-
-        lastEditTracker = new LastEditTracker({
-            ydoc,
-            username: user,
-            historyManager: hm,
-            isContentChange: sheetsAdapter.isContentChange,
+        const hm = new HistoryManager({
+            fileId: docId,
+            registry,
+            appType: 'sheets',
+            adapter: sheetsAdapter,
+            onAfterRestore: () => spreadsheetSession.reload(),
         });
+        historyManager = hm;
 
-        return () => {
-            lastEditTracker?.destroy();
-            lastEditTracker = null;
-        };
+        const unsubFileMeta = registry.subscribeFileMeta(docId, (meta) => hm.receiveFileMeta(meta));
+        return () => unsubFileMeta();
     });
 
     function handleCellEdit(row, col, value) {
@@ -582,7 +572,6 @@
     <HistoryViewer
         {historyManager}
         currentDoc={spreadsheetSession.ydoc ?? null}
-        adapter={sheetsAdapter}
     />
 {/if}
 

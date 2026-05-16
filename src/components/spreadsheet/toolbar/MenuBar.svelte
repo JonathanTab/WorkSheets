@@ -130,7 +130,7 @@
         if (!docId) return;
         const file = storage.drive.getFile(docId);
         if (!file) return;
-        openModal(VersionHistoryModal, { registry: storage, file });
+        openModal(VersionHistoryModal, { registry: storage, file, onAfterRestore: () => spreadsheetSession.reload() });
     }
 
     function exportTSV() {
@@ -661,11 +661,11 @@
                     if (ct === 'TABLE_DATA' || ct === 'TABLE_ENTRY') {
                         const info = renderContext?.tableManager?.getCellInfo(r, c);
                         if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { wrapText: mode });
+                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { wrapText: mode === 'overflow' ? undefined : mode });
                         }
                         continue;
                     }
-                    sheetStore.setCellProperties(r, c, { textWrap: mode });
+                    sheetStore.setCellProperties(r, c, { wrapText: mode === 'overflow' ? undefined : mode });
                 }
             }
         });

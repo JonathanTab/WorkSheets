@@ -35,7 +35,6 @@ const PT_PER_INCH       = 72;
 const DEFAULT_FONT_PX   = 12;
 const DEFAULT_TEXT_COLOR = '#1e293b';
 const DEFAULT_GRID_COLOR = '#e2e8f0';
-const ACCENT_BAR_PX     = 3;
 
 // ── Unit helpers ───────────────────────────────────────────────────────────────
 
@@ -150,6 +149,47 @@ function textWidthMm(pdf, text, sizePx, s) {
     return pdf.getStringUnitWidth(text) * pt / pdf.internal.scaleFactor;
 }
 
+// ── Floating image helpers ─────────────────────────────────────────────────────
+
+/** Convert a Blob to a base64 data URL. */
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(/** @type {string} */ (reader.result));
+        reader.onerror   = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+/** Load a data URL into an Image element and return its natural dimensions. */
+function getImgNaturalSize(dataUrl) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload  = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve({ w: 0, h: 0 });
+        img.src = dataUrl;
+    });
+}
+
+/**
+ * Compute jsPDF draw rect for a given fit mode (all values in mm).
+ * @returns {{ dx:number, dy:number, dw:number, dh:number }}
+ */
+function fitRectMm(srcW, srcH, dstX, dstY, dstW, dstH, fit) {
+    if (!srcW || !srcH || !fit || fit === 'fill') return { dx: dstX, dy: dstY, dw: dstW, dh: dstH };
+    const sa = srcW / srcH, da = dstW / dstH;
+    if (fit === 'contain') {
+        if (sa > da) { const dh = dstW / sa; return { dx: dstX, dy: dstY + (dstH - dh) / 2, dw: dstW, dh }; }
+        else         { const dw = dstH * sa; return { dx: dstX + (dstW - dw) / 2, dy: dstY, dw, dh: dstH }; }
+    }
+    if (fit === 'cover') {
+        if (sa > da) { const dw = dstH * sa; return { dx: dstX + (dstW - dw) / 2, dy: dstY, dw, dh: dstH }; }
+        else         { const dh = dstW / sa; return { dx: dstX, dy: dstY + (dstH - dh) / 2, dw: dstW, dh }; }
+    }
+    if (fit === 'none') return { dx: dstX, dy: dstY, dw: srcW, dh: srcH };
+    return { dx: dstX, dy: dstY, dw: dstW, dh: dstH };
+}
+
 // ── Variable substitution ──────────────────────────────────────────────────────
 
 function substituteVars(text, vars) {
@@ -258,10 +298,55 @@ function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
 // ── Rich-text content painter ──────────────────────────────────────────────────
 
 /**
+ * Word-wrap one '\n'-split line of rich-text runs to fit within maxW mm.
+ * Splits at whitespace boundaries; a single word wider than maxW is kept whole.
+ * Returns an array of wrapped sub-lines, each being an array of run segments.
+ */
+function wrapRichLine(pdf, runs, maxW, cell, s, defaultSizePx) {
+    const outLines = [[]];
+    let curW = 0;   // mm used by committed segments in the current output line
+
+    for (const run of runs) {
+        if (!run.t) continue;
+        applyFont(pdf, cell, s, run);
+        const sizePx = run.f || defaultSizePx;
+
+        // Tokenize: alternating word / whitespace chunks
+        const chunks = run.t.split(/(\s+)/);
+        let segText = '';
+        let segW    = 0;
+
+        for (const chunk of chunks) {
+            if (!chunk) continue;
+            const chunkW   = textWidthMm(pdf, chunk, sizePx, s);
+            const isSpace  = /^\s+$/.test(chunk);
+
+            if (!isSpace && curW + segW + chunkW > maxW && curW + segW > 0) {
+                // Overflow — flush current segment, start new line
+                const trimmed = segText.trimEnd();
+                if (trimmed) outLines[outLines.length - 1].push({ ...run, t: trimmed });
+                outLines.push([]);
+                curW    = 0;
+                segText = chunk;
+                segW    = chunkW;
+            } else {
+                segText += chunk;
+                segW    += chunkW;
+            }
+        }
+
+        if (segText) {
+            outLines[outLines.length - 1].push({ ...run, t: segText });
+            curW += segW;
+        }
+    }
+
+    return outLines.filter(l => l.length > 0);
+}
+
+/**
  * Render a cell's richTextRuns array as per-run styled PDF text.
- * Runs are split on '\n' to form visual lines; each run may override
- * bold, italic, font-size, color, underline, and strikethrough.
- * The entire cell area is clipped so runs never bleed outside the cell.
+ * Always word-wraps to match canvas behaviour (canvas ignores wrapText for rich text).
  *
  * @param {jsPDF}  pdf
  * @param {Object} cell          CellPaintItem
@@ -273,20 +358,30 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     const runs = cell.richTextRuns;
     if (!runs || runs.length === 0) return;
 
-    const hAlign       = cell.hAlign || 'left';
-    const vAlign       = cell.vAlign || 'middle';
-    const padMm        = px2mm(4, s);
+    const hAlign        = cell.hAlign || 'left';
+    const vAlign        = cell.vAlign || 'middle';
+    const padMm         = px2mm(4, s);
+    const maxW          = Math.max(1, cw - 2 * padMm);
     const defaultSizePx = cell.fontSize || DEFAULT_FONT_PX;
 
-    // Split runs into visual lines by '\n' within run text
-    const lines = [[]];
+    // Step 1: split runs into raw lines on explicit '\n'
+    const rawLines = [[]];
     for (const run of runs) {
         if (!run.t) continue;
         const parts = run.t.split('\n');
         for (let i = 0; i < parts.length; i++) {
-            if (i > 0) lines.push([]);
-            if (parts[i]) lines[lines.length - 1].push({ ...run, t: parts[i] });
+            if (i > 0) rawLines.push([]);
+            if (parts[i]) rawLines[rawLines.length - 1].push({ ...run, t: parts[i] });
         }
+    }
+
+    // Step 2: word-wrap each raw line to fit maxW (always, matching canvas)
+    const lines = [];
+    for (const rawLine of rawLines) {
+        if (rawLine.length === 0) { lines.push([]); continue; }
+        const wrapped = wrapRichLine(pdf, rawLine, maxW, cell, s, defaultSizePx);
+        if (wrapped.length === 0) lines.push([]);
+        else for (const wl of wrapped) lines.push(wl);
     }
 
     // Use the same line-height multiplier as CanvasRenderer (1.5) for visual parity.
@@ -383,6 +478,16 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     }
 
     const text = cell.displayValue;
+
+    // Placeholder text for empty cells — italic, muted (matches CanvasRenderer placeholderText path)
+    if ((!text || text === '') && cell.placeholderText) {
+        pdf.setFont('helvetica', 'italic');
+        pdf.setFontSize(px2pt((cell.fontSize || DEFAULT_FONT_PX) * 0.9, s));
+        setTextCol(pdf, '#94a3b8');
+        pdf.text(cell.placeholderText, cx + px2mm(4, s), cy + ch / 2, { align: 'left', baseline: 'middle' });
+        return;
+    }
+
     if (!text) return;
 
     const sizePx = applyFont(pdf, cell, s);
@@ -409,7 +514,7 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         // Use baseline:'middle' throughout for consistent jsPDF rendering —
         // baseline:'top' support is unreliable across jsPDF versions.
         const lines  = pdf.splitTextToSize(text, maxW);
-        const lineH  = px2mm(sizePx * 1.4, s);
+        const lineH  = px2mm(sizePx * 1.5, s);
         const totalH = lines.length * lineH;
         // lineY is the vertical center of the first line
         let lineY    = vAlign === 'top'    ? cy + padMm + lineH / 2
@@ -427,7 +532,7 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         // empty cells (buildPaneData already extends cell.width for those cases).
         const lines = pdf.splitTextToSize(text, maxW);
         const line  = lines[0] ?? text;
-        const lineH = px2mm(sizePx * 1.4, s);
+        const lineH = px2mm(sizePx * 1.5, s);
         let textY;
         if (vAlign === 'top')         textY = cy + padMm + lineH / 2;
         else if (vAlign === 'bottom') textY = cy + ch - padMm - lineH / 2;
@@ -457,9 +562,29 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 function drawBordersVec(pdf, borders, x, y, w, h) {
     const edge = (b, x1, y1, x2, y2) => {
         if (!b) return;
-        setDraw(pdf, b.color, [0, 0, 0]);
-        pdf.setLineWidth(Math.max(0.1, (b.width || 1) * 0.264));
-        pdf.line(x1, y1, x2, y2);
+        setDraw(pdf, b.color || '#000000', [0, 0, 0]);
+        const lineW = Math.max(0.1, (b.width || 1) * 0.264);
+        const style = b.style || 'solid';
+        if (style === 'double') {
+            pdf.setLineWidth(0.2);
+            const gap = 0.5;
+            const isH = (y1 === y2);
+            if (isH) {
+                pdf.line(x1, y1 - gap, x2, y2 - gap);
+                pdf.line(x1, y1 + gap, x2, y2 + gap);
+            } else {
+                pdf.line(x1 - gap, y1, x2 - gap, y2);
+                pdf.line(x1 + gap, y1, x2 + gap, y2);
+            }
+        } else if (style === 'dashed') {
+            pdf.setLineWidth(lineW);
+            pdf.setLineDashPattern([1.5, 1.5], 0);
+            pdf.line(x1, y1, x2, y2);
+            pdf.setLineDashPattern([], 0);
+        } else {
+            pdf.setLineWidth(lineW);
+            pdf.line(x1, y1, x2, y2);
+        }
     };
     edge(borders.top,    x,     y,     x + w, y    );
     edge(borders.right,  x + w, y,     x + w, y + h);
@@ -489,50 +614,62 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     }
 
     // ── 1. Background ─────────────────────────────────────────────────────────
+    // Always paint a white base so transparent overlays below blend correctly.
+    pdf.setFillColor(255, 255, 255);
+    pdf.rect(cx, cy, cw, ch, 'F');
+
     const bg = cell.bgColor;
     if (bg && !bg.startsWith('rgba(0,0,0,0')) {
         setFill(pdf, bg);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
+
+    // Zebra striping — rgba(0,0,0,0.018) over white ≈ (250,250,250)
     if (cell.zebraRow && !cell.bgColor) {
-        pdf.setFillColor(246, 248, 250);
+        pdf.setFillColor(250, 250, 250);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
-    if (cell.renderType === 'table_header') {
-        pdf.setFillColor(241, 245, 249);
-        pdf.rect(cx, cy, cw, ch, 'F');
-    }
-    if (cell.renderType === 'table_entry') {
-        pdf.setFillColor(248, 250, 252);
-        pdf.rect(cx, cy, cw, ch, 'F');
-    }
+
+    // Formula column tint — rgba(0,0,0,0.015) over white ≈ (251,251,251)
     if (cell.isFormulaCol) {
-        pdf.setFillColor(245, 243, 255);
+        pdf.setFillColor(251, 251, 251);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
 
-    // ── 2. Accent decorations ─────────────────────────────────────────────────
-    if (cell.renderType === 'table_header' && cell.tableAccentColor) {
-        const [r, g, b] = parseColor(cell.tableAccentColor, [59, 130, 246]);
-        pdf.setFillColor(r, g, b);
-        pdf.rect(cx, cy, cw, px2mm(2, s), 'F'); // accent top stripe
-    }
-    if (cell.isFirstTableCol && cell.tableAccentColor) {
-        const [r, g, b] = parseColor(cell.tableAccentColor, [59, 130, 246]);
-        pdf.setFillColor(r, g, b);
-        pdf.rect(cx, cy, px2mm(ACCENT_BAR_PX, s), ch, 'F');
+    // Repeater copy overlay — rgba(124,58,237,0.028) over white ≈ (251,250,255)
+    if (cell.isRepeaterCopy) {
+        pdf.setFillColor(251, 250, 255);
+        pdf.rect(cx, cy, cw, ch, 'F');
     }
 
-    // ── 3. Custom borders ─────────────────────────────────────────────────────
-    if (cell.borders) drawBordersVec(pdf, cell.borders, cx, cy, cw, ch);
+    // ── 2. Data validation invalid — red outline (before content, matches CanvasRenderer) ──
+    if (cell.dvInvalid) {
+        setDraw(pdf, '#ef4444');
+        pdf.setLineWidth(0.4);
+        const inset = 0.2;
+        pdf.rect(cx + inset, cy + inset, cw - 2 * inset, ch - 2 * inset, 'S');
+    }
 
-    // ── 4. Content ────────────────────────────────────────────────────────────
-    const accentOff = cell.isFirstTableCol ? px2mm(ACCENT_BAR_PX, s) : 0;
-
+    // ── 3. Content ────────────────────────────────────────────────────────────
     switch (cell.renderType) {
         case 'text':
         case 'dropdown':
-            drawTextContent(pdf, cell, cx + accentOff, cy, cw - accentOff, ch, s);
+            drawTextContent(pdf, cell, cx, cy, cw, ch, s);
+            if (cell.renderType === 'dropdown') {
+                // Dropdown chevron (▾) — matches CanvasRenderer #paintDropdownContent
+                const arrowW  = px2mm(16, s);
+                const arrowSz = px2mm(4, s);
+                const arrowX  = cx + cw - arrowW / 2;
+                const arrowY  = cy + ch / 2;
+                setFill(pdf, '#64748b');
+                setDraw(pdf, '#64748b');
+                pdf.setLineWidth(0.1);
+                pdf.lines(
+                    [[arrowSz * 2, 0], [-arrowSz, arrowSz]],
+                    arrowX - arrowSz, arrowY - arrowSz / 2,
+                    [1, 1], 'F', true,
+                );
+            }
             break;
 
         case 'checkbox':
@@ -543,61 +680,26 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
             drawRatingVec(pdf, cx, cy, cw, ch, cell.rawValue ?? 0, cell.ratingMax ?? 5, s);
             break;
 
-        case 'table_header': {
-            const info = cell.tableHeaderInfo;
-            if (!info) break;
-            const padMm     = px2mm(4, s) + accentOff;
-            const filterW   = px2mm(20, s);
-            const textAreaW = Math.max(0.5, cw - padMm - filterW);
-            const textY     = cy + ch / 2;
-
-            pdf.setFont('helvetica', 'bold');
-            pdf.setFontSize(px2pt(DEFAULT_FONT_PX, s));
-            pdf.setTextColor(51, 65, 85);
-
-            // Clip header text to its text area
-            beginClip(pdf, cx + padMm, cy, textAreaW, ch);
-            pdf.text(info.colName, cx + padMm, textY, { align: 'left', baseline: 'middle' });
-            endClip(pdf);
-
-            if (info.sortIcon) {
-                pdf.setFont('helvetica', 'bold');
-                pdf.setFontSize(px2pt(8, s));
-                const [r, g, b] = parseColor('#3b82f6', [59, 130, 246]);
-                pdf.setTextColor(r, g, b);
-                pdf.text(info.sortIcon, cx + cw - filterW / 2, textY, { align: 'center', baseline: 'middle' });
-            }
-            // Bottom border
-            setDraw(pdf, '#94a3b8');
-            pdf.setLineWidth(0.35);
-            pdf.line(cx, cy + ch, cx + cw, cy + ch);
+        default:
+            // image / file / custom types: fall back to text representation
+            drawTextContent(pdf, cell, cx, cy, cw, ch, s);
             break;
-        }
-
-        case 'table_entry': {
-            if (cell.isNonEntryCol) {
-                pdf.setFont('helvetica', 'bold');
-                pdf.setFontSize(px2pt(DEFAULT_FONT_PX, s));
-                pdf.setTextColor(139, 92, 246);
-                pdf.text('fx', cx + cw / 2, cy + ch / 2, { align: 'center', baseline: 'middle' });
-            } else if (cell.displayValue) {
-                drawTextContent(pdf, cell, cx + accentOff, cy, cw - accentOff, ch, s);
-            }
-            break;
-        }
     }
 
-    // ── 5. Grid lines ─────────────────────────────────────────────────────────
+    // ── 4. Grid lines ─────────────────────────────────────────────────────────
+    // Drawn before custom borders so borders render on top, matching CanvasRenderer.
     if (showGridLines) {
         const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
         pdf.setDrawColor(r, g, b);
         pdf.setLineWidth(0.13);
-        // Use naturalWidth for overflow cells so the right/bottom lines stay at
-        // the original column boundary, not the extended spill edge.
+        // naturalWidth: for overflow cells right/bottom lines stay at original boundary
         const gridCw = cell.naturalWidth ? px2mm(cell.naturalWidth, s) : cw;
         pdf.line(cx + gridCw, cy,      cx + gridCw, cy + ch); // right
         pdf.line(cx,          cy + ch, cx + gridCw, cy + ch); // bottom
     }
+
+    // ── 5. Custom borders (after gridlines so they render on top) ─────────────
+    if (cell.borders) drawBordersVec(pdf, cell.borders, cx, cy, cw, ch);
 }
 
 // ── VectorPrintEngine class ────────────────────────────────────────────────────
@@ -622,6 +724,7 @@ export class VectorPrintEngine {
             rowMetrics,
             colMetrics,
             docName = '',
+            fetchBlobFn = null,
         } = params;
 
         const totalRows = renderContext?.effectiveRowCount ?? sheetStore?.rowCount ?? 100;
@@ -629,30 +732,46 @@ export class VectorPrintEngine {
 
         // ── Paper geometry ────────────────────────────────────────────────────
         const orientation = printSettings.orientation ?? 'portrait';
-        const paperKey    = printSettings.paperSize ?? 'A4';
-        const paper       = PAPER_SIZES[paperKey] ?? PAPER_SIZES.A4;
+        const paperKey    = printSettings.paperSize ?? 'letter';
+        const paper       = PAPER_SIZES[paperKey] ?? PAPER_SIZES.letter;
         const pageW = orientation === 'landscape' ? paper.height : paper.width;
         const pageH = orientation === 'landscape' ? paper.width  : paper.height;
 
-        const marginTop    = printSettings.marginTop    ?? 19;
-        const marginBottom = printSettings.marginBottom ?? 19;
-        const marginLeft   = printSettings.marginLeft   ?? 18;
-        const marginRight  = printSettings.marginRight  ?? 18;
+        const marginTop    = printSettings.marginTop    ?? 19.05;
+        const marginBottom = printSettings.marginBottom ?? 19.05;
+        const marginLeft   = printSettings.marginLeft   ?? 19.05;
+        const marginRight  = printSettings.marginRight  ?? 19.05;
 
         const printableW = pageW  - marginLeft - marginRight;
         const printableH = pageH  - marginTop  - marginBottom;
         const s          = printSettings.scale ?? 1.0; // user scale
+
+        // ── Floating images list (needed for both area bounds and rendering) ──
+        const floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
 
         // ── Print area ────────────────────────────────────────────────────────
         const printArea = printSettings.printArea ?? 'usedArea';
         let settingsForBreaks = { ...printSettings };
         if (printArea === 'usedArea') {
             const used = computeUsedArea(sheetStore);
-            if (used) {
-                settingsForBreaks.areaStartRow = used.startRow;
-                settingsForBreaks.areaStartCol = used.startCol;
-                settingsForBreaks.areaEndRow   = used.endRow;
-                settingsForBreaks.areaEndCol   = used.endCol;
+            let startRow = used?.startRow ?? 0;
+            let startCol = used?.startCol ?? 0;
+            let endRow   = used?.endRow   ?? -1;
+            let endCol   = used?.endCol   ?? -1;
+            // Extend bounds in all directions to fully cover floating images
+            for (const img of floatingImages) {
+                const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
+                const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
+                if (imgRight  > 0) { const c = colMetrics.indexAtOffset(Math.max(0, imgRight  - 1)); if (c > endCol) endCol = c; }
+                if (imgBottom > 0) { const r = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1)); if (r > endRow) endRow = r; }
+                if (img.anchorRow < startRow) startRow = img.anchorRow;
+                if (img.anchorCol < startCol) startCol = img.anchorCol;
+            }
+            if (endRow >= 0) {
+                settingsForBreaks.areaStartRow = startRow;
+                settingsForBreaks.areaStartCol = startCol;
+                settingsForBreaks.areaEndRow   = endRow;
+                settingsForBreaks.areaEndCol   = Math.max(endCol, 0);
             }
         }
 
@@ -674,6 +793,21 @@ export class VectorPrintEngine {
         const hasHeader  = printSettings.headerLeft || printSettings.headerCenter || printSettings.headerRight;
         const hasFooter  = printSettings.footerLeft || printSettings.footerCenter || printSettings.footerRight;
         const totalPages = rowBreaks.length * colBreaks.length;
+
+        // ── Floating images: preload all unique blobs ─────────────────────────
+        /** @type {Map<string, {dataUrl:string, naturalW:number, naturalH:number}>} */
+        const imgAssets = new Map();
+        if (floatingImages.length && fetchBlobFn) {
+            const uniqueIds = [...new Set(floatingImages.map(f => f.blobId))];
+            await Promise.all(uniqueIds.map(async (blobId) => {
+                try {
+                    const blob    = await fetchBlobFn(blobId);
+                    const dataUrl = await blobToDataUrl(blob);
+                    const { w, h } = await getImgNaturalSize(dataUrl);
+                    imgAssets.set(blobId, { dataUrl, naturalW: w, naturalH: h });
+                } catch { /* skip images that fail to load */ }
+            }));
+        }
 
         // ── Build page list ───────────────────────────────────────────────────
         const pages = [];
@@ -729,11 +863,38 @@ export class VectorPrintEngine {
 
             // Clip all cell drawing to the printable area so content doesn't
             // bleed into margins. Uses the corrected clip sequence: clip → discardPath.
+            const pageContentW = colMetrics.offsetOf(endCol + 1) - contentLeft;
+            const pageContentH = rowMetrics.offsetOf(endRow + 1) - contentTop;
+
             beginClip(pdf, marginLeft, marginTop, printableW, printableH);
             for (const cell of cells) {
                 drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines);
             }
             endClip(pdf);
+
+            // Floating images: drawn outside the cell clip to avoid nested PDF clips.
+            // Each image gets its own clip = intersection(image bounds, printable area).
+            for (const img of floatingImages) {
+                const asset = imgAssets.get(img.blobId);
+                if (!asset) continue;
+                const imgX = colMetrics.offsetOf(img.anchorCol) + img.offsetX - contentLeft;
+                const imgY = rowMetrics.offsetOf(img.anchorRow) + img.offsetY - contentTop;
+                if (imgX + img.width <= 0 || imgX >= pageContentW) continue;
+                if (imgY + img.height <= 0 || imgY >= pageContentH) continue;
+                const imgX_mm = marginLeft + px2mm(imgX, s);
+                const imgY_mm = marginTop  + px2mm(imgY, s);
+                const imgW_mm = px2mm(img.width,  s);
+                const imgH_mm = px2mm(img.height, s);
+                const { dx, dy, dw, dh } = fitRectMm(asset.naturalW, asset.naturalH, imgX_mm, imgY_mm, imgW_mm, imgH_mm, img.fit ?? 'contain');
+                const clipX  = Math.max(imgX_mm, marginLeft);
+                const clipY  = Math.max(imgY_mm, marginTop);
+                const clipX2 = Math.min(imgX_mm + imgW_mm, marginLeft + printableW);
+                const clipY2 = Math.min(imgY_mm + imgH_mm, marginTop  + printableH);
+                if (clipX2 <= clipX || clipY2 <= clipY) continue;
+                beginClip(pdf, clipX, clipY, clipX2 - clipX, clipY2 - clipY);
+                pdf.addImage(asset.dataUrl, '', dx, dy, dw, dh, undefined, 'FAST');
+                endClip(pdf);
+            }
 
             // Header / footer are drawn OUTSIDE the printable-area clip
             const hfVars = { ...hfVarsBase, page: pageNum, pages: totalPages };

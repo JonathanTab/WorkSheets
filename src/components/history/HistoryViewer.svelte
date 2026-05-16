@@ -10,16 +10,17 @@
      * Downloads exactly two snapshot binaries (selected + previous).
      *
      * Props:
-     *   historyManager  - HistoryManager instance
+     *   historyManager  - HistoryManager instance (carries adapter, registry, fileId)
      *   currentDoc      - live Y.Doc (for context, not diffed against here)
-     *   adapter         - { diffFn, ViewerComponent } from historyAdapters
      */
 
     import * as Y from 'yjs';
     import { onMount } from 'svelte';
     import SnapshotListItem from './SnapshotListItem.svelte';
 
-    let { historyManager, currentDoc = null, adapter = null } = $props();
+    let { historyManager, currentDoc = null } = $props();
+
+    let adapter = $derived(historyManager.adapter);
 
     // The two docs being compared
     let snapDoc     = $state(/** @type {Y.Doc|null} */ (null));

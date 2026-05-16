@@ -99,16 +99,6 @@ export class YjsServerAPI {
     }
 
     /**
-     * Get last-edit metadata for a file (who changed it and when).
-     * @param {string} fileId
-     * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
-     */
-    async getFileMeta(fileId) {
-        const res = await this._get(`api/files/${encodeURIComponent(fileId)}/meta`);
-        return res.json();
-    }
-
-    /**
      * Get snapshot metadata.
      * @param {string} snapshotId
      * @returns {Promise<SnapshotMeta>}

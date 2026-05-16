@@ -69,6 +69,7 @@
 
 import * as Y from "yjs";
 import { TableFormulaEvaluator, matchCondition } from './tableFormulaEval.js';
+import { cmpValues, initPos, computeInsertPos } from './tableRowHelpers.js';
 
 /**
  * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
@@ -685,9 +686,9 @@ export class TableStore {
                 yRow.set(k, v);
             }
 
-            this.#initPos(rowArr);
+            initPos(rowArr);
             const newPos = this.insertSortColId
-                ? this.#computeInsertPos(rowArr, rowData[this.insertSortColId])
+                ? computeInsertPos(rowArr, this.insertSortColId, this.insertSortDir, rowData[this.insertSortColId])
                 : Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0)) + 1000;
             yRow.set('_pos', newPos);
             rowArr.push([yRow]);
@@ -733,30 +734,6 @@ export class TableStore {
 
     // ─── Row ordering helpers (private) ──────────────────────────────────────
 
-    /** Generic value comparator used by insertRow and checkOutOfOrder. */
-    #cmpValues(a, b) {
-        if (a == null && b == null) return 0;
-        if (a == null) return -1;
-        if (b == null) return 1;
-        if (typeof a === "number" && typeof b === "number") return a - b;
-        return String(a).localeCompare(String(b));
-    }
-
-    /**
-     * Assign _pos to any row in the raw Y.Array that is missing it.
-     * rawIndex 0 = oldest inserted = lowest _pos (display bottom).
-     * rawIndex n-1 = newest inserted = highest _pos (display top).
-     * Must be called inside a Yjs transaction.
-     * @param {import('yjs').Array} rowArr
-     */
-    #initPos(rowArr) {
-        const n = rowArr.length;
-        for (let i = 0; i < n; i++) {
-            const r = rowArr.get(i);
-            if (r && r.get('_pos') == null) r.set('_pos', (i + 1) * 1000);
-        }
-    }
-
     /**
      * Write a new _pos to the row at displayIndex.
      * @param {import('yjs').Array} rowArr
@@ -772,41 +749,6 @@ export class TableStore {
         if (yRow) yRow.set('_pos', newPos);
     }
 
-    /**
-     * Compute a _pos value for placing a row at the correct insertSort position.
-     * Reads _pos values directly from rowArr (safe to call after #initPos in same transaction).
-     * @param {import('yjs').Array} rowArr
-     * @param {any} newVal
-     * @param {number} [excludeRawIndex]  Raw index of a row to exclude (used when repositioning
-     *                                    an existing row so it doesn't interfere with the search).
-     * @returns {number}
-     */
-    #computeInsertPos(rowArr, newVal, excludeRawIndex = -1) {
-        const colId = this.insertSortColId;
-        const dir = this.insertSortDir === "asc" ? -1 : 1; // asc=ascending=lowest first, desc=highest first
-
-        const sorted = [];
-        for (let i = 0; i < rowArr.length; i++) {
-            if (i === excludeRawIndex) continue;
-            const r = rowArr.get(i);
-            sorted.push({ val: r?.get?.(colId), pos: r?.get?.('_pos') ?? 0 });
-        }
-        sorted.sort((a, b) => b.pos - a.pos); // desc _pos = display order
-
-        if (!sorted.length) return 1000;
-
-        // Blank value always goes to the top regardless of sort direction.
-        if (newVal == null || newVal === '') return sorted[0].pos + 1000;
-
-        for (let i = 0; i < sorted.length; i++) {
-            if (dir * this.#cmpValues(sorted[i].val, newVal) <= 0) {
-                const abovePos = i > 0 ? sorted[i - 1].pos : null;
-                return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
-            }
-        }
-        return Math.max(0, sorted[sorted.length - 1].pos - 1000);
-    }
-
     // ─── Row ordering (public) ────────────────────────────────────────────────
 
     /**
@@ -820,7 +762,7 @@ export class TableStore {
         if (!rowArr) return;
 
         this.#ydoc.transact(() => {
-            this.#initPos(rowArr);
+            initPos(rowArr);
 
             // Build display list with the moved row removed to find its new neighbours.
             const rows = this.sortedFilteredRows;
@@ -880,8 +822,8 @@ export class TableStore {
         const prevVal = displayIndex > 0 ? rows[displayIndex - 1]?.[colId] : null;
         const nextVal = displayIndex < rows.length - 1 ? rows[displayIndex + 1]?.[colId] : null;
 
-        const prevOk = prevVal == null || dir * this.#cmpValues(prevVal, val) >= 0;
-        const nextOk = nextVal == null || dir * this.#cmpValues(val, nextVal) >= 0;
+        const prevOk = prevVal == null || dir * cmpValues(prevVal, val) >= 0;
+        const nextOk = nextVal == null || dir * cmpValues(val, nextVal) >= 0;
         if (prevOk && nextOk) return null;
 
         const result = {
@@ -897,8 +839,8 @@ export class TableStore {
                 const rawIndex = this.rows.findIndex(r => r === targetRow);
                 if (rawIndex < 0) return;
                 this.#ydoc.transact(() => {
-                    this.#initPos(rowArr);
-                    const newPos = this.#computeInsertPos(rowArr, val, rawIndex);
+                    initPos(rowArr);
+                    const newPos = computeInsertPos(rowArr, this.insertSortColId, this.insertSortDir, val, rawIndex);
                     const yRow = rowArr.get(rawIndex);
                     if (yRow) yRow.set('_pos', newPos);
                 });
@@ -1444,7 +1386,7 @@ export class TableStore {
         skipped = dataRows.length - nonBlankRows.length;
 
         this.#ydoc.transact(() => {
-            this.#initPos(rowArr);
+            initPos(rowArr);
             const basePos = Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0));
             const n = nonBlankRows.length;
 

@@ -115,6 +115,8 @@
     let virtualizerSheetId = $state.raw(null);
     let resizeObserver = null;
     let vvCleanup = null; // visual viewport cleanup for iOS keyboard handling
+    /** @type {Map<string, {scrollTop: number, scrollLeft: number}>} */
+    const sheetScrollPositions = new Map();
 
     // ─── Page break overlay ───────────────────────────────────────────────────
     const _printEngine = new PrintEngine();
@@ -183,6 +185,11 @@
     let isMultiRefSelect = $state(false); // true when Ctrl/Cmd held during formula cell click
     let resizing = $state(null);
     let currentCursor = $state("cell");
+
+    // ─── Drag auto-scroll state ───────────────────────────────────────────────
+    let dragAutoScrollRAF = null;
+    let dragClientX = 0;
+    let dragClientY = 0;
 
     // ─── Freeze-handle drag state ─────────────────────────────────────────────
     // null | { axis: 'row'|'col', startPx: number, currentCount: number }
@@ -552,7 +559,13 @@
 
         untrack(() => {
             if (!virtualizer || virtualizerSheetId !== sheetId) {
-                if (virtualizer) virtualizer.destroy();
+                if (virtualizer) {
+                    sheetScrollPositions.set(virtualizerSheetId, {
+                        scrollTop: virtualizer.scrollTop,
+                        scrollLeft: virtualizer.scrollLeft,
+                    });
+                    virtualizer.destroy();
+                }
                 virtualizer = new GridVirtualizer({
                     defaultRowHeight: defaultRowHeight ?? ROW_HEIGHT,
                     defaultColWidth: defaultColWidth ?? COL_WIDTH,
@@ -562,6 +575,14 @@
                     const rect = containerEl.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0)
                         virtualizer.setContainerSize(rect.width, rect.height);
+                }
+                const saved = sheetScrollPositions.get(sheetId);
+                const restoredTop = saved?.scrollTop ?? 0;
+                const restoredLeft = saved?.scrollLeft ?? 0;
+                virtualizer.setScroll(restoredTop, restoredLeft);
+                if (scrollEl) {
+                    scrollEl.scrollTop = restoredTop;
+                    scrollEl.scrollLeft = restoredLeft;
                 }
             }
 
@@ -1229,6 +1250,7 @@
             frozenWidth,
             rowCount,
             colCount,
+            mergeEngine: renderContext?.mergeEngine ?? null,
         };
 
         selectionRenderer.clear();
@@ -1754,6 +1776,52 @@
     }
 
     /**
+     * After any anchor/focus change, expand the selection range to fully cover
+     * every merge that overlaps it.  The anchor stays fixed; focus is pushed to
+     * whichever edge of the expanded range is farther from the anchor.
+     */
+    function normalizeSelectionForMerges() {
+        const mergeEngine = renderContext?.mergeEngine;
+        if (!mergeEngine || mergeEngine.merges.length === 0) return;
+        const range  = selectionState.range;
+        const anchor = selectionState.anchor;
+        const focus  = selectionState.focus;
+        if (!range || !anchor || !focus) return;
+
+        const expanded = expandRangeForMerges(range, mergeEngine);
+        if (!expanded) return;
+        if (
+            expanded.startRow === range.startRow && expanded.endRow === range.endRow &&
+            expanded.startCol === range.startCol && expanded.endCol === range.endCol
+        ) return;
+
+        // Push focus to the far edge of the expansion (anchor direction determines which edge)
+        const newFocusRow = anchor.row <= focus.row ? expanded.endRow : expanded.startRow;
+        const newFocusCol = anchor.col <= focus.col ? expanded.endCol : expanded.startCol;
+        selectionState.focus = { row: newFocusRow, col: newFocusCol };
+    }
+
+    /**
+     * Start a fresh selection that covers the full merge when the target cell is
+     * inside a merged region (anchor = primary cell, focus = end cell of merge).
+     * For regular cells, equivalent to startSelection(row, col).
+     */
+    function startSelectionOnCell(row, col) {
+        const snapped = snapToMergePrimary(row, col);
+        selectionState.startSelection(snapped.row, snapped.col);
+        normalizeSelectionForMerges();
+    }
+
+    /**
+     * Extend the active selection to a cell, then expand to cover any overlapping
+     * merges — so the full extent of every touched merge is always included.
+     */
+    function extendSelectionToCell(row, col) {
+        selectionState.extendSelection(row, col);
+        normalizeSelectionForMerges();
+    }
+
+    /**
      * Check whether a pointer event landed inside the rendered checkbox square.
      * Checkbox rendering is centered and sized to min(16, cellHeight-4, cellWidth-4).
      */
@@ -1819,6 +1887,7 @@
                     selectionState.primaryCell = null;
                     selectionState.anchor = { row: snapped.row, col: snapped.col };
                     selectionState.focus  = { row: snapped.row, col: snapped.col };
+                    normalizeSelectionForMerges();
                     return;
                 }
             }
@@ -1826,22 +1895,21 @@
 
         selectionState.moveSelection(dRow, dCol, extend, rowCount, colCount);
 
-        // After a non-extend move, ensure anchor/focus didn't land on a shadow cell
         if (!extend && mergeEngine) {
+            // After a non-extend move, snap anchor/focus off any shadow cell
             const anchor = selectionState.anchor;
             if (anchor) {
                 const snapped = snapToMergePrimary(anchor.row, anchor.col);
                 if (snapped.row !== anchor.row || snapped.col !== anchor.col) {
-                    selectionState.anchor = {
-                        row: snapped.row,
-                        col: snapped.col,
-                    };
-                    selectionState.focus = {
-                        row: snapped.row,
-                        col: snapped.col,
-                    };
+                    selectionState.anchor = { row: snapped.row, col: snapped.col };
+                    selectionState.focus  = { row: snapped.row, col: snapped.col };
                 }
             }
+            // Then expand to cover the full merge the cursor landed on
+            normalizeSelectionForMerges();
+        } else if (extend && mergeEngine) {
+            // Shift+arrow: expand focus to cover any merge it landed inside
+            normalizeSelectionForMerges();
         }
     }
 
@@ -2198,6 +2266,9 @@
             return;
         }
         if (selectionState.isSelecting) {
+            dragClientX = e.clientX;
+            dragClientY = e.clientY;
+
             if (
                 selectionState.selectionMode === "rows" &&
                 (hit.region === "rowHeader" || hit.region === "cell")
@@ -2212,8 +2283,23 @@
                 selectionState.selectionMode === "range" &&
                 hit.region === "cell"
             ) {
-                selectionState.extendSelection(hit.row, hit.col);
+                extendSelectionToCell(hit.row, hit.col);
             }
+
+            // Start edge auto-scroll when mouse is near the content-area edges
+            if (containerEl) {
+                const cRect = containerEl.getBoundingClientRect();
+                const EDGE = 50;
+                const nearEdge =
+                    e.clientX - (cRect.left + HEADER_WIDTH) < EDGE ||
+                    cRect.right - e.clientX < EDGE ||
+                    e.clientY - (cRect.top + HEADER_HEIGHT) < EDGE ||
+                    cRect.bottom - e.clientY < EDGE;
+                if (nearEdge) startDragAutoScroll();
+                else stopDragAutoScroll();
+            }
+        } else {
+            stopDragAutoScroll();
         }
     }
 
@@ -2281,7 +2367,7 @@
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
                 const snappedHit = snapToMergePrimary(hit.row, hit.col);
                 if (!isSelected(snappedHit.row, snappedHit.col)) {
-                    selectionState.startSelection(snappedHit.row, snappedHit.col);
+                    startSelectionOnCell(hit.row, hit.col);
                     selectionState.endSelection();
                 }
                 // Enter drag-range mode — touch-move now extends selection instead of scrolling
@@ -2302,7 +2388,7 @@
             const { localX, localY } = getTouchLocalCoords(touch);
             const hit = doHitTest(localX, localY);
             if (hit.region === "cell" && hit.row >= 0 && hit.col >= 0) {
-                selectionState.extendSelection(hit.row, hit.col);
+                extendSelectionToCell(hit.row, hit.col);
             }
             return;
         }
@@ -2727,19 +2813,16 @@
         // ── Regular cell ──────────────────────────────────────────────────────
         const isCtrl = e.ctrlKey || e.metaKey;
         if (e.shiftKey && anchor) {
-            // Snap shift-click to merge boundary too (extend to the primary cell)
-            const snapped = snapToMergePrimary(row, col);
-            selectionState.extendSelection(snapped.row, snapped.col);
+            extendSelectionToCell(row, col);
         } else if (isCtrl) {
-            // Ctrl+click: add a new non-contiguous range
+            // Ctrl+click: add a new non-contiguous range covering the full merge
             const snapped = snapToMergePrimary(row, col);
             selectionState.startAdditionalSelection(snapped.row, snapped.col);
+            normalizeSelectionForMerges();
         } else {
             // Handle special cell type clicks (checkbox toggle, rating)
             if (handleRegularCellClick(row, col, e)) return;
-            // Snap to merge primary so anchor always lands on the top-left cell
-            const snapped = snapToMergePrimary(row, col);
-            selectionState.startSelection(snapped.row, snapped.col);
+            startSelectionOnCell(row, col);
         }
     }
 
@@ -2782,6 +2865,7 @@
     }
 
     function handleMouseUp() {
+        stopDragAutoScroll();
         if (isFormulaEditMode && isSelectingRange && rangeStartCell) {
             const endCell = rangeEndCell || rangeStartCell;
             let ref = toRangeRef(
@@ -2931,7 +3015,7 @@
         row = snapped.row;
         col = snapped.col;
         if (!isSelected(row, col)) {
-            selectionState.startSelection(row, col);
+            startSelectionOnCell(row, col);
             selectionState.endSelection();
         } else {
             // Anchor may have drifted onto a shadow cell via keyboard nav — re-snap it
@@ -3839,6 +3923,135 @@
         }
     }
 
+    // ─── Drag auto-scroll ─────────────────────────────────────────────────────
+
+    function stopDragAutoScroll() {
+        if (dragAutoScrollRAF !== null) {
+            cancelAnimationFrame(dragAutoScrollRAF);
+            dragAutoScrollRAF = null;
+        }
+    }
+
+    function dragAutoScrollTick() {
+        dragAutoScrollRAF = null;
+        if (!selectionState.isSelecting || !scrollEl || !virtualizer || !containerEl) return;
+
+        const cRect = containerEl.getBoundingClientRect();
+        const mode  = selectionState.selectionMode;
+        const EDGE  = 50;
+        const MAX_SPEED = 16;
+
+        // Scroll axes depend on selection mode:
+        // rows → vertical only, cols → horizontal only, range → both.
+        // Use content-area origin (past headers) so header-drag mice don't
+        // erroneously trigger the wrong axis.
+        let dx = 0, dy = 0;
+
+        if (mode !== 'rows') {
+            const contentLeft = cRect.left + HEADER_WIDTH;
+            const distLeft  = dragClientX - contentLeft;
+            const distRight = cRect.right - dragClientX;
+            if (distLeft < EDGE)        dx = -MAX_SPEED * Math.max(0, 1 - distLeft / EDGE);
+            else if (distRight < EDGE)  dx =  MAX_SPEED * Math.max(0, 1 - distRight / EDGE);
+        }
+
+        if (mode !== 'cols') {
+            const contentTop = cRect.top + HEADER_HEIGHT;
+            const distTop    = dragClientY - contentTop;
+            const distBottom = cRect.bottom - dragClientY;
+            if (distTop < EDGE)         dy = -MAX_SPEED * Math.max(0, 1 - distTop / EDGE);
+            else if (distBottom < EDGE) dy =  MAX_SPEED * Math.max(0, 1 - distBottom / EDGE);
+        }
+
+        if (dx === 0 && dy === 0) return; // mouse moved away from edge — stop loop
+
+        const newScrollLeft = Math.max(0, scrollEl.scrollLeft + dx);
+        const newScrollTop  = Math.max(0, scrollEl.scrollTop  + dy);
+        scrollEl.scrollLeft = newScrollLeft;
+        scrollEl.scrollTop  = newScrollTop;
+
+        // Compute target row/col from new scroll without touching virtualizer state
+        // (mirrors HitTestEngine logic so the render pipeline stays clean).
+        const contentX = Math.max(0, dragClientX - cRect.left - HEADER_WIDTH);
+        const contentY = Math.max(0, dragClientY - cRect.top  - HEADER_HEIGHT);
+        const frozenW  = virtualizer.frozenWidth;
+        const frozenH  = virtualizer.frozenHeight;
+
+        let targetCol;
+        if (frozenW > 0 && contentX < frozenW) {
+            targetCol = virtualizer.colMetrics.indexAtOffset(contentX);
+        } else {
+            const colOff = contentX + newScrollLeft;
+            targetCol = virtualizer.colMetrics.indexAtOffset(Math.max(0, colOff));
+            if (targetCol < virtualizer.frozenCols) targetCol = virtualizer.frozenCols;
+            targetCol = Math.min(targetCol, virtualizer.colCount - 1);
+        }
+
+        let targetRow;
+        if (frozenH > 0 && contentY < frozenH) {
+            targetRow = virtualizer.rowMetrics.indexAtOffset(contentY);
+        } else {
+            const rowOff = contentY + newScrollTop;
+            targetRow = virtualizer.rowMetrics.indexAtOffset(Math.max(0, rowOff));
+            if (targetRow < virtualizer.frozenRows) targetRow = virtualizer.frozenRows;
+            targetRow = Math.min(targetRow, virtualizer.rowCount - 1);
+        }
+
+        if (mode === 'rows') {
+            selectionState.extendRowSelection(targetRow);
+        } else if (mode === 'cols') {
+            selectionState.extendColSelection(targetCol);
+        } else if (targetRow >= 0 && targetCol >= 0) {
+            extendSelectionToCell(targetRow, targetCol);
+        }
+
+        dragAutoScrollRAF = requestAnimationFrame(dragAutoScrollTick);
+    }
+
+    // Document-level mousemove for row/col header drag-select.
+    // The event-layer doesn't cover the header area, so implicit pointer capture
+    // keeps mousemove on the header element — this handler bridges the gap.
+    function handleHeaderDragMouseMove(e) {
+        if (!selectionState.isSelecting) return;
+        const mode = selectionState.selectionMode;
+        if (mode !== 'rows' && mode !== 'cols') return;
+
+        dragClientX = e.clientX;
+        dragClientY = e.clientY;
+
+        const { localX, localY } = getLocalCoords(e);
+        const hit = doHitTest(localX, localY);
+
+        if (mode === 'rows' && (hit.region === 'rowHeader' || hit.region === 'cell')) {
+            selectionState.extendRowSelection(hit.row);
+        } else if (mode === 'cols' && (hit.region === 'colHeader' || hit.region === 'cell')) {
+            selectionState.extendColSelection(hit.col);
+        }
+
+        // Trigger auto-scroll based on content-area edges
+        if (containerEl) {
+            const cRect = containerEl.getBoundingClientRect();
+            const EDGE = 50;
+            let nearEdge = false;
+            if (mode === 'rows') {
+                nearEdge =
+                    dragClientY - (cRect.top + HEADER_HEIGHT) < EDGE ||
+                    cRect.bottom - dragClientY < EDGE;
+            } else {
+                nearEdge =
+                    dragClientX - (cRect.left + HEADER_WIDTH) < EDGE ||
+                    cRect.right - dragClientX < EDGE;
+            }
+            if (nearEdge) startDragAutoScroll();
+            else stopDragAutoScroll();
+        }
+    }
+
+    function startDragAutoScroll() {
+        if (dragAutoScrollRAF !== null) return;
+        dragAutoScrollRAF = requestAnimationFrame(dragAutoScrollTick);
+    }
+
     function scrollToAnchor() {
         if (!scrollEl || !anchor || !virtualizer) return;
         const { scrollTop, scrollLeft } = virtualizer.scrollToCell(
@@ -3956,10 +4169,12 @@
         const snapped = snapToMergePrimary(dest.row, dest.col);
         if (extend) {
             selectionState.focus = snapped;
+            normalizeSelectionForMerges();
         } else {
             selectionState.selectionMode = 'range';
             selectionState.anchor = snapped;
             selectionState.focus = snapped;
+            normalizeSelectionForMerges();
         }
     }
 
@@ -4257,9 +4472,23 @@
                 e.preventDefault();
                 break;
             }
-            case "Tab":
+            case "Tab": {
                 focusedDropdownCell = null;
-                if (selectionState.hasTabSelection) {
+                // A single merged-cell selection has anchor != focus (covers the merge
+                // extent) but should Tab like a single cell, not cycle within the range.
+                const isSingleMergeSelected = selectionState.hasTabSelection &&
+                    selectionState.extraRanges.length === 0 &&
+                    (() => {
+                        const r = selectionState.range;
+                        if (!r) return false;
+                        const me = renderContext?.mergeEngine;
+                        if (!me) return false;
+                        const m = me.getMergeAt(r.startRow, r.startCol);
+                        return m &&
+                            m.startRow === r.startRow && m.endRow === r.endRow &&
+                            m.startCol === r.startCol && m.endCol === r.endCol;
+                    })();
+                if (selectionState.hasTabSelection && !isSingleMergeSelected) {
                     e.shiftKey ? selectionState.tabPrev() : selectionState.tabNext();
                     scrollToPrimaryCell();
                 } else {
@@ -4268,6 +4497,7 @@
                 }
                 e.preventDefault();
                 break;
+            }
             case "Enter":
                 // Enter moves selection down, but opens editors for special cells.
                 if (anchor) {
@@ -5414,6 +5644,7 @@
         window.addEventListener("show-file-viewer", handleShowFileViewer);
 
         document.addEventListener("mouseup", handleMouseUp);
+        document.addEventListener("mousemove", handleHeaderDragMouseMove);
 
         if (containerEl) {
             // ResizeObserver stores the latest dimensions and always uses them
@@ -5532,7 +5763,9 @@
     });
 
     onDestroy(() => {
+        stopDragAutoScroll();
         document.removeEventListener("mouseup", handleMouseUp);
+        document.removeEventListener("mousemove", handleHeaderDragMouseMove);
         document.removeEventListener("mousemove", handleResizeMove);
         document.removeEventListener("mouseup", handleResizeEnd);
         if (resizeObserver) resizeObserver.disconnect();

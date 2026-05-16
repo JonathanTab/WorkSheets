@@ -67,19 +67,53 @@ backfillAllDiffs(true);
 // ---------------------------------------------------------------------------
 const messageSync = 0;
 const messageAwareness = 1;
+const messageFileMeta = 2;  // sideband: { last_edit_at, last_edit_by }
 
 // ---------------------------------------------------------------------------
 // WSSharedDoc — mirrors the reference utils.js WSSharedDoc exactly,
 // extended with fileId and connUsers for our snapshot/auth features.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// File-meta sideband helpers
+// ---------------------------------------------------------------------------
+
+/** Encode a fileMeta message. */
+const _encodeFileMeta = (meta) => {
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, messageFileMeta);
+    encoding.writeVarString(enc, JSON.stringify(meta));
+    return encoding.toUint8Array(enc);
+};
+
+/** Send file meta to one connection. */
+const sendFileMeta = (doc, conn, meta) => send(doc, conn, _encodeFileMeta(meta));
+
+/** Broadcast file meta to all connections in a room. */
+const broadcastFileMeta = (doc, meta) => {
+    const msg = _encodeFileMeta(meta);
+    doc.conns.forEach((_, conn) => send(doc, conn, msg));
+};
+
+// Per-room debounce state for last-edit
+const lastEditWritten   = new Map(); // fileId → last DB-write timestamp
+const lastEditBroadcast = new Map(); // fileId → last WS-broadcast timestamp
+const lastKnownFileMeta = new Map(); // fileId → { last_edit_at, last_edit_by } (in-memory, for on-connect send)
+const LAST_EDIT_DEBOUNCE_MS   = 10_000; // DB write cooldown
+const LAST_EDIT_BROADCAST_MS  =  2_000; // WS broadcast cooldown
+
+// ---------------------------------------------------------------------------
+// updateHandler
+// ---------------------------------------------------------------------------
+
 /**
  * @param {Uint8Array} update
- * @param {any} _origin
+ * @param {any} origin
  * @param {WSSharedDoc} doc
  * @param {any} _tr
  */
 const updateHandler = (update, origin, doc, _tr) => {
+    // Broadcast the Yjs update to all peers.
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, messageSync);
     syncProtocol.writeUpdate(encoder, update);
@@ -87,27 +121,35 @@ const updateHandler = (update, origin, doc, _tr) => {
     doc.conns.forEach((_, conn) => send(doc, conn, message));
     scheduler.markDirty(doc.name, doc.fileId, doc, update.byteLength);
 
-    // Track last-edit per file, debounced.
     // Skip persistence-load origin (fires when a room first opens from LevelDB).
-    if (doc.fileId && origin !== null && origin !== PERSISTENCE_ORIGIN) {
-        const now = Date.now();
-        const last = lastEditWritten.get(doc.fileId) ?? 0;
-        if (now - last >= LAST_EDIT_DEBOUNCE_MS) {
-            lastEditWritten.set(doc.fileId, now);
-            // Pick any connected user to attribute the edit
-            const username = doc.connUsers.size > 0
-                ? [...doc.connUsers.values()].find(Boolean) ?? null
-                : null;
-            if (username) {
-                try { updateFileLastEdit(doc.fileId, username, now); } catch { /* ignore */ }
-            }
-        }
+    if (!doc.fileId || origin === null || origin === PERSISTENCE_ORIGIN) return;
+
+    // Attribute to the specific connection that sent this update; fall back to
+    // any connected user if origin isn't a tracked conn (shouldn't normally happen).
+    const username = doc.connUsers.get(origin)
+        ?? (doc.connUsers.size > 0 ? [...doc.connUsers.values()].find(Boolean) : null)
+        ?? null;
+    if (!username) return;
+
+    const now = Date.now();
+
+    // Sideband broadcast (2 s debounce) — pushed to ALL connected clients so
+    // every open tab sees the attribution update in near-real-time.
+    const lastBcast = lastEditBroadcast.get(doc.fileId) ?? 0;
+    if (now - lastBcast >= LAST_EDIT_BROADCAST_MS) {
+        lastEditBroadcast.set(doc.fileId, now);
+        const meta = { last_edit_at: now, last_edit_by: username };
+        lastKnownFileMeta.set(doc.fileId, meta);
+        broadcastFileMeta(doc, meta);
+    }
+
+    // DB write (10 s debounce) — persists across room eviction / server restart.
+    const lastWritten = lastEditWritten.get(doc.fileId) ?? 0;
+    if (now - lastWritten >= LAST_EDIT_DEBOUNCE_MS) {
+        lastEditWritten.set(doc.fileId, now);
+        try { updateFileLastEdit(doc.fileId, username, now); } catch { /* ignore */ }
     }
 };
-
-// Per-room rate-limiter for last-edit writes (fileId → lastWrittenMs)
-const lastEditWritten = new Map();
-const LAST_EDIT_DEBOUNCE_MS = 10_000;
 
 class WSSharedDoc extends Y.Doc {
     /**
@@ -325,6 +367,14 @@ const setupWSConnection = (conn, name, fileId, username, appType) => {
             );
             send(doc, conn, encoding.toUint8Array(encoder));
         }
+    }
+
+    // Send current file meta sideband so the connecting client immediately
+    // knows the last editor without a separate REST round-trip.
+    // Prefer in-memory (may be more recent than the 10 s debounced DB write).
+    if (fileId) {
+        const meta = lastKnownFileMeta.get(fileId) ?? getFileLastEdit(fileId);
+        if (meta?.last_edit_at) sendFileMeta(doc, conn, meta);
     }
 };
 

@@ -6,6 +6,7 @@
     import ContextMenu from "../ui/ContextMenu.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { edit as editIcon, trash as trashIcon } from "../../lib/icons/index.js";
+    import { editSessionState } from "../../stores/spreadsheet/index.js";
 
     let {
         sheets = [],
@@ -195,6 +196,14 @@
                 class:active={sheet.id === activeSheetId}
                 class:dragging={draggedSheetId === sheet.id}
                 draggable={renamingSheetId !== sheet.id}
+                onmousedown={() => {
+                    // Switch surface to formulaBar before blur fires so handleEditBlur
+                    // skips its commit guard — prevents formula edit from being committed
+                    // when the user navigates to another sheet to pick a reference.
+                    if (editSessionState.isFormulaMode) {
+                        editSessionState.switchSurface("formulaBar", { focus: false });
+                    }
+                }}
                 onclick={() => handleTabClick(sheet.id)}
                 ondblclick={() => handleTabDoubleClick(sheet.id)}
                 oncontextmenu={(e) => handleTabContextMenu(sheet.id, e)}

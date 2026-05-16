@@ -11,6 +11,7 @@ import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
 import { YKeyValue } from 'y-utility/y-keyvalue';
 import { TableFormulaEvaluator } from '../stores/spreadsheet/features/tableFormulaEval.js';
+import { cmpValues, initPos, computeInsertPos } from '../stores/spreadsheet/features/tableRowHelpers.js';
 
 // ─── Cell KV helpers ────────────────────────────────────────────────────────
 
@@ -27,56 +28,6 @@ function cellStylesKV(sheetYMap) {
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
-
-/** @param {any} a @param {any} b */
-function _cmpValues(a, b) {
-    if (a == null && b == null) return 0;
-    if (a == null) return -1;
-    if (b == null) return 1;
-    if (typeof a === 'number' && typeof b === 'number') return a - b;
-    return String(a).localeCompare(String(b));
-}
-
-/**
- * Compute a _pos for inserting a row at the correct insertSort position.
- * Reads _pos and colId values directly from rowArr (safe within a Yjs transaction).
- * @param {import('yjs').Array<any>} rowArr
- * @param {string} colId
- * @param {'asc'|'desc'} dir
- * @param {any} newVal
- * @returns {number}
- */
-function _computeInsertPos(rowArr, colId, dir, newVal) {
-    const dirMult = dir === 'asc' ? -1 : 1; // asc=ascending=lowest first, desc=highest first
-    const sorted = [];
-    for (let i = 0; i < rowArr.length; i++) {
-        const r = rowArr.get(i);
-        sorted.push({ val: r?.get?.(colId), pos: r?.get?.('_pos') ?? 0 });
-    }
-    sorted.sort((a, b) => b.pos - a.pos);
-    if (!sorted.length) return 1000;
-    for (let i = 0; i < sorted.length; i++) {
-        if (dirMult * _cmpValues(sorted[i].val, newVal) <= 0) {
-            const abovePos = i > 0 ? sorted[i - 1].pos : null;
-            return abovePos == null ? sorted[i].pos + 1000 : (abovePos + sorted[i].pos) / 2;
-        }
-    }
-    return Math.max(0, sorted[sorted.length - 1].pos - 1000);
-}
-
-/**
- * Ensure all rows in rowArr have a _pos field, assigning one based on current Y.Array order.
- * rawIndex 0 = oldest = display bottom → lowest _pos; last index = newest = display top.
- * Must be called inside a Yjs transaction.
- * @param {import('yjs').Array<any>} rowArr
- */
-function _initPos(rowArr) {
-    const n = rowArr.length;
-    for (let i = 0; i < n; i++) {
-        const r = rowArr.get(i);
-        if (r && r.get('_pos') == null) r.set('_pos', (i + 1) * 1000);
-    }
-}
 
 function root(ydoc) {
     return ydoc.getMap('spreadsheet');
@@ -625,9 +576,9 @@ export function insertTableRow(ydoc, sheetId, tableId, rowData) {
             if (!formulaCols.has(k)) yRow.set(k, v);
         }
 
-        _initPos(rowArr);
+        initPos(rowArr);
         const newPos = insertSortColId
-            ? _computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (rowData)[insertSortColId])
+            ? computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (rowData)[insertSortColId])
             : Math.max(0, .../** @type {any[]} */ (rowArr.toArray()).map(r => r?.get?.('_pos') ?? 0)) + 1000;
         yRow.set('_pos', newPos);
         rowArr.push([yRow]);
@@ -699,9 +650,9 @@ export function upsertTableRow(ydoc, sheetId, tableId, where, rowData) {
             for (const [k, v] of Object.entries(merged)) {
                 if (!formulaCols.has(k)) yRow.set(k, v);
             }
-            _initPos(rowArr);
+            initPos(rowArr);
             const newPos = insertSortColId
-                ? _computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (merged)[insertSortColId])
+                ? computeInsertPos(rowArr, insertSortColId, insertSortDir, /** @type {any} */ (merged)[insertSortColId])
                 : Math.max(0, .../** @type {any[]} */ (rowArr.toArray()).map(r => r?.get?.('_pos') ?? 0)) + 1000;
             yRow.set('_pos', newPos);
             rowArr.push([yRow]);

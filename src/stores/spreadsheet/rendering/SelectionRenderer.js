@@ -75,6 +75,7 @@ export class SelectionRenderer {
      * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} params.colMetrics
      * @param {any} params.selectionState
      * @param {any} params.formulaEditState
+     * @param {any} [params.mergeEngine]
      * @param {number} params.frozenRows
      * @param {number} params.frozenCols
      * @param {number} params.frozenHeight
@@ -99,6 +100,7 @@ export class SelectionRenderer {
             rowRange, colRange,
             rowMetrics, colMetrics,
             selectionState, formulaEditState,
+            mergeEngine,
             frozenRows, frozenCols,
             scrollLeft, scrollTop,
             rowCount, colCount,
@@ -125,6 +127,10 @@ export class SelectionRenderer {
                 const h = rowMetrics.sizeOf(r);
 
                 for (let c = colRange.start; c <= colRange.end; c++) {
+                    // Shadow cells are never rendered independently — their primary
+                    // paints the entire merge area (fill or clear+border in step 3).
+                    if (mergeEngine?.isMergeCell(r, c) && !mergeEngine.isMergePrimary(r, c)) continue;
+
                     const selected  = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
                     const isPrimary = selected && (selectionState?.isPrimaryCell(r, c) ?? false);
                     const hlColor   = formulaEditState?.getCellHighlightColor(r, c) ?? null;
@@ -134,17 +140,39 @@ export class SelectionRenderer {
                     const x = isFrozenCol
                         ? colMetrics.offsetOf(c)
                         : colMetrics.offsetOf(c) - scrollLeft;
-                    const w = colMetrics.sizeOf(c);
+
+                    // For merge primaries, extend fill rect to cover the entire merge.
+                    let w = colMetrics.sizeOf(c);
+                    let cellH = h;
+                    if (mergeEngine?.isMergePrimary(r, c)) {
+                        const merge = mergeEngine.getMergeAt(r, c);
+                        if (merge) {
+                            if (merge.endCol > c) {
+                                const isFCEnd = merge.endCol < frozenCols;
+                                const x2 = isFCEnd
+                                    ? colMetrics.offsetOf(merge.endCol) + colMetrics.sizeOf(merge.endCol)
+                                    : colMetrics.offsetOf(merge.endCol) + colMetrics.sizeOf(merge.endCol) - scrollLeft;
+                                w = x2 - x;
+                            }
+                            if (merge.endRow > r) {
+                                const isFREnd = merge.endRow < frozenRows;
+                                const y2 = isFREnd
+                                    ? rowMetrics.offsetOf(merge.endRow) + rowMetrics.sizeOf(merge.endRow)
+                                    : rowMetrics.offsetOf(merge.endRow) + rowMetrics.sizeOf(merge.endRow) - scrollTop;
+                                cellH = y2 - y;
+                            }
+                        }
+                    }
 
                     if (selected && !isPrimary) {
                         ctx.fillStyle = SELECTION_FILL;
-                        ctx.fillRect(x, y, w, h);
+                        ctx.fillRect(x, y, w, cellH);
                     }
 
                     if (hlColor) {
                         ctx.strokeStyle = hlColor;
                         ctx.lineWidth = 2;
-                        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+                        ctx.strokeRect(x + 1, y + 1, w - 2, cellH - 2);
                     }
                 }
             }
@@ -165,7 +193,7 @@ export class SelectionRenderer {
                 }
             }
 
-            // ── 3. Primary-cell border (2px, no fill) ────────────────────────
+            // ── 3. Primary-cell border (2px, no fill) — spans full merge if applicable
             const pc = selectionState?.primaryCell ?? selectionState?.anchor;
             if (pc) {
                 const { row: pr, col: pc_ } = pc;
@@ -173,18 +201,33 @@ export class SelectionRenderer {
                     pc_ >= colRange.start && pc_ <= colRange.end &&
                     (selectionState?.isSelected(pr, pc_, rowCount, colCount) ?? false)) {
 
-                    const isFR = pr < frozenRows;
-                    const iFC  = pc_ < frozenCols;
-                    const x = iFC ? colMetrics.offsetOf(pc_) : colMetrics.offsetOf(pc_) - scrollLeft;
-                    const y = isFR ? rowMetrics.offsetOf(pr) : rowMetrics.offsetOf(pr) - scrollTop;
-                    const w = colMetrics.sizeOf(pc_) ?? 0;
-                    const h = rowMetrics.sizeOf(pr) ?? 0;
-                    if (w > 0 && h > 0) {
-                        // Clear fill so primary cell appears white
-                        ctx.clearRect(x, y, w, h);
+                    // Use the full merge extent for the primary cell border when applicable.
+                    let rect = null;
+                    if (mergeEngine) {
+                        const merge = mergeEngine.getMergeAt(pr, pc_);
+                        if (merge) {
+                            rect = this.#rangePixelRect(
+                                { startRow: merge.startRow, endRow: merge.endRow,
+                                  startCol: merge.startCol, endCol: merge.endCol },
+                                rowMetrics, colMetrics, frozenRows, frozenCols, scrollTop, scrollLeft,
+                            );
+                        }
+                    }
+                    if (!rect) {
+                        const isFR = pr < frozenRows;
+                        const iFC  = pc_ < frozenCols;
+                        rect = {
+                            x: iFC ? colMetrics.offsetOf(pc_) : colMetrics.offsetOf(pc_) - scrollLeft,
+                            y: isFR ? rowMetrics.offsetOf(pr)  : rowMetrics.offsetOf(pr)  - scrollTop,
+                            w: colMetrics.sizeOf(pc_) ?? 0,
+                            h: rowMetrics.sizeOf(pr)  ?? 0,
+                        };
+                    }
+                    if (rect.w > 0 && rect.h > 0) {
+                        ctx.clearRect(rect.x, rect.y, rect.w, rect.h);
                         ctx.strokeStyle = PRIMARY_CELL_BORDER;
                         ctx.lineWidth = 2;
-                        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+                        ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
                     }
                 }
             }

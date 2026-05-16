@@ -16,12 +16,24 @@ export class HistoryManager {
      *   fileId: string,
      *   registry: import('../FileRegistry/FileRegistry.js').FileRegistry,
      *   appType: string,
+     *   adapter?: { diffFn: Function, ViewerComponent: any, isContentChange: Function } | null,
+     *   onAfterRestore?: (() => Promise<void>) | null,
      * }} opts
      */
-    constructor({ fileId, registry, appType }) {
+    constructor({ fileId, registry, appType, adapter = null, onAfterRestore = null }) {
         this.fileId  = fileId;
         this.registry = registry;
         this.appType = appType;
+
+        /**
+         * App-specific adapter for diff computation and visual rendering.
+         * Shape: { diffFn, ViewerComponent, isContentChange }
+         * @type {{ diffFn: Function, ViewerComponent: any, isContentChange: Function } | null}
+         */
+        this.adapter = adapter;
+
+        /** Optional async callback invoked after a successful restore. @type {(() => Promise<void>)|null} */
+        this.onAfterRestore = onAfterRestore;
 
         // Reactive state (Svelte 5 runes — read via $state proxy on instances)
         this.snapshots      = $state(/** @type {import('../FileRegistry/api/YjsServerAPI.js').SnapshotMeta[]} */ ([]));
@@ -47,22 +59,16 @@ export class HistoryManager {
         }
     }
 
-    /** Load last-edit metadata from the Yjs server. */
-    async loadFileMeta() {
-        try {
-            const meta = await this.registry.getFileMeta(this.fileId);
-            if (meta?.last_edit_at) {
-                this.lastEdit = { by: meta.last_edit_by, at: meta.last_edit_at };
-            }
-        } catch { /* silently ignore — last-edit is non-critical */ }
-    }
-
     /**
-     * Update last-edit state locally (called by LastEditTracker on each content change).
-     * @param {string} username
+     * Called by the YjsRuntime fileMeta sideband when the server pushes
+     * { last_edit_at, last_edit_by }.  This replaces both the old
+     * loadFileMeta() REST poll and the LastEditTracker local-watch approach.
+     * @param {{ last_edit_at: number, last_edit_by: string|null }} meta
      */
-    notifyLocalEdit(username) {
-        this.lastEdit = { by: username, at: Date.now() };
+    receiveFileMeta(meta) {
+        if (meta?.last_edit_at) {
+            this.lastEdit = { by: meta.last_edit_by ?? null, at: meta.last_edit_at };
+        }
     }
 
     /** Open the history viewer for a specific snapshot. */
@@ -98,6 +104,9 @@ export class HistoryManager {
         this.restoring = true;
         try {
             await this.registry.restoreSnapshot(this.fileId, snapshotId);
+            // Let the workspace reload the session against the new Yjs room before
+            // closing the viewer, so the user lands on a live document.
+            if (this.onAfterRestore) await this.onAfterRestore();
             this.closeViewer();
             await this.loadSnapshots();
         } catch (err) {

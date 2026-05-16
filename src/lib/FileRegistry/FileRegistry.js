@@ -1124,6 +1124,18 @@ export class FileRegistry extends EventEmitter {
         return this._runtime.getAwareness(fileId);
     }
 
+    /**
+     * Subscribe to file-meta sideband messages pushed by the Yjs server over
+     * the existing WebSocket connection. The callback fires on connect (with the
+     * last-known edit) and after each debounced edit while the doc is open.
+     * @param {string} fileId
+     * @param {(meta: {last_edit_at: number, last_edit_by: string}) => void} callback
+     * @returns {() => void} unsubscribe
+     */
+    subscribeFileMeta(fileId, callback) {
+        return this._runtime.subscribeFileMeta(fileId, callback);
+    }
+
     // -------------------------------------------------------
     // Snapshot / history
     // -------------------------------------------------------
@@ -1149,15 +1161,6 @@ export class FileRegistry extends EventEmitter {
         const file = this._files.get(fileId);
         if (!file?.roomId) throw new Error('No active room for file');
         return this._yjsApi.createSnapshot(file.roomId, description, appType ?? null);
-    }
-
-    /**
-     * Get last-edit metadata for a file (proxied through PHP to the Yjs server).
-     * @param {string} fileId
-     * @returns {Promise<{ last_edit_at: number|null, last_edit_by: string|null }>}
-     */
-    async getFileMeta(fileId) {
-        return this._api.getFileMeta(fileId);
     }
 
     /**

@@ -1,6 +1,7 @@
 <script>
-    import { onDestroy } from "svelte";
+    import { onMount, onDestroy } from "svelte";
     import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
+    import storage from "../../stores/storage.js";
     import { selectionState } from "../../stores/spreadsheet/index.js";
     import { VectorPrintEngine } from "../../stores/spreadsheet/rendering/VectorPrintEngine.js";
     import { CanvasRenderer } from "../../stores/spreadsheet/rendering/CanvasRenderer.js";
@@ -28,14 +29,23 @@
         A5:     { w: 148,   h: 210   },
     };
 
+    // Margin presets stored in mm; displayed in inches to the user.
     const MARGIN_PRESETS = {
-        normal:  { top: 19,   bottom: 19,   left: 18,   right: 18   },
-        wide:    { top: 25.4, bottom: 25.4, left: 25.4, right: 25.4 },
-        narrow:  { top: 12,   bottom: 12,   left: 6.4,  right: 6.4  },
+        normal:  { top: 19.05, bottom: 19.05, left: 19.05, right: 19.05 }, // 0.75 in
+        wide:    { top: 38.1,  bottom: 38.1,  left: 38.1,  right: 38.1  }, // 1.5 in
+        narrow:  { top: 12.7,  bottom: 12.7,  left: 12.7,  right: 12.7  }, // 0.5 in
     };
 
     const CSS_PX_PER_INCH = 96;
     const MM_PER_INCH = 25.4;
+
+    /** Display a mm value as rounded inches. */
+    const mmToIn = (mm) => +(mm / MM_PER_INCH).toFixed(2);
+    /** Clamp and round an inch input value, then return mm. */
+    function inToMm(v) {
+        const n = parseFloat(v);
+        return isNaN(n) ? 0 : Math.round(Math.max(0, Math.min(4, n)) * MM_PER_INCH * 10) / 10;
+    }
 
     // ── Capture selection at open time ─────────────────────────────────────────
     const selectionRange = selectionState.range ? {
@@ -49,13 +59,15 @@
     // ── Load settings ──────────────────────────────────────────────────────────
     const saved = spreadsheetSession.activeSheetStore?.getPrintSettings() ?? {};
 
-    let paperSize    = $state(saved.paperSize    ?? 'A4');
+    let paperSize    = $state(saved.paperSize    ?? 'letter');
     let orientation  = $state(saved.orientation  ?? 'portrait');
-    let marginTop    = $state(saved.marginTop    ?? 19);
-    let marginBottom = $state(saved.marginBottom ?? 19);
-    let marginLeft   = $state(saved.marginLeft   ?? 18);
-    let marginRight  = $state(saved.marginRight  ?? 18);
+    let marginTop    = $state(saved.marginTop    ?? 19.05); // 0.75 in
+    let marginBottom = $state(saved.marginBottom ?? 19.05);
+    let marginLeft   = $state(saved.marginLeft   ?? 19.05);
+    let marginRight  = $state(saved.marginRight  ?? 19.05);
     let scale        = $state(saved.scale        ?? 1.0);
+    /** When true, scale is re-fitted to page width whenever margins/paper/orientation change. */
+    let autoFitWidth = $state(saved.autoFitWidth ?? false);
     let showGridLines = $state(saved.showGridLines ?? true);
     let printDPI     = $state(saved.printDPI     ?? 300);
     let printArea    = $state(saved.printArea    ?? 'usedArea');
@@ -64,8 +76,8 @@
     let headerCenter = $state(saved.headerCenter ?? '');
     let headerRight  = $state(saved.headerRight  ?? '');
     let footerLeft   = $state(saved.footerLeft   ?? '');
-    let footerCenter = $state(saved.footerCenter ?? '{sheetName}');
-    let footerRight  = $state(saved.footerRight  ?? 'Page {page} of {pages}');
+    let footerCenter = $state(saved.footerCenter ?? '');
+    let footerRight  = $state(saved.footerRight  ?? '');
 
     // ── HF section expanded state ──────────────────────────────────────────────
     let hfExpanded = $state(!!(saved.headerLeft || saved.headerCenter || saved.headerRight || saved.footerLeft || saved.footerCenter || saved.footerRight));
@@ -101,6 +113,48 @@
         return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
     }
 
+    /**
+     * Like computeUsedArea but also extends bounds to cover floating images.
+     * Returns row/col index bounds (for page-break computation) AND pixel extents
+     * (for scale computation) as a unified object.
+     * @param {import('../../stores/spreadsheet/SheetStore.svelte.js').SheetStore} sheetStore
+     * @param {import('../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js').AxisMetrics} rowMetrics
+     * @param {import('../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
+     */
+    function computeContentBounds(sheetStore, rowMetrics, colMetrics) {
+        const cellBounds = computeUsedArea(sheetStore);
+        let endRow = cellBounds?.endRow ?? -1;
+        let endCol = cellBounds?.endCol ?? -1;
+        let startRow = cellBounds?.startRow ?? 0;
+        let startCol = cellBounds?.startCol ?? 0;
+        // Pixel extents (may exceed the last cell's right/bottom edge)
+        let maxW = endCol >= 0 ? colMetrics.offsetOf(endCol + 1) : 0;
+        let maxH = endRow >= 0 ? rowMetrics.offsetOf(endRow + 1) : 0;
+
+        for (const img of (sheetStore.floatingImages?.values() ?? [])) {
+            const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
+            const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
+            if (imgRight  > maxW) maxW = imgRight;
+            if (imgBottom > maxH) maxH = imgBottom;
+            // Convert pixel extents back to row/col indices for page-break engine
+            if (imgRight  > 0) {
+                const imgEndCol = colMetrics.indexAtOffset(Math.max(0, imgRight - 1));
+                if (imgEndCol > endCol) endCol = imgEndCol;
+            }
+            if (imgBottom > 0) {
+                const imgEndRow = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1));
+                if (imgEndRow > endRow) endRow = imgEndRow;
+            }
+            if (img.anchorCol < startCol) startCol = img.anchorCol;
+            if (img.anchorRow < startRow) startRow = img.anchorRow;
+        }
+
+        if (endRow < 0 && endCol < 0) return null;
+        endRow = Math.max(endRow, 0);
+        endCol = Math.max(endCol, 0);
+        return { startRow, startCol, endRow, endCol, maxW, maxH };
+    }
+
     // ── Metrics builder ────────────────────────────────────────────────────────
     function buildMetrics(sheetStore) {
         const rowM = new AxisMetrics(sheetStore.defaultRowHeight ?? ROW_HEIGHT);
@@ -119,7 +173,7 @@
         const s = {
             paperSize, orientation,
             marginTop, marginBottom, marginLeft, marginRight,
-            scale, showGridLines, printDPI,
+            scale, autoFitWidth, showGridLines, printDPI,
             printArea, pageOrder,
             headerLeft, headerCenter, headerRight,
             footerLeft, footerCenter, footerRight,
@@ -127,6 +181,13 @@
         if (printArea === 'selection' && selectionRange) Object.assign(s, selectionRange);
         return s;
     }
+
+    // ── Auto fit-to-width ──────────────────────────────────────────────────────
+    // Re-apply fitToWidth whenever the printable width changes (margins, paper, orientation).
+    $effect(() => {
+        void [marginLeft, marginRight, marginTop, marginBottom, paperSize, orientation];
+        if (autoFitWidth) fitToWidth();
+    });
 
     // ── Page data (breaks + metrics) ───────────────────────────────────────────
     const _printEngine = new PrintEngine();
@@ -142,8 +203,8 @@
 
         const ps = { ...currentSettings() };
         if (ps.printArea === 'usedArea') {
-            const used = computeUsedArea(sheetStore);
-            if (used) Object.assign(ps, { areaStartRow: used.startRow, areaStartCol: used.startCol, areaEndRow: used.endRow, areaEndCol: used.endCol });
+            const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
+            if (bounds) Object.assign(ps, { areaStartRow: bounds.startRow, areaStartCol: bounds.startCol, areaEndRow: bounds.endRow, areaEndCol: bounds.endCol });
         } else if (ps.printArea === 'selection' && selectionRange) {
             Object.assign(ps, selectionRange);
         }
@@ -163,53 +224,56 @@
     });
 
     // ── Preview state ──────────────────────────────────────────────────────────
-    let previewCanvasEl = $state(null);
-    let previewPageIdx  = $state(0);
-    let previewZoom     = $state(1.0);
-    let isRendering     = $state(false);
+    let previewZoom = $state(1.0);
 
-    // Clamp page index when page count changes
+    /** Map from page index → mounted canvas element, populated by the registerCanvas action. */
+    const _pageCanvases = new Map();
+
+    /** Svelte use: action — registers each page's canvas and schedules a render. */
+    function registerCanvas(node, pageIdx) {
+        _pageCanvases.set(pageIdx, node);
+        scheduleRender();
+        return { destroy() { _pageCanvases.delete(pageIdx); } };
+    }
+
+    // Re-render whenever anything affecting the preview changes.
     $effect(() => {
-        const total = pageData.pages;
-        if (total > 0 && previewPageIdx >= total) previewPageIdx = total - 1;
+        void [showGridLines, previewZoom, pageInfo, pageData.pages];
+        scheduleRender();
     });
 
-    // Per-page row/col range for the current preview page
-    let previewPageRange = $derived.by(() => {
+    let renderTimer = null;
+    function scheduleRender() {
+        clearTimeout(renderTimer);
+        renderTimer = setTimeout(doRenderAll, 80);
+    }
+
+    /** Returns the row/col range for the given page index. */
+    function getPageRange(pageIdx) {
         const { rowBreaks, colBreaks, rowMetrics, colMetrics, areaEndRow, areaEndCol } = pageData;
         if (!rowMetrics || !colMetrics || !rowBreaks.length || !colBreaks.length) return null;
-        const total = rowBreaks.length * colBreaks.length;
-        const idx   = Math.min(previewPageIdx, total - 1);
-        const ri    = Math.floor(idx / colBreaks.length);
-        const ci    = idx % colBreaks.length;
+        const ri = Math.floor(pageIdx / colBreaks.length);
+        const ci = pageIdx % colBreaks.length;
+        if (ri >= rowBreaks.length || ci >= colBreaks.length) return null;
         return {
             startRow: rowBreaks[ri],
             endRow:   ri + 1 < rowBreaks.length ? rowBreaks[ri + 1] - 1 : areaEndRow,
             startCol: colBreaks[ci],
             endCol:   ci + 1 < colBreaks.length ? colBreaks[ci + 1] - 1 : areaEndCol,
-            total,
-            idx,
         };
-    });
-
-    // Schedule a re-render whenever anything preview-related changes
-    $effect(() => {
-        void [previewCanvasEl, previewPageRange, showGridLines, previewZoom, pageInfo];
-        scheduleRender();
-    });
-
-    let renderTimer = null;
-
-    function scheduleRender() {
-        clearTimeout(renderTimer);
-        renderTimer = setTimeout(doRenderPreview, 80);
     }
 
-    function doRenderPreview() {
+    async function doRenderAll() {
         renderTimer = null;
-        const canvas = previewCanvasEl;
-        const range  = previewPageRange;
-        if (!canvas || !range) return;
+        for (let i = 0; i < pageData.pages; i++) {
+            const canvas = _pageCanvases.get(i);
+            if (canvas) await doRenderPage(canvas, i);
+        }
+    }
+
+    async function doRenderPage(canvas, pageIdx) {
+        const range = getPageRange(pageIdx);
+        if (!range) return;
 
         const sheetStore    = spreadsheetSession.activeSheetStore;
         const renderContext = spreadsheetSession.renderContext;
@@ -219,12 +283,11 @@
         const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
         const { startRow, endRow, startCol, endCol } = range;
 
-        const contentLeft   = colMetrics.offsetOf(startCol);
-        const contentTop    = rowMetrics.offsetOf(startRow);
-        const contentW_css  = Math.max(1, colMetrics.offsetOf(endCol + 1) - contentLeft);
-        const contentH_css  = Math.max(1, rowMetrics.offsetOf(endRow + 1) - contentTop);
+        const contentLeft  = colMetrics.offsetOf(startCol);
+        const contentTop   = rowMetrics.offsetOf(startRow);
+        const contentW_css = Math.max(1, colMetrics.offsetOf(endCol + 1) - contentLeft);
+        const contentH_css = Math.max(1, rowMetrics.offsetOf(endRow + 1) - contentTop);
 
-        // Canvas layout
         const { pageW, pageH } = pageInfo;
         const displayW   = Math.round(480 * previewZoom);
         const displayH   = Math.round(displayW * (pageH / pageW));
@@ -248,22 +311,21 @@
         const ctx = canvas.getContext('2d');
         ctx.scale(dpr, dpr);
 
-        // White paper
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, displayW, displayH);
 
-        // Light tint on margin zones
         ctx.fillStyle = 'rgba(241, 245, 249, 0.6)';
         ctx.fillRect(0, 0, displayW, mT);
         ctx.fillRect(0, displayH - mB, displayW, mB);
         ctx.fillRect(0, mT, mL, areaH);
         ctx.fillRect(displayW - mR, mT, mR, areaH);
 
-        // Render cells to offscreen canvas
         const offscreen = document.createElement('canvas');
         const renderer  = new CanvasRenderer(offscreen);
-        const rs = Math.max(0.25, areaW / contentW_css);
-        renderer.resize(contentW_css, contentH_css, rs);
+        // Derive preview scale from the user scale (same as PDF engine) so page-break
+        // invariants hold: each page's content is guaranteed to fit within (areaW, areaH).
+        const rs = Math.max(0.25, scale * (MM_PER_INCH / CSS_PX_PER_INCH) * scalePerMm);
+        renderer.resize(contentW_css, contentH_css, rs * dpr);
 
         try {
             const cells = buildPaneData({
@@ -271,43 +333,122 @@
                 colRange: { start: startCol, end: endCol,   count: endCol   - startCol + 1 },
                 rowMetrics, colMetrics,
                 renderContext, sheetStore, session,
-                selectionState:   null,
-                formulaEditState: null,
+                selectionState: null, formulaEditState: null,
                 frozenRows: 0, frozenCols: 0, frozenHeight: 0, frozenWidth: 0,
-                scrollLeft: contentLeft,
-                scrollTop:  contentTop,
+                scrollLeft: contentLeft, scrollTop: contentTop,
             });
 
             renderer.clear();
-            renderer.paintPane(cells, {
-                clipX: 0, clipY: 0,
-                clipW: contentW_css, clipH: contentH_css,
-                showGridLines,
-            });
+            renderer.paintPane(cells, { clipX: 0, clipY: 0, clipW: contentW_css, clipH: contentH_css, showGridLines });
 
-            ctx.drawImage(offscreen, mL, mT, areaW, areaH);
+            // Floating images
+            const floatingImgs = [...(sheetStore.floatingImages?.values() ?? [])];
+            if (floatingImgs.length) {
+                const imgsOnPage = floatingImgs.map(img => ({
+                    img,
+                    x: colMetrics.offsetOf(img.anchorCol) + img.offsetX - contentLeft,
+                    y: rowMetrics.offsetOf(img.anchorRow) + img.offsetY - contentTop,
+                })).filter(({ img, x, y }) =>
+                    x + img.width > 0 && x < contentW_css && y + img.height > 0 && y < contentH_css
+                );
+                if (imgsOnPage.length) {
+                    await Promise.all(imgsOnPage.map(({ img }) => loadImgElement(img.blobId)));
+                    const offCtx = offscreen.getContext('2d');
+                    offCtx.save();
+                    offCtx.scale(rs * dpr, rs * dpr);
+                    for (const { img, x, y } of imgsOnPage) {
+                        const loaded = _blobCache.get(img.blobId);
+                        if (!loaded?.element) continue;
+                        const el = loaded.element;
+                        const { dx, dy, dw, dh } = fitRect(el.naturalWidth, el.naturalHeight, x, y, img.width, img.height, img.fit ?? 'contain');
+                        offCtx.save();
+                        offCtx.beginPath(); offCtx.rect(x, y, img.width, img.height); offCtx.clip();
+                        offCtx.drawImage(el, dx, dy, dw, dh);
+                        offCtx.restore();
+                    }
+                    offCtx.restore();
+                }
+            }
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(mL, mT, areaW, areaH);
+            ctx.clip();
+            ctx.drawImage(offscreen, mL, mT, contentW_css * rs, contentH_css * rs);
+            ctx.restore();
         } catch (_) {
-            // If render fails, leave white area (empty page)
+            // leave white area on failure
         } finally {
             renderer.destroy();
         }
 
-        // Margin guide lines
         ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth   = 0.75;
+        ctx.lineWidth = 0.75;
         ctx.setLineDash([3, 3]);
         for (const [x1, y1, x2, y2] of [
-            [0, mT, displayW, mT],
-            [0, displayH - mB, displayW, displayH - mB],
-            [mL, 0, mL, displayH],
-            [displayW - mR, 0, displayW - mR, displayH],
-        ]) {
-            ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-        }
+            [0, mT, displayW, mT], [0, displayH - mB, displayW, displayH - mB],
+            [mL, 0, mL, displayH], [displayW - mR, 0, displayW - mR, displayH],
+        ]) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
         ctx.setLineDash([]);
     }
 
-    onDestroy(() => clearTimeout(renderTimer));
+    // ── Floating image rendering helpers ─────────────────────────────────────────
+
+    /** Cache of loaded HTMLImageElements for the preview (blobId → {element, url}) */
+    const _blobCache = new Map();
+
+    /**
+     * Load a blob as an HTMLImageElement, caching by blobId.
+     * Uses fetch + createObjectURL so the result is safe for canvas drawImage.
+     * @returns {Promise<{element:HTMLImageElement,url:string}|null>}
+     */
+    async function loadImgElement(blobId) {
+        if (_blobCache.has(blobId)) return _blobCache.get(blobId);
+        try {
+            const resp = await fetch(storage.app.getBlobUrl(blobId));
+            if (!resp.ok) return null;
+            const blob = await resp.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const element = await new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => resolve(null);
+                img.src = objectUrl;
+            });
+            if (!element) { URL.revokeObjectURL(objectUrl); return null; }
+            const entry = { element, url: objectUrl };
+            _blobCache.set(blobId, entry);
+            return entry;
+        } catch { return null; }
+    }
+
+    /**
+     * Compute draw rect for an image fit mode (all values in same unit).
+     * Returns the destination (dx, dy, dw, dh) to pass to ctx.drawImage / pdf.addImage.
+     */
+    function fitRect(srcW, srcH, dstX, dstY, dstW, dstH, fit) {
+        if (!srcW || !srcH || !fit || fit === 'fill') return { dx: dstX, dy: dstY, dw: dstW, dh: dstH };
+        const sa = srcW / srcH, da = dstW / dstH;
+        if (fit === 'contain') {
+            if (sa > da) { const dh = dstW / sa; return { dx: dstX, dy: dstY + (dstH - dh) / 2, dw: dstW, dh }; }
+            else         { const dw = dstH * sa; return { dx: dstX + (dstW - dw) / 2, dy: dstY, dw, dh: dstH }; }
+        }
+        if (fit === 'cover') {
+            if (sa > da) { const dw = dstH * sa; return { dx: dstX + (dstW - dw) / 2, dy: dstY, dw, dh: dstH }; }
+            else         { const dh = dstW / sa; return { dx: dstX, dy: dstY + (dstH - dh) / 2, dw: dstW, dh }; }
+        }
+        if (fit === 'none') return { dx: dstX, dy: dstY, dw: srcW, dh: srcH };
+        return { dx: dstX, dy: dstY, dw: dstW, dh: dstH };
+    }
+
+    onDestroy(() => {
+        clearTimeout(renderTimer);
+        for (const { url } of _blobCache.values()) URL.revokeObjectURL(url);
+        _blobCache.clear();
+    });
+
+    // On open: apply fit-to-width if it was previously active, or if no scale was ever saved.
+    onMount(() => { if (saved.scale == null || saved.autoFitWidth) fitToWidth(); });
 
     // ── Actions ────────────────────────────────────────────────────────────────
     function applyMarginPreset(preset) {
@@ -319,36 +460,32 @@
     function fitToWidth() {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
-        const { colMetrics } = buildMetrics(sheetStore);
-        const totalCols = sheetStore.colCount;
-        const contentW_css = colMetrics.offsetOf(totalCols);
+        const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
+        const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
+        const contentW_css = Math.max(1, bounds?.maxW ?? colMetrics.offsetOf(bounds?.endCol ?? sheetStore.colCount - 1 + 1));
         const printW_css   = (pageInfo.printW / MM_PER_INCH) * CSS_PX_PER_INCH;
         scale = Math.max(0.1, Math.min(4.0, Math.round((printW_css / contentW_css) * 100) / 100));
+        autoFitWidth = true;
     }
 
     function fitToPage() {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
         const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
-        const totalRows = sheetStore.rowCount;
-        const totalCols = sheetStore.colCount;
-        const contentW_css = colMetrics.offsetOf(totalCols);
-        const contentH_css = rowMetrics.offsetOf(totalRows);
+        const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
+        const contentW_css = Math.max(1, bounds?.maxW ?? colMetrics.offsetOf(sheetStore.colCount));
+        const contentH_css = Math.max(1, bounds?.maxH ?? rowMetrics.offsetOf(sheetStore.rowCount));
         const printW_css = (pageInfo.printW / MM_PER_INCH) * CSS_PX_PER_INCH;
         const printH_css = (pageInfo.printH / MM_PER_INCH) * CSS_PX_PER_INCH;
         const scaleW = printW_css / contentW_css;
         const scaleH = printH_css / contentH_css;
         scale = Math.max(0.1, Math.min(4.0, Math.round(Math.min(scaleW, scaleH) * 100) / 100));
+        autoFitWidth = false; // fit page is a one-shot, not a persistent mode
     }
 
     function clampScale(v) {
         const n = parseFloat(v);
         return isNaN(n) ? scale : Math.max(0.1, Math.min(4.0, Math.round(n * 100) / 100));
-    }
-
-    function clampMargin(v) {
-        const n = parseFloat(v);
-        return isNaN(n) ? 0 : Math.max(0, Math.min(100, Math.round(n * 10) / 10));
     }
 
     function saveSettings() {
@@ -372,6 +509,10 @@
             rowMetrics,
             colMetrics,
             docName: spreadsheetSession.docTitle || sheetStore.name || 'sheet',
+            fetchBlobFn: (blobId) => fetch(storage.app.getBlobUrl(blobId)).then(r => {
+                if (!r.ok) throw new Error(`blob ${blobId}: ${r.status}`);
+                return r.blob();
+            }),
         };
     }
 
@@ -423,10 +564,6 @@
     }
 
     function handleClose() { saveSettings(); onclose?.(); }
-
-    // Preview navigation helpers
-    function prevPage() { if (previewPageIdx > 0) previewPageIdx--; }
-    function nextPage() { if (previewPageRange && previewPageIdx < previewPageRange.total - 1) previewPageIdx++; }
 
     const ZOOM_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
     function zoomIn()  {
@@ -483,7 +620,7 @@
                             </button>
                         </div>
                     </div>
-                    <div class="paper-dims-hint">{pageInfo.pageW.toFixed(0)}×{pageInfo.pageH.toFixed(0)} mm · printable {pageInfo.printW.toFixed(0)}×{pageInfo.printH.toFixed(0)} mm</div>
+                    <div class="paper-dims-hint">{mmToIn(pageInfo.pageW).toFixed(2)}×{mmToIn(pageInfo.pageH).toFixed(2)} in · printable {mmToIn(pageInfo.printW).toFixed(2)}×{mmToIn(pageInfo.printH).toFixed(2)} in</div>
                 </section>
 
                 <!-- Margins -->
@@ -497,21 +634,21 @@
                         </div>
                     </div>
                     <div class="margins-grid">
-                        {#each [['Top', 'marginTop'], ['Bottom', 'marginBottom'], ['Left', 'marginLeft'], ['Right', 'marginRight']] as [label, key]}
+                        {#each [['Top', 'marginTop', marginTop], ['Bottom', 'marginBottom', marginBottom], ['Left', 'marginLeft', marginLeft], ['Right', 'marginRight', marginRight]] as [label, key, val]}
                             <label class="margin-label">
                                 <span class="margin-name">{label}</span>
                                 <input
-                                    type="number" class="margin-input" min="0" max="100" step="1"
-                                    value={key === 'marginTop' ? marginTop : key === 'marginBottom' ? marginBottom : key === 'marginLeft' ? marginLeft : marginRight}
+                                    type="number" class="margin-input" min="0" max="4" step="0.05"
+                                    value={mmToIn(val)}
                                     onchange={(e) => {
-                                        const v = clampMargin(e.target.value);
+                                        const v = inToMm(e.target.value);
                                         if (key === 'marginTop') marginTop = v;
                                         else if (key === 'marginBottom') marginBottom = v;
                                         else if (key === 'marginLeft') marginLeft = v;
                                         else marginRight = v;
                                     }}
                                 />
-                                <span class="margin-unit">mm</span>
+                                <span class="margin-unit">in</span>
                             </label>
                         {/each}
                     </div>
@@ -525,12 +662,12 @@
                     </div>
                     <input type="range" class="scale-slider" min="0.25" max="2" step="0.05"
                         bind:value={scale}
-                        oninput={() => scale = clampScale(scale)}
+                        oninput={() => { autoFitWidth = false; scale = clampScale(scale); }}
                     />
                     <div class="fit-btns">
-                        <button class="preset-btn" onclick={fitToWidth}>Fit width</button>
+                        <button class="preset-btn" class:active={autoFitWidth} onclick={fitToWidth}>Fit width</button>
                         <button class="preset-btn" onclick={fitToPage}>Fit page</button>
-                        <button class="preset-btn" onclick={() => scale = 1.0}>Reset</button>
+                        <button class="preset-btn" onclick={() => { autoFitWidth = false; scale = 1.0; }}>Reset</button>
                     </div>
                 </section>
 
@@ -608,21 +745,17 @@
                 <!-- Page count summary -->
                 <div class="page-summary">
                     <span class="page-count">{pageData.pages} page{pageData.pages !== 1 ? 's' : ''}</span>
-                    <span class="page-grid">{pageData.rows}×{pageData.cols} grid</span>
+                    <span class="page-grid">{pageData.rows}r × {pageData.cols}c</span>
                 </div>
             </div>
 
             <!-- Preview panel -->
             <div class="preview-panel">
-                <!-- Preview toolbar -->
+                <!-- Toolbar: page count + zoom -->
                 <div class="preview-toolbar">
-                    <div class="page-nav">
-                        <button class="nav-btn" onclick={prevPage} disabled={previewPageIdx === 0}>‹</button>
-                        <span class="page-counter">
-                            {previewPageRange ? previewPageIdx + 1 : 0} / {pageData.pages}
-                        </span>
-                        <button class="nav-btn" onclick={nextPage} disabled={!previewPageRange || previewPageIdx >= previewPageRange.total - 1}>›</button>
-                    </div>
+                    <span class="page-count-label">
+                        {pageData.pages} page{pageData.pages !== 1 ? 's' : ''}
+                    </span>
                     <div class="zoom-controls">
                         <button class="zoom-btn" onclick={zoomOut} disabled={previewZoom <= ZOOM_STEPS[0]}>−</button>
                         <span class="zoom-label">{Math.round(previewZoom * 100)}%</span>
@@ -630,17 +763,19 @@
                     </div>
                 </div>
 
-                <!-- Scrollable preview area -->
+                <!-- All pages stacked vertically -->
                 <div class="preview-scroll">
-                    <div class="preview-centering">
-                        {#if pageData.pages === 0}
-                            <div class="empty-preview">No content to preview</div>
-                        {:else}
-                            <div class="paper-shadow">
-                                <canvas bind:this={previewCanvasEl}></canvas>
-                            </div>
-                        {/if}
-                    </div>
+                    {#if pageData.pages === 0}
+                        <div class="empty-preview">No content to preview</div>
+                    {:else}
+                        <div class="pages-column">
+                            {#each Array(pageData.pages) as _, i (i)}
+                                <div class="paper-shadow">
+                                    <canvas use:registerCanvas={i}></canvas>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
                 </div>
             </div>
         </div>
@@ -845,6 +980,11 @@
         white-space: nowrap;
     }
     .preset-btn:hover { background: var(--color-fill-2, #e2e8f0); }
+    .preset-btn.active {
+        background: var(--color-primary, #3b82f6);
+        border-color: var(--color-primary, #3b82f6);
+        color: #fff;
+    }
 
     .margins-grid {
         display: grid;
@@ -1031,35 +1171,9 @@
         flex-shrink: 0;
     }
 
-    .page-nav {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    .nav-btn {
-        width: 28px;
-        height: 28px;
-        border: 1px solid var(--color-border, #e2e8f0);
-        border-radius: 5px;
-        background: var(--color-surface, #fff);
-        color: var(--color-text, #1e293b);
-        font-size: 1rem;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        line-height: 1;
-        padding: 0;
-    }
-    .nav-btn:hover:not(:disabled) { background: var(--color-fill, #f1f5f9); }
-    .nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
-    .page-counter {
+    .page-count-label {
         font-size: 0.8125rem;
-        color: var(--color-text, #1e293b);
-        min-width: 50px;
-        text-align: center;
+        color: var(--color-text-secondary, #64748b);
     }
 
     .zoom-controls {
@@ -1099,11 +1213,11 @@
         padding: 24px;
     }
 
-    .preview-centering {
+    .pages-column {
         display: flex;
-        justify-content: center;
-        min-height: 100%;
-        align-items: flex-start;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
     }
 
     .paper-shadow {

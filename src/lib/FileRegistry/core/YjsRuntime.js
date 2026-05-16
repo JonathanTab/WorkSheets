@@ -2,6 +2,9 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 
+// Message type for the server's file-meta sideband (matches server.js)
+const MESSAGE_FILE_META = 2;
+
 // Timeout for IndexedDB persistence sync (in milliseconds)
 const PERSISTENCE_TIMEOUT = 5000;
 // Timeout for initial WebSocket sync (in milliseconds)
@@ -41,6 +44,11 @@ export class YjsRuntime {
         this.getApiKey = options.getApiKey ?? null;
         /** @type {() => {username: string, color: string}|null} */
         this.getUserInfo = options.getUserInfo ?? null;
+
+        /** @type {Map<string, (meta: {last_edit_at: number, last_edit_by: string}) => void>} */
+        this._fileMetaHandlers = new Map();
+        /** Tracks WS instances we've already attached a fileMeta listener to (avoid duplicates on same instance). */
+        this._patchedWs = new WeakSet();
 
         // Track offline state
         this.isOffline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
@@ -177,6 +185,9 @@ export class YjsRuntime {
 
         this.activeDocs.set(docId, { ydoc, provider, persistence });
 
+        // Intercept file-meta sideband messages (type 2) from the server.
+        this._setupFileMetaListener(docId, provider);
+
         // Fire onDocUpdate for local (non-remote) changes so the registry can update
         // the file's updatedAt and queue an offline sync if needed.
         if (this.onDocUpdate) {
@@ -280,6 +291,66 @@ export class YjsRuntime {
             active.ydoc.destroy();
             this.activeDocs.delete(docId);
         }
+    }
+
+    /**
+     * Subscribe to file-meta sideband messages the Yjs server pushes on connect
+     * and after each debounced edit. The callback receives { last_edit_at, last_edit_by }.
+     * @param {string} docId
+     * @param {(meta: {last_edit_at: number, last_edit_by: string}) => void} callback
+     * @returns {() => void} unsubscribe
+     */
+    subscribeFileMeta(docId, callback) {
+        this._fileMetaHandlers.set(docId, callback);
+        return () => this._fileMetaHandlers.delete(docId);
+    }
+
+    /**
+     * Attach a raw WebSocket message listener to intercept type-2 (fileMeta) messages.
+     * Uses a WeakSet so we never double-attach to the same WS instance, and re-attaches
+     * on reconnect via the provider's 'status' event.
+     * @param {string} docId
+     * @param {WebsocketProvider} provider
+     */
+    _setupFileMetaListener(docId, provider) {
+        const attach = (ws) => {
+            if (!ws || this._patchedWs.has(ws)) return;
+            this._patchedWs.add(ws);
+            ws.addEventListener('message', (event) => {
+                if (!(event.data instanceof ArrayBuffer)) return;
+                try {
+                    const buf = new Uint8Array(event.data);
+                    // Read first varuint (message type).  lib0 varuint: each byte
+                    // contributes 7 bits; high bit signals more bytes follow.
+                    let pos = 0, type = 0, shift = 0;
+                    while (pos < buf.length) {
+                        const b = buf[pos++];
+                        type |= (b & 0x7f) << shift;
+                        if ((b & 0x80) === 0) break;
+                        shift += 7;
+                    }
+                    if (type !== MESSAGE_FILE_META) return;
+                    // Read varstring: varuint length, then UTF-8 bytes.
+                    let len = 0; shift = 0;
+                    while (pos < buf.length) {
+                        const b = buf[pos++];
+                        len |= (b & 0x7f) << shift;
+                        if ((b & 0x80) === 0) break;
+                        shift += 7;
+                    }
+                    const meta = JSON.parse(new TextDecoder().decode(buf.subarray(pos, pos + len)));
+                    this._fileMetaHandlers.get(docId)?.(meta);
+                } catch { /* ignore malformed or non-fileMeta messages */ }
+            });
+        };
+
+        // Attach to the WS that was created at provider construction time.
+        attach(provider.ws);
+
+        // Re-attach each time the provider reconnects (new WS instance each time).
+        provider.on('status', ({ status }) => {
+            if (status === 'connected') attach(provider.ws);
+        });
     }
 
     shutdown() {

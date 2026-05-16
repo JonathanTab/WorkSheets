@@ -1,71 +1,49 @@
 <script>
     import { onMount } from 'svelte';
-    import * as Y from 'yjs';
     import ModalHeader from '../../lib/ui/ModalHeader.svelte';
     import { closeTopModal } from '../../lib/ui/modalStore.svelte.js';
+    import { HistoryManager } from '../../lib/history/HistoryManager.svelte.js';
 
-    /** @type {{ registry: any, file: any }} */
-    let { registry, file } = $props();
+    /**
+     * @type {{
+     *   registry: any,
+     *   file: any,
+     *   onAfterRestore?: (() => Promise<void>) | null
+     * }}
+     */
+    let { registry, file, onAfterRestore = null } = $props();
 
-    // ---------- State ----------
-    let snapshots = $state([]);
-    let loading = $state(true);
-    let error = $state(null);
-    let selectedId = $state(null);
-    let restoring = $state(false);
-    let restoreError = $state(null);
-    let restoreSuccess = $state(false);
+    const hm = new HistoryManager({
+        fileId: file.id,
+        registry,
+        appType: file.app ?? 'sheets',
+        onAfterRestore,
+    });
 
-    // Manual snapshot creation
+    onMount(() => hm.loadSnapshots());
+
     let snapshotDesc = $state('');
     let snapshotCreating = $state(false);
-
-    onMount(async () => {
-        try {
-            snapshots = await registry.listSnapshots(file.id);
-        } catch (err) {
-            error = err.message ?? 'Failed to load version history';
-        } finally {
-            loading = false;
-        }
-    });
+    let restoreSuccess = $state(false);
 
     async function handleCreateSnapshot() {
         snapshotCreating = true;
-        error = null;
-        try {
-            await registry.createSnapshot(file.id, snapshotDesc || undefined);
-            snapshotDesc = '';
-            snapshots = await registry.listSnapshots(file.id);
-        } catch (err) {
-            error = err.message ?? 'Failed to save version';
-        } finally {
-            snapshotCreating = false;
-        }
-    }
-
-    function toggleSnapshot(id) {
-        selectedId = selectedId === id ? null : id;
-        restoreError = null;
+        await hm.createSnapshot(snapshotDesc || null);
+        snapshotDesc = '';
+        snapshotCreating = false;
     }
 
     async function handleRestore(snapshotId) {
         if (!confirm('Restore this version? The current state will be replaced.')) return;
-        restoring = true;
-        restoreError = null;
+        hm.error = null;
         restoreSuccess = false;
-        try {
-            await registry.restoreSnapshot(file.id, snapshotId);
+        await hm.restoreSnapshot(snapshotId);
+        if (!hm.error) {
             restoreSuccess = true;
             setTimeout(() => closeTopModal(), 1200);
-        } catch (err) {
-            restoreError = err.message ?? 'Restore failed';
-        } finally {
-            restoring = false;
         }
     }
 
-    // ---------- Formatting ----------
     function formatTime(tsMs) {
         return new Date(tsMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     }
@@ -81,7 +59,7 @@
         if (d >= weekStart) return d.toLocaleDateString(undefined, { weekday: 'long' });
         return d.toLocaleDateString(undefined, {
             month: 'long', day: 'numeric',
-            year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
+            year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
         });
     }
 
@@ -98,10 +76,19 @@
         return `${names[0]} +${names.length - 1} others`;
     }
 
+    function changeCountClass(count) {
+        if (!count || count === 0) return 'badge-neutral';
+        if (count < 5) return 'badge-low';
+        if (count < 20) return 'badge-mid';
+        return 'badge-high';
+    }
+
+    let selectedId = $state(null);
+
     let groupedSnapshots = $derived.by(() => {
         const groups = [];
         let lastLabel = null;
-        for (const snap of snapshots) {
+        for (const snap of hm.snapshots) {
             const label = formatDateGroup(snap.created_at);
             if (label !== lastLabel) {
                 groups.push({ label, snaps: [] });
@@ -111,17 +98,10 @@
         }
         return groups;
     });
-
-    function changeCountClass(count) {
-        if (!count || count === 0) return 'badge-neutral';
-        if (count < 5) return 'badge-low';
-        if (count < 20) return 'badge-mid';
-        return 'badge-high';
-    }
 </script>
 
 <div class="vh-modal">
-    <ModalHeader title="Version History — {file.name}" />
+    <ModalHeader title="Version History — {file.name ?? file.title}" />
 
     <!-- Save current version bar -->
     <div class="save-bar">
@@ -141,8 +121,8 @@
         </button>
     </div>
 
-    {#if error}
-        <div class="error-banner">{error}</div>
+    {#if hm.error}
+        <div class="error-banner">{hm.error}</div>
     {/if}
 
     {#if restoreSuccess}
@@ -151,9 +131,9 @@
 
     <!-- Snapshot list -->
     <div class="snap-list">
-        {#if loading}
+        {#if hm.loading}
             <div class="state-msg">Loading…</div>
-        {:else if snapshots.length === 0}
+        {:else if hm.snapshots.length === 0}
             <div class="state-msg empty">
                 <div class="empty-icon">🕐</div>
                 <div>No versions yet</div>
@@ -165,19 +145,22 @@
                 {#each group.snaps as snap (snap.id)}
                     {@const isSelected = selectedId === snap.id}
                     {@const users = formatUsers(snap.created_by)}
-                    {@const changeCount = snap.change_count ?? null}
+                    {@const summary = hm.interpretSnapshotDiff(snap)}
                     <div class="snap-item" class:snap-item--selected={isSelected}>
-                        <button class="snap-row" onclick={() => toggleSnapshot(snap.id)}>
+                        <button class="snap-row" onclick={() => { selectedId = isSelected ? null : snap.id; }}>
                             <div class="snap-main">
                                 <div class="snap-time-row">
                                     <span class="snap-time">{formatTime(snap.created_at)}</span>
                                     <span class="snap-trigger">{formatTrigger(snap.trigger)}</span>
-                                    {#if changeCount !== null}
-                                        <span class="snap-badge {changeCountClass(changeCount)}">{changeCount}</span>
+                                    {#if summary.changeCount > 0}
+                                        <span class="snap-badge {changeCountClass(summary.changeCount)}">{summary.changeCount}</span>
                                     {/if}
                                 </div>
                                 {#if snap.description}
                                     <div class="snap-desc">"{snap.description}"</div>
+                                {/if}
+                                {#if summary.summary && summary.summary !== 'No changes' && summary.summary !== '—'}
+                                    <div class="snap-summary">{summary.summary}</div>
                                 {/if}
                                 {#if users}
                                     <div class="snap-users">{users}</div>
@@ -188,17 +171,17 @@
 
                         {#if isSelected}
                             <div class="snap-detail">
-                                <p class="restore-hint">Open the document to preview changes.</p>
-                                {#if restoreError}
-                                    <div class="restore-error">{restoreError}</div>
+                                {#if restoreSuccess}
+                                    <!-- already handled above -->
+                                {:else}
+                                    <button
+                                        class="restore-btn"
+                                        onclick={() => handleRestore(snap.id)}
+                                        disabled={hm.restoring}
+                                    >
+                                        {hm.restoring ? 'Restoring…' : 'Restore this version'}
+                                    </button>
                                 {/if}
-                                <button
-                                    class="restore-btn"
-                                    onclick={() => handleRestore(snap.id)}
-                                    disabled={restoring}
-                                >
-                                    {restoring ? 'Restoring…' : 'Restore this version'}
-                                </button>
                             </div>
                         {/if}
                     </div>
@@ -218,7 +201,6 @@
         min-height: 300px;
     }
 
-    /* Save bar */
     .save-bar {
         display: flex;
         gap: 6px;
@@ -253,7 +235,6 @@
     .save-btn:hover { opacity: 0.9; }
     .save-btn:disabled { opacity: 0.5; cursor: default; }
 
-    /* Banners */
     .error-banner {
         margin: 6px 16px;
         padding: 6px 10px;
@@ -273,7 +254,6 @@
         flex-shrink: 0;
     }
 
-    /* List */
     .snap-list {
         flex: 1;
         overflow-y: auto;
@@ -286,12 +266,7 @@
         color: var(--color-text-muted);
         font-size: 13px;
     }
-    .state-msg.empty {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 6px;
-    }
+    .state-msg.empty { display: flex; flex-direction: column; align-items: center; gap: 6px; }
     .empty-icon { font-size: 28px; }
     .empty-sub {
         font-size: 12px;
@@ -301,7 +276,6 @@
         max-width: 260px;
     }
 
-    /* Date group header */
     .date-group {
         padding: 6px 16px 4px;
         font-size: 10px;
@@ -316,10 +290,7 @@
         z-index: 1;
     }
 
-    /* Snapshot items */
-    .snap-item {
-        border-bottom: 1px solid var(--color-border);
-    }
+    .snap-item { border-bottom: 1px solid var(--color-border); }
     .snap-item--selected {
         background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface));
     }
@@ -350,15 +321,8 @@
         gap: 6px;
         flex-wrap: wrap;
     }
-    .snap-time {
-        font-weight: 600;
-        font-size: 13px;
-        color: var(--color-text);
-    }
-    .snap-trigger {
-        font-size: 11px;
-        color: var(--color-text-muted);
-    }
+    .snap-time { font-weight: 600; font-size: 13px; color: var(--color-text); }
+    .snap-trigger { font-size: 11px; color: var(--color-text-muted); }
     .snap-badge {
         font-size: 10px;
         font-weight: 600;
@@ -380,6 +344,14 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    .snap-summary {
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--color-text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
     .snap-users {
         margin-top: 2px;
         font-size: 11px;
@@ -392,21 +364,10 @@
         margin-top: 4px;
     }
 
-    /* Expanded detail */
     .snap-detail {
         padding: 10px 16px 12px;
         background: color-mix(in srgb, var(--color-primary) 4%, var(--color-surface));
         border-top: 1px solid color-mix(in srgb, var(--color-primary) 20%, var(--color-border));
-    }
-    .restore-hint {
-        font-size: 12px;
-        color: var(--color-text-muted);
-        margin: 0 0 8px;
-    }
-    .restore-error {
-        font-size: 12px;
-        color: #b91c1c;
-        margin-bottom: 6px;
     }
     .restore-btn {
         padding: 6px 14px;

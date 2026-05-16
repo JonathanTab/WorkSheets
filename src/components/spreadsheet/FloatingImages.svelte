@@ -228,11 +228,24 @@
         }
     }
 
+    // Deselect when clicking outside any floating image
+    function handleDocMousedown(e) {
+        if (!selectedId) return;
+        if (e.target.closest?.('.floating-image')) return;
+        selectedId = null;
+    }
+
+    $effect(() => {
+        document.addEventListener('mousedown', handleDocMousedown, true);
+        return () => document.removeEventListener('mousedown', handleDocMousedown, true);
+    });
+
     onDestroy(() => {
         document.removeEventListener('mousemove', handleDragMove);
         document.removeEventListener('mouseup', handleDragEnd);
         document.removeEventListener('mousemove', handleResizeMove);
         document.removeEventListener('mouseup', handleResizeEnd);
+        document.removeEventListener('mousedown', handleDocMousedown, true);
     });
 
     // ── Reactive image list ───────────────────────────────────────────────────
@@ -261,7 +274,6 @@
     class="floating-images-root"
     tabindex="-1"
     onkeydown={handleKeydown}
-    onclick={(e) => { if (e.target === e.currentTarget) selectedId = null; }}
 >
     {#each images as img (img.id)}
         {@const selected = selectedId === img.id}

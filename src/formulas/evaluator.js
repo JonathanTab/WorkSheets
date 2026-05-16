@@ -6,7 +6,7 @@
  */
 
 import { NodeType, parseFormula } from './parser.js';
-import { getFunction, isError, FormulaError } from './functions.js';
+import { getFunction, isError, FormulaError, parseNumericString } from './functions.js';
 
 // Formula string → AST cache. Parsing is expensive; the AST is a pure function
 // of the formula string so caching is safe. Limited to 1 000 entries (LRU-style eviction).
@@ -100,9 +100,10 @@ function evaluateCellRef(ast, getCellValue) {
     // If the cell has a formula, this should return the computed value
     // The getCellValue function is responsible for handling that
 
-    // Convert string representations of numbers to actual numbers
-    if (typeof value === 'string' && value.trim() !== '' && !isNaN(Number(value))) {
-        return Number(value);
+    // Convert human-readable number strings (e.g. "$1,234", "42%") to actual numbers
+    if (typeof value === 'string') {
+        const n = parseNumericString(value);
+        if (!isNaN(n)) return n;
     }
 
     return value;
@@ -148,8 +149,9 @@ function evaluateSheetRef(ast, getCrossSheetValue) {
     if (ref.type === NodeType.CELL_REF) {
         const value = getCrossSheetValue(sheetName, ref.row, ref.col);
         if (value === null || value === undefined) return null;
-        if (typeof value === 'string' && value.trim() !== '' && !isNaN(Number(value))) {
-            return Number(value);
+        if (typeof value === 'string') {
+            const n = parseNumericString(value);
+            if (!isNaN(n)) return n;
         }
         return value;
     }
@@ -192,14 +194,10 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             const leftCoerce = left ?? 0;
             const rightCoerce = right ?? 0;
             // Try to convert string numbers to actual numbers for addition
-            const leftNum =
-                typeof leftCoerce === 'string' && leftCoerce.trim() !== '' && !isNaN(Number(leftCoerce))
-                    ? Number(leftCoerce)
-                    : leftCoerce;
-            const rightNum =
-                typeof rightCoerce === 'string' && rightCoerce.trim() !== '' && !isNaN(Number(rightCoerce))
-                    ? Number(rightCoerce)
-                    : rightCoerce;
+            const _ln = typeof leftCoerce === 'string' ? parseNumericString(leftCoerce) : NaN;
+            const leftNum = typeof leftCoerce === 'string' && !isNaN(_ln) ? _ln : leftCoerce;
+            const _rn = typeof rightCoerce === 'string' ? parseNumericString(rightCoerce) : NaN;
+            const rightNum = typeof rightCoerce === 'string' && !isNaN(_rn) ? _rn : rightCoerce;
 
             if (typeof leftNum === 'number' && typeof rightNum === 'number') {
                 return leftNum + rightNum;

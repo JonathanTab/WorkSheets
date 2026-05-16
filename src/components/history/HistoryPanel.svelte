@@ -20,7 +20,6 @@
 
     onMount(() => {
         historyManager.loadSnapshots();
-        historyManager.loadFileMeta();
     });
 
     async function handleCreateSnapshot() {

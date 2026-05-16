@@ -599,6 +599,12 @@ export class CanvasRenderer {
             return;
         }
 
+        // Word-wrap mode: route through the rich text renderer for line breaking
+        if (cell.wrapText === 'wrap' || cell.wrapText === true) {
+            this.#paintRichTextContent(ctx, { ...cell, richTextRuns: [{ t: text }] });
+            return;
+        }
+
         const font = this.#buildFont(cell);
         if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
         ctx.fillStyle = cell.textColor || this.#theme.defaultText;
