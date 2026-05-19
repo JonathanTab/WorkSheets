@@ -138,12 +138,17 @@ export class HistoryManager {
     }
 
     /**
-     * Parse the stored diff_json for a snapshot.
+     * Fetch the precomputed diff JSON for a snapshot from the server.
+     * The snapshot list no longer includes diff_json (slim response).
      * @param {import('../FileRegistry/api/YjsServerAPI.js').SnapshotMeta} snap
-     * @returns {object|null}
+     * @returns {Promise<object|null>} parsed diff object
      */
-    parseDiff(snap) {
-        if (!snap?.diff_json) return null;
-        try { return JSON.parse(snap.diff_json); } catch { return null; }
+    async fetchDiff(snap) {
+        if (!snap?.id) return null;
+        try {
+            return await this.registry.getSnapshotDiff(this.fileId, snap.id);
+        } catch {
+            return null;
+        }
     }
 }

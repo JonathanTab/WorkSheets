@@ -41,7 +41,8 @@ export { FORMAT_FIELDS };
 
 /**
  * Read a YKeyValue Y.Array into a plain Map<key, value>.
- * Each element in the array is a Y.Map with 'key' and 'val' entries.
+ * y-utility/y-keyvalue stores items as plain { key, val } objects (yarray.push([{key,val}])).
+ * Also handles Y.Map shape defensively for any future schema variation.
  * Later duplicates overwrite earlier ones (matching YKeyValue semantics).
  * @param {Y.Array|null|undefined} arr
  * @returns {Map<string, any>}
@@ -50,11 +51,16 @@ function readYKeyValue(arr) {
     const map = new Map();
     if (!arr || !(arr instanceof Y.Array)) return map;
     arr.forEach(item => {
+        if (!item) return;
+        let k, v;
         if (item instanceof Y.Map) {
-            const k = item.get('key');
-            const v = item.get('val');
-            if (k !== undefined) map.set(k, v);
+            k = item.get('key');
+            v = item.get('val');
+        } else if (typeof item === 'object') {
+            k = item.key;
+            v = item.val;
         }
+        if (k !== undefined) map.set(k, v);
     });
     return map;
 }

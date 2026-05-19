@@ -575,10 +575,7 @@
 {/if}
 
 {#if historyManager?.viewerOpen}
-    <HistoryViewer
-        {historyManager}
-        currentDoc={spreadsheetSession.ydoc ?? null}
-    />
+    <HistoryViewer {historyManager} />
 {/if}
 
 <style>

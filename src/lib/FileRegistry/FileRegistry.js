@@ -1185,6 +1185,14 @@ export class FileRegistry extends EventEmitter {
     }
 
     /**
+     * Fetch the precomputed diff JSON for a snapshot (no binary download).
+     * @param {string} fileId @param {string} snapshotId @returns {Promise<object|null>}
+     */
+    async getSnapshotDiff(fileId, snapshotId) {
+        return this._api.getSnapshotDiff(fileId, snapshotId);
+    }
+
+    /**
      * Restore a snapshot:
      *   1. storage.php validates access, asks the Yjs server to create a new room
      *      pre-loaded with the snapshot state, and updates the file's roomId atomically.

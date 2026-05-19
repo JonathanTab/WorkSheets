@@ -6,25 +6,18 @@
      *   [Header bar: title | snapshot info | Restore | Close]
      *   [Left sidebar: snapshot list] [Main: app-specific ViewerComponent]
      *
-     * Always diffs the selected snapshot vs the one immediately before it.
-     * Downloads exactly two snapshot binaries (selected + previous).
+     * Fetches the precomputed diff JSON on-demand (no binary downloads).
      *
      * Props:
      *   historyManager  - HistoryManager instance (carries adapter, registry, fileId)
-     *   currentDoc      - live Y.Doc (for context, not diffed against here)
      */
 
-    import * as Y from 'yjs';
-    import { onMount } from 'svelte';
     import SnapshotListItem from './SnapshotListItem.svelte';
 
-    let { historyManager, currentDoc = null } = $props();
+    let { historyManager } = $props();
 
     let adapter = $derived(historyManager.adapter);
 
-    // The two docs being compared
-    let snapDoc     = $state(/** @type {Y.Doc|null} */ (null));
-    let prevDoc     = $state(/** @type {Y.Doc|null} */ (null));
     let diffResult  = $state(null);
     let diffLoading = $state(false);
     let diffError   = $state(/** @type {string|null} */ (null));
@@ -32,7 +25,7 @@
     // Keep track of which snapshot we've loaded so we don't reload unnecessarily
     let loadedSnapId = $state(/** @type {string|null} */ (null));
 
-    // Load snapshot data whenever selectedSnap changes
+    // Load diff whenever selectedSnap changes
     $effect(() => {
         const snap = historyManager.selectedSnap;
         if (!snap || snap.id === loadedSnapId) return;
@@ -45,35 +38,18 @@
         diffError = null;
         diffResult = null;
 
-        // Destroy previous docs
-        if (snapDoc) { snapDoc.destroy(); snapDoc = null; }
-        if (prevDoc) { prevDoc.destroy(); prevDoc = null; }
-
         try {
-            const prevSnap = historyManager.getPreviousSnapshot(snap.id);
+            // Fetch the precomputed diff JSON — lightweight, no binaries.
+            const diff = await historyManager.fetchDiff(snap);
 
-            // Fetch both binaries in parallel
-            const [snapData, prevData] = await Promise.all([
-                historyManager.registry.getSnapshotData(historyManager.fileId, snap.id),
-                prevSnap ? historyManager.registry.getSnapshotData(historyManager.fileId, prevSnap.id) : null,
-            ]);
-
-            const newSnapDoc = new Y.Doc({ gc: false });
-            Y.applyUpdate(newSnapDoc, snapData);
-
-            const newPrevDoc = new Y.Doc({ gc: false });
-            if (prevData) {
-                Y.applyUpdate(newPrevDoc, prevData);
+            // Warn if we got a v1 generic diff for a sheets file (backfill needed)
+            if (diff?.v === 1 && snap.app_type === 'sheets') {
+                console.warn(`[history] Snapshot ${snap.id} has a v1 generic diff despite app_type=sheets. Run /api/backfill-diffs to fix.`);
             }
 
-            snapDoc = newSnapDoc;
-            prevDoc = newPrevDoc;
-
-            // Use server-computed diff JSON (primary path).
-            // Falls back to null if not available (viewer renders its own fallback).
-            diffResult = historyManager.parseDiff(snap);
+            diffResult = diff;
         } catch (err) {
-            diffError = err.message ?? 'Failed to load snapshot';
+            diffError = err.message ?? 'Failed to load diff';
         } finally {
             diffLoading = false;
         }
@@ -123,14 +99,6 @@
             groups[groups.length - 1].snaps.push(snap);
         }
         return groups;
-    });
-
-    // Cleanup on destroy
-    $effect(() => {
-        return () => {
-            if (snapDoc) snapDoc.destroy();
-            if (prevDoc) prevDoc.destroy();
-        };
     });
 
     // Keyboard: Escape closes the viewer
@@ -205,18 +173,20 @@
                 <div class="viewer-placeholder viewer-placeholder--error">
                     <div>Failed to load: {diffError}</div>
                 </div>
-            {:else if snapDoc && adapter?.ViewerComponent}
+            {:else if diffResult && adapter?.ViewerComponent}
                 <svelte:component
                     this={adapter.ViewerComponent}
-                    {prevDoc}
-                    {snapDoc}
                     diff={diffResult}
-                    {currentDoc}
                 />
-            {:else if snapDoc}
-                <!-- No app-specific viewer: show generic text fallback -->
+            {:else if diffResult}
+                <!-- v1 generic diff or no app-specific viewer -->
                 <div class="viewer-placeholder">
-                    <div>Visual diff not available for this document type.</div>
+                    <div>Visual diff not available for this snapshot format.</div>
+                    <div class="placeholder-sub">Re-run the server backfill to upgrade this snapshot.</div>
+                </div>
+            {:else if !diffLoading}
+                <div class="viewer-placeholder">
+                    <div>No diff data available for this snapshot.</div>
                 </div>
             {/if}
         </div>

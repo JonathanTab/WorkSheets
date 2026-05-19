@@ -33,6 +33,7 @@ import {
     listSnapshotsByRoom,
     listSnapshotsByFile,
     getSnapshotData,
+    getSnapshotDiff,
     getSnapshotMeta,
     prepareRestore,
     getSqliteDb,
@@ -487,6 +488,13 @@ async function handleHttp(req, res, url) {
         const body = await _readBody(req);
         backfillAllDiffs(body.force === true);
         return _json(res, 200, { ok: true, message: 'Backfill started in background' });
+    }
+
+    // GET /api/snapshot/:id/diff  (diff JSON only — lightweight, no binary)
+    const diffMatch = pathname.match(/^\/api\/snapshot\/([^/]+)\/diff$/);
+    if (diffMatch && req.method === 'GET') {
+        const diffJson = getSnapshotDiff(diffMatch[1]);
+        return _json(res, 200, { diff_json: diffJson });
     }
 
     // GET /api/snapshot/:id/data  (binary)

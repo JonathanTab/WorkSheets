@@ -2,6 +2,21 @@ import * as Y from 'yjs';
 import { computeSheetsDiff, countSheetsDiffChanges } from './diff/sheets.js';
 export { computeSheetsDiff, countSheetsDiffChanges };
 
+/**
+ * Infer the app type from a Y.Doc's root structure when app_type column is NULL.
+ * Checks for known root map keys used by each app.
+ * @param {Y.Doc|null} ydoc
+ * @returns {string|null}
+ */
+export function inferAppType(ydoc) {
+    if (!ydoc) return null;
+    try {
+        const ss = ydoc.getMap('spreadsheet');
+        if (ss?.size > 0 || ss?.get?.('sheets')) return 'sheets';
+    } catch { /* ignore */ }
+    return null;
+}
+
 const MAX_DEPTH = 4;
 
 /**
@@ -189,26 +204,28 @@ export function computeGenericDiff(docA, docB) {
 
 /**
  * Dispatch to the correct app-specific diff function.
+ * When appType is null/unknown, infers from the Y.Doc structure.
  * Returns v2 JSON for 'sheets', v1 JSON for everything else.
- * @param {string|null} appType
+ * @param {string|null} appType  explicit type from DB column (may be null for legacy rows)
  * @param {Y.Doc} prevDoc
  * @param {Y.Doc} newDoc
- * @returns {object}
+ * @returns {{ diff: object, resolvedAppType: string|null }}
  */
 export function computeAppDiff(appType, prevDoc, newDoc) {
-    if (appType === 'sheets') return computeSheetsDiff(prevDoc, newDoc);
-    return computeGenericDiff(prevDoc, newDoc);
+    const resolved = appType ?? inferAppType(newDoc) ?? inferAppType(prevDoc);
+    if (resolved === 'sheets') return { diff: computeSheetsDiff(prevDoc, newDoc), resolvedAppType: 'sheets' };
+    return { diff: computeGenericDiff(prevDoc, newDoc), resolvedAppType: resolved };
 }
 
 /**
- * Count meaningful changes in any diff (v1 or v2).
- * @param {object|null} diff
+ * Count meaningful changes in any diff object (v1 or v2).
+ * @param {object|null} diff  the parsed diff object (not the wrapper returned by computeAppDiff)
  * @returns {number}
  */
 export function countDiffChanges(diff) {
     if (!diff) return 0;
     if (diff.v === 2) return countSheetsDiffChanges(diff);
-    // v1 generic
+    // v1 generic — delta-based count would inflate the number; return entries count instead
     if (!diff.entries?.length) return 0;
-    return diff.entries.reduce((sum, e) => sum + (e.added ?? 0) + (e.removed ?? 0) + (e.modified ?? 0) + Math.abs(e.delta ?? 0), 0);
+    return diff.entries.reduce((sum, e) => sum + (e.added ?? 0) + (e.removed ?? 0) + (e.modified ?? 0), 0);
 }

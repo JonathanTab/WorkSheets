@@ -2,39 +2,18 @@
     /**
      * SpreadsheetHistoryViewer — diff viewer for spreadsheet snapshots.
      *
-     * Reads the v4 spreadsheet schema directly from the snapshot Y.Doc
-     * (cellValues + cellStyles as YKeyValue-backed Y.Arrays). Renders a
-     * scrollable grid covering the changed region (± context rows/cols) with
-     * diff highlights from the server-precomputed diff JSON.
+     * Renders from the server-precomputed v2 diff JSON only — no Y.Doc downloads.
+     * Changed cells show their "to" value from the diff; context cells are empty.
      *
      * Props:
-     *   prevDoc  - Y.Doc of the "before" state (may be empty for initial snapshots)
-     *   snapDoc  - Y.Doc of the "after" state (selected snapshot)
-     *   diff     - parsed server diff object (v2 JSON from diff_json column, or null)
-     *   currentDoc - live Y.Doc (not used by this viewer, but passed through)
+     *   diff  - parsed server diff object (v2 JSON), or null
      */
-
-    import * as Y from 'yjs';
 
     const CONTEXT_PAD = 3;
     const MAX_GRID_ROWS = 100;
     const MAX_GRID_COLS = 40;
 
-    let { prevDoc = null, snapDoc = null, diff = null } = $props();
-
-    // ─── Read YKeyValue Y.Array into Map<key, value> ───────────────────────────
-    function readYKeyValue(arr) {
-        const map = new Map();
-        if (!arr || !(arr instanceof Y.Array)) return map;
-        arr.forEach(item => {
-            if (item instanceof Y.Map) {
-                const k = item.get('key');
-                const v = item.get('val');
-                if (k !== undefined) map.set(k, v);
-            }
-        });
-        return map;
-    }
+    let { diff = null } = $props();
 
     // ─── Cell display helpers ──────────────────────────────────────────────────
     function colToLetter(col) {
@@ -81,20 +60,13 @@
     let activeSheetIdx = $state(0);
     let activeSheet = $derived(changedSheets[activeSheetIdx] ?? null);
 
-    // ─── Read sheet cells from the snapshot Y.Doc ──────────────────────────────
-    function getSheetYMap(ydoc, sheetId) {
-        if (!ydoc) return null;
-        return ydoc.getMap('spreadsheet')?.get('sheets')?.get(sheetId) ?? null;
-    }
-
-    // Build the grid for the active sheet
+    // Build the grid for the active sheet using diff data only (no Y.Doc)
     let gridData = $derived.by(() => {
-        if (!activeSheet || !snapDoc) return null;
+        if (!activeSheet) return null;
 
         const sheetId = activeSheet.id;
         const cellMap = diffCellsBySheet.get(sheetId);
 
-        // If deleted or no cells, nothing to render
         if (activeSheet.isDeleted || !cellMap) return null;
 
         const cells = activeSheet.cells ?? [];
@@ -115,24 +87,20 @@
         const c0 = Math.max(0, minCol - CONTEXT_PAD);
         const c1 = Math.min(c0 + MAX_GRID_COLS - 1, maxCol + CONTEXT_PAD);
 
-        // Read actual cell values from the snapshot Y.Doc
-        const sheetYMap = getSheetYMap(snapDoc, sheetId);
-        const snapCellValues = sheetYMap ? readYKeyValue(sheetYMap.get('cellValues')) : new Map();
-
         const rows = [];
         for (let r = r0; r <= r1; r++) {
             const cols = [];
             for (let c = c0; c <= c1; c++) {
                 const key = `${r},${c}`;
                 const cellDiff = cellMap?.get(key) ?? null;
-                const valEntry = snapCellValues.get(key);
-                const displayVal = formatVal(valEntry?.v ?? valEntry);
+                // Show the "to" value from the diff for changed/added cells
+                const displayVal = cellDiff ? formatVal(cellDiff.to?.v) : '';
                 cols.push({ r, c, key, cellDiff, displayVal });
             }
             rows.push({ r, cols });
         }
 
-        const truncated = activeSheet.cellsTruncated > 0;
+        const truncated = (activeSheet.cellsTruncated ?? 0) > 0;
         return { rows, r0, r1, c0, c1, truncated, totalChanged: cells.length };
     });
 

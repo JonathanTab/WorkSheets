@@ -481,6 +481,18 @@ export class StorageAPI {
     }
 
     /**
+     * Fetch the precomputed diff JSON for a snapshot (lightweight — no binary download).
+     * @param {string} fileId
+     * @param {string} snapshotId
+     * @returns {Promise<object|null>} parsed diff object, or null if not available
+     */
+    async getSnapshotDiff(fileId, snapshotId) {
+        const data = await this._get({ action: 'snapshot_diff', file_id: fileId, snapshot_id: snapshotId });
+        if (!data?.diff_json) return null;
+        try { return JSON.parse(data.diff_json); } catch { return null; }
+    }
+
+    /**
      * Fetch the raw Yjs state for a snapshot as a Uint8Array.
      * Apply to a Y.Doc with Y.applyUpdate(doc, data) to reconstruct the doc for diffing.
      * @param {string} fileId - The file this snapshot belongs to (used for access control)

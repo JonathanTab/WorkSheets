@@ -1387,6 +1387,22 @@ try {
             // yjsStreamBinary exits; unreachable
         }
 
+        case 'snapshot_diff': {
+            // Returns the precomputed diff JSON for a snapshot (lightweight, no binary).
+            $user       = requireAuth();
+            $fileId     = trim($_GET['file_id'] ?? '');
+            $snapshotId = trim($_GET['snapshot_id'] ?? '');
+            if (!$fileId || !$snapshotId) error('file_id and snapshot_id required');
+            if (!canReadFile($db, $fileId, $user)) error('Access denied', 403);
+
+            // Validate snapshot belongs to file before returning diff.
+            $meta = yjsGet('api/snapshot/' . urlencode($snapshotId));
+            if (($meta['file_id'] ?? '') !== $fileId) error('Snapshot does not belong to this file', 403);
+
+            $data = yjsGet('api/snapshot/' . urlencode($snapshotId) . '/diff');
+            respond(['diff_json' => $data['diff_json'] ?? null]);
+        }
+
         case 'snapshot_restore': {
             // Full restore: create new room on Yjs server + update room_id in DB.
             requirePost();

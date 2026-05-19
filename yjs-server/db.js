@@ -4,7 +4,7 @@ import * as Y from 'yjs';
 import path from 'path';
 import fs from 'fs';
 import { randomBytes } from 'crypto';
-import { computeAppDiff, countDiffChanges, computeGenericDiff } from './diff.js';
+import { computeAppDiff, countDiffChanges, inferAppType } from './diff.js';
 
 let levelPersistence;
 let sqliteDb;
@@ -164,23 +164,26 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionC
     } else {
         // Compute diff synchronously
         const prevStateBytes = _toUint8Array(prevRow.state);
-        const resolvedAppType = appType ?? prevRow.app_type ?? null;
 
         const prevDoc = new Y.Doc({ gc: false });
         Y.applyUpdate(prevDoc, prevStateBytes);
         const newDoc = new Y.Doc({ gc: false });
         Y.applyUpdate(newDoc, newStateBytes);
 
-        let diff;
+        let diff, resolvedAppType;
         try {
-            diff = computeAppDiff(resolvedAppType, prevDoc, newDoc);
+            ({ diff, resolvedAppType } = computeAppDiff(appType ?? prevRow.app_type ?? null, prevDoc, newDoc));
         } catch (err) {
             console.error(`[snapshot] Diff compute error: ${err.message}`);
             diff = { v: 1, entries: [] };
+            resolvedAppType = appType;
         } finally {
             prevDoc.destroy();
             newDoc.destroy();
         }
+
+        // Use inferred appType if the explicit one was null
+        const effectiveAppType = appType ?? resolvedAppType ?? null;
 
         realChangeCount = countDiffChanges(diff);
 
@@ -191,7 +194,8 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionC
         }
 
         diffJson = JSON.stringify(diff);
-        console.log(`[diff] ${trigger} snapshot for ${roomId}: ${realChangeCount} changes`);
+        appType = effectiveAppType; // update for the INSERT below
+        console.log(`[diff] ${trigger} snapshot for ${roomId}: ${realChangeCount} changes (${effectiveAppType ?? 'unknown'})`);
     }
 
     const id = `snap_${randomBytes(8).toString('hex')}`;
@@ -214,7 +218,6 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionC
 function _computeAndStoreDiff(snapshotId, fileId, newStateBytes, appType) {
     try {
         const current = sqliteDb.prepare('SELECT created_at, room_id, app_type FROM snapshots WHERE id = ?').get(snapshotId);
-        const resolvedAppType = appType ?? current?.app_type ?? null;
 
         let prevRow = null;
         if (current) {
@@ -232,7 +235,16 @@ function _computeAndStoreDiff(snapshotId, fileId, newStateBytes, appType) {
         }
 
         let diffJson;
+        let resolvedAppType = appType ?? current?.app_type ?? null;
+
         if (!prevRow) {
+            // Use inferAppType to get proper type even without a predecessor
+            if (!resolvedAppType) {
+                const doc = new Y.Doc({ gc: false });
+                Y.applyUpdate(doc, _toUint8Array(newStateBytes));
+                resolvedAppType = inferAppType(doc);
+                doc.destroy();
+            }
             diffJson = JSON.stringify({ v: 2, appType: resolvedAppType, isInitial: true, totals: { cells: 0, formatting: 0, structure: 0, tables: 0, sheetsAdded: 0, sheetsRemoved: 0 }, sheets: [], sheetsRenamed: [], sheetOrder: null });
         } else {
             const prevDoc = new Y.Doc({ gc: false });
@@ -240,16 +252,22 @@ function _computeAndStoreDiff(snapshotId, fileId, newStateBytes, appType) {
             const newDoc = new Y.Doc({ gc: false });
             Y.applyUpdate(newDoc, _toUint8Array(newStateBytes));
 
-            const diff = computeAppDiff(resolvedAppType, prevDoc, newDoc);
+            let diff;
+            ({ diff, resolvedAppType } = computeAppDiff(resolvedAppType, prevDoc, newDoc));
             diffJson = JSON.stringify(diff);
             const n = countDiffChanges(diff);
 
             prevDoc.destroy();
             newDoc.destroy();
-            console.log(`[diff] backfill ${snapshotId}: ${n} changes`);
+            console.log(`[diff] backfill ${snapshotId}: ${n} changes (${resolvedAppType ?? 'unknown'})`);
         }
 
-        sqliteDb.prepare('UPDATE snapshots SET diff_json = ? WHERE id = ?').run(diffJson, snapshotId);
+        // Update diff_json and opportunistically write app_type if it was inferred
+        if (resolvedAppType && resolvedAppType !== current?.app_type) {
+            sqliteDb.prepare('UPDATE snapshots SET diff_json = ?, app_type = ? WHERE id = ?').run(diffJson, resolvedAppType, snapshotId);
+        } else {
+            sqliteDb.prepare('UPDATE snapshots SET diff_json = ? WHERE id = ?').run(diffJson, snapshotId);
+        }
     } catch (err) {
         console.error(`[diff] Failed for ${snapshotId}:`, err.message);
     }
@@ -313,20 +331,33 @@ export function backfillAllDiffs(force = false) {
     });
 }
 
-const SNAP_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, diff_json, app_type, pinned';
+// Columns for list endpoints — omits diff_json (can be 100s of KB per row)
+const SNAP_LIST_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, app_type, pinned';
+// Full columns for single-snapshot fetches (metadata + diff)
+const SNAP_COLS = SNAP_LIST_COLS + ', diff_json';
 
-/** @returns {object[]} snapshot metadata (no binary state) */
+/** @returns {object[]} snapshot list metadata (no diff_json, no binary state) */
 export function listSnapshotsByRoom(roomId) {
     return sqliteDb.prepare(
-        `SELECT ${SNAP_COLS} FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100`
+        `SELECT ${SNAP_LIST_COLS} FROM snapshots WHERE room_id = ? ORDER BY created_at DESC LIMIT 100`
     ).all(roomId);
 }
 
 /** @returns {object[]} */
 export function listSnapshotsByFile(fileId) {
     return sqliteDb.prepare(
-        `SELECT ${SNAP_COLS} FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100`
+        `SELECT ${SNAP_LIST_COLS} FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 100`
     ).all(fileId);
+}
+
+/**
+ * Get only the diff_json for a specific snapshot (lightweight on-demand fetch).
+ * @param {string} snapshotId
+ * @returns {string|null}
+ */
+export function getSnapshotDiff(snapshotId) {
+    const row = sqliteDb.prepare('SELECT diff_json FROM snapshots WHERE id = ?').get(snapshotId);
+    return row?.diff_json ?? null;
 }
 
 /** @returns {Buffer|null} */
