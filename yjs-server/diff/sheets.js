@@ -131,20 +131,101 @@ function parseCellKey(key) {
 
 // ─── Table helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Get ordered column names from a table Y.Map.
+ * Supports both new layout (columnDefs/columnOrder) and legacy (cols/colOrder/columns).
+ */
 function getTableColNames(tableMap) {
     try {
-        const colOrder = tableMap.get('colOrder');
+        // New layout: columnDefs (Y.Map) + columnOrder (Y.Array)
+        const colDefs  = tableMap.get('columnDefs');
+        const colOrder = tableMap.get('columnOrder') ?? tableMap.get('colOrder');
+        if (colDefs && colOrder) {
+            return colOrder.toArray().map(id => colDefs.get?.(id)?.get?.('name') ?? id);
+        }
+        // Legacy: cols Y.Map or columns Y.Array
         const cols = tableMap.get('cols') ?? tableMap.get('columns');
-        if (colOrder && cols) {
-            return colOrder.toArray().map(id => cols.get?.(id)?.get?.('name') ?? id);
+        if (!cols) return [];
+        if (cols instanceof Y.Array) {
+            return cols.toArray().map(c => c.get?.('name') ?? c);
         }
-        if (cols) {
-            const names = [];
-            cols.forEach((c, id) => names.push(c.get?.('name') ?? id));
-            return names;
-        }
-        return [];
+        const names = [];
+        cols.forEach((c, id) => names.push(c.get?.('name') ?? id));
+        return names;
     } catch { return []; }
+}
+
+/**
+ * Diff two table row Y.Arrays.
+ * Rows are Y.Maps sorted by their `_pos` field (insertion-order float).
+ * Returns a table diff entry (type:'rows') or null if no row changes.
+ * The internal _rowAdded/_rowRemoved/_rowEdited fields let the caller
+ * fold row changes into the totals.cells counter so empty-snapshot guards fire.
+ * @param {Y.Array|null} pArr
+ * @param {Y.Array|null} nArr
+ * @param {string} tableName
+ * @returns {object|null}
+ */
+function _diffTableRows(pArr, nArr, tableName) {
+    try {
+        // Flatten rows to plain objects, sorting by _pos for stable ordering
+        const toSortedRows = (arr) => {
+            if (!arr || !(arr instanceof Y.Array)) return [];
+            return arr.toArray()
+                .map(r => (r && typeof r.toJSON === 'function') ? r.toJSON() : (r ?? {}))
+                .sort((a, b) => (a._pos ?? 0) - (b._pos ?? 0));
+        };
+
+        const pRows = toSortedRows(pArr);
+        const nRows = toSortedRows(nArr);
+        const pLen  = pRows.length;
+        const nLen  = nRows.length;
+
+        // Row fingerprint: JSON of all fields except _pos (which changes with sort arithmetic)
+        const fingerprint = (row) => {
+            const { _pos, ...rest } = row;
+            return JSON.stringify(rest);
+        };
+
+        // Build fingerprint sets for identity-free change detection
+        const pPrints = pRows.map(fingerprint);
+        const nPrints = nRows.map(fingerprint);
+
+        const pSet = new Map();
+        for (const fp of pPrints) pSet.set(fp, (pSet.get(fp) ?? 0) + 1);
+        const nSet = new Map();
+        for (const fp of nPrints) nSet.set(fp, (nSet.get(fp) ?? 0) + 1);
+
+        // Rows in prev but not new: removed or edited
+        let rowRemoved = 0;
+        for (const [fp, pCount] of pSet) {
+            const nCount = nSet.get(fp) ?? 0;
+            if (pCount > nCount) rowRemoved += pCount - nCount;
+        }
+        // Rows in new but not prev: added or result of edit
+        let rowAdded = 0;
+        for (const [fp, nCount] of nSet) {
+            const pCount = pSet.get(fp) ?? 0;
+            if (nCount > pCount) rowAdded += nCount - pCount;
+        }
+
+        // Edits = matched pairs of add+remove (minimum of both)
+        const rowEdited = Math.min(rowAdded, rowRemoved);
+        const actualAdded   = rowAdded   - rowEdited;
+        const actualRemoved = rowRemoved - rowEdited;
+
+        if (actualAdded === 0 && actualRemoved === 0 && rowEdited === 0) return null;
+
+        const parts = [];
+        if (actualAdded   > 0) parts.push(`+${actualAdded} row${actualAdded !== 1 ? 's' : ''}`);
+        if (actualRemoved > 0) parts.push(`−${actualRemoved} row${actualRemoved !== 1 ? 's' : ''}`);
+        if (rowEdited     > 0) parts.push(`${rowEdited} row${rowEdited !== 1 ? 's' : ''} edited`);
+
+        return {
+            id: tableName, type: 'rows', name: tableName, detail: parts.join(', '),
+            _rowAdded: actualAdded, _rowRemoved: actualRemoved, _rowEdited: rowEdited,
+        };
+    } catch { return null; }
 }
 
 function yArrayJson(yArr) {
@@ -372,18 +453,43 @@ export function computeSheetsDiff(prevDoc, newDoc) {
             }
 
             // ── 4. Tables ────────────────────────────────────────────────────
+            // Tables exist at two levels in v4:
+            //   root.get('tables')  → global source tables (id → Y.Map with rows/columnDefs/columnOrder)
+            //   sheet.get('tables') → view entries (id → Y.Map with sourceTableId, or legacy combined)
+            //
+            // We collect every distinct SOURCE table ID visible to this sheet in each doc,
+            // then compare the source Y.Maps directly (rows, columns, name).
             const tables = [];
-            const prevTables = prevSheet.get?.('tables');
-            const newTables  = newSheet.get?.('tables');
+            {
+                const prevGlobal = prevDoc.getMap('spreadsheet').get('tables');
+                const newGlobal  = newDoc.getMap('spreadsheet').get('tables');
+                const prevSheetTbl = prevSheet.get?.('tables');
+                const newSheetTbl  = newSheet.get?.('tables');
 
-            if (prevTables || newTables) {
-                const allTableIds = new Set([
-                    ...(prevTables ? [...prevTables.keys()] : []),
-                    ...(newTables  ? [...newTables.keys()]  : []),
-                ]);
-                for (const tid of allTableIds) {
-                    const pTable = prevTables?.get?.(tid);
-                    const nTable = newTables?.get?.(tid);
+                // Collect all source table IDs visible in this sheet
+                const allSourceIds = new Set();
+
+                // From sheet view entries
+                for (const [id, entry] of (prevSheetTbl ? [...prevSheetTbl.entries()] : [])) {
+                    const src = entry.get?.('sourceTableId') ?? id;
+                    allSourceIds.add(src);
+                }
+                for (const [id, entry] of (newSheetTbl ? [...newSheetTbl.entries()] : [])) {
+                    const src = entry.get?.('sourceTableId') ?? id;
+                    allSourceIds.add(src);
+                }
+
+                // Directly from global tables (catches tables not yet tied to a view)
+                if (prevGlobal) for (const id of prevGlobal.keys()) allSourceIds.add(id);
+                if (newGlobal)  for (const id of newGlobal.keys())  allSourceIds.add(id);
+
+                for (const tid of allSourceIds) {
+                    // Resolve to the actual source Y.Map in each doc
+                    const pTable = prevGlobal?.get(tid) ?? prevSheetTbl?.get(tid) ?? null;
+                    const nTable = newGlobal?.get(tid)  ?? newSheetTbl?.get(tid)  ?? null;
+
+                    // Skip view-only entries (isSourceOnly=true, legacy migration artefacts)
+                    if (pTable?.get?.('isSourceOnly') && nTable?.get?.('isSourceOnly')) continue;
 
                     if (!pTable && nTable) {
                         tables.push({ id: tid, type: 'added', name: nTable.get?.('name') ?? tid });
@@ -398,38 +504,30 @@ export function computeSheetsDiff(prevDoc, newDoc) {
                             tables.push({ id: tid, type: 'renamed', name: nName, from: pName, to: nName });
                             totals.tables++;
                         }
+                        // Column schema changes
                         const pCols = getTableColNames(pTable);
                         const nCols = getTableColNames(nTable);
                         if (JSON.stringify(pCols) !== JSON.stringify(nCols)) {
                             const delta = nCols.length - pCols.length;
-                            const detail = delta > 0 ? `+${delta} column${delta !== 1 ? 's' : ''}` : delta < 0 ? `${delta} column${Math.abs(delta) !== 1 ? 's' : ''}` : 'columns reordered/renamed';
+                            const detail = delta > 0
+                                ? `+${delta} column${delta !== 1 ? 's' : ''}`
+                                : delta < 0
+                                    ? `${delta} column${Math.abs(delta) !== 1 ? 's' : ''}`
+                                    : 'columns reordered/renamed';
                             tables.push({ id: tid, type: 'columns', name: nName, detail });
                             totals.tables++;
                         }
-                        // Row data
-                        const sArr = pTable.get('rows');
-                        const lArr = nTable.get('rows');
-                        if (sArr || lArr) {
-                            const sLen = sArr?.length ?? 0;
-                            const lLen = lArr?.length ?? 0;
-                            const added   = Math.max(0, lLen - sLen);
-                            const removed = Math.max(0, sLen - lLen);
-                            let mutated = 0;
-                            const minLen = Math.min(sLen, lLen);
-                            for (let i = 0; i < minLen; i++) {
-                                const sr = sArr?.get?.(i);
-                                const lr = lArr?.get?.(i);
-                                const sj = JSON.stringify(sr && typeof sr.toJSON === 'function' ? sr.toJSON() : sr);
-                                const lj = JSON.stringify(lr && typeof lr.toJSON === 'function' ? lr.toJSON() : lr);
-                                if (sj !== lj) mutated++;
-                            }
-                            if (added > 0 || removed > 0 || mutated > 0) {
-                                const parts = [];
-                                if (added   > 0) parts.push(`+${added} row${added !== 1 ? 's' : ''}`);
-                                if (removed > 0) parts.push(`−${removed} row${removed !== 1 ? 's' : ''}`);
-                                if (mutated > 0) parts.push(`${mutated} row${mutated !== 1 ? 's' : ''} edited`);
-                                tables.push({ id: tid, type: 'rows', name: nName, detail: parts.join(', ') });
+                        // Row data — compare the rows Y.Array
+                        const pArr = pTable.get('rows');
+                        const nArr = nTable.get('rows');
+                        if (pArr instanceof Y.Array || nArr instanceof Y.Array) {
+                            const rowDiff = _diffTableRows(pArr ?? null, nArr ?? null, nName);
+                            if (rowDiff) {
+                                tables.push(rowDiff);
                                 totals.tables++;
+                                // Also roll added/removed rows into the cells total
+                                // so the snapshot "has real changes" guard fires correctly.
+                                totals.cells += rowDiff._rowAdded + rowDiff._rowRemoved + rowDiff._rowEdited;
                             }
                         }
                     }

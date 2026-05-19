@@ -701,4 +701,10 @@
         /* Reserve space for MobileInputBar: faux bar (44px) + tools (44px) */
         padding-bottom: 88px;
     }
+
+    .workspace-container.mobile :global(.sheet-tabs) {
+        margin-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+        position: relative;
+        z-index: 210;
+    }
 </style>

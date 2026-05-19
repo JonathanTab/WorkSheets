@@ -27,17 +27,21 @@ export class NodeYjsRuntime {
      * Returns the same instance if already loaded.
      * @param {string} docId
      * @param {string} roomId
+     * @param {{ fileId?: string|null, appType?: string|null }} [opts]
      * @returns {Promise<Y.Doc>}
      */
-    async load(docId, roomId) {
+    async load(docId, roomId, { fileId = null, appType = null } = {}) {
         if (this._active.has(docId)) {
             return this._active.get(docId).ydoc;
         }
 
         const ydoc = new Y.Doc();
 
-        const wsOpts = this.apiKey ? { params: { auth: this.apiKey } } : {};
-        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, wsOpts);
+        const params = {};
+        if (this.apiKey) params.auth    = this.apiKey;
+        if (fileId)      params.fileId  = fileId;
+        if (appType)     params.appType = appType;
+        const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, { params });
 
         await new Promise((resolve, reject) => {
             if (provider.synced) { resolve(); return; }

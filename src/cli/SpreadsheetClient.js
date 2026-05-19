@@ -135,6 +135,10 @@ export class SpreadsheetClient {
 
     /**
      * Load and sync a Yjs document. Returns the same instance if already open.
+     * Passes fileId and appType to the WebSocket server so that:
+     *   - last-edit metadata is tracked correctly against the file UUID
+     *   - snapshots are keyed by fileId (not roomId) and app_type is set
+     *   - the last-edit sideband fires to other connected clients
      * @param {string} fileId
      * @returns {Promise<import('yjs').Doc>}
      */
@@ -145,7 +149,11 @@ export class SpreadsheetClient {
         if (!file) throw new Error(`File "${fileId}" not found — did you call init()?`);
         if (file.type !== 'yjs') throw new Error(`File "${fileId}" is not a Yjs document`);
 
-        const ydoc = await this._runtime.load(fileId, file.roomId);
+        // Infer appType from file.app — all scriptorium files are spreadsheets.
+        // The server uses this to store app_type on snapshots and for diff routing.
+        const appType = file.app === 'scriptorium' ? 'sheets' : null;
+
+        const ydoc = await this._runtime.load(fileId, file.roomId, { fileId, appType });
         this._docs.set(fileId, ydoc);
         return ydoc;
     }
