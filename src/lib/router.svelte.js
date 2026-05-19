@@ -60,9 +60,18 @@ export const router = {
         _route = parsePath(window.location.pathname);
     },
 
-    /** Navigate back to the drive browser root */
+    /** Go back to the browser, returning to the exact tab/folder the user came from */
+    goBack() {
+        if (history.length > 1) {
+            history.back();
+        } else {
+            this.navigate('/recent');
+        }
+    },
+
+    /** @deprecated Use goBack() instead */
     goHome() {
-        this.navigate('/');
+        this.goBack();
     },
 
     /** Open a spreadsheet document */

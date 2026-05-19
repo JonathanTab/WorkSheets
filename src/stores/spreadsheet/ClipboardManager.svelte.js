@@ -662,7 +662,21 @@ class ClipboardManager {
 
                 const cellBorders = this.parseCellBorderCSS(tdStyle);
                 for (const [edge, borderStyle] of Object.entries(cellBorders)) {
-                    collectedBorders.push({ relRow: ri, relCol: ci, edge, ...borderStyle });
+                    // Horizontal edges (top/bottom) must cover every column of the span so
+                    // merge secondaries share the same border as the primary.  Bottom also
+                    // moves to the last row of a rowspan.  Vertical edges (left/right) cover
+                    // every row of the span; right moves to the last column of a colspan.
+                    if (edge === 'top' || edge === 'bottom') {
+                        const bRow = edge === 'bottom' ? ri + rowspan - 1 : ri;
+                        for (let dc = 0; dc < colspan; dc++) {
+                            collectedBorders.push({ relRow: bRow, relCol: ci + dc, edge, ...borderStyle });
+                        }
+                    } else {
+                        const bCol = edge === 'right' ? ci + colspan - 1 : ci;
+                        for (let dr = 0; dr < rowspan; dr++) {
+                            collectedBorders.push({ relRow: ri + dr, relCol: bCol, edge, ...borderStyle });
+                        }
+                    }
                 }
 
                 grid[ri][ci] = cellData;
@@ -693,7 +707,7 @@ class ClipboardManager {
 
         // Try rich-text parse: multiple spans with varying styles → tfr
         const richResult = this._parseInnerSpansToTfr(td);
-        if (richResult) {
+        if (richResult?.tfr) {
             return {
                 v:            richResult.plainText,
                 displayValue: richResult.plainText || null,
@@ -703,11 +717,11 @@ class ClipboardManager {
             };
         }
 
-        // Plain cell: extract text + optional whole-cell anchor link
+        // Plain cell: use walk result for proper <br>→newline handling; fall back to textContent
         const anchor  = td.querySelector('a');
         let url       = null;
-        let rawText   = td.textContent?.trim() ?? '';
-        if (anchor) {
+        let rawText   = richResult ? richResult.plainText.trim() : (td.textContent?.trim() ?? '');
+        if (!richResult && anchor) {
             url     = anchor.getAttribute('href') || null;
             rawText = anchor.textContent?.trim() || rawText;
         }
@@ -720,7 +734,7 @@ class ClipboardManager {
             }
         }
 
-        const { v } = this.inferValueFromText(rawText, tdStyle);
+        const { v, numberFormat } = this.inferValueFromText(rawText, tdStyle);
         const cell  = {
             v,
             displayValue: rawText || null,
@@ -732,14 +746,18 @@ class ClipboardManager {
             strikethrough: false,
             ...styleProps,
         };
+        if (numberFormat && !cell.numberFormat) cell.numberFormat = numberFormat;
         if (url) cell.url = url;
         return cell;
     }
 
     /**
      * Walk the inner DOM of a <td> to collect text runs with accumulated inline styles.
-     * Returns { plainText, tfr } when multiple distinct run styles are found (rich text),
-     * or null when the cell is plain / uniformly styled (cell-level props suffice).
+     * Returns { plainText, tfr } always when content is found:
+     *   - tfr is non-null only when runs have varying styles (rich text)
+     *   - tfr is null for plain / uniformly-styled cells (cell-level props from
+     *     parseHTMLStyleProps handle styling; plainText is still useful for <br> newlines)
+     * Returns null only when the cell is empty.
      */
     _parseInnerSpansToTfr(td) {
         const flatRuns = [];
@@ -785,9 +803,10 @@ class ClipboardManager {
                     const m = cs.fontSize.match(/^(\d+(?:\.\d+)?)(pt|px|em|rem)$/);
                     if (m) {
                         const v = parseFloat(m[1]);
-                        s.fontSize = m[2] === 'pt' ? Math.round(v * 4 / 3)
-                                   : m[2] === 'px' ? Math.round(v)
-                                   : Math.round(v * 16);
+                        // Store fontSize in pt to match our internal convention.
+                        s.fontSize = m[2] === 'pt'       ? Math.round(v)
+                                   : m[2] === 'px'       ? Math.round(v * 3 / 4)
+                                   : /* em/rem */           Math.round(v * 12);
                     }
                 }
                 if (cs.fontFamily) s.fontFamily = cs.fontFamily.trim().replace(/^['"]|['"]$/g, '');
@@ -815,16 +834,17 @@ class ClipboardManager {
 
         if (flatRuns.length === 0) return null;
 
-        // No formatting at all → let cell-level props handle it
-        const hasFormatting = flatRuns.some(r => r._key !== '{}');
-        if (!hasFormatting) return null;
-
-        // All runs identical → uniform style, no run-level variation needed
-        const firstKey = flatRuns[0]._key;
-        if (flatRuns.every(r => r._key === firstKey)) return null;
-
         const plainText = flatRuns.map(r => r.text).join('');
         if (!plainText) return null;
+
+        // No formatting at all — return plainText so <br> newlines are preserved;
+        // cell-level props from parseHTMLStyleProps handle the styling.
+        const hasFormatting = flatRuns.some(r => r._key !== '{}');
+        if (!hasFormatting) return { plainText, tfr: null };
+
+        // All runs identical → uniform style, same reasoning — plainText only
+        const firstKey = flatRuns[0]._key;
+        if (flatRuns.every(r => r._key === firstKey)) return { plainText, tfr: null };
 
         // Build tfr from flat runs
         let offset  = 0;
@@ -956,6 +976,9 @@ class ClipboardManager {
         const width = unit === 'pt' ? Math.round(rawWidth * 4 / 3) : rawWidth;
         const color = colorMatch ? colorMatch[1] : '#000000';
 
+        // Google Sheets uses "1px solid transparent" for overflow-visible cells — treat as no border
+        if (color === 'transparent') return null;
+
         return { width, style: styleMatch[1], color };
     }
 
@@ -967,6 +990,13 @@ class ClipboardManager {
         if (numericPattern.test(text)) {
             const n = parseFloat(text.replace(/,/g, ''));
             if (!isNaN(n)) return { v: n };
+        }
+        // Currency values like $4,137.30 or -$1,234 — store as number with format hint
+        const currencyPattern = /^(-?)[$€£¥]([\d,]+(?:\.\d+)?)$/;
+        const cm = text.match(currencyPattern);
+        if (cm) {
+            const n = parseFloat((cm[1] + cm[2]).replace(/,/g, ''));
+            if (!isNaN(n)) return { v: n, numberFormat: '"$"#,##0.00' };
         }
         return { v: text };
     }
@@ -1112,7 +1142,8 @@ class ClipboardManager {
                 }
             }
 
-            if (code === 210 || code === 211) isFormula = true;
+            // 203 = formula cell with cached display value (like 211 but different code point)
+            if (code === 203 || code === 210 || code === 211) isFormula = true;
             if (code === 1219) mergePrimaries.push({ row, col });
 
             const cellData = {
@@ -1144,24 +1175,24 @@ class ClipboardManager {
             }
         }
 
-        // Assign formulas
-        const nonEmptyCells = [];
+        // Assign formulas: formula stream maps 1:1 to formula-code cells in order.
+        // Codes 203/210/211 all carry a formula; mapping against ALL non-empty cells
+        // causes formulas to land on the wrong cells when some are plain-value cells.
+        const formulaCells = [];
         for (let pos = 0; pos < cellStream.length && pos < numRows * numCols; pos++) {
             const code = cellStream[pos];
-            if (code !== 194 && code !== 0) {
-                nonEmptyCells.push({ row: Math.floor(pos / numCols), col: pos % numCols });
+            if (code === 203 || code === 210 || code === 211) {
+                formulaCells.push({ row: Math.floor(pos / numCols), col: pos % numCols });
             }
         }
 
         if (formulaStreamRaw.length > 0 && formulaPool.length > 0) {
-            // Formula stream uses the same compact RLE shape as other streams in this payload.
-            // Decode first, then map 1:1 over non-empty cells.
             const formulaStream = this.decodeRLE(formulaStreamRaw);
-            const limit = Math.min(formulaStream.length, nonEmptyCells.length);
+            const limit = Math.min(formulaStream.length, formulaCells.length);
             for (let i = 0; i < limit; i++) {
                 const poolIdx = formulaStream[i];
                 if (poolIdx == null || poolIdx < 0 || poolIdx >= formulaPool.length) continue;
-                const { row, col } = nonEmptyCells[i];
+                const { row, col } = formulaCells[i];
                 const cell = grid[row]?.[col];
                 if (!cell) continue;
                 cell.formula = this.r1c1ToA1(formulaPool[poolIdx], row, col);

@@ -262,7 +262,7 @@
 
     onDestroy(() => { destroyView(); docSession.unload(); });
 
-    function handleCloseDocument() { router.goHome(); }
+    function handleCloseDocument() { router.goBack(); }
 </script>
 
 <svelte:window onkeydown={handleGlobalKeydown} />

@@ -69,9 +69,9 @@
             snapDoc = newSnapDoc;
             prevDoc = newPrevDoc;
 
-            if (adapter?.diffFn) {
-                diffResult = adapter.diffFn(newPrevDoc, newSnapDoc);
-            }
+            // Use server-computed diff JSON (primary path).
+            // Falls back to null if not available (viewer renders its own fallback).
+            diffResult = historyManager.parseDiff(snap);
         } catch (err) {
             diffError = err.message ?? 'Failed to load snapshot';
         } finally {
@@ -98,11 +98,6 @@
     }
 
     let snapInfo = $derived(formatSnapInfo(historyManager.selectedSnap));
-    let snapSummary = $derived(
-        historyManager.selectedSnap
-            ? historyManager.interpretSnapshotDiff(historyManager.selectedSnap)
-            : null
-    );
 
     function formatDateGroup(tsMs) {
         const d = new Date(tsMs);
@@ -158,9 +153,6 @@
         <div class="topbar-info">
             {#if historyManager.selectedSnap}
                 <span class="topbar-snapinfo">{snapInfo}</span>
-                {#if snapSummary?.summary && snapSummary.summary !== '—'}
-                    <span class="topbar-summary">· {snapSummary.summary}</span>
-                {/if}
             {:else}
                 <span class="topbar-snapinfo">Select a version from the list</span>
             {/if}
@@ -188,10 +180,8 @@
             {#each groupedSnapshots as group}
                 <div class="date-group-label">{group.label}</div>
                 {#each group.snaps as snap (snap.id)}
-                    {@const summary = historyManager.interpretSnapshotDiff(snap)}
                     <SnapshotListItem
                         {snap}
-                        {summary}
                         isSelected={historyManager.selectedSnap?.id === snap.id}
                         onSelect={() => historyManager.selectSnapshot(snap)}
                     />
@@ -227,9 +217,6 @@
                 <!-- No app-specific viewer: show generic text fallback -->
                 <div class="viewer-placeholder">
                     <div>Visual diff not available for this document type.</div>
-                    <div class="placeholder-sub">
-                        {snapSummary?.summary ?? ''}
-                    </div>
                 </div>
             {/if}
         </div>
@@ -286,14 +273,6 @@
         font-weight: 500;
         color: #333;
         white-space: nowrap;
-    }
-
-    .topbar-summary {
-        font-size: 12px;
-        color: #777;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
     }
 
     .topbar-actions {

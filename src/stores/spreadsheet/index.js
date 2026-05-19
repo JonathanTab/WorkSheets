@@ -14,7 +14,6 @@
 export { SpreadsheetSession, spreadsheetSession } from './SpreadsheetSession.svelte.js';
 export { SheetStore } from './SheetStore.svelte.js';
 export { SelectionState } from './SelectionState.svelte.js';
-export { FormulaEditState, formulaEditState } from './FormulaEditState.svelte.js';
 export { EditSessionState, editSessionState } from './EditSessionState.svelte.js';
 export { clipboardManager } from './ClipboardManager.svelte.js';
 export { CellTypeRegistry } from './cellTypes/index.js';

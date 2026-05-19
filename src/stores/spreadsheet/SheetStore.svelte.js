@@ -761,6 +761,60 @@ export class SheetStore {
     }
 
     /**
+     * Remove one formatting property from every cell style in the sheet.
+     * Call inside a Yjs transaction. Only touches cells that actually store that property.
+     * @param {string} property
+     */
+    clearCellStylePropertyAll(property) {
+        if (!this.#cellStylesKV) return;
+        for (const [key, { val: style }] of this.#cellStylesKV.map) {
+            if (!(property in style)) continue;
+            const updated = { ...style };
+            delete updated[property];
+            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
+            else this.#cellStylesKV.delete(key);
+        }
+    }
+
+    /**
+     * Remove one formatting property from cell styles in the given rows.
+     * Call inside a Yjs transaction.
+     * @param {Set<number>} rowSet
+     * @param {string} property
+     */
+    clearCellStylePropertyInRows(rowSet, property) {
+        if (!this.#cellStylesKV) return;
+        for (const [key, { val: style }] of this.#cellStylesKV.map) {
+            if (!(property in style)) continue;
+            const row = parseInt(key.split(',')[0], 10);
+            if (!rowSet.has(row)) continue;
+            const updated = { ...style };
+            delete updated[property];
+            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
+            else this.#cellStylesKV.delete(key);
+        }
+    }
+
+    /**
+     * Remove one formatting property from cell styles in the given columns.
+     * Call inside a Yjs transaction.
+     * @param {Set<number>} colSet
+     * @param {string} property
+     */
+    clearCellStylePropertyInCols(colSet, property) {
+        if (!this.#cellStylesKV) return;
+        for (const [key, { val: style }] of this.#cellStylesKV.map) {
+            if (!(property in style)) continue;
+            const col = parseInt(key.split(',')[1], 10);
+            if (!colSet.has(col)) continue;
+            const updated = { ...style };
+            delete updated[property];
+            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
+            else this.#cellStylesKV.delete(key);
+        }
+    }
+
+    /**
      * Resolve the effective visual style for a cell by applying the same
      * col→row→cell cascade that CellPaintData uses, so the inline editor
      * can match the canvas exactly.
@@ -1068,8 +1122,14 @@ export class SheetStore {
                     const row = Number(rowStr);
                     const col = Number(colStr);
                     if (type === 'h') {
-                        if (deletedSet.has(row) || deletedSet.has(row + 1)) { bToDelete.push(key); }
-                        else {
+                        if (deletedSet.has(row + 1)) {
+                            // Top boundary of deleted block (or interior): delete
+                            bToDelete.push(key);
+                        } else if (deletedSet.has(row)) {
+                            // Bottom boundary of deleted block: shift to sit between the two surviving rows
+                            const newRow = row - shiftFor(row + 1);
+                            bToMove.push({ key, newKey: `h,${newRow},${col}`, value });
+                        } else {
                             const shift = shiftFor(row);
                             if (shift > 0) bToMove.push({ key, newKey: `h,${row - shift},${col}`, value });
                         }

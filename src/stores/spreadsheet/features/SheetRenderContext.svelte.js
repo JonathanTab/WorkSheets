@@ -40,11 +40,11 @@ const textMeasurementCache = new Map();
 function measureTextWidth(text, cell = {}) {
     if (!text) return 0;
 
-    // Build font string
-    const fontSize = cell.fontSize || 12;
+    // Build font string. fontSize is stored in pt; convert to CSS px (× 4/3).
+    const fontSizePt = cell.fontSize || 12;
     const fontFamily = cell.fontFamily || 'system-ui, -apple-system, sans-serif';
     const fontWeight = cell.bold ? 'bold' : 'normal';
-    const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    const font = `${fontWeight} ${fontSizePt * 4 / 3}px ${fontFamily}`;
 
     const cacheKey = `${text}|${font}`;
     if (textMeasurementCache.has(cacheKey)) {

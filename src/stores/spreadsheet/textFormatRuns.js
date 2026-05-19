@@ -12,7 +12,7 @@
  *   underline?:       boolean
  *   strikethrough?:   boolean
  *   foregroundColor?: string   (CSS color)
- *   fontSize?:        number   (px)
+ *   fontSize?:        number   (pt — matches UI picker and Google Sheets convention)
  *   fontFamily?:      string
  *   link?:            { uri: string }
  * }
@@ -406,31 +406,6 @@ export function queryFormatInRange(tfr, start, end, textLen, property) {
 }
 
 /**
- * Adjust tfr indices after a text insertion or deletion.
- *
- * @param {Array|null} tfr
- * @param {number} offset   position where the edit happened
- * @param {number} inserted characters added (0 if none)
- * @param {number} deleted  characters removed (0 if none)
- * @returns {Array|null}
- */
-export function adjustTfrForEdit(tfr, offset, inserted, deleted) {
-    if (!tfr || tfr.length === 0) return tfr;
-    if (inserted === 0 && deleted === 0) return tfr;
-
-    const deleteEnd = offset + deleted;
-    return tfr.map(run => {
-        let idx = run.startIndex;
-        if (inserted > 0 && idx >= offset)  idx += inserted;
-        if (deleted  > 0) {
-            if (idx >= deleteEnd)            idx -= deleted;
-            else if (idx > offset)           idx  = offset;
-        }
-        return { startIndex: idx, format: run.format };
-    });
-}
-
-/**
  * Normalize tfr: sort, merge adjacent identical formats, strip out-of-range runs.
  * Returns null when there are no meaningful runs (no inline formatting).
  *
@@ -498,7 +473,7 @@ export function hitTestLink(mouseXInCell, mouseYInCell, renderRuns, cellWidth, c
     const ctx            = _measureCtx();
     const pad            = 4;
     const hAlign         = cellStyle?.hAlign    || 'left';
-    const defaultSize    = cellStyle?.fontSize  || theme?.defaultFontSize  || 12;
+    const defaultSize    = cellStyle?.fontSize  || theme?.defaultFontSize  || 10;
     const defaultFamily  = cellStyle?.fontFamily|| theme?.defaultFontFamily|| 'system-ui';
     const defaultBold    = cellStyle?.bold   || false;
     const defaultItalic  = cellStyle?.italic || false;

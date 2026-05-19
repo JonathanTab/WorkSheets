@@ -32,7 +32,8 @@ const PAPER_SIZES = {
 const CSS_PX_PER_INCH   = 96;
 const MM_PER_INCH       = 25.4;
 const PT_PER_INCH       = 72;
-const DEFAULT_FONT_PX   = 12;
+// fontSize values are stored in points (matching the UI picker and Google Sheets convention).
+const DEFAULT_FONT_PT   = 10;
 const DEFAULT_TEXT_COLOR = '#1e293b';
 const DEFAULT_GRID_COLOR = '#e2e8f0';
 
@@ -40,6 +41,8 @@ const DEFAULT_GRID_COLOR = '#e2e8f0';
 
 function px2mm(px, s) { return px * s * MM_PER_INCH / CSS_PX_PER_INCH; }
 function px2pt(px, s) { return px * s * PT_PER_INCH / CSS_PX_PER_INCH; }
+// pt2mm: convert a font-size (or other pt value) to mm at the given user scale.
+function pt2mm(pt, s) { return pt * s * MM_PER_INCH / PT_PER_INCH; }
 
 // ── Color helpers ──────────────────────────────────────────────────────────────
 
@@ -135,17 +138,19 @@ function applyFont(pdf, cell, s, run) {
                  : 'normal';
     const family = mapFontFamily(cell.fontFamily);
     pdf.setFont(family, style);
-    const sizePx = run?.f || cell.fontSize || DEFAULT_FONT_PX;
-    pdf.setFontSize(px2pt(sizePx, s));
-    return sizePx;
+    // fontSize is stored in pt (matches UI picker / Google Sheets convention).
+    // Apply user scale only — no px→pt conversion needed.
+    const sizePt = run?.f || cell.fontSize || DEFAULT_FONT_PT;
+    pdf.setFontSize(sizePt * s);
+    return sizePt;
 }
 
 /**
  * Measure a string's rendered width in mm at the current jsPDF font.
  */
-function textWidthMm(pdf, text, sizePx, s) {
+function textWidthMm(pdf, text, sizePt, s) {
     if (!text) return 0;
-    const pt = px2pt(sizePx, s);
+    const pt = sizePt * s;
     return pdf.getStringUnitWidth(text) * pt / pdf.internal.scaleFactor;
 }
 
@@ -302,14 +307,14 @@ function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
  * Splits at whitespace boundaries; a single word wider than maxW is kept whole.
  * Returns an array of wrapped sub-lines, each being an array of run segments.
  */
-function wrapRichLine(pdf, runs, maxW, cell, s, defaultSizePx) {
+function wrapRichLine(pdf, runs, maxW, cell, s, defaultSizePt) {
     const outLines = [[]];
     let curW = 0;   // mm used by committed segments in the current output line
 
     for (const run of runs) {
         if (!run.t) continue;
         applyFont(pdf, cell, s, run);
-        const sizePx = run.f || defaultSizePx;
+        const sizePt = run.f || defaultSizePt;
 
         // Tokenize: alternating word / whitespace chunks
         const chunks = run.t.split(/(\s+)/);
@@ -318,7 +323,7 @@ function wrapRichLine(pdf, runs, maxW, cell, s, defaultSizePx) {
 
         for (const chunk of chunks) {
             if (!chunk) continue;
-            const chunkW   = textWidthMm(pdf, chunk, sizePx, s);
+            const chunkW   = textWidthMm(pdf, chunk, sizePt, s);
             const isSpace  = /^\s+$/.test(chunk);
 
             if (!isSpace && curW + segW + chunkW > maxW && curW + segW > 0) {
@@ -360,9 +365,10 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 
     const hAlign        = cell.hAlign || 'left';
     const vAlign        = cell.vAlign || 'middle';
-    const padMm         = px2mm(4, s);
+    const padMm         = pt2mm(4, s);
     const maxW          = Math.max(1, cw - 2 * padMm);
-    const defaultSizePx = cell.fontSize || DEFAULT_FONT_PX;
+    // fontSize is stored in pt (matches UI/Google Sheets convention).
+    const defaultSizePt = cell.fontSize || DEFAULT_FONT_PT;
 
     // Step 1: split runs into raw lines on explicit '\n'
     const rawLines = [[]];
@@ -379,30 +385,30 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     const lines = [];
     for (const rawLine of rawLines) {
         if (rawLine.length === 0) { lines.push([]); continue; }
-        const wrapped = wrapRichLine(pdf, rawLine, maxW, cell, s, defaultSizePx);
+        const wrapped = wrapRichLine(pdf, rawLine, maxW, cell, s, defaultSizePt);
         if (wrapped.length === 0) lines.push([]);
         else for (const wl of wrapped) lines.push(wl);
     }
 
-    // Use the same line-height multiplier as CanvasRenderer (1.5) for visual parity.
-    const lineH  = px2mm(defaultSizePx * 1.5, s);
-    const totalH = lines.length * lineH;
+    // Line height = 1.5× font size, computed in mm from pt.
+    const lineH      = pt2mm(defaultSizePt * 1.5, s);
+    const halfFontMm = pt2mm(defaultSizePt / 2, s);
+    const totalH     = lines.length * lineH;
 
-    // lineY = startY + li * lineH + halfFontMm  (baseline:'middle' offset)
-    // mirrors canvas: lineY = startY + li * lineH  where startY already includes fontSize/2.
-    const halfFontMm = px2mm(defaultSizePx / 2, s);
-
-    // Minimum startY so first line doesn't appear above the top padding
-    const minStartY = cy + padMm - halfFontMm;
+    // startY = center of the first line (matches canvas convention).
+    // top/bottom: offset by halfFontMm so the em-square touches the padding edge.
+    // middle: block centered; lineH/2 places first line center at mid-slot.
+    const minStartY = cy + padMm + halfFontMm;
 
     let startY;
     if (vAlign === 'top') {
-        startY = cy + padMm - halfFontMm;  // first lineY = cy + padMm + halfFontMm ≈ canvas top
+        startY = minStartY;
     } else if (vAlign === 'bottom') {
-        startY = cy + ch - totalH;
+        // Last line center at cy + ch - padMm - halfFontMm; solve for first line.
+        startY = cy + ch - padMm - halfFontMm - (totalH - lineH);
     } else {
         // Center — clamp so first line doesn't bleed above top padding when overflowing
-        startY = Math.max(cy + (ch - totalH) / 2, minStartY);
+        startY = Math.max(cy + (ch - totalH) / 2 + lineH / 2, minStartY);
     }
 
     // Rich text always clips to cell bounds to prevent bleed
@@ -412,15 +418,15 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         const lineRuns = lines[li];
         if (!lineRuns.length) continue;
 
-        // Vertical midpoint of this line (for baseline:'middle')
-        const lineY = startY + li * lineH + halfFontMm;
+        // startY is the center of line 0; subsequent lines step by lineH.
+        const lineY = startY + li * lineH;
 
         // Measure total line width for horizontal alignment
         let lineW = 0;
         for (const run of lineRuns) {
-            const sizePx = run.f || defaultSizePx;
+            const sizePt = run.f || defaultSizePt;
             applyFont(pdf, cell, s, run);
-            lineW += textWidthMm(pdf, run.t, sizePx, s);
+            lineW += textWidthMm(pdf, run.t, sizePt, s);
         }
 
         let runX;
@@ -429,13 +435,13 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         else                          runX = cx + padMm;
 
         for (const run of lineRuns) {
-            const sizePx = applyFont(pdf, cell, s, run);
+            const sizePt = applyFont(pdf, cell, s, run);
             const color  = overrideColor || run.c || cell.textColor || DEFAULT_TEXT_COLOR;
             setTextCol(pdf, color);
 
             pdf.text(run.t, runX, lineY, { align: 'left', baseline: 'middle' });
 
-            const runW = textWidthMm(pdf, run.t, sizePx, s);
+            const runW = textWidthMm(pdf, run.t, sizePt, s);
 
             const doUnderline = run.u !== undefined ? !!run.u : (cell.underline || false);
             const doStrike    = run.s !== undefined ? !!run.s : (cell.strikethrough || false);
@@ -443,7 +449,7 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
             if (doUnderline || doStrike) {
                 setDraw(pdf, color);
                 pdf.setLineWidth(0.2);
-                if (doUnderline) pdf.line(runX, lineY + px2mm(sizePx * 0.6, s),  runX + runW, lineY + px2mm(sizePx * 0.6, s));
+                if (doUnderline) pdf.line(runX, lineY + pt2mm(sizePt * 0.6, s),  runX + runW, lineY + pt2mm(sizePt * 0.6, s));
                 if (doStrike)    pdf.line(runX, lineY,                             runX + runW, lineY);
             }
 
@@ -454,15 +460,14 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
     endClip(pdf);
 }
 
-// ── Plain-text content painter ─────────────────────────────────────────────────
+// ── Cell text painter ──────────────────────────────────────────────────────────
 
 /**
  * Draw text for a cell. Coordinates in mm.
- * - If cell.richTextRuns is set, delegates to drawRichTextContent.
- * - Wrapped text is clipped to cell bounds.
- * - Single-line text uses splitTextToSize for soft truncation (no per-cell clip),
- *   preserving text-overspill into adjacent empty cells (handled by buildPaneData
- *   extending cell.width for overflow cells).
+ * - Rich text (richTextRuns) and any wrapped/multi-line plain text delegate to
+ *   drawRichTextContent for unified layout.
+ * - True single-line text is drawn directly without a clip, preserving overspill
+ *   into adjacent empty cells (buildPaneData extends cell.width for those).
  *
  * @param {jsPDF}  pdf
  * @param {Object} cell         CellPaintItem
@@ -471,7 +476,6 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
  * @param {string} [overrideColor]
  */
 function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
-    // Delegate rich text
     if (cell.richTextRuns?.length) {
         drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor);
         return;
@@ -479,24 +483,32 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 
     const text = cell.displayValue;
 
-    // Placeholder text for empty cells — italic, muted (matches CanvasRenderer placeholderText path)
     if ((!text || text === '') && cell.placeholderText) {
         pdf.setFont('helvetica', 'italic');
-        pdf.setFontSize(px2pt((cell.fontSize || DEFAULT_FONT_PX) * 0.9, s));
+        pdf.setFontSize((cell.fontSize || DEFAULT_FONT_PT) * 0.9 * s);
         setTextCol(pdf, '#94a3b8');
-        pdf.text(cell.placeholderText, cx + px2mm(4, s), cy + ch / 2, { align: 'left', baseline: 'middle' });
+        pdf.text(cell.placeholderText, cx + pt2mm(4, s), cy + ch / 2, { align: 'left', baseline: 'middle' });
         return;
     }
 
     if (!text) return;
 
-    const sizePx = applyFont(pdf, cell, s);
+    // Wrapped and multi-line text: delegate to rich-text path with a synthetic
+    // single-run array. Matches CanvasRenderer's approach — no duplicate wrap logic.
+    if (cell.wrapText || text.includes('\n')) {
+        drawRichTextContent(pdf, { ...cell, richTextRuns: [{ t: text }] }, cx, cy, cw, ch, s, overrideColor);
+        return;
+    }
+
+    // Single-line, no-wrap: draw without clip so text can overspill into adjacent empty cells.
+    const sizePt     = applyFont(pdf, cell, s);
     setTextCol(pdf, overrideColor || cell.textColor || DEFAULT_TEXT_COLOR);
 
-    const padMm    = px2mm(4, s);
-    const hAlign   = cell.hAlign || 'left';
-    const vAlign   = cell.vAlign || 'middle';
-    const maxW     = cw - 2 * padMm;
+    const padMm      = pt2mm(4, s);
+    const hAlign     = cell.hAlign || 'left';
+    const vAlign     = cell.vAlign || 'middle';
+    const halfFontMm = pt2mm(sizePt / 2, s);
+    const maxW       = cw - 2 * padMm;
 
     let textX;
     /** @type {'left'|'center'|'right'} */
@@ -509,50 +521,26 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         textX = cx + padMm; jsPDFAlign = 'left';
     }
 
-    if (cell.wrapText) {
-        // Wrap lines and clip to cell so they can't bleed below/outside.
-        // Use baseline:'middle' throughout for consistent jsPDF rendering —
-        // baseline:'top' support is unreliable across jsPDF versions.
-        const lines  = pdf.splitTextToSize(text, maxW);
-        const lineH  = px2mm(sizePx * 1.5, s);
-        const totalH = lines.length * lineH;
-        // lineY is the vertical center of the first line
-        let lineY    = vAlign === 'top'    ? cy + padMm + lineH / 2
-                     : vAlign === 'bottom' ? cy + ch - totalH + lineH / 2
-                     : cy + (ch - totalH) / 2 + lineH / 2;
+    let textY;
+    if (vAlign === 'top')         textY = cy + padMm + halfFontMm;
+    else if (vAlign === 'bottom') textY = cy + ch - padMm - halfFontMm;
+    else                          textY = cy + ch / 2;
 
-        beginClip(pdf, cx, cy, cw, ch);
-        for (const line of lines) {
-            pdf.text(line, textX, lineY, { align: jsPDFAlign, baseline: 'middle' });
-            lineY += lineH;
-        }
-        endClip(pdf);
-    } else {
-        // Single line: no per-cell clip so that text can overspill into adjacent
-        // empty cells (buildPaneData already extends cell.width for those cases).
-        const lines = pdf.splitTextToSize(text, maxW);
-        const line  = lines[0] ?? text;
-        const lineH = px2mm(sizePx * 1.5, s);
-        let textY;
-        if (vAlign === 'top')         textY = cy + padMm + lineH / 2;
-        else if (vAlign === 'bottom') textY = cy + ch - padMm - lineH / 2;
-        else                          textY = cy + ch / 2;
-        pdf.text(line, textX, textY, { align: jsPDFAlign, baseline: 'middle' });
-    }
+    // Draw the full text — no splitting. The page-level clip handles overflow,
+    // matching canvas behaviour where single-line text overspills adjacent cells.
+    pdf.text(text, textX, textY, { align: jsPDFAlign, baseline: 'middle' });
 
-    // Underline / strikethrough decorations (plain text only; rich text handles per-run)
     if (cell.underline || cell.strikethrough) {
-        const fontSizePt = px2pt(sizePx, s);
-        const wMm = pdf.getStringUnitWidth(text) * fontSizePt / pdf.internal.scaleFactor;
+        const wMm      = textWidthMm(pdf, text, sizePt, s);
         const clampedW = Math.min(wMm, maxW);
         let decorX;
-        if (hAlign === 'center')      decorX = cx + cw / 2 - clampedW / 2;
-        else if (hAlign === 'right')  decorX = cx + cw - padMm - clampedW;
-        else                          decorX = cx + padMm;
+        if (hAlign === 'center')     decorX = cx + cw / 2 - clampedW / 2;
+        else if (hAlign === 'right') decorX = cx + cw - padMm - clampedW;
+        else                         decorX = cx + padMm;
         const midY = cy + ch / 2;
         setDraw(pdf, overrideColor || cell.textColor || DEFAULT_TEXT_COLOR);
         pdf.setLineWidth(0.2);
-        if (cell.underline)     pdf.line(decorX, midY + px2mm(sizePx * 0.55, s), decorX + clampedW, midY + px2mm(sizePx * 0.55, s));
+        if (cell.underline)     pdf.line(decorX, midY + pt2mm(sizePt * 0.55, s), decorX + clampedW, midY + pt2mm(sizePt * 0.55, s));
         if (cell.strikethrough) pdf.line(decorX, midY,                            decorX + clampedW, midY);
     }
 }
@@ -560,6 +548,9 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 // ── Border painter ─────────────────────────────────────────────────────────────
 
 function drawBordersVec(pdf, borders, x, y, w, h) {
+    // Square linecap extends stroke past endpoints, filling corner gaps when
+    // adjacent edges meet at the same point.
+    pdf.setLineCap(2); // 2 = square
     const edge = (b, x1, y1, x2, y2) => {
         if (!b) return;
         setDraw(pdf, b.color || '#000000', [0, 0, 0]);
@@ -590,6 +581,7 @@ function drawBordersVec(pdf, borders, x, y, w, h) {
     edge(borders.right,  x + w, y,     x + w, y + h);
     edge(borders.bottom, x,     y + h, x + w, y + h);
     edge(borders.left,   x,     y,     x,     y + h);
+    pdf.setLineCap(0); // restore butt
 }
 
 // ── Main cell painter ──────────────────────────────────────────────────────────
@@ -688,14 +680,16 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
 
     // ── 4. Grid lines ─────────────────────────────────────────────────────────
     // Drawn before custom borders so borders render on top, matching CanvasRenderer.
+    // Suppress each edge where a custom border exists so the gridline can't bleed
+    // through thin or dashed borders.
     if (showGridLines) {
         const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
         pdf.setDrawColor(r, g, b);
         pdf.setLineWidth(0.13);
         // naturalWidth: for overflow cells right/bottom lines stay at original boundary
         const gridCw = cell.naturalWidth ? px2mm(cell.naturalWidth, s) : cw;
-        pdf.line(cx + gridCw, cy,      cx + gridCw, cy + ch); // right
-        pdf.line(cx,          cy + ch, cx + gridCw, cy + ch); // bottom
+        if (!cell.borders?.right)  pdf.line(cx + gridCw, cy,      cx + gridCw, cy + ch);
+        if (!cell.borders?.bottom) pdf.line(cx,          cy + ch, cx + gridCw, cy + ch);
     }
 
     // ── 5. Custom borders (after gridlines so they render on top) ─────────────

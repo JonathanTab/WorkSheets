@@ -271,11 +271,13 @@
                         class:disabled={item.disabled}
                         class:has-submenu={item.submenu}
                         class:submenu-open={activeSubmenu === item.label}
+                        class:has-check={item.checked !== undefined}
                         onclick={(e) => handleItemClick(item, e)}
                         onmouseenter={(e) => handleItemMouseEnter(item, e)}
                         onmouseleave={handleItemMouseLeave}
                         disabled={item.disabled}
                     >
+                        <span class="check-col">{item.checked ? "✓" : ""}</span>
                         {#if item.icon}
                             <span class="item-icon"
                                 >{#if item.isSvgIcon}{@html item.icon}{:else}{item.icon}{/if}</span
@@ -298,10 +300,12 @@
                                     <button
                                         class="menu-item"
                                         class:disabled={subItem.disabled}
+                                        class:has-check={subItem.checked !== undefined}
                                         onclick={() =>
                                             handleSubmenuClick(subItem)}
                                         disabled={subItem.disabled}
                                     >
+                                        <span class="check-col">{subItem.checked ? "✓" : ""}</span>
                                         {#if subItem.icon}
                                             <span class="item-icon"
                                                 >{#if subItem.isSvgIcon}{@html subItem.icon}{:else}{subItem.icon}{/if}</span
@@ -426,6 +430,20 @@
     .menu-item:focus-visible {
         outline: none;
         background: var(--color-primary-soft);
+    }
+
+    .check-col {
+        width: 16px;
+        font-size: 0.75rem;
+        flex-shrink: 0;
+        color: var(--color-primary, #3b82f6);
+        text-align: center;
+        line-height: 1;
+    }
+
+    /* When an item has no check property, hide the check column to save space */
+    .menu-item:not(.has-check) .check-col {
+        display: none;
     }
 
     .item-icon {

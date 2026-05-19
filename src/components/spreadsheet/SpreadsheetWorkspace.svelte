@@ -12,9 +12,7 @@
     import DocumentTablesPanel from "./features/DocumentTablesPanel.svelte";
     import PdfExportView from "./PdfExportView.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
-    import { computeSpreadsheetDiff } from "../../lib/spreadsheetDiff.js";
     import { HistoryManager } from "../../lib/history/HistoryManager.svelte.js";
-    import "../../lib/history/apps/sheetsInterpreter.js";
     import {
         spreadsheetSession,
         selectionState,
@@ -22,7 +20,7 @@
         unloadDocument,
     } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
-    import { toCellRef } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+    import { toCellRef } from "../../formulas/refCoords.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { CellTypeRegistry } from "../../stores/spreadsheet/index.js";
     import { authStore } from "../../stores/authStore.js";
@@ -37,9 +35,7 @@
     let historyManager = $state(/** @type {HistoryManager|null} */ (null));
 
     const sheetsAdapter = {
-        diffFn: computeSpreadsheetDiff,
         ViewerComponent: SpreadsheetHistoryViewer,
-        isContentChange: (_update, origin) => origin === null,
     };
 
     // Show history panel (sidebar), viewer is managed by historyManager.viewerOpen
@@ -55,21 +51,24 @@
     let currentUser = $derived($authStore.user?.username ?? "");
 
     // ── Page break overlay state ───────────────────────────────────────────────
-    let showPageBreaks = $state(false);
-    let pageBreakPrintSettings = $state(null);
+    // showPageBreaksUser: toggled by the View menu (persists independently of PDF export)
+    let showPageBreaksUser = $state(false);
 
     // ── PDF export view ────────────────────────────────────────────────────────
     let showPdfExport = $state(false);
 
-    // Show page breaks in the grid while the export view is open
-    $effect(() => {
-        if (showPdfExport) {
-            const settings = spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {};
-            document.dispatchEvent(new CustomEvent('togglePageBreaks', { detail: { show: true, settings } }));
-        } else {
-            document.dispatchEvent(new CustomEvent('togglePageBreaks', { detail: { show: false, settings: null } }));
-        }
-    });
+    // Page breaks are visible when either the menu toggle is on or PDF export is open.
+    let showPageBreaks = $derived(showPageBreaksUser || showPdfExport);
+    let pageBreakPrintSettings = $derived(
+        showPageBreaks
+            ? (spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {})
+            : null
+    );
+
+    // ── View state (formula bar, gridlines, formula text mode) ─────────────────
+    let viewFormulaBar = $state(true);
+    let viewGridlines = $state(true);
+    let viewFormulas = $state(false);
 
     let currentLoadedDocId = $state.raw(null); // Track what we've actually loaded (raw to avoid reactivity)
     let isLoadInProgress = false; // Guard against concurrent loads
@@ -143,12 +142,18 @@
 
     // ── Page break overlay event listener ─────────────────────────────────────
     function handleTogglePageBreaks(e) {
-        showPageBreaks = e.detail.show;
-        pageBreakPrintSettings = e.detail.settings ?? null;
+        showPageBreaksUser = e.detail.show;
     }
 
     function handleOpenPdfExport() {
         showPdfExport = true;
+    }
+
+    function handleViewChange(e) {
+        const { key, value } = e.detail ?? {};
+        if (key === 'formulaBar') viewFormulaBar = value;
+        else if (key === 'gridlines') viewGridlines = value;
+        else if (key === 'formulas') viewFormulas = value;
     }
 
     const APP_NAME = "Scriptorium";
@@ -166,6 +171,7 @@
         }
         document.addEventListener("togglePageBreaks", handleTogglePageBreaks);
         document.addEventListener("openPdfExport", handleOpenPdfExport);
+        document.addEventListener("spreadsheetViewChange", handleViewChange);
     });
 
     // Use $effect only for docId changes after mount
@@ -180,7 +186,7 @@
     onDestroy(() => {
         document.removeEventListener("togglePageBreaks", handleTogglePageBreaks);
         document.removeEventListener("openPdfExport", handleOpenPdfExport);
-        lastEditTracker?.destroy();
+        document.removeEventListener("spreadsheetViewChange", handleViewChange);
         unloadDocument();
     });
 
@@ -272,7 +278,7 @@
     }
 
     function handleCloseDocument() {
-        router.goHome();
+        router.goBack();
     }
 
     // Capture the hash present in the URL at the moment this component mounts
@@ -360,8 +366,8 @@
                     />
                 {/if}
 
-                <!-- Formula Bar: static on desktop only -->
-                {#if !mobileState.isMobile}
+                <!-- Formula Bar: static on desktop only, hideable via View menu -->
+                {#if !mobileState.isMobile && viewFormulaBar}
                 <FormulaBar
                     bind:this={formulaBarRef}
                     {selectedCell}
@@ -520,13 +526,13 @@
                 <div class="grid-container">
                     <Grid
                         {showPageBreaks}
+                        showGridlines={viewGridlines}
+                        showFormulas={viewFormulas}
                         requestMobileKeyboardFocus={() =>
                             mobileState.isMobile
                                 ? mobileInputBarRef?.captureKeyboardFocus?.()
                                 : formulaBarRef?.captureKeyboardFocus?.()}
-                        printSettings={pageBreakPrintSettings ??
-                            spreadsheetSession.activeSheetStore?.getPrintSettings() ??
-                            null}
+                        printSettings={pageBreakPrintSettings}
                         onShowTablesPanel={(tableId, colId) => { tablesPanelTableId = tableId ?? null; tablesPanelColId = colId ?? null; showTablesPanel = true; }}
                     />
                     {#if isCrossSheetFormulaEdit}

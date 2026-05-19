@@ -135,6 +135,32 @@ export class MergeEngine {
         };
     }
 
+    /**
+     * Expand a range rect to fully encompass every merge it overlaps.
+     * Iterates until stable (handles chains of adjacent merges).
+     * Returns the input range unchanged if there are no merges or no overlap.
+     *
+     * @param {{ startRow:number, endRow:number, startCol:number, endCol:number }} range
+     * @returns {{ startRow:number, endRow:number, startCol:number, endCol:number }}
+     */
+    expandRange(range) {
+        if (this.merges.length === 0) return range;
+        let { startRow, endRow, startCol, endCol } = range;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const m of this.merges) {
+                if (m.startRow > endRow || m.endRow < startRow ||
+                    m.startCol > endCol || m.endCol < startCol) continue;
+                if (m.startRow < startRow) { startRow = m.startRow; changed = true; }
+                if (m.endRow   > endRow)   { endRow   = m.endRow;   changed = true; }
+                if (m.startCol < startCol) { startCol = m.startCol; changed = true; }
+                if (m.endCol   > endCol)   { endCol   = m.endCol;   changed = true; }
+            }
+        }
+        return { startRow, endRow, startCol, endCol };
+    }
+
     // -------------------------------------------------------------------------
     // Mutations
 

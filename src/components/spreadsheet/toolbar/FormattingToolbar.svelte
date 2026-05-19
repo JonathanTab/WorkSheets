@@ -186,7 +186,22 @@
             };
         }
 
-        // For range/all mode: sample from cells (limited to avoid hang)
+        if (mode === "all") {
+            const colFmt = sheetStore.getColFormatting?.(0) ?? {};
+            return {
+                bold: colFmt.bold ?? null,
+                italic: colFmt.italic ?? null,
+                underline: colFmt.underline ?? null,
+                fontSize: colFmt.fontSize ?? null,
+                fontFamily: colFmt.fontFamily ?? null,
+                color: colFmt.color ?? null,
+                backgroundColor: colFmt.backgroundColor ?? null,
+                horizontalAlign: colFmt.horizontalAlign ?? null,
+                verticalAlign: colFmt.verticalAlign ?? null,
+            };
+        }
+
+        // For range mode: sample from cells (limited to avoid hang)
         const eff = selectionState.effectiveRange(rowCount, colCount);
         if (!eff) return null;
 
@@ -316,12 +331,13 @@
         if (mode === "rows") {
             const rowRanges = selectionState.allRowRanges;
             if (rowRanges.length === 0) return;
+            const rowSet = new Set();
+            for (const { start, end } of rowRanges) {
+                for (let r = start; r <= end; r++) rowSet.add(r);
+            }
             spreadsheetSession.ydoc?.transact(() => {
-                for (const { start, end } of rowRanges) {
-                    for (let r = start; r <= end; r++) {
-                        sheetStore.setRowFormatting?.(r, { [property]: value });
-                    }
-                }
+                for (const r of rowSet) sheetStore.setRowFormatting?.(r, { [property]: value });
+                sheetStore.clearCellStylePropertyInRows?.(rowSet, property);
             });
             return;
         }
@@ -329,23 +345,33 @@
         if (mode === "cols") {
             const colRanges = selectionState.allColRanges;
             if (colRanges.length === 0) return;
+            const colSet = new Set();
+            for (const { start, end } of colRanges) {
+                for (let c = start; c <= end; c++) colSet.add(c);
+            }
             spreadsheetSession.ydoc?.transact(() => {
-                for (const { start, end } of colRanges) {
-                    for (let c = start; c <= end; c++) {
-                        sheetStore.setColFormatting?.(c, { [property]: value });
-                    }
-                }
+                for (const c of colSet) sheetStore.setColFormatting?.(c, { [property]: value });
+                sheetStore.clearCellStylePropertyInCols?.(colSet, property);
             });
             return;
         }
 
-        // Range / all mode — iterate all selected ranges, routing each cell correctly.
+        // 'all' mode: apply column-level formatting for all cols, clear cell-level overrides
+        if (mode === 'all') {
+            spreadsheetSession.ydoc?.transact(() => {
+                for (let c = 0; c < colCount; c++) {
+                    sheetStore.setColFormatting?.(c, { [property]: value });
+                }
+                sheetStore.clearCellStylePropertyAll?.(property);
+            });
+            return;
+        }
+
+        // Range mode — iterate all selected ranges, routing each cell correctly.
         // TABLE_DATA/TABLE_ENTRY → per-cell table formatting.
         // TABLE_HEADER → skip (format headers by selecting them directly).
         // Regular cells → sheetStore.setCellProperties.
-        const ranges = mode === 'all'
-            ? [selectionState.effectiveRange(rowCount, colCount)]
-            : selectionState.allRanges;
+        const ranges = selectionState.allRanges;
         if (ranges.length === 0 || !ranges[0]) return;
 
         const renderContext = spreadsheetSession.renderContext;
@@ -433,7 +459,7 @@
         }
         const sf = selectedFormatting?.fontSize;
         if (sf === 'mixed') return '';
-        return sf || 12;
+        return sf || 10;
     });
 
     function getStepBaseFontSize() {
@@ -442,7 +468,7 @@
             if (typeof s === 'number') return s;
         }
         const sf = selectedFormatting?.fontSize;
-        return typeof sf === 'number' ? sf : 12;
+        return typeof sf === 'number' ? sf : 10;
     }
 
     // Font size handler

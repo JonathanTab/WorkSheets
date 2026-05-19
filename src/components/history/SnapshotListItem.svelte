@@ -1,170 +1,134 @@
 <script>
     /**
-     * SnapshotListItem — a single row in the history snapshot list.
-     * Props:
-     *   snap         - SnapshotMeta (includes diff_json, app_type)
-     *   summary      - { summary: string, changeCount: number } from interpretDiff
-     *   isSelected   - bool, highlight this row
-     *   onSelect     - () => void
+     * SnapshotListItem — bare-bones row in the version history sidebar.
+     * Shows: time, author list (truncated), optional description label.
      */
 
-    let { snap, summary = null, isSelected = false, onSelect } = $props();
+    let { snap, isSelected = false, onSelect } = $props();
 
     function formatTime(tsMs) {
         return new Date(tsMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     }
 
-    function formatTrigger(trigger) {
-        return {
-            auto:        'Auto-saved',
-            manual:      'Saved',
-            room_empty:  'Session end',
-            session_end: 'Session end',
-            session_cap: 'Checkpoint',
-        }[trigger] ?? trigger;
-    }
-
-    function formatUsers(createdBy) {
+    function formatAuthors(createdBy) {
         if (!createdBy) return null;
-        const names = createdBy.split(',').map(s => s.trim()).filter(Boolean);
-        if (names.length === 0) return null;
-        if (names.length === 1) return names[0];
-        if (names.length === 2) return `${names[0]} & ${names[1]}`;
-        return `${names[0]} +${names.length - 1} others`;
+        const users = [...new Set(createdBy.split(',').map(s => s.trim()).filter(Boolean))];
+        if (users.length === 0) return null;
+        if (users.length <= 2) return users.join(', ');
+        return `${users[0]}, ${users[1]}, +${users.length - 2}`;
     }
 
-    function badgeClass(count) {
-        if (!count) return 'badge-neutral';
-        if (count < 5) return 'badge-low';
-        if (count < 20) return 'badge-mid';
-        return 'badge-high';
-    }
-
-    let users    = $derived(formatUsers(snap.created_by));
-    let badgeCls = $derived(badgeClass(summary?.changeCount ?? 0));
+    let timeLabel   = $derived(formatTime(snap.created_at));
+    let authorLabel = $derived(formatAuthors(snap.created_by));
+    let isManual    = $derived(snap.trigger === 'manual');
 </script>
 
 <button
-    class="snap-item {isSelected ? 'snap-item--selected' : ''}"
+    class="snap-row {isSelected ? 'snap-row--selected' : ''}"
     onclick={onSelect}
+    type="button"
     aria-pressed={isSelected}
 >
-    <div class="snap-main">
-        <div class="snap-top-row">
-            <span class="snap-time">{formatTime(snap.created_at)}</span>
-            <span class="snap-trigger">{formatTrigger(snap.trigger)}</span>
-            {#if summary !== null}
-                {#if summary.changeCount > 0}
-                    <span class="snap-badge {badgeCls}">{summary.changeCount}</span>
-                {:else if summary.summary !== '—'}
-                    <span class="snap-badge badge-neutral">0</span>
-                {:else}
-                    <span class="snap-badge badge-neutral">—</span>
-                {/if}
-            {:else}
-                <span class="snap-badge badge-neutral">—</span>
-            {/if}
+    <div class="snap-dot {isManual ? 'snap-dot--manual' : ''}"></div>
+    <div class="snap-body">
+        <div class="snap-time">
+            {timeLabel}
+            {#if isManual}<span class="snap-badge">saved</span>{/if}
+            {#if snap.pinned}<span class="snap-pin">★</span>{/if}
         </div>
-
+        {#if authorLabel}
+            <div class="snap-authors">{authorLabel}</div>
+        {/if}
         {#if snap.description}
             <div class="snap-desc">"{snap.description}"</div>
-        {/if}
-
-        {#if summary?.summary && summary.summary !== '—' && summary.summary !== 'No changes' && summary.summary !== 'Initial version'}
-            <div class="snap-summary">{summary.summary}</div>
-        {:else if summary?.summary === 'Initial version'}
-            <div class="snap-summary snap-summary--initial">Initial version</div>
-        {/if}
-
-        {#if users}
-            <div class="snap-users">{users}</div>
         {/if}
     </div>
     <span class="snap-chevron">›</span>
 </button>
 
 <style>
-    .snap-item {
+    .snap-row {
         display: flex;
-        align-items: center;
-        gap: 6px;
+        align-items: flex-start;
+        gap: 8px;
         width: 100%;
-        padding: 8px 12px;
-        background: none;
+        padding: 8px 10px;
         border: none;
-        cursor: pointer;
+        background: transparent;
         text-align: left;
+        cursor: pointer;
+        border-left: 3px solid transparent;
         border-bottom: 1px solid #f0f0f0;
         transition: background 0.1s;
     }
-    .snap-item:hover { background: #f5f5f5; }
-    .snap-item--selected { background: #eef4ff; }
+    .snap-row:hover { background: #f5f5f5; }
+    .snap-row--selected {
+        background: #eef4ff;
+        border-left-color: #4285f4;
+    }
 
-    .snap-main { flex: 1; min-width: 0; }
+    .snap-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ccc;
+        margin-top: 5px;
+        flex-shrink: 0;
+    }
+    .snap-dot--manual { background: #4285f4; }
 
-    .snap-top-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-bottom: 2px;
+    .snap-body {
+        flex: 1;
+        min-width: 0;
     }
 
     .snap-time {
+        display: flex;
+        align-items: center;
+        gap: 5px;
         font-size: 12px;
-        font-weight: 600;
+        font-weight: 500;
         color: #222;
-    }
-
-    .snap-trigger {
-        font-size: 10px;
-        color: #888;
-        background: #f0f0f0;
-        padding: 1px 5px;
-        border-radius: 3px;
     }
 
     .snap-badge {
         font-size: 10px;
         font-weight: 600;
-        padding: 1px 5px;
-        border-radius: 10px;
-        margin-left: auto;
-        flex-shrink: 0;
+        background: #e8f0fe;
+        color: #4285f4;
+        border-radius: 3px;
+        padding: 1px 4px;
+        letter-spacing: 0.02em;
     }
-    .badge-neutral  { background: #eee; color: #666; }
-    .badge-low      { background: #e6f4ea; color: #2d7a2d; }
-    .badge-mid      { background: #fff3cd; color: #7a5c00; }
-    .badge-high     { background: #fde8e8; color: #a00; }
+
+    .snap-pin {
+        font-size: 10px;
+        color: #f4a018;
+    }
+
+    .snap-authors {
+        font-size: 11px;
+        color: #777;
+        margin-top: 1px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
 
     .snap-desc {
         font-size: 11px;
         color: #555;
         font-style: italic;
-        margin-top: 1px;
+        margin-top: 2px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-    }
-
-    .snap-summary {
-        font-size: 11px;
-        color: #555;
-        margin-top: 1px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .snap-summary--initial { color: #999; font-style: italic; }
-
-    .snap-users {
-        font-size: 10px;
-        color: #888;
-        margin-top: 1px;
     }
 
     .snap-chevron {
         color: #bbb;
         font-size: 16px;
         flex-shrink: 0;
+        align-self: center;
     }
 </style>

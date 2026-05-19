@@ -104,7 +104,7 @@
             <!-- Row 1: title + menus + save -->
             <SvgMenuBar
                 {isSaving}
-                onClose={() => router.goHome()}
+                onClose={() => router.goBack()}
                 onSave={handleSave}
                 onToggleDocProps={() => (docPropsOpen = !docPropsOpen)}
             />

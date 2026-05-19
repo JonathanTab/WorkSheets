@@ -9,7 +9,8 @@
  * ## Visual style (Google Sheets)
  *   - Selected cells:   light blue fill, thin blue border around each range rect
  *   - Primary cell:     no fill (white), 2px blue border inset
- *   - Formula refs:     colored stroke border per cell
+ *   - Formula refs:     one colored outline rect per unique referenced range
+ *                       (not one per cell — ranges draw a single bounding box)
  */
 
 const SELECTION_FILL        = 'rgba(26, 115, 232, 0.12)';
@@ -118,7 +119,7 @@ export class SelectionRenderer {
             ctx.rect(clipX, clipY, clipW, clipH);
             ctx.clip();
 
-            // ── 1. Per-cell fills (skip primary cell) and formula borders ────
+            // ── 1. Per-cell selection fills (skip primary cell) ───────────────
             for (let r = rowRange.start; r <= rowRange.end; r++) {
                 const isFrozenRow = r < frozenRows;
                 const y = isFrozenRow
@@ -128,20 +129,18 @@ export class SelectionRenderer {
 
                 for (let c = colRange.start; c <= colRange.end; c++) {
                     // Shadow cells are never rendered independently — their primary
-                    // paints the entire merge area (fill or clear+border in step 3).
+                    // paints the entire merge area.
                     if (mergeEngine?.isMergeCell(r, c) && !mergeEngine.isMergePrimary(r, c)) continue;
 
                     const selected  = selectionState?.isSelected(r, c, rowCount, colCount) ?? false;
                     const isPrimary = selected && (selectionState?.isPrimaryCell(r, c) ?? false);
-                    const hlColor   = formulaEditState?.getCellHighlightColor(r, c) ?? null;
-                    if (!selected && !hlColor) continue;
+                    if (!selected || isPrimary) continue;
 
                     const isFrozenCol = c < frozenCols;
                     const x = isFrozenCol
                         ? colMetrics.offsetOf(c)
                         : colMetrics.offsetOf(c) - scrollLeft;
 
-                    // For merge primaries, extend fill rect to cover the entire merge.
                     let w = colMetrics.sizeOf(c);
                     let cellH = h;
                     if (mergeEngine?.isMergePrimary(r, c)) {
@@ -164,20 +163,12 @@ export class SelectionRenderer {
                         }
                     }
 
-                    if (selected && !isPrimary) {
-                        ctx.fillStyle = SELECTION_FILL;
-                        ctx.fillRect(x, y, w, cellH);
-                    }
-
-                    if (hlColor) {
-                        ctx.strokeStyle = hlColor;
-                        ctx.lineWidth = 2;
-                        ctx.strokeRect(x + 1, y + 1, w - 2, cellH - 2);
-                    }
+                    ctx.fillStyle = SELECTION_FILL;
+                    ctx.fillRect(x, y, w, cellH);
                 }
             }
 
-            // ── 2. Per-range border outlines ─────────────────────────────────
+            // ── 2. Per-range selection border outlines ────────────────────────
             const allRanges = selectionState?.allRanges ?? [];
             if (allRanges.length > 0) {
                 ctx.strokeStyle = SELECTION_BORDER;
@@ -193,7 +184,29 @@ export class SelectionRenderer {
                 }
             }
 
-            // ── 3. Primary-cell border (2px, no fill) — spans full merge if applicable
+            // ── 3. Formula ref highlights — one rect per unique range ─────────
+            // One descriptor per unique ref string: one outline box per range,
+            // never one per cell. Merges within the ref rect are expanded out.
+            const refHighlights = formulaEditState?.rangeHighlights ?? [];
+            for (const hl of refHighlights) {
+                if (hl.sheetName !== null) continue; // cross-sheet: skip on this sheet
+
+                const expanded = mergeEngine ? mergeEngine.expandRange(hl) : hl;
+
+                const rect = this.#rangePixelRect(
+                    { startRow: expanded.startRow, endRow: expanded.endRow,
+                      startCol: expanded.startCol, endCol: expanded.endCol },
+                    rowMetrics, colMetrics,
+                    frozenRows, frozenCols, scrollTop, scrollLeft,
+                );
+                if (!rect || rect.w <= 0 || rect.h <= 0) continue;
+
+                ctx.strokeStyle = hl.color;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+            }
+
+            // ── 4. Primary-cell border (2px, no fill) — spans full merge ──────
             const pc = selectionState?.primaryCell ?? selectionState?.anchor;
             if (pc) {
                 const { row: pr, col: pc_ } = pc;
@@ -201,7 +214,6 @@ export class SelectionRenderer {
                     pc_ >= colRange.start && pc_ <= colRange.end &&
                     (selectionState?.isSelected(pr, pc_, rowCount, colCount) ?? false)) {
 
-                    // Use the full merge extent for the primary cell border when applicable.
                     let rect = null;
                     if (mergeEngine) {
                         const merge = mergeEngine.getMergeAt(pr, pc_);

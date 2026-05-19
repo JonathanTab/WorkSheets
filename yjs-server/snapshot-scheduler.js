@@ -69,6 +69,7 @@ export class SnapshotScheduler {
          *   sessionStart: number,
          *   lastSnapshotSV: Uint8Array|null,
          *   lastCheckedSV: Uint8Array|null,
+         *   sessionUsers: Set<string>,
          * }>}
          */
         this.rooms = new Map();
@@ -104,6 +105,17 @@ export class SnapshotScheduler {
         }
 
         this._scheduleSessionSnapshot(roomId, entry);
+    }
+
+    /**
+     * Record that a named user contributed an update to a room.
+     * Called from the server's updateHandler whenever an update is attributed.
+     * @param {string} roomId
+     * @param {string} username
+     */
+    markUserActivity(roomId, username) {
+        const entry = this.rooms.get(roomId);
+        if (entry && username) entry.sessionUsers.add(username);
     }
 
     /**
@@ -146,7 +158,9 @@ export class SnapshotScheduler {
             }
         }
 
-        const createdBy = activeUsernames.length > 0 ? activeUsernames.join(',') : null;
+        // Merge session-tracked users with currently active users (deduped).
+        const allUsers = new Set([...entry.sessionUsers, ...activeUsernames]);
+        const createdBy = allUsers.size > 0 ? [...allUsers].join(',') : null;
 
         this._commitSnapshot(roomId, fileId ?? entry.fileId, ydoc, 'room_empty', createdBy, entry.sessionChanges, entry);
     }
@@ -195,6 +209,7 @@ export class SnapshotScheduler {
             sessionStart:   Date.now(),
             lastSnapshotSV: ydoc ? Y.encodeStateVector(ydoc) : null,
             lastCheckedSV:  ydoc ? Y.encodeStateVector(ydoc) : null,
+            sessionUsers:   new Set(),
         };
     }
 
@@ -266,10 +281,15 @@ export class SnapshotScheduler {
         if (!this._hasRealChanges(entry.ydoc, entry.lastSnapshotSV)) {
             entry.dirty          = false;
             entry.sessionChanges = 0;
+            entry.sessionUsers   = new Set();
             return;
         }
 
-        this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, null, entry.sessionChanges, entry);
+        const createdBy = entry.sessionUsers.size > 0
+            ? [...entry.sessionUsers].join(',')
+            : null;
+
+        this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, createdBy, entry.sessionChanges, entry);
     }
 
     /** Persist the snapshot and update entry bookkeeping. */
@@ -288,6 +308,7 @@ export class SnapshotScheduler {
             entry.lastSnapshot   = Date.now();
             entry.sessionChanges = 0;
             entry.sessionStart   = Date.now();
+            entry.sessionUsers   = new Set();
             entry.lastSnapshotSV = Y.encodeStateVector(ydoc);
         }
     }
@@ -319,7 +340,7 @@ export class SnapshotScheduler {
             const now = Date.now();
 
             const fileIds = this.sqliteDb.prepare(
-                `SELECT DISTINCT file_id FROM snapshots WHERE trigger != 'manual'`
+                `SELECT DISTINCT file_id FROM snapshots WHERE trigger != 'manual' AND pinned = 0`
             ).all().map(r => r.file_id);
 
             let totalThinned = 0;
@@ -327,7 +348,7 @@ export class SnapshotScheduler {
             for (const fileId of fileIds) {
                 const snaps = this.sqliteDb.prepare(`
                     SELECT id, created_at FROM snapshots
-                    WHERE file_id = ? AND trigger != 'manual'
+                    WHERE file_id = ? AND trigger != 'manual' AND pinned = 0
                     ORDER BY created_at ASC
                 `).all(fileId);
 

@@ -126,10 +126,8 @@
             {#each groupedSnapshots as group}
                 <div class="date-group-label">{group.label}</div>
                 {#each group.snaps as snap (snap.id)}
-                    {@const summary = historyManager.interpretSnapshotDiff(snap)}
                     <SnapshotListItem
                         {snap}
-                        {summary}
                         isSelected={historyManager.selectedSnap?.id === snap.id}
                         onSelect={() => historyManager.selectSnapshot(snap)}
                     />

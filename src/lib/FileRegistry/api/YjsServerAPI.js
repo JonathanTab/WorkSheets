@@ -129,6 +129,52 @@ export class YjsServerAPI {
         const res = await this._post('api/restore', { snapshotId });
         return res.json();
     }
+
+    /**
+     * Toggle pinned state for a snapshot.
+     * @param {string} snapshotId
+     * @param {boolean} pinned
+     */
+    async pinSnapshot(snapshotId, pinned) {
+        const url = new URL(`api/snapshot/${encodeURIComponent(snapshotId)}/pin`, this.baseUrl);
+        const res = await fetch(url.toString(), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+            body: JSON.stringify({ pinned }),
+        });
+        return this._handleResponse(res);
+    }
+
+    /**
+     * Update the description of a manual snapshot.
+     * @param {string} snapshotId
+     * @param {string|null} description
+     */
+    async updateSnapshotDescription(snapshotId, description) {
+        const url = new URL(`api/snapshot/${encodeURIComponent(snapshotId)}`, this.baseUrl);
+        const res = await fetch(url.toString(), {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+            body: JSON.stringify({ description }),
+        });
+        return this._handleResponse(res);
+    }
+
+    /**
+     * Delete a manual snapshot.
+     * @param {string} snapshotId
+     */
+    async deleteSnapshot(snapshotId) {
+        const url = new URL(`api/snapshot/${encodeURIComponent(snapshotId)}`, this.baseUrl);
+        const res = await fetch(url.toString(), {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: this._authHeaders(),
+        });
+        return this._handleResponse(res);
+    }
 }
 
 /**

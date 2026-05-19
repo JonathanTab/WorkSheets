@@ -23,7 +23,7 @@ const DEFAULT_THEME = {
     gridline: '#e2e8f0',
     cellBg: '#ffffff',
     defaultText: '#1e293b',
-    defaultFontSize: 12,
+    defaultFontSize: 10,
     defaultFontFamily: 'system-ui, -apple-system, sans-serif',
     tableHeaderBg: '#f1f5f9',
     tableHeaderText: '#334155',
@@ -270,14 +270,17 @@ export class CanvasRenderer {
                 ctx.strokeStyle = this.#theme.gridline;
                 ctx.lineWidth = 1;
                 for (const cell of cells) {
-                    const { x, y, width, height } = cell;
-                    // bottom edge — always drawn (horizontal row lines stay visible)
-                    ctx.moveTo(x, y + height - halfPx);
-                    ctx.lineTo(x + width, y + height - halfPx);
-                    // right edge — suppressed for overflow shadow cells (gridlineOnly).
-                    // Overflow source cells use 'width' (the extended far edge), erasing
-                    // intermediate column boundaries within the overflow span.
-                    if (!cell.gridlineOnly) {
+                    const { x, y, width, height, borders } = cell;
+                    // Skip bottom gridline when the cell has a custom bottom border — the
+                    // border renders on top anyway, but suppressing avoids the gridline
+                    // bleeding through thin or dashed custom borders.
+                    if (!borders?.bottom) {
+                        ctx.moveTo(x, y + height - halfPx);
+                        ctx.lineTo(x + width, y + height - halfPx);
+                    }
+                    // right edge — suppressed for overflow shadow cells (gridlineOnly) and
+                    // when the cell has a custom right border.
+                    if (!cell.gridlineOnly && !borders?.right) {
                         ctx.moveTo(x + width - halfPx, y);
                         ctx.lineTo(x + width - halfPx, y + height);
                     }
@@ -424,7 +427,7 @@ export class CanvasRenderer {
 
         if (col?.isNonEntry) {
             // Formula column — show 'fx' hint
-            const fxFont = `600 ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+            const fxFont = `600 ${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
             if (fxFont !== this.#lastFont) { ctx.font = fxFont; this.#lastFont = fxFont; }
             ctx.fillStyle = 'rgba(100,116,139,0.35)';
             ctx.textBaseline = 'middle';
@@ -437,7 +440,7 @@ export class CanvasRenderer {
         const value = colId != null ? (entryBuffer?.[colId] ?? null) : null;
 
         if (value != null && value !== '') {
-            const font = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+            const font = `${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
             if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
             ctx.fillStyle = this.#theme.defaultText;
             ctx.textBaseline = 'middle';
@@ -578,7 +581,7 @@ export class CanvasRenderer {
 
         // Placeholder text for empty entry cells (shown in italic, muted style)
         if ((text === '' || text == null) && cell.placeholderText) {
-            const placeholderFont = `italic ${this.#theme.defaultFontSize * 0.9}px ${this.#theme.defaultFontFamily}`;
+            const placeholderFont = `italic ${this.#theme.defaultFontSize * 4 / 3 * 0.9}px ${this.#theme.defaultFontFamily}`;
             if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
             ctx.fillStyle = this.#theme.entryPlaceholderText || 'rgba(100,116,139,0.5)';
             ctx.textBaseline = 'middle';
@@ -613,7 +616,8 @@ export class CanvasRenderer {
         const pad = 4;
         const hAlign = cell.hAlign || 'left';
         const vAlign = cell.vAlign || 'middle';
-        const fontSize = cell.fontSize || this.#theme.defaultFontSize;
+        // fontSize is stored in pt; convert to CSS px for layout measurements.
+        const fontPx = (cell.fontSize || this.#theme.defaultFontSize) * 4 / 3;
 
         ctx.textBaseline = 'middle';
 
@@ -624,12 +628,12 @@ export class CanvasRenderer {
         const dpr = this.#dpr;
         const snap = (v) => Math.round(v * dpr) / dpr;
 
-        const minTextY = snap(y + 1 + fontSize / 2);
+        const minTextY = snap(y + 1 + fontPx / 2);
         let textY;
         if (vAlign === 'top') {
-            textY = snap(y + pad + fontSize / 2);
+            textY = snap(y + pad + fontPx / 2);
         } else if (vAlign === 'bottom') {
-            textY = Math.max(snap(y + height - pad - fontSize / 2), minTextY);
+            textY = Math.max(snap(y + height - pad - fontPx / 2), minTextY);
         } else {
             textY = Math.max(snap(y + height / 2), minTextY);
         }
@@ -651,19 +655,19 @@ export class CanvasRenderer {
         // Decorations
         if (cell.underline || cell.strikethrough) {
             ctx.textAlign = 'left';
-            const measuredX = hAlign === 'center'
-                ? x + width / 2 - ctx.measureText(text).width / 2
-                : hAlign === 'right'
-                    ? x + width - pad - ctx.measureText(text).width
-                    : x + pad;
             const tw = ctx.measureText(text).width;
+            const measuredX = hAlign === 'center'
+                ? x + width / 2 - tw / 2
+                : hAlign === 'right'
+                    ? x + width - pad - tw
+                    : x + pad;
 
             if (cell.underline) {
                 ctx.strokeStyle = cell.textColor || this.#theme.defaultText;
                 ctx.lineWidth = 1;
                 ctx.beginPath();
-                ctx.moveTo(measuredX, textY + 7);
-                ctx.lineTo(measuredX + tw, textY + 7);
+                ctx.moveTo(measuredX, textY + fontPx / 2 + 1);
+                ctx.lineTo(measuredX + tw, textY + fontPx / 2 + 1);
                 ctx.stroke();
             }
             if (cell.strikethrough) {
@@ -701,6 +705,8 @@ export class CanvasRenderer {
         const defaultStrikethrough = cell.strikethrough || false;
 
         const maxWidth = width - 2 * pad;
+        // fontSize is stored in pt; convert to CSS px for layout.
+        const defaultFontPx = defaultFontSize * 4 / 3;
 
         // Split runs into logical lines (by explicit \n)
         const logicalLines = [[]];
@@ -742,22 +748,26 @@ export class CanvasRenderer {
             this.#wrapCache.set(wrapCacheKey, allLines);
         }
 
-        const lineHeight = defaultFontSize * 1.5;
+        // lineHeight in CSS px, using the converted font size.
+        const lineHeight = defaultFontPx * 1.5;
         const totalTextH = allLines.length * lineHeight;
 
         // Minimum startY so the first line's baseline never appears above the top pad
-        const minStartY = y + pad + defaultFontSize / 2;
+        const minStartY = y + pad + defaultFontPx / 2;
 
         let startY;
         if (vAlign === 'top') {
             startY = minStartY;
         } else if (vAlign === 'bottom') {
-            startY = y + height - pad - totalTextH + lineHeight / 2;
+            // Last line center at y + height - pad - fontPx/2; solve for startY.
+            startY = y + height - pad - defaultFontPx / 2 - (totalTextH - lineHeight);
         } else {
             // Center — clamp so first line doesn't bleed above the cell when content overflows
             startY = Math.max(y + (height - totalTextH) / 2 + lineHeight / 2, minStartY);
         }
 
+        const dpr = this.#dpr;
+        const snap = (v) => Math.round(v * dpr) / dpr;
         ctx.save();
         ctx.beginPath();
         ctx.rect(x + 1, y + 1, width - 2, height - 2);
@@ -767,20 +777,16 @@ export class CanvasRenderer {
 
         for (let li = 0; li < allLines.length; li++) {
             const lineRuns = allLines[li];
-            const lineY = Math.round(startY + li * lineHeight);
+            const lineY = snap(startY + li * lineHeight);
 
-            // Measure line width for alignment
+            // Use pre-computed widths stored on each fragment during wrap layout
             let lineW = 0;
-            for (const run of lineRuns) {
-                const mf = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
-                if (mf !== this.#lastFont) { ctx.font = mf; this.#lastFont = mf; }
-                lineW += ctx.measureText(run.t).width;
-            }
+            for (const run of lineRuns) lineW += run._w;
 
             let runX;
-            if (hAlign === 'right') runX = Math.round(x + width - pad - lineW);
-            else if (hAlign === 'center') runX = Math.round(x + (width - lineW) / 2);
-            else runX = Math.round(x + pad);
+            if (hAlign === 'right') runX = snap(x + width - pad - lineW);
+            else if (hAlign === 'center') runX = snap(x + (width - lineW) / 2);
+            else runX = snap(x + pad);
 
             for (const run of lineRuns) {
                 const font = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
@@ -790,18 +796,17 @@ export class CanvasRenderer {
                 ctx.fillStyle = color;
                 ctx.fillText(run.t, runX, lineY);
 
-                const tw = ctx.measureText(run.t).width;
+                const tw = run._w;
                 const doUnderline = isLink || (run.u !== undefined ? run.u : defaultUnderline);
                 const doStrike    = run.s !== undefined ? run.s : defaultStrikethrough;
 
                 if (doUnderline || doStrike) {
-                    // Use the run's effective font size so decorations sit correctly
-                    // under/through text of any size. Matches plain-text path: textY + fontSize/2 + 1.
-                    const runFontSize = run.f || defaultFontSize;
+                    // runFontSize is in pt; convert to px for the offset calculation.
+                    const runFontPx = (run.f || defaultFontSize) * 4 / 3;
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 1;
                     if (doUnderline) {
-                        const underlineY = lineY + runFontSize / 2 + 1;
+                        const underlineY = lineY + runFontPx / 2 + 1;
                         ctx.beginPath();
                         ctx.moveTo(runX, underlineY);
                         ctx.lineTo(runX + tw, underlineY);
@@ -867,8 +872,9 @@ export class CanvasRenderer {
                 // Merge with last fragment if same run (same style key)
                 if (lastFrag && lastFrag._runRef === run) {
                     lastFrag.t += token;
+                    lastFrag._w += tokenW;
                 } else {
-                    lastLine.push({ ...run, t: token, _runRef: run });
+                    lastLine.push({ ...run, t: token, _runRef: run, _w: tokenW });
                 }
                 lineWidth += tokenW;
             }
@@ -889,13 +895,14 @@ export class CanvasRenderer {
 
     /**
      * Build a CSS font string for a single rich-text run, falling back to cell defaults.
+     * size values are in pt; multiply by 4/3 to get CSS px.
      */
     #buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic) {
         const bold = run.b !== undefined ? run.b : defaultBold;
         const italic = run.i !== undefined ? run.i : defaultItalic;
-        const size = run.f || defaultSize;
+        const sizePt = run.f || defaultSize;
         const family = run.ff || defaultFamily;
-        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${size}px ${family}`;
+        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${sizePt * 4 / 3}px ${family}`;
     }
 
     /**
@@ -989,7 +996,7 @@ export class CanvasRenderer {
         const textY = Math.round((y + height / 2) * dpr) / dpr;
 
         // Column name — bold, same size as regular cells
-        const headerFont = `600 ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
+        const headerFont = `600 ${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
         if (headerFont !== this.#lastFont) { ctx.font = headerFont; this.#lastFont = headerFont; }
         ctx.fillStyle = this.#theme.tableHeaderText;
         ctx.textAlign = 'left';
@@ -1005,49 +1012,6 @@ export class CanvasRenderer {
 
         // Filter icon — magnifying glass
         this.#drawMagnifyingGlass(ctx, filterActive, x, y, width, height);
-    }
-
-    /**
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {import('./CellPaintData.js').CellPaintItem} cell
-     */
-    #paintTableEntryContent(ctx, cell) {
-        const { x, y, width, height } = cell;
-
-        if (cell.isNonEntryCol) {
-            // Formula column — show subtle 'fx' to hint it's computed
-            const fxFont = `600 ${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
-            if (fxFont !== this.#lastFont) { ctx.font = fxFont; this.#lastFont = fxFont; }
-            ctx.fillStyle = 'rgba(100,116,139,0.35)';
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'center';
-            ctx.fillText('fx', Math.round(x + width / 2), Math.round(y + height / 2));
-            return;
-        }
-
-        const textY = Math.round(y + height / 2);
-
-        // If the user has typed a value, render it like a normal cell.
-        if (cell.displayValue) {
-            const entryFont = `${this.#theme.defaultFontSize}px ${this.#theme.defaultFontFamily}`;
-            if (entryFont !== this.#lastFont) { ctx.font = entryFont; this.#lastFont = entryFont; }
-            ctx.fillStyle = this.#theme.defaultText;
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'left';
-            ctx.fillText(cell.displayValue, Math.round(x + 4), textY, width - 8);
-            return;
-        }
-
-        // Placeholder (column name) — faint italic, identical visual to a blank cell hint
-        const text = cell.placeholderText;
-        if (!text) return;
-
-        const placeholderFont = `italic 12px ${this.#theme.defaultFontFamily}`;
-        if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
-        ctx.fillStyle = this.#theme.entryPlaceholderText;
-        ctx.textBaseline = 'middle';
-        ctx.textAlign = 'left';
-        ctx.fillText(text, Math.round(x + 4), textY);
     }
 
     /**
@@ -1079,6 +1043,8 @@ export class CanvasRenderer {
         const arrowW = 16;
         const pad = 4;
         const { x, y, width, height } = cell;
+        const dpr = this.#dpr;
+        const snap = (v) => Math.round(v * dpr) / dpr;
         const text = cell.displayValue || '';
         const font = this.#buildFont(cell);
         if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
@@ -1091,7 +1057,7 @@ export class CanvasRenderer {
         ctx.beginPath();
         ctx.rect(x + pad, y, width - arrowW - pad * 2, height);
         ctx.clip();
-        if (text) ctx.fillText(text, x + pad, y + height / 2);
+        if (text) ctx.fillText(text, snap(x + pad), snap(y + height / 2));
         ctx.restore();
 
         // Draw dropdown arrow
@@ -1121,6 +1087,7 @@ export class CanvasRenderer {
         const paintEdge = (edge, x1, y1, x2, y2, position = 'center') => {
             if (!edge) return;
             ctx.strokeStyle = edge.color || '#000000';
+            ctx.lineCap = 'square'; // extends stroke past endpoints to fill corners
             const lineWidth = edge.width || 1;
             const edgeStyle = edge.style || 'solid';
 
@@ -1170,21 +1137,23 @@ export class CanvasRenderer {
         if (borders.right) paintEdge(borders.right, x + w, y, x + w, y + h, 'right');
         if (borders.bottom) paintEdge(borders.bottom, x, y + h, x + w, y + h, 'bottom');
         if (borders.left) paintEdge(borders.left, x, y, x, y + h, 'left');
+        ctx.lineCap = 'butt'; // restore default
     }
 
     // ─── Private: font / text helpers ─────────────────────────────────────────
 
     /**
      * Build a CSS font string from cell style properties.
+     * fontSize is stored in pt; multiply by 4/3 to convert to CSS px (96dpi / 72pt-per-inch).
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      * @returns {string}
      */
     #buildFont(cell) {
         const style = cell.italic ? 'italic' : 'normal';
         const weight = cell.bold ? 'bold' : 'normal';
-        const size = cell.fontSize || this.#theme.defaultFontSize;
+        const sizePt = cell.fontSize || this.#theme.defaultFontSize;
         const family = cell.fontFamily || this.#theme.defaultFontFamily;
-        return `${style} ${weight} ${size}px ${family}`;
+        return `${style} ${weight} ${sizePt * 4 / 3}px ${family}`;
     }
 }
 

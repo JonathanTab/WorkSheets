@@ -1,10 +1,10 @@
-import { formulaEditState } from './FormulaEditState.svelte.js';
+import { REFERENCE_COLORS, extractRangeRefs, getCursorRefContext } from '../../formulas/formulaParser.js';
 
 /**
  * EditSessionState - Canonical editing lifecycle for spreadsheet cells.
  *
- * Coordinates editing across grid cell editor and formula bar, while keeping
- * a single draft, active cell, and commit/cancel flow.
+ * Single source of truth for all edit state: draft text, cursor, surface,
+ * formula ref highlights (for SelectionRenderer), and rich-text live sync.
  */
 export class EditSessionState {
     /** @type {'idle' | 'editing'} */
@@ -31,123 +31,55 @@ export class EditSessionState {
     /** @type {'date' | 'time' | 'datetime-local' | null} */
     pickerMode = $state(null);
 
-    /**
-     * The text format runs loaded from the cell when editing began.
-     * null when the cell has no inline formatting.
-     * @type {Array|null}
-     */
+    /** @type {Array|null} */
     initialTfr = $state(null);
 
-    /**
-     * Live plain text from the contenteditable, kept in sync on every input.
-     * Used by commit() so clickaway-triggered commits get the latest text.
-     * @type {string|null}
-     */
+    /** @type {string|null} */
     livePlainText = $state(null);
 
-    /**
-     * Live tfr from the contenteditable, kept in sync after every format
-     * operation and on commit. null when there is no inline formatting.
-     * @type {Array|null}
-     */
+    /** @type {Array|null} */
     liveTfr = $state(null);
 
-    /**
-     * The effective font size at the current inline selection or cursor position.
-     * Updated by GridOverlays on selectionchange and after every _syncLive.
-     * null = no run-level override (cell-level applies), 'mixed' = multiple values.
-     * @type {number | 'mixed' | null}
-     */
+    /** @type {number | 'mixed' | null} */
     inlineSelFontSize = $state(null);
 
-    /**
-     * Callback set by GridOverlays so the toolbar can apply inline formatting
-     * to the current text selection.
-     * Signature: (prop: string, value: any) => boolean
-     * Returns true if formatting was applied to a selection.
-     * @type {Function|null}
-     */
+    /** @type {Function|null} */
     applyInlineFormat = null;
 
-    /**
-     * The sheet ID where this edit was initiated.
-     * @type {string | null}
-     */
+    /** @type {string | null} */
     editingSheetId = $state(null);
+
+    /**
+     * One colored rect per unique reference in the current formula.
+     * Used by SelectionRenderer to draw ref-highlight outlines.
+     * @type {Array<import('../../formulas/formulaParser.js').RefDescriptor & { color: string }>}
+     */
+    rangeHighlights = $state([]);
 
     /** @type {Map<string, Function>} */
     #focusHandles = new Map();
 
-    get isEditing() {
-        return this.phase === 'editing';
-    }
+    get isEditing()     { return this.phase === 'editing'; }
+    get isFormulaMode() { return this.isEditing && this.draft.startsWith('='); }
 
-    get isFormulaMode() {
-        return this.isEditing && this.draft.startsWith('=');
-    }
+    setFocusHandle(surface, fn) { if (fn) this.#focusHandles.set(surface, fn); }
+    clearFocusHandle(surface)   { this.#focusHandles.delete(surface); }
 
-    /**
-     * Register a focus callback for a surface.
-     * @param {'grid' | 'formulaBar'} surface
-     * @param {Function} focusHandle
-     */
-    setFocusHandle(surface, focusHandle) {
-        if (!focusHandle) return;
-        this.#focusHandles.set(surface, focusHandle);
-    }
-
-    /**
-     * Remove a focus callback for a surface.
-     * @param {'grid' | 'formulaBar'} surface
-     */
-    clearFocusHandle(surface) {
-        this.#focusHandles.delete(surface);
-    }
-
-    /**
-     * Request focus on a specific surface.
-     * @param {'grid' | 'formulaBar'} [surface]
-     */
     requestFocus(surface = this.surface) {
-        setTimeout(() => {
-            const handle = this.#focusHandles.get(surface);
-            handle?.();
-        }, 0);
+        setTimeout(() => this.#focusHandles.get(surface)?.(), 0);
     }
 
-    /**
-     * Switch active editing surface while keeping same session.
-     * @param {'grid' | 'formulaBar'} surface
-     * @param {{ focus?: boolean }} [opts]
-     */
-    switchSurface(surface, opts = {}) {
-        const { focus = true } = opts;
+    switchSurface(surface, { focus = true } = {}) {
         this.surface = surface;
         if (focus) this.requestFocus(surface);
     }
 
-    /**
-     * Check if the current session is editing a specific cell.
-     * @param {number} row
-     * @param {number} col
-     * @returns {boolean}
-     */
     isEditingCell(row, col) {
         return this.isEditing && this.cell?.row === row && this.cell?.col === col;
     }
 
-    /**
-     * Begin editing a cell.
-     * @param {number} row
-     * @param {number} col
-     * @param {any} initialValue  plain text (or formula string)
-     * @param {'grid' | 'formulaBar'} [surface]
-     * @param {Object} [options]
-     * @param {Array|null} [options.initialTfr]  text format runs for the cell
-     */
     beginEdit(row, col, initialValue = '', surface = 'grid', options = {}) {
-        const text = _toText(initialValue);
-
+        const text = _str(initialValue);
         this.phase          = 'editing';
         this.cell           = { row, col };
         this.draft          = text;
@@ -158,128 +90,92 @@ export class EditSessionState {
         this.cursorEnd      = text.length;
         this.surface        = surface;
         this.sessionId++;
-        this.pickerMode     = options.pickerMode || null;
-        this.editingSheetId = options.sheetId ?? null;
-
-        formulaEditState.startEditing(row, col, text);
-        formulaEditState.updateValue(text, this.cursorStart);
-
+        this.pickerMode     = options.pickerMode ?? null;
+        this.editingSheetId = options.sheetId    ?? null;
+        this.#updateHighlights(text);
         this.requestFocus(surface);
     }
 
-    /**
-     * Update current draft text and cursor range.
-     * @param {any} value
-     * @param {number | null} [cursorStart]
-     * @param {number | null} [cursorEnd]
-     */
     updateDraft(value, cursorStart = null, cursorEnd = null) {
         if (!this.isEditing) return;
-
-        const text = _toText(value);
-        this.draft = text;
-
-        const nextStart = cursorStart ?? text.length;
-        const nextEnd   = cursorEnd   ?? nextStart;
-
+        const text       = _str(value);
+        this.draft       = text;
+        const nextStart  = cursorStart ?? text.length;
+        const nextEnd    = cursorEnd   ?? nextStart;
         this.cursorStart = _clamp(nextStart, 0, text.length);
         this.cursorEnd   = _clamp(nextEnd,   0, text.length);
-
-        formulaEditState.updateValue(text, this.cursorStart);
+        this.#updateHighlights(text);
     }
 
-    /**
-     * Update cursor range.
-     * @param {number} start
-     * @param {number} [end]
-     */
     setCursor(start, end = start) {
         if (!this.isEditing) return;
-        const textLength = this.draft.length;
-        this.cursorStart = _clamp(start, 0, textLength);
-        this.cursorEnd   = _clamp(end,   0, textLength);
-        formulaEditState.cursorPosition = this.cursorStart;
+        this.cursorStart = _clamp(start, 0, this.draft.length);
+        this.cursorEnd   = _clamp(end,   0, this.draft.length);
     }
 
     /**
-     * Insert or replace a formula reference at the current cursor position.
+     * Smart reference insertion:
+     *   replace — cursor inside an existing ref token → replace it
+     *   insert  — cursor after operator / open-paren / '=' → insert directly
+     *   append  — cursor after a value or ')' → prepend ',' then insert
+     * A non-collapsed selection is replaced unconditionally.
      * @param {string} ref
      */
     insertReference(ref) {
         if (!this.isEditing || !this.isFormulaMode) return;
+        const selStart = Math.min(this.cursorStart, this.cursorEnd);
+        const selEnd   = Math.max(this.cursorStart, this.cursorEnd);
+        let rStart = selStart, rEnd = selEnd, prefix = '';
 
-        const value = this.draft;
-        const start = Math.min(this.cursorStart, this.cursorEnd);
-        const end   = Math.max(this.cursorStart, this.cursorEnd);
-
-        let replaceStart = start;
-        let replaceEnd   = end;
-
-        if (start === end) {
-            const refPositions = _findReferencePositions(value);
-            for (const pos of refPositions) {
-                if (start >= pos.start && start <= pos.end) {
-                    replaceStart = pos.start;
-                    replaceEnd   = pos.end;
-                    break;
-                }
-            }
+        if (selStart === selEnd) {
+            const ctx = getCursorRefContext(this.draft, selStart);
+            if (ctx.mode === 'replace') { rStart = ctx.replaceStart; rEnd = ctx.replaceEnd; }
+            else if (ctx.mode === 'append') { prefix = ','; }
         }
 
-        const newValue  = value.substring(0, replaceStart) + ref + value.substring(replaceEnd);
-        const newCursor = replaceStart + ref.length;
-
-        this.updateDraft(newValue, newCursor, newCursor);
+        const next   = this.draft.slice(0, rStart) + prefix + ref + this.draft.slice(rEnd);
+        const cursor = rStart + prefix.length + ref.length;
+        this.updateDraft(next, cursor, cursor);
         this.requestFocus(this.surface);
     }
 
     /**
-     * Append a formula reference after the current cursor position.
+     * Append a ref after the cursor with an automatic comma separator.
+     * Used for Ctrl+click multi-ref selection.
      * @param {string} ref
      */
     appendReference(ref) {
         if (!this.isEditing || !this.isFormulaMode) return;
-
-        const value  = this.draft;
         const pos    = Math.max(this.cursorStart, this.cursorEnd);
-        const before = value.substring(0, pos);
-        const after  = value.substring(pos);
-
-        const lastChar  = before.trimEnd().slice(-1);
-        const needsComma = lastChar && !',;(+-*/='.includes(lastChar);
-        const prefix    = needsComma ? ',' : '';
-
-        const newValue  = before + prefix + ref + after;
-        const newCursor = pos + prefix.length + ref.length;
-
-        this.updateDraft(newValue, newCursor, newCursor);
+        const before = this.draft.slice(0, pos);
+        const after  = this.draft.slice(pos);
+        const last   = before.trimEnd().slice(-1);
+        const prefix = (last && !',;(+-*/=<>^&:'.includes(last)) ? ',' : '';
+        const next   = before + prefix + ref + after;
+        const cursor = pos + prefix.length + ref.length;
+        this.updateDraft(next, cursor, cursor);
         this.requestFocus(this.surface);
     }
 
-    /**
-     * Commit current edit and return payload to persist.
-     * @returns {{ row: number, col: number, value: string, tfr: Array|null } | null}
-     */
     commit() {
         if (!this.isEditing || !this.cell) return null;
-
-        const payload = {
-            row:   this.cell.row,
-            col:   this.cell.col,
-            value: this.livePlainText ?? this.draft,
-            tfr:   this.liveTfr,
-        };
-
+        const payload = { row: this.cell.row, col: this.cell.col,
+                          value: this.livePlainText ?? this.draft, tfr: this.liveTfr };
         this.#stopEditing();
         return payload;
     }
 
-    /**
-     * Cancel current edit.
-     */
     cancel() {
         if (!this.isEditing) return;
         this.#stopEditing();
+    }
+
+    #updateHighlights(text) {
+        if (!text?.startsWith('=')) { this.rangeHighlights = []; return; }
+        let i = 0;
+        this.rangeHighlights = extractRangeRefs(text).map(ref => ({
+            ...ref, color: REFERENCE_COLORS[i++ % REFERENCE_COLORS.length],
+        }));
     }
 
     #stopEditing() {
@@ -291,66 +187,17 @@ export class EditSessionState {
         this.liveTfr           = null;
         this.inlineSelFontSize = null;
         this.applyInlineFormat = null;
-        this.cursorStart    = 0;
-        this.cursorEnd      = 0;
-        this.surface        = 'grid';
-        this.pickerMode     = null;
-        this.editingSheetId = null;
+        this.cursorStart       = 0;
+        this.cursorEnd         = 0;
+        this.surface           = 'grid';
+        this.pickerMode        = null;
+        this.editingSheetId    = null;
+        this.rangeHighlights   = [];
         this.sessionId++;
-        formulaEditState.stopEditing();
     }
 }
 
-// ─── Reference parsing (formula mode) ────────────────────────────────────────
-
-function _findReferencePositions(formula) {
-    const positions = [];
-    if (!formula) return positions;
-
-    const content = formula.startsWith('=') ? formula.slice(1) : formula;
-    const offset  = formula.startsWith('=') ? 1 : 0;
-    let match;
-
-    const crossSheetRegex = /(?:'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
-    const crossSheetPositions = [];
-    while ((match = crossSheetRegex.exec(content)) !== null) {
-        crossSheetPositions.push({ start: match.index, end: match.index + match[0].length });
-        positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
-    }
-
-    function inCrossSheet(idx) {
-        return crossSheetPositions.some(r => idx >= r.start && idx < r.end);
-    }
-
-    const rangeRegex = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
-    const rangePositions = [];
-    while ((match = rangeRegex.exec(content)) !== null) {
-        if (!inCrossSheet(match.index)) {
-            rangePositions.push({ start: match.index, end: match.index + match[0].length });
-            positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
-        }
-    }
-
-    const cellRegex = /\$?[A-Za-z]+\$?\d+/g;
-    while ((match = cellRegex.exec(content)) !== null) {
-        if (!inCrossSheet(match.index) &&
-            !rangePositions.some(r => match.index >= r.start && match.index < r.end)) {
-            positions.push({ start: match.index + offset, end: match.index + match[0].length + offset });
-        }
-    }
-
-    return positions.sort((a, b) => a.start - b.start);
-}
-
-function _clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-}
-
-function _toText(value) {
-    if (value === null || value === undefined) return '';
-    return String(value);
-}
+function _clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function _str(v) { return (v === null || v === undefined) ? '' : String(v); }
 
 export const editSessionState = new EditSessionState();
-
-export default EditSessionState;

@@ -216,14 +216,26 @@ export function createNamedRangeYMap(range) {
 
 export const spreadsheetSchema = {
     version: SCHEMA_VERSION,
-    initialize: (ydoc) => {
+    /**
+     * Run schema migrations against an EXISTING document.
+     *
+     * IMPORTANT: This must never create the root `sheets` structure. If `sheets`
+     * is missing it means either:
+     *   (a) the doc is a brand-new file (which is initialized exclusively by
+     *       createDocument() via initializeDocument()), or
+     *   (b) the local copy hasn't synced the structure yet from the server.
+     *
+     * In case (b), creating a default Sheet 1 here would race with the
+     * server's real `sheets` map — the local write gets a higher Yjs
+     * lamport clock and wins via Y.Map LWW, overwriting the user's data.
+     * Callers must wait for server sync BEFORE invoking migrate() when
+     * they suspect (b).
+     */
+    migrate: (ydoc) => {
         const root   = ydoc.getMap('spreadsheet');
         const sheets = root.get('sheets');
 
-        if (!sheets) {
-            initializeDocument(ydoc);
-            return;
-        }
+        if (!sheets) return;
 
         // Add sub-fields missing from pre-v3 docs.
         sheets.forEach((sheet) => {
@@ -297,7 +309,6 @@ export const spreadsheetSchema = {
             }
         });
     },
-    migrate: async (_ydoc) => {},
 };
 
 export default spreadsheetSchema;

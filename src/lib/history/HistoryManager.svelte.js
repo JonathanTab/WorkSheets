@@ -16,7 +16,7 @@ export class HistoryManager {
      *   fileId: string,
      *   registry: import('../FileRegistry/FileRegistry.js').FileRegistry,
      *   appType: string,
-     *   adapter?: { diffFn: Function, ViewerComponent: any, isContentChange: Function } | null,
+     *   adapter?: { ViewerComponent: any } | null,
      *   onAfterRestore?: (() => Promise<void>) | null,
      * }} opts
      */
@@ -26,9 +26,9 @@ export class HistoryManager {
         this.appType = appType;
 
         /**
-         * App-specific adapter for diff computation and visual rendering.
-         * Shape: { diffFn, ViewerComponent, isContentChange }
-         * @type {{ diffFn: Function, ViewerComponent: any, isContentChange: Function } | null}
+         * App-specific adapter for visual rendering.
+         * Shape: { ViewerComponent }
+         * @type {{ ViewerComponent: any } | null}
          */
         this.adapter = adapter;
 
@@ -128,10 +128,22 @@ export class HistoryManager {
 
     /**
      * Interpret a snapshot's server diff JSON into a human-readable summary.
+     * Used by docs/svg apps that still register generic interpreters.
+     * Not used by the spreadsheet viewer (which reads diff.totals directly).
      * @param {import('../FileRegistry/api/YjsServerAPI.js').SnapshotMeta} snap
      * @returns {{ summary: string, changeCount: number }}
      */
     interpretSnapshotDiff(snap) {
         return interpretDiff(snap.app_type ?? this.appType, snap.diff_json);
+    }
+
+    /**
+     * Parse the stored diff_json for a snapshot.
+     * @param {import('../FileRegistry/api/YjsServerAPI.js').SnapshotMeta} snap
+     * @returns {object|null}
+     */
+    parseDiff(snap) {
+        if (!snap?.diff_json) return null;
+        try { return JSON.parse(snap.diff_json); } catch { return null; }
     }
 }

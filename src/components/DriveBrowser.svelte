@@ -139,6 +139,12 @@
     let isInternalDragging = $state(false); // true while dragging an internal item (not external files)
     let isTrashDropTarget = $state(false); // true when dragging a file over the Trash nav item
 
+    // Rubber-band (drag range) selection state
+    /** @type {HTMLElement|null} */
+    let contentAreaEl = $state(null);
+    let dragSelectActive = $state(false);
+    let dragSelectRect = $state(/** @type {{x1:number,y1:number,x2:number,y2:number}|null} */ (null));
+
     // Undo / redo stacks for file operations
     let undoStack = $state(
         /** @type {{ description: string, undo: () => Promise<void>, redo: () => Promise<void> }[]} */ ([]),
@@ -449,6 +455,44 @@
         const newSelection = new Set();
         displayItems.forEach((item) => newSelection.add(itemKey(item)));
         selectedItems = newSelection;
+    }
+
+    // ---- Rubber-band (drag range) selection ----
+    function handleDragSelectPointerDown(e) {
+        if (e.button !== 0) return;
+        if (isInternalDragging) return;
+        // Only start if clicking on the content area background, not on an item or interactive element
+        if (e.target.closest('.grid-item, .file-row, .folder-chip, .folders-strip, .empty-state, .drop-overlay, button, input, a')) return;
+        e.preventDefault();
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) clearSelection();
+        dragSelectActive = true;
+        dragSelectRect = { x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY };
+        contentAreaEl?.setPointerCapture(e.pointerId);
+    }
+
+    function handleDragSelectPointerMove(e) {
+        if (!dragSelectActive || !dragSelectRect) return;
+        dragSelectRect = { ...dragSelectRect, x2: e.clientX, y2: e.clientY };
+        const left = Math.min(dragSelectRect.x1, dragSelectRect.x2);
+        const top = Math.min(dragSelectRect.y1, dragSelectRect.y2);
+        const right = Math.max(dragSelectRect.x1, dragSelectRect.x2);
+        const bottom = Math.max(dragSelectRect.y1, dragSelectRect.y2);
+        if (right - left < 4 && bottom - top < 4) return;
+        if (!contentAreaEl) return;
+        const newSelection = new Set();
+        contentAreaEl.querySelectorAll('[data-item-key]').forEach((el) => {
+            const r = el.getBoundingClientRect();
+            if (r.left < right && r.right > left && r.top < bottom && r.bottom > top) {
+                newSelection.add(el.dataset.itemKey);
+            }
+        });
+        selectedItems = newSelection;
+    }
+
+    function handleDragSelectPointerUp() {
+        if (!dragSelectActive) return;
+        dragSelectActive = false;
+        dragSelectRect = null;
     }
 
     // ---- Navigation ----
@@ -1906,11 +1950,16 @@
             class="content-area"
             class:drag-over={isDraggingOver && tab === "drive"}
             class:is-dragging-item={!!draggingItem}
+            class:drag-selecting={dragSelectActive}
+            bind:this={contentAreaEl}
             ondragenter={handleDragEnter}
             ondragleave={handleDragLeave}
             ondragover={handleDragOver}
             ondrop={handleDrop}
             oncontextmenu={showContentContextMenu}
+            onpointerdown={handleDragSelectPointerDown}
+            onpointermove={handleDragSelectPointerMove}
+            onpointerup={handleDragSelectPointerUp}
         >
             <!-- Drop Zone Overlay -->
             {#if isDraggingOver && tab === "drive"}
@@ -1930,6 +1979,13 @@
                         </div>
                     </div>
                 </div>
+            {/if}
+            <!-- Rubber-band selection rect -->
+            {#if dragSelectActive && dragSelectRect}
+                <div
+                    class="drag-select-rect"
+                    style="left:{Math.min(dragSelectRect.x1,dragSelectRect.x2)}px;top:{Math.min(dragSelectRect.y1,dragSelectRect.y2)}px;width:{Math.abs(dragSelectRect.x2-dragSelectRect.x1)}px;height:{Math.abs(dragSelectRect.y2-dragSelectRect.y1)}px"
+                ></div>
             {/if}
             <!-- Folders quick-access strip on Recent tab -->
             {#if tab === "recent" && !searchQuery && rootFolders.length > 0}
@@ -2143,6 +2199,7 @@
                             {#each displayItems as item, index (itemKey(item))}
                                 <tr
                                     class="file-row"
+                                    data-item-key={itemKey(item)}
                                     class:selected={isSelected(item)}
                                     class:folder-row={item.itemType ===
                                         "folder"}
@@ -2329,6 +2386,7 @@
                     {#each displayItems as item (itemKey(item))}
                         <div
                             class="grid-item"
+                            data-item-key={itemKey(item)}
                             class:selected={isSelected(item)}
                             class:focused={focusedItemKey === itemKey(item)}
                             class:folder={item.itemType === "folder"}
@@ -3449,6 +3507,11 @@
         padding: 0 1rem;
     }
 
+    .content-area.drag-selecting {
+        user-select: none;
+        cursor: default;
+    }
+
     /* Folders strip (Recent tab) */
     .folders-strip {
         padding: 1rem 0 0;
@@ -4220,6 +4283,16 @@
         inset: 0;
         z-index: 1001;
         background: var(--color-bg);
+    }
+
+    /* Rubber-band selection rect */
+    .drag-select-rect {
+        position: fixed;
+        border: 1px solid var(--color-primary, #3b82f6);
+        background: color-mix(in srgb, var(--color-primary, #3b82f6) 10%, transparent);
+        pointer-events: none;
+        z-index: 200;
+        border-radius: 2px;
     }
 
     /* Drag and Drop Styles */

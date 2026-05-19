@@ -3,20 +3,12 @@
      * GridOverlays - Cell Editor Overlay (Canvas Architecture)
      *
      * Editor modes:
-     *   - Formula:  plain <input> with colored formula-segment overlay
-     *   - Picker:   date/time/datetime/image/file picker
-     *   - Text:     contenteditable <div> for ALL text cells (plain or rich)
-     *
-     * Rich text is stored as TextFormatRuns (tfr) alongside the plain text
-     * value. The contenteditable shows formatted HTML while editing; on commit
-     * we parse back to { plainText, tfr } via htmlToTfr().
-     *
-     * applyInlineFormat() is registered on editSessionState so the toolbar can
-     * apply formatting to the current selection at any time during editing.
+     *   formula  — FormulaInput (transparent input + colored overlay)
+     *   text     — contenteditable for plain and rich text
+     *   picker   — date/time/image/file pickers
      */
 
     import { untrack } from "svelte";
-    import { segmentFormula } from "../../../formulas/reference-highlighter.js";
     import { editSessionState } from "../../../stores/spreadsheet/index.js";
     import { spreadsheetSession } from "../../../stores/spreadsheetStore.svelte.js";
     import {
@@ -28,9 +20,8 @@
         queryFormatInRange,
         getCharOffset,
         restoreSelection,
-        normalizeTfr,
     } from "../../../stores/spreadsheet/textFormatRuns.js";
-    import FormulaValuePopup from "../FormulaValuePopup.svelte";
+    import FormulaInput from "../FormulaInput.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
     import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
@@ -38,42 +29,33 @@
 
     let {
         editorBounds = null,
-        isEditing = false,
-        editValue = "",
+        isEditing    = false,
+        editValue    = '',
         onEditInput,
         onEditSelect,
         onCommitEdit,
         onCancelEdit,
-        onTabCommit = null,
-        docId = null,
+        onTabCommit  = null,
+        docId        = null,
     } = $props();
 
-    let cellEditInputEl = $state(null);
-    let richEditEl      = $state(null);
-    let _suppressNextBlur = false;
+    let formulaInputComponent = $state(null);
+    let richEditEl            = $state(null);
+    let _suppressNextBlur     = false;
 
-    // Saved selection offsets — updated on every selectionchange while the rich
-    // editor is focused, so toolbar interactions that move focus (font-size input,
-    // font-family select) can restore the selection before applying inline format.
+    // Saved selection offsets so toolbar focus-grabs (font-size input etc.) can
+    // restore the selection before applying inline formatting.
     let savedSelStart = -1;
     let savedSelEnd   = -1;
 
-    let pickerMode         = $derived(editSessionState.pickerMode);
-    let isImagePickerMode  = $derived(pickerMode === 'image-picker');
-    let isFilePickerMode   = $derived(pickerMode === 'file-picker');
-    let isFormulaMode      = $derived(
-        isEditing && typeof editValue === 'string' && editValue?.startsWith('=')
+    let pickerMode        = $derived(editSessionState.pickerMode);
+    let isImagePickerMode = $derived(pickerMode === 'image-picker');
+    let isFilePickerMode  = $derived(pickerMode === 'file-picker');
+    let isFormulaMode     = $derived(isEditing && typeof editValue === 'string' && editValue.startsWith('='));
+    let isTextMode        = $derived(
+        isEditing && editSessionState.surface === 'grid' && !pickerMode && !isFormulaMode
     );
 
-    // Text mode = everything that is not a formula and not a picker
-    let isTextMode = $derived(
-        isEditing &&
-        editSessionState.surface === 'grid' &&
-        !pickerMode &&
-        !isFormulaMode
-    );
-
-    // Cell type config (for file / date pickers)
     let cellCtConfig = $derived.by(() => {
         if (!editSessionState.isEditing || !editSessionState.cell) return null;
         const { row, col } = editSessionState.cell;
@@ -87,7 +69,6 @@
         return 'date';
     });
 
-    // Effective cell-level formatting (font, color, background)
     let cellFormatting = $derived.by(() => {
         if (!editSessionState.isEditing || !editSessionState.cell) return null;
         const { row, col } = editSessionState.cell;
@@ -98,12 +79,12 @@
         const f = cellFormatting;
         if (!f) return null;
         const parts = [];
-        if (f.fontFamily)       parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
-        if (f.fontSize)         parts.push(`font-size: ${f.fontSize}px`);
-        if (f.bold)             parts.push('font-weight: bold');
-        if (f.italic)           parts.push('font-style: italic');
-        if (f.color)            parts.push(`color: ${f.color}`);
-        if (f.backgroundColor)  parts.push(`background: ${f.backgroundColor}`);
+        if (f.fontFamily)      parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
+        if (f.fontSize)        parts.push(`font-size: ${f.fontSize * 4 / 3}px`);
+        if (f.bold)            parts.push('font-weight: bold');
+        if (f.italic)          parts.push('font-style: italic');
+        if (f.color)           parts.push(`color: ${f.color}`);
+        if (f.backgroundColor) parts.push(`background: ${f.backgroundColor}`);
         return parts.length ? parts.join('; ') : null;
     });
 
@@ -112,66 +93,58 @@
         if (!f) return null;
         const parts = [];
         if (f.fontFamily) parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
-        if (f.fontSize)   parts.push(`font-size: ${f.fontSize}px`);
+        if (f.fontSize)   parts.push(`font-size: ${f.fontSize * 4 / 3}px`);
         if (f.bold)       parts.push('font-weight: bold');
         if (f.italic)     parts.push('font-style: italic');
         return parts.length ? parts.join('; ') : null;
     });
 
-    let formulaSegments = $derived(
-        isFormulaMode ? segmentFormula(editValue ?? '') : []
-    );
+    let editorStyle = $derived.by(() => {
+        if (!editorBounds) return 'display:none;';
+        return `top:${editorBounds.top}px; left:${editorBounds.left}px; width:${editorBounds.width}px; height:${editorBounds.height}px;`;
+    });
 
-    // ── Initialize contenteditable when text mode starts or cell changes ──────
+    // ── Rich text init ────────────────────────────────────────────────────────
 
     $effect(() => {
         const _row = editSessionState.cell?.row;
         const _col = editSessionState.cell?.col;
-        if (isTextMode && richEditEl) {
-            untrack(() => {
-                const tfr  = editSessionState.initialTfr;
-                const text = editSessionState.draft;
-                richEditEl.innerHTML = runsToHtml(text, tfr);
+        if (!isTextMode || !richEditEl) return;
 
-                // Move cursor to end
-                const range = document.createRange();
-                range.selectNodeContents(richEditEl);
-                range.collapse(false);
-                const sel = window.getSelection();
-                sel?.removeAllRanges();
-                sel?.addRange(range);
+        untrack(() => {
+            richEditEl.innerHTML = runsToHtml(editSessionState.draft, editSessionState.initialTfr);
 
-                // Sync live state so clickaway-commits have the initial value
-                _syncLive();
+            const range = document.createRange();
+            range.selectNodeContents(richEditEl);
+            range.collapse(false);
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
 
-                // Register format applier for toolbar
-                editSessionState.applyInlineFormat = _applyInlineFormat;
+            _syncLive();
+            editSessionState.applyInlineFormat = _applyInlineFormat;
+            savedSelStart = -1;
+            savedSelEnd   = -1;
+        });
 
-                // Track selection so toolbar inputs that move focus (font-size, font-family)
-                // can restore it before applying formatting.
-                savedSelStart = -1;
-                savedSelEnd   = -1;
-            });
-
-            function onSelectionChange() {
-                const sel = richEditEl && window.getSelection();
-                if (!sel || !richEditEl.contains(sel.anchorNode)) return;
-                const range = sel.getRangeAt(0);
-                savedSelStart = getCharOffset(richEditEl, range.startContainer, range.startOffset);
-                savedSelEnd   = getCharOffset(richEditEl, range.endContainer,   range.endOffset);
-                _updateInlineSelFontSize();
-            }
-            document.addEventListener('selectionchange', onSelectionChange);
-
-            return () => {
-                editSessionState.applyInlineFormat = null;
-                editSessionState.inlineSelFontSize = null;
-                document.removeEventListener('selectionchange', onSelectionChange);
-            };
+        function onSelectionChange() {
+            const sel = richEditEl && window.getSelection();
+            if (!sel || !richEditEl.contains(sel.anchorNode)) return;
+            const range = sel.getRangeAt(0);
+            savedSelStart = getCharOffset(richEditEl, range.startContainer, range.startOffset);
+            savedSelEnd   = getCharOffset(richEditEl, range.endContainer,   range.endOffset);
+            _updateInlineSelFontSize();
         }
+        document.addEventListener('selectionchange', onSelectionChange);
+
+        return () => {
+            editSessionState.applyInlineFormat = null;
+            editSessionState.inlineSelFontSize = null;
+            document.removeEventListener('selectionchange', onSelectionChange);
+        };
     });
 
-    // ── Live sync helpers ─────────────────────────────────────────────────────
+    // ── Live sync ─────────────────────────────────────────────────────────────
 
     function _syncLive() {
         if (!richEditEl) return;
@@ -182,15 +155,15 @@
     }
 
     function _updateInlineSelFontSize() {
-        const tfr = editSessionState.liveTfr;
-        if (!tfr) { editSessionState.inlineSelFontSize = null; return; }
+        const tfr       = editSessionState.liveTfr;
         const plainText = editSessionState.livePlainText ?? '';
         const textLen   = plainText.length;
-        if (textLen === 0 || savedSelStart < 0) { editSessionState.inlineSelFontSize = null; return; }
-
+        if (!tfr || textLen === 0 || savedSelStart < 0) {
+            editSessionState.inlineSelFontSize = null;
+            return;
+        }
         const start = Math.max(0, savedSelStart);
         const end   = savedSelEnd;
-
         let size;
         if (end <= start) {
             size = getFormatAtIndex(tfr, Math.min(start, textLen - 1))?.fontSize ?? null;
@@ -198,27 +171,25 @@
             const clampedEnd = Math.min(end, textLen);
             if (start >= clampedEnd) { editSessionState.inlineSelFontSize = null; return; }
             const val = queryFormatInRange(tfr, start, clampedEnd, textLen, 'fontSize');
-            size = (val === undefined) ? null : val; // keep 'mixed' as-is
+            size = (val === undefined) ? null : val;
         }
         editSessionState.inlineSelFontSize = size ?? null;
     }
 
-    // ── Commit helpers ────────────────────────────────────────────────────────
+    // ── Rich text commit helpers ──────────────────────────────────────────────
 
     function _commitRichFromElement() {
         if (!richEditEl) return;
         const { plainText, tfr } = htmlToTfr(richEditEl.innerHTML);
-        const text = plainText || richEditEl.innerText || richEditEl.textContent || '';
-        onCommitEdit?.({ value: text, tfr: tfr ?? null });
+        onCommitEdit?.({ value: plainText || richEditEl.innerText || richEditEl.textContent || '', tfr: tfr ?? null });
     }
 
     function _commitRichFromCapture(html, innerText) {
         const { plainText, tfr } = htmlToTfr(html);
-        const text = plainText || innerText || '';
-        onCommitEdit?.({ value: text, tfr: tfr ?? null });
+        onCommitEdit?.({ value: plainText || innerText || '', tfr: tfr ?? null });
     }
 
-    // ── Blur / commit flow ────────────────────────────────────────────────────
+    // ── Blur / commit ─────────────────────────────────────────────────────────
 
     function handleEditBlur() {
         if (pickerMode) return;
@@ -227,33 +198,28 @@
     }
 
     function handleRichBlur() {
-        if (!richEditEl) return;
-        if (_suppressNextBlur) { _suppressNextBlur = false; return; }
+        if (!richEditEl || _suppressNextBlur) { _suppressNextBlur = false; return; }
         const html      = richEditEl.innerHTML;
         const innerText = richEditEl.innerText;
-
         setTimeout(() => {
             if (document.activeElement === richEditEl) return;
             if (editSessionState.surface !== 'grid') return;
-            const toolbar = document.querySelector('.formatting-toolbar');
-            if (toolbar?.contains(document.activeElement)) return;
+            if (document.querySelector('.formatting-toolbar')?.contains(document.activeElement)) return;
             _commitRichFromCapture(html, innerText);
         }, 150);
     }
 
-    // ── Keyboard handlers ─────────────────────────────────────────────────────
+    // ── Keyboard ──────────────────────────────────────────────────────────────
 
-    function handleEditKeydown(e) {
+    function handleFormulaKeydown(e) {
         if (e.key === 'Enter') {
-            e.stopPropagation();
-            e.preventDefault();
+            e.stopPropagation(); e.preventDefault();
             onTabCommit ? onTabCommit(1) : onCommitEdit?.(editValue);
         } else if (e.key === 'Escape') {
             e.stopPropagation();
             onCancelEdit?.();
         } else if (e.key === 'Tab') {
-            e.stopPropagation();
-            e.preventDefault();
+            e.stopPropagation(); e.preventDefault();
             onTabCommit ? onTabCommit(e.shiftKey ? -1 : 1, 'tab') : onCommitEdit?.(editValue);
         }
     }
@@ -264,51 +230,30 @@
             _suppressNextBlur = true;
             onCancelEdit?.();
         } else if (e.key === 'Tab') {
-            e.stopPropagation();
-            e.preventDefault();
-            if (onTabCommit) {
-                _suppressNextBlur = true;
-                _commitRichFromElement();
-                onTabCommit(e.shiftKey ? -1 : 1, 'tab');
-            } else {
-                handleRichBlur();
-            }
+            e.stopPropagation(); e.preventDefault();
+            if (onTabCommit) { _suppressNextBlur = true; _commitRichFromElement(); onTabCommit(e.shiftKey ? -1 : 1, 'tab'); }
+            else { handleRichBlur(); }
         } else if (e.key === 'Enter' && !e.ctrlKey) {
-            e.stopPropagation();
-            e.preventDefault();
-            if (onTabCommit) {
-                _suppressNextBlur = true;
-                _commitRichFromElement();
-                onTabCommit(1);
-            } else {
-                _suppressNextBlur = true;
-                _commitRichFromElement();
-            }
+            e.stopPropagation(); e.preventDefault();
+            _suppressNextBlur = true;
+            _commitRichFromElement();
+            if (onTabCommit) onTabCommit(1);
         } else if (e.key === 'Enter' && e.ctrlKey) {
-            e.stopPropagation();
-            e.preventDefault();
+            e.stopPropagation(); e.preventDefault();
             _insertLineBreak();
         }
     }
 
-    function handleRichInput() {
-        if (!richEditEl) return;
-        // Full sync on every input so clickaway-commits always have accurate plain text + tfr.
-        // Stale liveTfr would cause old formatting to reattach to newly typed text.
-        _syncLive();
-        onEditInput?.(editSessionState.livePlainText ?? '', null, null);
-    }
-
-    // ── Line break insertion ──────────────────────────────────────────────────
+    // ── Rich text editing helpers ─────────────────────────────────────────────
 
     function _insertLineBreak() {
         const sel = window.getSelection();
         if (!sel || sel.rangeCount === 0) return;
         const range = sel.getRangeAt(0);
         range.deleteContents();
-        const br = document.createElement('br');
-        range.insertNode(br);
+        const br   = document.createElement('br');
         const zwsp = document.createTextNode('​');
+        range.insertNode(br);
         br.after(zwsp);
         range.setStartAfter(zwsp);
         range.collapse(true);
@@ -317,15 +262,11 @@
         _syncLive();
     }
 
-    // ── Inline format application (called by toolbar) ─────────────────────────
-
     /**
-     * Apply inline formatting to the current selection.
-     * Returns true if a selection existed and formatting was applied,
-     * false if cursor was collapsed (toolbar should apply cell-level format).
-     *
-     * @param {string} prop   TextFormat property name (e.g. 'bold', 'foregroundColor')
-     * @param {any}    value  value to set, or undefined for toggle props
+     * Apply inline formatting to the current rich-text selection.
+     * Called by the toolbar. Returns true if a selection existed.
+     * @param {string} prop
+     * @param {any} value
      * @returns {boolean}
      */
     function _applyInlineFormat(prop, value) {
@@ -335,80 +276,47 @@
         let sel = window.getSelection();
         let hasSelection = sel && !sel.isCollapsed && richEditEl.contains(sel.anchorNode);
 
-        // When focus moved to a toolbar input (font-size field, font-family select),
-        // the browser may have cleared the selection. Restore from saved offsets.
         if (!hasSelection && savedSelStart >= 0 && savedSelEnd > savedSelStart) {
             restoreSelection(richEditEl, savedSelStart, savedSelEnd);
             sel = window.getSelection();
             hasSelection = sel && !sel.isCollapsed && richEditEl.contains(sel.anchorNode);
         }
-
         if (!hasSelection) return false;
 
-        // Compute char offsets
         const range  = sel.getRangeAt(0);
         const start  = getCharOffset(richEditEl, range.startContainer, range.startOffset);
         const end    = getCharOffset(richEditEl, range.endContainer,   range.endOffset);
         if (start >= end) return false;
 
-        // Parse current HTML to tfr
         const { plainText, tfr: currentTfr } = htmlToTfr(richEditEl.innerHTML);
         const textLen = plainText.length;
 
-        // Compute new tfr
-        let newTfr;
         const toggleProps = new Set(['bold', 'italic', 'underline', 'strikethrough']);
+        let newTfr;
         if (toggleProps.has(prop) && value === undefined) {
             newTfr = toggleFormatInRange(currentTfr, start, end, prop, textLen);
         } else if (prop === 'link' && !value) {
-            // Remove link
             newTfr = applyFormatToRange(currentTfr, start, end, { link: null }, textLen);
         } else {
             newTfr = applyFormatToRange(currentTfr, start, end, { [prop]: value }, textLen);
         }
 
-        // Re-render HTML preserving content
         richEditEl.innerHTML = runsToHtml(plainText, newTfr);
-
-        // Restore selection
         restoreSelection(richEditEl, start, end);
-
         _syncLive();
         return true;
     }
 
-    // ── Focus helpers ─────────────────────────────────────────────────────────
+    // ── Focus ─────────────────────────────────────────────────────────────────
 
     function _focusNoScroll(el) {
         if (!el) return;
-        try { el.focus({ preventScroll: true }); }
-        catch { el.focus(); }
+        try { el.focus({ preventScroll: true }); } catch { el.focus(); }
     }
 
     export function focusEditor() {
-        setTimeout(() => {
-            if (isTextMode) _focusNoScroll(richEditEl);
-            else _focusNoScroll(cellEditInputEl);
-        }, 0);
+        setTimeout(() => _focusNoScroll(isTextMode ? richEditEl : formulaInputComponent?.el), 0);
     }
-
-    // ── Picker commits ────────────────────────────────────────────────────────
-
-    function handlePickerCommit(val) {
-        onCommitEdit?.(val);
-    }
-
-    // ── Editor position style ─────────────────────────────────────────────────
-
-    let editorStyle = $derived.by(() => {
-        if (!editorBounds) return 'display:none;';
-        return [
-            `top:${editorBounds.top}px`,
-            `left:${editorBounds.left}px`,
-            `width:${editorBounds.width}px`,
-            `height:${editorBounds.height}px`,
-        ].join('; ') + ';';
-    });
 </script>
 
 <div class="overlays-root">
@@ -420,9 +328,7 @@
                     {docId}
                     onCommit={(blobId, fit) => {
                         onCommitEdit?.(blobId ?? '');
-                        if (typeof window !== 'undefined') {
-                            window.dispatchEvent(new CustomEvent('image-fit-change', { detail: { fit } }));
-                        }
+                        window?.dispatchEvent(new CustomEvent('image-fit-change', { detail: { fit } }));
                     }}
                     onCancel={onCancelEdit}
                 />
@@ -438,7 +344,7 @@
                     value={editValue}
                     subFormat={effectiveDateSubFormat}
                     onchange={(val) => onEditInput?.(val)}
-                    oncommit={(val) => handlePickerCommit(val)}
+                    oncommit={(val) => onCommitEdit?.(val)}
                     oncancel={onCancelEdit}
                 />
             {:else if pickerMode}
@@ -446,12 +352,11 @@
                     type={pickerMode}
                     value={editValue}
                     on:change={(e) => onEditInput?.(e.detail)}
-                    on:commit={(e) => handlePickerCommit(e.detail)}
+                    on:commit={(e) => onCommitEdit?.(e.detail)}
                     on:cancel={onCancelEdit}
                     on:blur={handleEditBlur}
                 />
             {:else if isTextMode}
-                <!-- Unified contenteditable for all text cells (plain and rich) -->
                 <div
                     role="textbox"
                     tabindex="-1"
@@ -461,43 +366,24 @@
                     bind:this={richEditEl}
                     onblur={handleRichBlur}
                     onkeydown={handleRichKeydown}
-                    oninput={handleRichInput}
+                    oninput={() => {
+                        _syncLive();
+                        onEditInput?.(editSessionState.livePlainText ?? '', null, null);
+                    }}
                 ></div>
             {:else}
-                <!-- Formula mode: transparent input + colored overlay -->
-                <input
-                    type="text"
-                    class="cell-edit-input"
-                    style={plainEditStyle}
-                    bind:this={cellEditInputEl}
-                    value={editValue}
-                    oninput={(e) => {
-                        const t = /** @type {HTMLInputElement} */ (e.target);
-                        onEditInput?.(t.value, t.selectionStart, t.selectionEnd);
-                    }}
-                    onselect={(e) => {
-                        const t = /** @type {HTMLInputElement} */ (e.target);
-                        onEditSelect?.(t.selectionStart, t.selectionEnd);
-                    }}
-                    onblur={handleEditBlur}
-                    onkeydown={handleEditKeydown}
-                />
-                {#if isFormulaMode}
-                    <div class="formula-overlay" aria-hidden="true">
-                        <span class="formula-overlay-text">
-                            {#each formulaSegments as segment}
-                                {#if segment.color}
-                                    <span style="color:{segment.color}; font-weight:600;">{segment.text}</span>
-                                {:else if segment.type === 'FUNCTION'}
-                                    <span class="formula-function">{segment.text}</span>
-                                {:else}
-                                    <span>{segment.text}</span>
-                                {/if}
-                            {/each}
-                        </span>
-                    </div>
-                    <FormulaValuePopup formula={editValue} visible={true} />
-                {/if}
+                <!-- Formula / plain-text input -->
+                <div class="formula-cell-wrap" style={plainEditStyle}>
+                    <FormulaInput
+                        bind:this={formulaInputComponent}
+                        value={editValue}
+                        scrollable={false}
+                        onInput={(val, s, e) => onEditInput?.(val, s, e)}
+                        onSelect={(s, e) => onEditSelect?.(s, e)}
+                        onKeydown={handleFormulaKeydown}
+                        onBlur={handleEditBlur}
+                    />
+                </div>
             {/if}
         </div>
     {/if}
@@ -519,19 +405,20 @@
         overflow: visible;
     }
 
-    .cell-edit-input {
+    /* Wrapper that passes cell-level font/size styles to FormulaInput */
+    .formula-cell-wrap {
         width: 100%;
         height: 100%;
-        border: none;
-        padding: 0 4px;
+        position: relative;
         font-size: 12px;
         font-family: system-ui, -apple-system, sans-serif;
+        padding: 0 4px;
+        box-sizing: border-box;
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
         color: var(--text-color, #1e293b);
-        position: relative;
-        z-index: 2;
-        box-sizing: border-box;
+        display: flex;
+        align-items: center;
     }
 
     .cell-rich-edit {
@@ -553,42 +440,5 @@
         overflow-wrap: break-word;
         word-break: break-word;
         line-height: 1.5;
-    }
-
-    .cell-editor:has(.formula-overlay) .cell-edit-input {
-        font-family: monospace;
-    }
-
-    .formula-overlay {
-        position: absolute;
-        inset: 0;
-        padding: 0 4px;
-        font-size: 12px;
-        pointer-events: none;
-        overflow: hidden;
-        font-family: monospace;
-        z-index: 1;
-        color: var(--text-color, #1e293b);
-        background: var(--input-bg, #ffffff);
-        outline: 2px solid var(--editor-outline, #3b82f6);
-        display: flex;
-        align-items: center;
-    }
-
-    .formula-overlay-text {
-        white-space: pre;
-        overflow: hidden;
-        min-width: 0;
-    }
-
-    .formula-function {
-        font-weight: 600;
-        color: var(--function-color, #7c3aed);
-    }
-
-    .cell-editor:has(.formula-overlay) .cell-edit-input {
-        color: transparent;
-        background: transparent;
-        caret-color: var(--text-color, #1e293b);
     }
 </style>

@@ -546,7 +546,11 @@ export class StorageAPI {
  * @property {string}  file_id
  * @property {string}  room_id
  * @property {number}  created_at  Unix ms timestamp
- * @property {'auto'|'manual'|'room_empty'} trigger
- * @property {string|null} created_by  comma-separated usernames
+ * @property {'auto'|'manual'|'room_empty'|'session_end'|'session_cap'} trigger
+ * @property {string|null} created_by  comma-separated usernames (deduped)
  * @property {string|null} description
+ * @property {number|null} change_count  number of meaningful content changes in this snapshot
+ * @property {string|null} diff_json  server-computed diff JSON (v1 generic or v2 sheets)
+ * @property {string|null} app_type  'sheets' | 'docs' | 'svg'
+ * @property {number}      pinned    1 if pinned (excluded from retention thinning), 0 otherwise
  */

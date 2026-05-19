@@ -222,10 +222,34 @@ export class SpreadsheetSession {
             const root = ydoc.getMap('spreadsheet');
             console.log('[SpreadsheetSession] Got root map');
 
-            // Ensure document structure exists (idempotent — skips if already initialized).
-            // This handles documents loaded on a fresh client before sync, or documents
-            // created with an older API that didn't explicitly initialize the schema.
-            spreadsheetSchema.initialize(ydoc);
+            // If the root `sheets` structure is missing, the local copy hasn't
+            // synced yet from the server. We MUST wait for server sync before
+            // proceeding — otherwise migrate()/the session would observe an
+            // empty doc and (historically) auto-init a blank Sheet 1, racing
+            // the real server data and overwriting the user's content.
+            //
+            // Initialization is exclusively a creation-time concern
+            // (createDocument → initializeDocument). If a doc has a valid ID,
+            // it must already exist on the server, so we never auto-create
+            // the root structure on load.
+            if (!root.get('sheets')) {
+                console.log('[SpreadsheetSession] sheets missing — waiting for server sync');
+                const synced = await storage.drive.waitForServerSync(docId);
+                if (!root.get('sheets')) {
+                    if (!synced) {
+                        throw new Error(
+                            'Document is not available offline. Reconnect to load this spreadsheet.'
+                        );
+                    }
+                    throw new Error(
+                        'Document structure missing after server sync. The file may be corrupted.'
+                    );
+                }
+            }
+
+            // Run schema migrations on the existing structure. migrate() is a
+            // no-op when sheets are absent and never creates root structure.
+            spreadsheetSchema.migrate(ydoc);
 
             this.docId = docId;
             this.ydoc = ydoc;

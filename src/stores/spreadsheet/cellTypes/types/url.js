@@ -26,10 +26,12 @@ export const urlType = {
         if (!text) return;
 
         const color = theme?.urlColor ?? '#1a73e8';
-        const fontSize = style?.fontSize ?? theme?.defaultFontSize ?? 12;
+        // fontSize is stored in pt; convert to CSS px (× 4/3).
+        const fontSizePt = style?.fontSize ?? theme?.defaultFontSize ?? 10;
+        const fontPx = fontSizePt * 4 / 3;
         const fontFamily = style?.fontFamily ?? theme?.defaultFontFamily ?? 'system-ui, -apple-system, sans-serif';
 
-        ctx.font = `normal normal ${fontSize}px ${fontFamily}`;
+        ctx.font = `normal normal ${fontPx}px ${fontFamily}`;
         ctx.fillStyle = color;
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'left';
@@ -39,13 +41,13 @@ export const urlType = {
 
         ctx.fillText(text, textX, textY);
 
-        // Underline
+        // Underline — positioned just below the text's em-box.
         const tw = ctx.measureText(text).width;
         ctx.strokeStyle = color;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(textX, textY + 7);
-        ctx.lineTo(textX + tw, textY + 7);
+        ctx.moveTo(textX, textY + fontPx / 2 + 1);
+        ctx.lineTo(textX + tw, textY + fontPx / 2 + 1);
         ctx.stroke();
     },
 };

@@ -162,6 +162,7 @@ export function buildPaneData(params) {
         frozenCols,
         scrollLeft,
         scrollTop,
+        showFormulas = false,
     } = params;
 
     if (
@@ -325,6 +326,12 @@ export function buildPaneData(params) {
             } else {
                 dispV = sheetCell?.v ?? '';
             }
+            // Formula view mode: show raw formula text instead of computed value
+            if (showFormulas) {
+                const rawV = sheetCell?.v;
+                if (typeof rawV === 'string' && rawV.startsWith('=')) dispV = rawV;
+            }
+
             const descriptor = ct ? CellTypeRegistry.get(ct.type) : null;
 
             /** @type {CellPaintItem} */

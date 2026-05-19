@@ -652,6 +652,19 @@ class DriveView {
     /** @param {string} id @returns {import('yjs').Doc|null} */
     getDoc(id) { return this._r._runtime.get(id); }
 
+    /**
+     * Wait for the WebSocket provider to complete its initial sync with the
+     * server for `id`. Resolves `true` on success, `false` on timeout/offline.
+     * Use this before performing structural reads that need authoritative
+     * server state (e.g. before deciding whether a doc needs initialization).
+     * @param {string} id
+     * @param {number} [timeoutMs]
+     * @returns {Promise<boolean>}
+     */
+    waitForServerSync(id, timeoutMs) {
+        return this._r._runtime.waitForServerSync(id, timeoutMs);
+    }
+
     // -------------------------------------------------------
     // Blob
     // -------------------------------------------------------

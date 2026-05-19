@@ -278,6 +278,37 @@ export class YjsRuntime {
     }
 
     /**
+     * Wait for the WebSocket provider to complete its initial sync with the
+     * server for `docId`. Resolves immediately if already synced, or after
+     * `timeoutMs` if the sync doesn't arrive (e.g. offline).
+     *
+     * Returns `true` if server sync was confirmed, `false` if we timed out
+     * or are offline / the doc isn't loaded.
+     *
+     * @param {string} docId
+     * @param {number} [timeoutMs]
+     * @returns {Promise<boolean>}
+     */
+    async waitForServerSync(docId, timeoutMs = WS_SYNC_TIMEOUT) {
+        const active = this.activeDocs.get(docId);
+        if (!active?.provider) return false;
+        if (active.provider.synced) return true;
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+
+        return await new Promise((resolve) => {
+            let done = false;
+            const finish = (ok) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                resolve(ok);
+            };
+            const timer = setTimeout(() => finish(false), timeoutMs);
+            active.provider.once('sync', () => finish(true));
+        });
+    }
+
+    /**
      * Unloads a document, destroying its providers and Y.Doc instance to free memory.
      *
      * @param {string} docId

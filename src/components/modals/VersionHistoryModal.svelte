@@ -145,22 +145,18 @@
                 {#each group.snaps as snap (snap.id)}
                     {@const isSelected = selectedId === snap.id}
                     {@const users = formatUsers(snap.created_by)}
-                    {@const summary = hm.interpretSnapshotDiff(snap)}
                     <div class="snap-item" class:snap-item--selected={isSelected}>
                         <button class="snap-row" onclick={() => { selectedId = isSelected ? null : snap.id; }}>
                             <div class="snap-main">
                                 <div class="snap-time-row">
                                     <span class="snap-time">{formatTime(snap.created_at)}</span>
                                     <span class="snap-trigger">{formatTrigger(snap.trigger)}</span>
-                                    {#if summary.changeCount > 0}
-                                        <span class="snap-badge {changeCountClass(summary.changeCount)}">{summary.changeCount}</span>
+                                    {#if snap.change_count > 0}
+                                        <span class="snap-badge {changeCountClass(snap.change_count)}">{snap.change_count}</span>
                                     {/if}
                                 </div>
                                 {#if snap.description}
                                     <div class="snap-desc">"{snap.description}"</div>
-                                {/if}
-                                {#if summary.summary && summary.summary !== 'No changes' && summary.summary !== '—'}
-                                    <div class="snap-summary">{summary.summary}</div>
                                 {/if}
                                 {#if users}
                                     <div class="snap-users">{users}</div>

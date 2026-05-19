@@ -1,4 +1,6 @@
 import * as Y from 'yjs';
+import { computeSheetsDiff, countSheetsDiffChanges } from './diff/sheets.js';
+export { computeSheetsDiff, countSheetsDiffChanges };
 
 const MAX_DEPTH = 4;
 
@@ -183,4 +185,30 @@ export function computeGenericDiff(docA, docB) {
     }
 
     return { v: 1, entries };
+}
+
+/**
+ * Dispatch to the correct app-specific diff function.
+ * Returns v2 JSON for 'sheets', v1 JSON for everything else.
+ * @param {string|null} appType
+ * @param {Y.Doc} prevDoc
+ * @param {Y.Doc} newDoc
+ * @returns {object}
+ */
+export function computeAppDiff(appType, prevDoc, newDoc) {
+    if (appType === 'sheets') return computeSheetsDiff(prevDoc, newDoc);
+    return computeGenericDiff(prevDoc, newDoc);
+}
+
+/**
+ * Count meaningful changes in any diff (v1 or v2).
+ * @param {object|null} diff
+ * @returns {number}
+ */
+export function countDiffChanges(diff) {
+    if (!diff) return 0;
+    if (diff.v === 2) return countSheetsDiffChanges(diff);
+    // v1 generic
+    if (!diff.entries?.length) return 0;
+    return diff.entries.reduce((sum, e) => sum + (e.added ?? 0) + (e.removed ?? 0) + (e.modified ?? 0) + Math.abs(e.delta ?? 0), 0);
 }

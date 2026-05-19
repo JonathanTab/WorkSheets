@@ -46,7 +46,7 @@
     // ── FILE ──────────────────────────────────────────────────────────────────
     let fileItems = $derived([
         { label: 'New document',    action: () => (window.location.hash = '/new'), shortcut: 'Ctrl+N' },
-        { label: 'Open…',           action: () => router.goHome(),                 shortcut: 'Ctrl+O' },
+        { label: 'Open…',           action: () => router.goBack(),                 shortcut: 'Ctrl+O' },
         { divider: true },
         { label: 'Page Setup…',     action: () => onShowPageSetup?.() },
         {

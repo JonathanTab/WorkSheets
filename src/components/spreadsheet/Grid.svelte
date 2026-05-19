@@ -37,16 +37,14 @@
         HEADER_HEIGHT,
         HEADER_WIDTH,
     } from "../../stores/spreadsheetStore.svelte.js";
-    import {
-        formulaEditState,
-        toRangeRef,
-    } from "../../stores/spreadsheet/FormulaEditState.svelte.js";
+    import { toRangeRef } from "../../formulas/refCoords.js";
     import {
         clipboardManager,
         editSessionState,
         CellTypeRegistry,
     } from "../../stores/spreadsheet/index.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
+    import { clearFormatting as clearFormattingCmd } from "../../stores/spreadsheet/formatCommands.js";
     import { CanvasRenderer } from "../../stores/spreadsheet/rendering/CanvasRenderer.js";
     import { SelectionRenderer } from "../../stores/spreadsheet/rendering/SelectionRenderer.js";
     import { RenderScheduler } from "../../stores/spreadsheet/rendering/RenderScheduler.js";
@@ -84,6 +82,8 @@
         printSettings = null,
         requestMobileKeyboardFocus = null,
         onShowTablesPanel = undefined,
+        showGridlines = true,
+        showFormulas = false,
     } = $props();
 
     // ─── DOM refs ──────────────────────────────────────────────────────────────
@@ -114,6 +114,7 @@
     let overlaysRef = $state(null);
     let virtualizerSheetId = $state.raw(null);
     let resizeObserver = null;
+    let dprMql = null; // matchMedia query for DPR change (moving between displays)
     let vvCleanup = null; // visual viewport cleanup for iOS keyboard handling
     /** @type {Map<string, {scrollTop: number, scrollLeft: number}>} */
     const sheetScrollPositions = new Map();
@@ -445,6 +446,12 @@
     let showCreateRepeaterDialog = $state(false);
     let showFloatingImageInsert = $state(false);
 
+    function handleInsertFloatingImageEvent() {
+        if (selectionState.anchor && spreadsheetSession.activeSheetStore) {
+            showFloatingImageInsert = true;
+        }
+    }
+
     // ─── Derived store state ──────────────────────────────────────────────────
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
     let renderContext = $derived(spreadsheetSession.renderContext);
@@ -735,6 +742,13 @@
         });
     });
 
+    // ─── View option change repaint ───────────────────────────────────────────
+    $effect(() => {
+        const _gl = showGridlines;
+        const _sf = showFormulas;
+        untrack(() => renderScheduler?.invalidateAll());
+    });
+
     // ─── Selection canvas repaint trigger ─────────────────────────────────────
     // Tracks selection state and formula edit deps only. Repaints are cheap
     // (~0.3ms) since SelectionRenderer just draws fill rects — no data lookups.
@@ -746,7 +760,7 @@
         const _selCols = selectionState.selectedCols;
         const _anch = selectionState.anchor;
         const _editing = editSessionState.isEditing;
-        const _formula = formulaEditState?.currentValue;
+        const _formula = editSessionState.draft;
         const _fr = virtualizer?.frozenRows;
         const _fc = virtualizer?.frozenCols;
 
@@ -806,6 +820,7 @@
             frozenCols,
             frozenHeight,
             frozenWidth,
+            showFormulas,
         };
 
         const isFullRepaint = dirtyPanes.size === 4;
@@ -837,6 +852,7 @@
                         clipY: frozenHeight,
                         clipW: bodyW,
                         clipH: bodyH,
+                        showGridLines: showGridlines,
                     },
                 );
             }
@@ -861,6 +877,7 @@
                         clipY: 0,
                         clipW: bodyW,
                         clipH: frozenHeight,
+                        showGridLines: showGridlines,
                     },
                 );
             }
@@ -885,6 +902,7 @@
                         clipY: frozenHeight,
                         clipW: frozenWidth,
                         clipH: bodyH,
+                        showGridLines: showGridlines,
                     },
                 );
             }
@@ -909,6 +927,7 @@
                         clipY: 0,
                         clipW: frozenWidth,
                         clipH: frozenHeight,
+                        showGridLines: showGridlines,
                     },
                 );
             }
@@ -1043,17 +1062,7 @@
             );
             return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
         }
-        function colStripRange(fromOffset, toOffset) {
-            const s = Math.max(
-                frozenCols,
-                colMetrics.indexAtOffset(fromOffset),
-            );
-            const e = Math.min(
-                virtualizer.colCount - 1,
-                colMetrics.indexAtOffset(toOffset) + 1,
-            );
-            return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
-        }
+
 
         const bp = renderPlan.plans.body;
 
@@ -1095,38 +1104,36 @@
                             scrollLeft,
                             scrollTop,
                         }),
-                        { clipX: frozenWidth, clipY, clipW: bodyW, clipH },
+                        { clipX: frozenWidth, clipY, clipW: bodyW, clipH, showGridLines: showGridlines },
                     );
                 }
             }
 
             // Horizontal strip (cols entering left or right)
             if (dx !== 0) {
-                let stripCols, clipX, clipW;
+                let clipX, clipW;
                 if (dx > 0) {
-                    stripCols = colStripRange(
-                        frozenWidth + prevSL + bodyW,
-                        frozenWidth + scrollLeft + bodyW,
-                    );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
-                    stripCols = colStripRange(frozenWidth + scrollLeft, frozenWidth + prevSL);
                     clipX = frozenWidth;
                     clipW = -dx;
                 }
-                if (stripCols) {
-                    canvasRenderer.paintPane(
-                        buildPaneDataTimed({
-                            ...commonParams,
-                            rowRange: bp.rowRange,
-                            colRange: stripCols,
-                            scrollLeft,
-                            scrollTop,
-                        }),
-                        { clipX, clipY: frozenHeight, clipW, clipH: bodyH },
-                    );
-                }
+                // Use the full column range (not just the newly-exposed strip) so that
+                // cells outside the strip whose overflow text or merge spans extend INTO
+                // the strip are included in the paint pass. The clip rect limits actual
+                // drawing to the exposed pixels, so the blit pixels for stable cells are
+                // not overwritten.
+                canvasRenderer.paintPane(
+                    buildPaneDataTimed({
+                        ...commonParams,
+                        rowRange: bp.rowRange,
+                        colRange: bp.colRange,
+                        scrollLeft,
+                        scrollTop,
+                    }),
+                    { clipX, clipY: frozenHeight, clipW, clipH: bodyH, showGridLines: showGridlines },
+                );
             }
         }
 
@@ -1142,31 +1149,26 @@
                     bodyW,
                     frozenHeight,
                 );
-                let stripCols, clipX, clipW;
+                let clipX, clipW;
                 if (dx > 0) {
-                    stripCols = colStripRange(
-                        frozenWidth + prevSL + bodyW,
-                        frozenWidth + scrollLeft + bodyW,
-                    );
                     clipX = frozenWidth + bodyW - dx;
                     clipW = dx;
                 } else {
-                    stripCols = colStripRange(frozenWidth + scrollLeft, frozenWidth + prevSL);
                     clipX = frozenWidth;
                     clipW = -dx;
                 }
-                if (stripCols) {
-                    canvasRenderer.paintPane(
-                        buildPaneDataTimed({
-                            ...commonParams,
-                            rowRange: tp.rowRange,
-                            colRange: stripCols,
-                            scrollLeft,
-                            scrollTop: 0,
-                        }),
-                        { clipX, clipY: 0, clipW, clipH: frozenHeight },
-                    );
-                }
+                // Use full column range so overflow/merge cells outside the strip are
+                // included; clip rect limits drawing to the newly-exposed pixels.
+                canvasRenderer.paintPane(
+                    buildPaneDataTimed({
+                        ...commonParams,
+                        rowRange: tp.rowRange,
+                        colRange: tp.colRange,
+                        scrollLeft,
+                        scrollTop: 0,
+                    }),
+                    { clipX, clipY: 0, clipW, clipH: frozenHeight, showGridLines: showGridlines },
+                );
             }
         }
 
@@ -1204,7 +1206,7 @@
                             scrollLeft: 0,
                             scrollTop,
                         }),
-                        { clipX: 0, clipY, clipW: frozenWidth, clipH },
+                        { clipX: 0, clipY, clipW: frozenWidth, clipH, showGridLines: showGridlines },
                     );
                 }
             }
@@ -1243,7 +1245,7 @@
             rowMetrics: virtualizer.rowMetrics,
             colMetrics: virtualizer.colMetrics,
             selectionState,
-            formulaEditState,
+            formulaEditState: editSessionState,
             frozenRows,
             frozenCols,
             frozenHeight,
@@ -1721,46 +1723,15 @@
     }
 
     /**
-     * Expand a selection range to fully encompass every merged region it overlaps.
-     * Iterates until stable (handles chains of merges).
+     * Expand a range rect to cover every merge it overlaps.
+     * Delegates to MergeEngine.expandRange so the algorithm lives in one place.
      * @param {{startRow,endRow,startCol,endCol}|null} range
-     * @param {import('../../stores/spreadsheet/features/MergeEngine.svelte.js').MergeEngine|null|undefined} mergeEngine
+     * @param {import('../../stores/spreadsheet/features/MergeEngine.svelte.js').MergeEngine|null|undefined} me
      * @returns {{startRow,endRow,startCol,endCol}|null}
      */
-    function expandRangeForMerges(range, mergeEngine) {
-        if (!range || !mergeEngine || mergeEngine.merges.length === 0)
-            return range;
-        let { startRow, endRow, startCol, endCol } = range;
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const m of mergeEngine.merges) {
-                if (
-                    m.startRow <= endRow &&
-                    m.endRow >= startRow &&
-                    m.startCol <= endCol &&
-                    m.endCol >= startCol
-                ) {
-                    if (m.startRow < startRow) {
-                        startRow = m.startRow;
-                        changed = true;
-                    }
-                    if (m.endRow > endRow) {
-                        endRow = m.endRow;
-                        changed = true;
-                    }
-                    if (m.startCol < startCol) {
-                        startCol = m.startCol;
-                        changed = true;
-                    }
-                    if (m.endCol > endCol) {
-                        endCol = m.endCol;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        return { startRow, endRow, startCol, endCol };
+    function expandRangeForMerges(range, me) {
+        if (!range || !me) return range;
+        return me.expandRange(range);
     }
 
     /**
@@ -2094,6 +2065,50 @@
             }
         }
 
+        const FORMAT_PROPS = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline',
+            'strikethrough', 'color', 'backgroundColor',
+            'horizontalAlign', 'verticalAlign', 'wrapText', 'numberFormat'];
+
+        /** Copy cell-level formatting (non-border) from source cell (sr,sc) to target (r,c). */
+        function writeFillFormat(r, c, sr, sc) {
+            const ct = renderContext?.getCellType(r, c);
+            if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
+            const srcCell = store.getCell(sr, sc);
+            const props = {};
+            for (const k of FORMAT_PROPS) {
+                props[k] = srcCell?.exists && srcCell[k] !== undefined ? srcCell[k] : null;
+            }
+            store.setCellProperties(r, c, props);
+        }
+
+        /**
+         * Copy edge-based borders from source cell (sr,sc) to fill cell (r,c).
+         * Only sets the edges "owned" by this cell (bottom + right), plus the left
+         * outer boundary for the leftmost fill column. Shared edges between the
+         * source range and fill range are intentionally left untouched so the
+         * source's own border stays intact.
+         */
+        function writeFillBorders(r, c, sr, sc) {
+            const ct = renderContext?.getCellType(r, c);
+            if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
+            const sb = store.getCellBorders(sr, sc);
+
+            // Bottom edge — skip for fill-up at the shared boundary row (= source's top edge)
+            if (!(direction === 'up' && r === fillRange.endRow)) {
+                store.setCellBorder(r, c, 'bottom', sb.bottom ?? null);
+            }
+
+            // Right edge — skip for fill-left at the shared boundary col (= source's left edge)
+            if (!(direction === 'left' && c === fillRange.endCol)) {
+                store.setCellBorder(r, c, 'right', sb.right ?? null);
+            }
+
+            // Left outer boundary — only for leftmost fill col, skip for fill-right (shared)
+            if (c === fillRange.startCol && direction !== 'right') {
+                store.setCellBorder(r, c, 'left', sb.left ?? null);
+            }
+        }
+
         const srcRows = srcRange.endRow - srcRange.startRow + 1;
         const srcCols = srcRange.endCol - srcRange.startCol + 1;
         const isVertical = direction === 'down' || direction === 'up';
@@ -2111,8 +2126,8 @@
                 const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
 
                 for (let r = fillRange.startRow; r <= fillRange.endRow; r++) {
+                    const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
                     if (hasFormula) {
-                        const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
                         const cell = store.getCell(srcRow, c);
                         if (!cell?.exists) continue;
                         const v = cell.v;
@@ -2125,12 +2140,13 @@
                     } else if (seriesFn) {
                         writeFillValue(r, c, seriesFn(r - srcRange.startRow));
                     } else {
-                        const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
                         const cell = store.getCell(srcRow, c);
                         if (cell?.exists && cell.v !== null && cell.v !== undefined) {
                             writeFillValue(r, c, cell.v);
                         }
                     }
+                    writeFillFormat(r, c, srcRow, c);
+                    writeFillBorders(r, c, srcRow, c);
                 }
             }
         } else {
@@ -2146,8 +2162,8 @@
                 const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
 
                 for (let c = fillRange.startCol; c <= fillRange.endCol; c++) {
+                    const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
                     if (hasFormula) {
-                        const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
                         const cell = store.getCell(r, srcCol);
                         if (!cell?.exists) continue;
                         const v = cell.v;
@@ -2160,12 +2176,13 @@
                     } else if (seriesFn) {
                         writeFillValue(r, c, seriesFn(c - srcRange.startCol));
                     } else {
-                        const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
                         const cell = store.getCell(r, srcCol);
                         if (cell?.exists && cell.v !== null && cell.v !== undefined) {
                             writeFillValue(r, c, cell.v);
                         }
                     }
+                    writeFillFormat(r, c, r, srcCol);
+                    writeFillBorders(r, c, r, srcCol);
                 }
             }
         }
@@ -2262,7 +2279,7 @@
         }
 
         if (isFormulaEditMode && isSelectingRange && hit.region === "cell") {
-            rangeEndCell = { row: hit.row, col: hit.col };
+            rangeEndCell = snapToMergePrimary(hit.row, hit.col);
             return;
         }
         if (selectionState.isSelecting) {
@@ -2648,9 +2665,10 @@
 
         // Formula range selection mode
         if (isFormulaEditMode) {
+            const snapped = snapToMergePrimary(row, col);
             isSelectingRange = true;
-            rangeStartCell = { row, col };
-            rangeEndCell = { row, col };
+            rangeStartCell = snapped;
+            rangeEndCell = snapped;
             isMultiRefSelect = e.ctrlKey || e.metaKey;
             e.preventDefault();
             return;
@@ -2868,11 +2886,22 @@
         stopDragAutoScroll();
         if (isFormulaEditMode && isSelectingRange && rangeStartCell) {
             const endCell = rangeEndCell || rangeStartCell;
+
+            // Build the bounding rect of the dragged range, then expand it to
+            // cover the full extent of any merged cells it touches.
+            let rawRange = {
+                startRow: Math.min(rangeStartCell.row, endCell.row),
+                startCol: Math.min(rangeStartCell.col, endCell.col),
+                endRow:   Math.max(rangeStartCell.row, endCell.row),
+                endCol:   Math.max(rangeStartCell.col, endCell.col),
+            };
+            const expandedRange = expandRangeForMerges(rawRange, renderContext?.mergeEngine) ?? rawRange;
+
             let ref = toRangeRef(
-                Math.min(rangeStartCell.row, endCell.row),
-                Math.min(rangeStartCell.col, endCell.col),
-                Math.max(rangeStartCell.row, endCell.row),
-                Math.max(rangeStartCell.col, endCell.col),
+                expandedRange.startRow,
+                expandedRange.startCol,
+                expandedRange.endRow,
+                expandedRange.endCol,
             );
 
             // Prefix with sheet name when picking from a different sheet
@@ -4941,24 +4970,7 @@
 
     // ─── Clear formatting ─────────────────────────────────────────────────────
     function clearFormatting() {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        if (ranges.length === 0) return;
-
-        for (const eff of ranges) {
-            // Clear per-cell formatting for any table data cells in the range
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct !== CELL_TYPE.TABLE_DATA) continue;
-                    const info = renderContext?.tableManager?.getCellInfo(r, c);
-                    if (info?.table && info.colDef && info.dataIndex >= 0) {
-                        info.table.clearCellFormatting(info.dataIndex, info.colDef.id);
-                    }
-                }
-            }
-            sheetStore.clearRangeFormatting(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
-        }
+        clearFormattingCmd(spreadsheetSession, selectionState);
     }
 
     // ─── Row / Column insert / delete ─────────────────────────────────────────
@@ -5245,6 +5257,12 @@
             label: "Clear Contents",
             shortcut: "Del",
             action: clearContents,
+            disabled: !hasAnySelection,
+        },
+        {
+            label: "Clear Formatting",
+            shortcut: "Ctrl+\\",
+            action: () => { clearFormatting(); closeContextMenu(); },
             disabled: !hasAnySelection,
         },
         { divider: true },
@@ -5626,6 +5644,24 @@
 
     let _stopStorageFilesWatch = null;
 
+    // Re-register on each DPR change so we catch subsequent changes (e.g. moving
+    // from a 1× monitor to a 2× monitor and then back to a 1.5× monitor).
+    function refreshOnDprChange() {
+        dprMql?.removeEventListener('change', refreshOnDprChange);
+        dprMql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+        dprMql.addEventListener('change', refreshOnDprChange);
+        if (!canvasRenderer || !virtualizer) return;
+        const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
+        const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
+        if (w <= 0 || h <= 0) return;
+        canvasRenderer.resize(w, h);
+        renderScheduler?.invalidateAll();
+        renderScheduler?.flush();
+        selectionRenderer?.resize(w, h);
+        selectionScheduler?.invalidateAll();
+        selectionScheduler?.flush();
+    }
+
     onMount(() => {
         // Trigger a canvas repaint when any image finishes loading
         setOnLoadCallback(() => {
@@ -5643,8 +5679,11 @@
         window.addEventListener("file-meta-change", handleFileMetaChange);
         window.addEventListener("show-file-viewer", handleShowFileViewer);
 
+        document.addEventListener("insertFloatingImage", handleInsertFloatingImageEvent);
         document.addEventListener("mouseup", handleMouseUp);
         document.addEventListener("mousemove", handleHeaderDragMouseMove);
+
+        refreshOnDprChange(); // set up initial DPR change listener
 
         if (containerEl) {
             // ResizeObserver stores the latest dimensions and always uses them
@@ -5764,6 +5803,7 @@
 
     onDestroy(() => {
         stopDragAutoScroll();
+        document.removeEventListener("insertFloatingImage", handleInsertFloatingImageEvent);
         document.removeEventListener("mouseup", handleMouseUp);
         document.removeEventListener("mousemove", handleHeaderDragMouseMove);
         document.removeEventListener("mousemove", handleResizeMove);
@@ -5780,6 +5820,7 @@
         window.removeEventListener("image-fit-change", handleImageFitChange);
         window.removeEventListener("file-meta-change", handleFileMetaChange);
         window.removeEventListener("show-file-viewer", handleShowFileViewer);
+        dprMql?.removeEventListener('change', refreshOnDprChange);
     });
 </script>
 

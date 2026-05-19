@@ -39,6 +39,9 @@ import {
     updateFileLastEdit,
     getFileLastEdit,
     backfillAllDiffs,
+    setSnapshotPinned,
+    updateSnapshotDescription,
+    deleteSnapshot,
     PERSISTENCE_ORIGIN,
 } from './db.js';
 import { SnapshotScheduler } from './snapshot-scheduler.js';
@@ -58,9 +61,8 @@ const GC_ENABLED = process.env.GC !== 'false' && process.env.GC !== '0';
 initDb(LEVELDB_PATH, SQLITE_PATH);
 const scheduler = new SnapshotScheduler(saveSnapshot, getSqliteDb());
 
-// Recompute ALL diffs on startup — the predecessor query was fixed, so existing
-// diffs computed with the old query (comparing against future snapshots) are wrong.
-backfillAllDiffs(true);
+// Diffs are now computed synchronously at snapshot-save time.
+// Use POST /api/backfill-diffs to recompute legacy snapshots on demand.
 
 // ---------------------------------------------------------------------------
 // Message type constants (y-protocols)
@@ -130,6 +132,9 @@ const updateHandler = (update, origin, doc, _tr) => {
         ?? (doc.connUsers.size > 0 ? [...doc.connUsers.values()].find(Boolean) : null)
         ?? null;
     if (!username) return;
+
+    // Track this user as a contributor to the current session.
+    scheduler.markUserActivity(doc.name, username);
 
     const now = Date.now();
 
@@ -388,7 +393,7 @@ const server = http.createServer((req, res) => {
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -491,6 +496,29 @@ async function handleHttp(req, res, url) {
         if (!data) return _json(res, 404, { error: 'Snapshot not found' });
         res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
         return res.end(data);
+    }
+
+    // POST /api/snapshot/:id/pin  { pinned: boolean }
+    const pinMatch = pathname.match(/^\/api\/snapshot\/([^/]+)\/pin$/);
+    if (pinMatch && req.method === 'POST') {
+        const body = await _readBody(req);
+        setSnapshotPinned(pinMatch[1], !!body.pinned);
+        return _json(res, 200, { ok: true });
+    }
+
+    // PATCH /api/snapshot/:id  { description: string|null }
+    const patchMatch = pathname.match(/^\/api\/snapshot\/([^/]+)$/);
+    if (patchMatch && req.method === 'PATCH') {
+        const body = await _readBody(req);
+        updateSnapshotDescription(patchMatch[1], body.description ?? null);
+        return _json(res, 200, { ok: true });
+    }
+
+    // DELETE /api/snapshot/:id  (manual snapshots only)
+    if (patchMatch && req.method === 'DELETE') {
+        const deleted = deleteSnapshot(patchMatch[1]);
+        if (!deleted) return _json(res, 404, { error: 'Snapshot not found or not manual' });
+        return _json(res, 200, { ok: true });
     }
 
     // GET /api/snapshot/:id  (metadata)

@@ -131,6 +131,7 @@
     }
 
     function finishRenaming(sheetId) {
+        if (renamingSheetId !== sheetId) return;
         const trimmed = renameValue.trim();
         if (trimmed && trimmed !== sheets.find((s) => s.id === sheetId)?.name) {
             onRenameSheet(sheetId, trimmed);
@@ -138,6 +139,22 @@
         renamingSheetId = null;
         renameValue = "";
     }
+
+    // Commit rename when clicking outside the input (e.g. on the canvas which is non-focusable,
+    // so blur never fires).
+    $effect(() => {
+        if (renamingSheetId === null) return;
+        const id = renamingSheetId;
+        /** @param {MouseEvent} e */
+        function onMousedown(e) {
+            const input = document.querySelector(".tab-rename-input");
+            if (input && !input.contains(/** @type {Node} */ (e.target))) {
+                finishRenaming(id);
+            }
+        }
+        window.addEventListener("mousedown", onMousedown, true);
+        return () => window.removeEventListener("mousedown", onMousedown, true);
+    });
 
     function cancelRenaming() {
         renamingSheetId = null;

@@ -4,7 +4,7 @@ import * as Y from 'yjs';
 import path from 'path';
 import fs from 'fs';
 import { randomBytes } from 'crypto';
-import { computeGenericDiff } from './diff.js';
+import { computeAppDiff, countDiffChanges, computeGenericDiff } from './diff.js';
 
 let levelPersistence;
 let sqliteDb;
@@ -43,9 +43,10 @@ export function initDb(levelDbPath, sqlitePath) {
             app_type     TEXT
         );
 
-        CREATE INDEX IF NOT EXISTS idx_snap_file ON snapshots(file_id);
-        CREATE INDEX IF NOT EXISTS idx_snap_room  ON snapshots(room_id);
-        CREATE INDEX IF NOT EXISTS idx_snap_time  ON snapshots(created_at);
+        CREATE INDEX IF NOT EXISTS idx_snap_file      ON snapshots(file_id);
+        CREATE INDEX IF NOT EXISTS idx_snap_room      ON snapshots(room_id);
+        CREATE INDEX IF NOT EXISTS idx_snap_time      ON snapshots(created_at);
+        CREATE INDEX IF NOT EXISTS idx_snap_file_time ON snapshots(file_id, created_at);
 
         CREATE TABLE IF NOT EXISTS file_meta (
             file_id      TEXT PRIMARY KEY,
@@ -59,6 +60,7 @@ export function initDb(levelDbPath, sqlitePath) {
         `ALTER TABLE snapshots ADD COLUMN change_count INTEGER`,
         `ALTER TABLE snapshots ADD COLUMN diff_json TEXT`,
         `ALTER TABLE snapshots ADD COLUMN app_type TEXT`,
+        `ALTER TABLE snapshots ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
     ];
     for (const sql of migrations) {
         try { sqliteDb.exec(sql); } catch { /* column already exists */ }
@@ -123,54 +125,100 @@ export async function writeDocState(roomId, ydoc) {
 }
 
 /**
- * Create a snapshot of the current doc state, then asynchronously compute
- * a generic structural diff vs. the previous snapshot for this file.
+ * Create a snapshot of the current doc state, computing the diff synchronously
+ * so that empty auto-snapshots can be rejected before writing to disk.
+ *
+ * Returns the snapshot id on success, or null if the snapshot was rejected
+ * (zero meaningful changes on a non-manual trigger).
  *
  * @param {string} roomId
  * @param {string|null} fileId
  * @param {Y.Doc} ydoc
- * @param {'auto'|'manual'|'room_empty'} trigger
- * @param {string|null} createdBy - comma-separated usernames
- * @param {number} changeCount - number of state-vector advances since last snapshot
+ * @param {'auto'|'manual'|'room_empty'|'session_end'|'session_cap'} trigger
+ * @param {string|null} createdBy - comma-separated usernames (may have dupes — deduped here)
+ * @param {number} _sessionChanges - legacy SV-advance count (unused, kept for signature compat)
  * @param {string|null} [description] - optional user-provided label
  * @param {string|null} [appType] - 'sheets' | 'docs' | 'svg'
- * @returns {string} snapshot id
+ * @returns {string|null} snapshot id, or null if aborted (no changes)
  */
-export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, description = null, appType = null) {
-    const id = `snap_${randomBytes(8).toString('hex')}`;
+export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionChanges, description = null, appType = null) {
     const effectiveFileId = fileId ?? roomId;
-    const state = Y.encodeStateAsUpdate(ydoc);
+    const newStateBytes = Y.encodeStateAsUpdate(ydoc);
+
+    // Deduplicate comma-separated usernames
+    const cleanCreatedBy = createdBy
+        ? [...new Set(createdBy.split(',').map(s => s.trim()).filter(Boolean))].join(',') || null
+        : null;
+
+    // Find predecessor snapshot for this file
+    const prevRow = sqliteDb.prepare(
+        'SELECT state, app_type FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 1'
+    ).get(effectiveFileId);
+
+    let diffJson;
+    let realChangeCount = 0;
+
+    if (!prevRow) {
+        // Initial snapshot — always keep it, no diff needed
+        diffJson = JSON.stringify({ v: 2, appType: appType ?? 'unknown', isInitial: true, totals: { cells: 0, formatting: 0, structure: 0, tables: 0, sheetsAdded: 0, sheetsRemoved: 0 }, sheets: [], sheetsRenamed: [], sheetOrder: null });
+    } else {
+        // Compute diff synchronously
+        const prevStateBytes = _toUint8Array(prevRow.state);
+        const resolvedAppType = appType ?? prevRow.app_type ?? null;
+
+        const prevDoc = new Y.Doc({ gc: false });
+        Y.applyUpdate(prevDoc, prevStateBytes);
+        const newDoc = new Y.Doc({ gc: false });
+        Y.applyUpdate(newDoc, newStateBytes);
+
+        let diff;
+        try {
+            diff = computeAppDiff(resolvedAppType, prevDoc, newDoc);
+        } catch (err) {
+            console.error(`[snapshot] Diff compute error: ${err.message}`);
+            diff = { v: 1, entries: [] };
+        } finally {
+            prevDoc.destroy();
+            newDoc.destroy();
+        }
+
+        realChangeCount = countDiffChanges(diff);
+
+        // Reject zero-change auto snapshots (not manual)
+        if (realChangeCount === 0 && trigger !== 'manual') {
+            console.log(`[snapshot] Skipping ${trigger} snapshot for ${roomId} — zero meaningful changes`);
+            return null;
+        }
+
+        diffJson = JSON.stringify(diff);
+        console.log(`[diff] ${trigger} snapshot for ${roomId}: ${realChangeCount} changes`);
+    }
+
+    const id = `snap_${randomBytes(8).toString('hex')}`;
     sqliteDb.prepare(
-        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description, app_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, effectiveFileId, roomId, Buffer.from(state), Date.now(), trigger, createdBy ?? null, changeCount ?? null, description ?? null, appType ?? null);
-    console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger} changes=${changeCount ?? '?'}`);
+        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description, app_type, diff_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, effectiveFileId, roomId, Buffer.from(newStateBytes), Date.now(), trigger, cleanCreatedBy, realChangeCount, description ?? null, appType ?? null, diffJson);
 
-    // Compute diff asynchronously — does not block the save
-    setImmediate(() => _computeAndStoreDiff(id, effectiveFileId, state));
-
+    console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger} changes=${realChangeCount}`);
     return id;
 }
 
 /**
- * Compute and store the generic structural diff for a snapshot vs. its predecessor.
- * Called asynchronously after saveSnapshot.
+ * Compute and store the diff for a snapshot vs. its predecessor (used by backfill).
+ * Uses computeAppDiff to dispatch to the correct app-specific diff function.
  * @param {string} snapshotId
  * @param {string} fileId
- * @param {Uint8Array} newState
+ * @param {Uint8Array} newStateBytes
+ * @param {string|null} appType
  */
-function _computeAndStoreDiff(snapshotId, fileId, newStateBytes) {
+function _computeAndStoreDiff(snapshotId, fileId, newStateBytes, appType) {
     try {
-        // Find the correct predecessor: must be strictly BEFORE this snapshot in time.
-        // Without the created_at < constraint, backfilling an old snapshot would
-        // compare it against the MOST RECENT snapshot (a future state), which
-        // produces massive spurious diffs.
-        //
-        // Prefer the same room (avoids cross-room confusion after snapshot restores).
-        const current = sqliteDb.prepare('SELECT created_at, room_id FROM snapshots WHERE id = ?').get(snapshotId);
+        const current = sqliteDb.prepare('SELECT created_at, room_id, app_type FROM snapshots WHERE id = ?').get(snapshotId);
+        const resolvedAppType = appType ?? current?.app_type ?? null;
 
         let prevRow = null;
         if (current) {
-            // 1. Same-room predecessor
+            // 1. Same-room predecessor (strictly before in time)
             prevRow = sqliteDb.prepare(
                 'SELECT state FROM snapshots WHERE file_id = ? AND room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT 1'
             ).get(fileId, current.room_id, current.created_at);
@@ -185,22 +233,20 @@ function _computeAndStoreDiff(snapshotId, fileId, newStateBytes) {
 
         let diffJson;
         if (!prevRow) {
-            diffJson = JSON.stringify({ v: 1, entries: [], isInitial: true });
+            diffJson = JSON.stringify({ v: 2, appType: resolvedAppType, isInitial: true, totals: { cells: 0, formatting: 0, structure: 0, tables: 0, sheetsAdded: 0, sheetsRemoved: 0 }, sheets: [], sheetsRenamed: [], sheetOrder: null });
         } else {
-            const prevStateBytes = _toUint8Array(prevRow.state);
-            const newDocBytes    = _toUint8Array(newStateBytes);
-
             const prevDoc = new Y.Doc({ gc: false });
-            Y.applyUpdate(prevDoc, prevStateBytes);
+            Y.applyUpdate(prevDoc, _toUint8Array(prevRow.state));
             const newDoc = new Y.Doc({ gc: false });
-            Y.applyUpdate(newDoc, newDocBytes);
+            Y.applyUpdate(newDoc, _toUint8Array(newStateBytes));
 
-            const diff = computeGenericDiff(prevDoc, newDoc);
+            const diff = computeAppDiff(resolvedAppType, prevDoc, newDoc);
             diffJson = JSON.stringify(diff);
+            const n = countDiffChanges(diff);
 
             prevDoc.destroy();
             newDoc.destroy();
-            console.log(`[diff] ${snapshotId}: ${diff.entries.length} entries`);
+            console.log(`[diff] backfill ${snapshotId}: ${n} changes`);
         }
 
         sqliteDb.prepare('UPDATE snapshots SET diff_json = ? WHERE id = ?').run(diffJson, snapshotId);
@@ -225,14 +271,14 @@ function _toUint8Array(buf) {
  */
 export function backfillDiffs(fileId) {
     const snaps = sqliteDb.prepare(
-        'SELECT id, state, created_at FROM snapshots WHERE file_id = ? AND diff_json IS NULL ORDER BY created_at ASC'
+        'SELECT id, state, created_at, app_type FROM snapshots WHERE file_id = ? AND diff_json IS NULL ORDER BY created_at ASC'
     ).all(fileId);
 
     if (snaps.length === 0) return 0;
 
     let processed = 0;
     for (const snap of snaps) {
-        _computeAndStoreDiff(snap.id, fileId, _toUint8Array(snap.state));
+        _computeAndStoreDiff(snap.id, fileId, _toUint8Array(snap.state), snap.app_type ?? null);
         processed++;
     }
     console.log(`[diff] Backfilled ${processed} snapshots for file ${fileId}`);
@@ -267,7 +313,7 @@ export function backfillAllDiffs(force = false) {
     });
 }
 
-const SNAP_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, diff_json, app_type';
+const SNAP_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, diff_json, app_type, pinned';
 
 /** @returns {object[]} snapshot metadata (no binary state) */
 export function listSnapshotsByRoom(roomId) {
@@ -319,6 +365,35 @@ export function getFileLastEdit(fileId) {
     return sqliteDb.prepare(
         'SELECT last_edit_at, last_edit_by FROM file_meta WHERE file_id = ?'
     ).get(fileId) ?? null;
+}
+
+/**
+ * Toggle the pinned state of a snapshot.
+ * Pinned snapshots are excluded from retention thinning.
+ * @param {string} snapshotId
+ * @param {boolean} pinned
+ */
+export function setSnapshotPinned(snapshotId, pinned) {
+    sqliteDb.prepare('UPDATE snapshots SET pinned = ? WHERE id = ?').run(pinned ? 1 : 0, snapshotId);
+}
+
+/**
+ * Update the description of a snapshot (manual snapshots only).
+ * @param {string} snapshotId
+ * @param {string|null} description
+ */
+export function updateSnapshotDescription(snapshotId, description) {
+    sqliteDb.prepare("UPDATE snapshots SET description = ? WHERE id = ? AND trigger = 'manual'").run(description ?? null, snapshotId);
+}
+
+/**
+ * Delete a snapshot (manual snapshots only; auto/room_empty are managed by retention).
+ * @param {string} snapshotId
+ * @returns {boolean} true if a row was deleted
+ */
+export function deleteSnapshot(snapshotId) {
+    const info = sqliteDb.prepare("DELETE FROM snapshots WHERE id = ? AND trigger = 'manual'").run(snapshotId);
+    return info.changes > 0;
 }
 
 /**
