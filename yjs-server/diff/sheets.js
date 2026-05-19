@@ -40,9 +40,11 @@ export { FORMAT_FIELDS };
 // avoid a Node-side dependency on the browser library.
 
 /**
- * Read a YKeyValue Y.Array into a plain Map<key, value>.
+ * Read a YKeyValue Y.Array into a plain Map<string, value>.
  * y-utility/y-keyvalue stores items as plain { key, val } objects (yarray.push([{key,val}])).
  * Also handles Y.Map shape defensively for any future schema variation.
+ * Keys are normalised to strings so that numeric keys (e.g. 3) and string keys ("3")
+ * are treated as the same entry — application code may use either form.
  * Later duplicates overwrite earlier ones (matching YKeyValue semantics).
  * @param {Y.Array|null|undefined} arr
  * @returns {Map<string, any>}
@@ -60,9 +62,47 @@ function readYKeyValue(arr) {
             k = item.key;
             v = item.val;
         }
-        if (k !== undefined) map.set(k, v);
+        // Normalise key to string to prevent number/string key mismatches
+        if (k !== undefined && k !== null) map.set(String(k), v);
     });
     return map;
+}
+
+/**
+ * Safely extract a numeric dimension (width or height) from a rowMeta/colMeta entry.
+ * The entry can be:
+ *   - an object like { width: 120 } (current v4 format)
+ *   - a plain number (legacy format)
+ *   - undefined/null (column/row using default size → treated as null)
+ * Returns null when the entry is absent or the field is missing/non-numeric.
+ * NEVER falls back to the full object — avoids spurious change detection from
+ * reference inequality on otherwise identical objects.
+ * @param {any} entry
+ * @param {'width'|'height'} field
+ * @returns {number|null}
+ */
+function _extractDimension(entry, field) {
+    if (entry === undefined || entry === null) return null;
+    if (typeof entry === 'number') return entry;
+    if (typeof entry === 'object') {
+        const v = entry[field];
+        return typeof v === 'number' ? v : null;
+    }
+    return null;
+}
+
+/**
+ * Safely extract the cell value from a cellValues entry.
+ * Entries are { v, t } objects or occasionally plain primitives.
+ * Returns undefined when the entry is absent (key not in map).
+ * NEVER returns the full object — avoids reference-inequality false positives.
+ * @param {any} entry
+ * @returns {any}
+ */
+function _extractCellValue(entry) {
+    if (entry === undefined || entry === null) return null;
+    if (typeof entry === 'object') return entry.v ?? null;
+    return entry; // plain primitive stored directly
 }
 
 // ─── Coordinate helpers ───────────────────────────────────────────────────────
@@ -190,6 +230,10 @@ export function computeSheetsDiff(prevDoc, newDoc) {
             const cells = [];
             let cellsTruncated = 0;
 
+            // Hoist style maps — used both in the value loop (for ct) and in the format loop
+            const prevStyleMap = readYKeyValue(prevSheet.get('cellStyles'));
+            const newStyleMap  = readYKeyValue(newSheet.get('cellStyles'));
+
             const allCellKeys = new Set([...prevValMap.keys(), ...newValMap.keys()]);
             for (const key of allCellKeys) {
                 const pos = parseCellKey(key);
@@ -197,10 +241,11 @@ export function computeSheetsDiff(prevDoc, newDoc) {
 
                 const pVal = prevValMap.get(key);
                 const nVal = newValMap.get(key);
-                const pV   = pVal?.v ?? pVal;
-                const nV   = nVal?.v ?? nVal;
-                const pT   = pVal?.t ?? null;
-                const nT   = nVal?.t ?? null;
+                // Extract .v (cell value) safely — never fall back to object reference
+                const pV = _extractCellValue(pVal);
+                const nV = _extractCellValue(nVal);
+                const pT = (pVal && typeof pVal === 'object') ? (pVal.t ?? null) : null;
+                const nT = (nVal && typeof nVal === 'object') ? (nVal.t ?? null) : null;
 
                 if (pV === nV && pT === nT) continue; // unchanged
 
@@ -209,9 +254,6 @@ export function computeSheetsDiff(prevDoc, newDoc) {
                 else if (!newValMap.has(key)) status = 'removed';
                 else                          status = 'changed';
 
-                // Combine with style type ct for display
-                const prevStyleMap = readYKeyValue(prevSheet.get('cellStyles'));
-                const newStyleMap  = readYKeyValue(newSheet.get('cellStyles'));
                 const pCt = prevStyleMap.get(key)?.ct ?? null;
                 const nCt = newStyleMap.get(key)?.ct  ?? null;
 
@@ -233,8 +275,7 @@ export function computeSheetsDiff(prevDoc, newDoc) {
             cells.sort((a, b) => a.row !== b.row ? a.row - b.row : a.col - b.col);
 
             // ── 2. Cell formatting (cellStyles Y.Array / YKeyValue) ──────────
-            const prevStyleMap = readYKeyValue(prevSheet.get('cellStyles'));
-            const newStyleMap  = readYKeyValue(newSheet.get('cellStyles'));
+            // prevStyleMap / newStyleMap already computed above
 
             const formatCells = [];
             const allStyleKeys = new Set([...prevStyleMap.keys(), ...newStyleMap.keys()]);
@@ -283,8 +324,8 @@ export function computeSheetsDiff(prevDoc, newDoc) {
                 let n = 0;
                 const keys = new Set([...prevRowMeta.keys(), ...newRowMeta.keys()]);
                 for (const k of keys) {
-                    const ph = prevRowMeta.get(k)?.height ?? prevRowMeta.get(k);
-                    const nh = newRowMeta.get(k)?.height  ?? newRowMeta.get(k);
+                    const ph = _extractDimension(prevRowMeta.get(k), 'height');
+                    const nh = _extractDimension(newRowMeta.get(k),  'height');
                     if (ph !== nh) n++;
                 }
                 if (n > 0) { structure.push({ field: 'Row heights', from: '', to: `${n} row${n !== 1 ? 's' : ''} resized` }); totals.structure++; }
@@ -297,8 +338,8 @@ export function computeSheetsDiff(prevDoc, newDoc) {
                 let n = 0;
                 const keys = new Set([...prevColMeta.keys(), ...newColMeta.keys()]);
                 for (const k of keys) {
-                    const pw = prevColMeta.get(k)?.width ?? prevColMeta.get(k);
-                    const nw = newColMeta.get(k)?.width  ?? newColMeta.get(k);
+                    const pw = _extractDimension(prevColMeta.get(k), 'width');
+                    const nw = _extractDimension(newColMeta.get(k),  'width');
                     if (pw !== nw) n++;
                 }
                 if (n > 0) { structure.push({ field: 'Column widths', from: '', to: `${n} col${n !== 1 ? 's' : ''} resized` }); totals.structure++; }
