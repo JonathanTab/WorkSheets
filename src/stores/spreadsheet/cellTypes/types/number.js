@@ -143,12 +143,9 @@ function _formatScientific(num, decimals) {
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
 
-import NumberConfigPanel from './NumberConfigPanel.svelte';
-
 export const numberType = {
     id: 'number',
     renderType: 'text',
-    configPanel: NumberConfigPanel,
 
     formatValue(rawValue, config) {
         return formatNumber(rawValue, config);

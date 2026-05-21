@@ -33,8 +33,6 @@ import {
     timeStringToDate,
 } from '../../../../util/dateAndNumber.js';
 
-import DateConfigPanel from './DateConfigPanel.svelte';
-
 // Re-export presets so consumers can import from one place (no circular dep since
 // the arrays now live in datePresets.js, not here).
 export { DATE_PRESETS, TIME_PRESETS } from './datePresets.js';
@@ -47,7 +45,6 @@ export { parseLocalDate, formatDate, dateToISO };
 export const dateType = {
     id: 'date',
     renderType: 'text',
-    configPanel: DateConfigPanel,
 
     formatValue(rawValue, config) {
         if (!rawValue && rawValue !== 0) return '';

@@ -92,6 +92,10 @@
         return typeof sf === 'number' ? sf : 10;
     }
 
+    function handleFontFamilyChange(e) {
+        if (e.target.value) applyFormatting('fontFamily', e.target.value);
+    }
+
     function handleFontSizeChange(e) {
         const size = parseInt(e.target.value, 10);
         if (!isNaN(size) && size > 0) applyFormatting('fontSize', size);

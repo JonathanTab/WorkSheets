@@ -8,12 +8,9 @@
  * Canvas rendering shows a ▾ indicator at the right edge of the cell.
  * Clicking/pressing Enter opens a DOM dropdown overlay (handled in Grid.svelte).
  */
-import DropdownConfigPanel from './DropdownConfigPanel.svelte';
-
 export const dropdownType = {
     id: 'dropdown',
     renderType: 'dropdown',
-    configPanel: DropdownConfigPanel,
 
     formatValue(rawValue, _config) {
         if (rawValue === undefined || rawValue === null || rawValue === '') return '';

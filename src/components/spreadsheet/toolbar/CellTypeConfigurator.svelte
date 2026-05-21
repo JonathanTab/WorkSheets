@@ -2,6 +2,15 @@
     import { spreadsheetSession, selectionState } from "../../../stores/spreadsheetStore.svelte.js";
     import { date, checkbox, star, imageIcon } from "../../../lib/icons/index.js";
     import { CellTypeRegistry } from "../../../stores/spreadsheet/cellTypes/index.js";
+    import DateConfigPanel     from "../../../stores/spreadsheet/cellTypes/types/DateConfigPanel.svelte";
+    import NumberConfigPanel   from "../../../stores/spreadsheet/cellTypes/types/NumberConfigPanel.svelte";
+    import DropdownConfigPanel from "../../../stores/spreadsheet/cellTypes/types/DropdownConfigPanel.svelte";
+
+    const CONFIG_PANELS = {
+        date:     DateConfigPanel,
+        number:   NumberConfigPanel,
+        dropdown: DropdownConfigPanel,
+    };
 
     /**
      * Controlled mode: when both props are provided the component reads/writes
@@ -114,9 +123,9 @@
         {/each}
     </div>
 
-    {#if descriptor?.configPanel}
+    {#if CONFIG_PANELS[activeTypeId]}
         <svelte:component
-            this={descriptor.configPanel}
+            this={CONFIG_PANELS[activeTypeId]}
             {options}
             onUpdate={handlePanelUpdate}
         />
