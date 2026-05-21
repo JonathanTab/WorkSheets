@@ -3,7 +3,7 @@
     import { editSessionState } from "../../stores/spreadsheet/index.js";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { toCellRef } from "../../formulas/refCoords.js";
-    import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
+    import { applyFormatting } from "../../stores/spreadsheet/cellFormattingCommands.js";
     import FormulaInput from "./FormulaInput.svelte";
     import MobileFormattingSheet from "./MobileFormattingSheet.svelte";
 
@@ -134,28 +134,6 @@
         });
     }
 
-    function applyFormat(property, value) {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(sheetStore.rowCount, sheetStore.colCount);
-        if (!eff) return;
-        const rc = spreadsheetSession.renderContext;
-        spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = rc?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER) continue;
-                    if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
-                        const info = rc?.tableManager?.getCellInfo(r, c);
-                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0)
-                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
-                        continue;
-                    }
-                    sheetStore.setCellProperties(r, c, { [property]: value });
-                }
-            }
-        });
-    }
 
     function handleKeydown(e) {
         if (e.key === 'Enter')  { commitAndMoveDown(); e.preventDefault(); }
@@ -255,10 +233,10 @@
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
             </button>
             <div class="tool-divider"></div>
-            <button class="tool-btn text-tool" class:active={isBold}   onclick={() => applyFormat('bold',   !isBold)}   aria-label="Bold"   aria-pressed={isBold}>
+            <button class="tool-btn text-tool" class:active={isBold}   onclick={() => applyFormatting('bold',   !isBold)}   aria-label="Bold"   aria-pressed={isBold}>
                 <span class="bold-label">B</span>
             </button>
-            <button class="tool-btn text-tool" class:active={isItalic} onclick={() => applyFormat('italic', !isItalic)} aria-label="Italic" aria-pressed={isItalic}>
+            <button class="tool-btn text-tool" class:active={isItalic} onclick={() => applyFormatting('italic', !isItalic)} aria-label="Italic" aria-pressed={isItalic}>
                 <span class="italic-label">I</span>
             </button>
             <div class="tool-divider"></div>

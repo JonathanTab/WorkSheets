@@ -79,6 +79,15 @@
         appSubtitle = "Collaborative Spreadsheets",
     } = $props();
 
+    // ---- Constants ----
+    const MOBILE_BREAKPOINT = 768;    // px — window width below which the layout switches to mobile
+    const RECENTS_LIMIT = 50;         // max number of recently-opened files shown
+    const MIN_SEARCH_LENGTH = 2;      // minimum query length before content search fires
+    const SEARCH_DEBOUNCE_MS = 400;   // ms to wait after typing before issuing a search
+    const CTX_MENU_MARGIN = 8;        // px gap between context menu and viewport edge
+    const CTX_W = 185;                // approximate context menu width for viewport clamping
+    const CTX_H = 270;                // approximate context menu height for viewport clamping
+
     // ---- State ----
     // Seed tab and folderId from the current route so back/forward works on first load
     let tab = $state(
@@ -118,7 +127,7 @@
     let deletedFiles = $state(registry.drive.listDeletedFiles?.() ?? []);
     let syncState = $state({ isSyncing: false, lastSync: null, error: null });
     let isMobile = $state(
-        typeof window !== "undefined" && window.innerWidth <= 768,
+        typeof window !== "undefined" && window.innerWidth <= MOBILE_BREAKPOINT,
     );
     /** @type {HTMLInputElement | null} */
     let searchInput = $state(null);
@@ -202,7 +211,7 @@
     // Recent files — update on every registry change/sync
     $effect(() => {
         function updateRecents() {
-            recentFiles = registry.drive.recentlyOpened(50);
+            recentFiles = registry.drive.recentlyOpened(RECENTS_LIMIT);
         }
         updateRecents();
         registry.on?.("change", updateRecents);
@@ -216,7 +225,7 @@
     // Mobile breakpoint — reactive to window resize
     $effect(() => {
         function onResize() {
-            isMobile = window.innerWidth <= 768;
+            isMobile = window.innerWidth <= MOBILE_BREAKPOINT;
         }
         window.addEventListener("resize", onResize);
         return () => window.removeEventListener("resize", onResize);
@@ -228,7 +237,7 @@
         const q = searchQuery.trim();
         contentSearchResults = [];
         if (_searchTimer) clearTimeout(_searchTimer);
-        if (!q || q.length < 2) {
+        if (!q || q.length < MIN_SEARCH_LENGTH) {
             isContentSearching = false;
             return;
         }
@@ -241,7 +250,7 @@
             } finally {
                 isContentSearching = false;
             }
-        }, 400);
+        }, SEARCH_DEBOUNCE_MS);
     });
 
     // ---- Folder tree for sidebar ----
@@ -859,10 +868,6 @@
     }
 
     // ---- Context menu ----
-    // Approximate context menu dimensions for viewport clamping
-    const CTX_W = 185,
-        CTX_H = 270;
-
     // Context menu state extended for different areas
     // contextMenu can be: { x, y, item, type: 'file'|'folder', area: 'item'|'content'|'sidebar'|'breadcrumb' }
     // Or for no menu in certain areas, we just prevent default
@@ -878,10 +883,10 @@
         }
         let x = e.clientX;
         let y = e.clientY;
-        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
-        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
-        x = Math.max(8, x);
-        y = Math.max(8, y);
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - CTX_MENU_MARGIN;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - CTX_MENU_MARGIN;
+        x = Math.max(CTX_MENU_MARGIN, x);
+        y = Math.max(CTX_MENU_MARGIN, y);
         contextMenu = { x, y, item, type, area: "item" };
     }
 
@@ -897,10 +902,10 @@
 
         let x = e.clientX;
         let y = e.clientY;
-        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
-        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
-        x = Math.max(8, x);
-        y = Math.max(8, y);
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - CTX_MENU_MARGIN;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - CTX_MENU_MARGIN;
+        x = Math.max(CTX_MENU_MARGIN, x);
+        y = Math.max(CTX_MENU_MARGIN, y);
         contextMenu = { x, y, type: "content", area: "content" };
     }
 
@@ -911,10 +916,10 @@
 
         let x = e.clientX;
         let y = e.clientY;
-        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
-        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
-        x = Math.max(8, x);
-        y = Math.max(8, y);
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - CTX_MENU_MARGIN;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - CTX_MENU_MARGIN;
+        x = Math.max(CTX_MENU_MARGIN, x);
+        y = Math.max(CTX_MENU_MARGIN, y);
         contextMenu = { x, y, type: navType, area: "sidebar" };
     }
 
@@ -925,10 +930,10 @@
 
         let x = e.clientX;
         let y = e.clientY;
-        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - 8;
-        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - 8;
-        x = Math.max(8, x);
-        y = Math.max(8, y);
+        if (x + CTX_W > window.innerWidth) x = window.innerWidth - CTX_W - CTX_MENU_MARGIN;
+        if (y + CTX_H > window.innerHeight) y = window.innerHeight - CTX_H - CTX_MENU_MARGIN;
+        x = Math.max(CTX_MENU_MARGIN, x);
+        y = Math.max(CTX_MENU_MARGIN, y);
         contextMenu = {
             x,
             y,

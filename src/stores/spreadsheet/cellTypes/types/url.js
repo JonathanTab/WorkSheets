@@ -3,6 +3,7 @@
  */
 export const urlType = {
     id: 'url',
+    renderType: 'text',
     formatValue(rawValue) {
         return String(rawValue);
     },

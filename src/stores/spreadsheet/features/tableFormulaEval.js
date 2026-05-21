@@ -330,32 +330,6 @@ export function buildTableFunctions(resolveTableByName) {
 const CROSS_ROW_PATTERN = /\b(PREV|NEXT|ROWVAL|WINDOW)\s*\(/i;
 const COL_REF_PATTERN   = /\{([^}]+)\}/g;
 
-// Pre-compiled regex patterns for row helpers and aggregate functions.
-// These were previously created with `new RegExp(...)` inside hot loops
-// (per-row × per-function × up to 20 passes), which is slow when a browser
-// extension intercepts RegExp construction. Using module-level literals avoids
-// repeated object creation and extension overhead entirely.
-const ROW_HELPER_RE = /** @type {Record<string, RegExp>} */ ({
-    WINDOW:    /\bWINDOW\s*\(/i,
-    ROWVAL:    /\bROWVAL\s*\(/i,
-    PREV:      /\bPREV\s*\(/i,
-    NEXT:      /\bNEXT\s*\(/i,
-});
-
-const AGGREGATE_RE = /** @type {Record<string, RegExp>} */ ({
-    RUNNINGIFS: /\bRUNNINGIFS\s*\(/i,
-    RUNNINGIF:  /\bRUNNINGIF\s*\(/i,
-    SUMIFS:     /\bSUMIFS\s*\(/i,
-    SUMIF:      /\bSUMIF\s*\(/i,
-    AVGIF:      /\bAVGIF\s*\(/i,
-    MINIF:      /\bMINIF\s*\(/i,
-    MAXIF:      /\bMAXIF\s*\(/i,
-    COUNTIF:    /\bCOUNTIF\s*\(/i,
-    AVG:        /\bAVG\s*\(/i,
-    MIN:        /\bMIN\s*\(/i,
-    MAX:        /\bMAX\s*\(/i,
-    SUM:        /\bSUM\s*\(/i,
-});
 
 // Module-level cache for evaluation plans.
 // Key: column fingerprint string (ids + formulas).
@@ -694,7 +668,6 @@ export class TableFormulaEvaluator {
     #evalFormula(formula, rowIndex, colId = null) {
         let expr = formula.trim();
         if (expr.startsWith('=')) expr = expr.slice(1).trimStart();
-        // Fast string guards before regex: includes() is a plain scan with no polyfill overhead.
         if (expr.includes('ROW')) {
             expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
             expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
@@ -705,11 +678,7 @@ export class TableFormulaEvaluator {
         if (expr.includes('{')) {
             expr = this.#substituteColRefs(expr, rowIndex);
         }
-        // Cross-row helpers only exist in columns flagged at plan time — skip the loop entirely for others.
-        if (!colId || this.#crossRowCols.has(colId)) {
-            expr = this.#substituteRowHelpers(expr, rowIndex);
-        }
-        expr = this.#substituteAggregateFuncs(expr, rowIndex);
+        expr = this.#substituteTableFunctions(expr, rowIndex, false);
         return this.#evalExpression(expr);
     }
 
@@ -717,19 +686,15 @@ export class TableFormulaEvaluator {
     #evalFormulaWithTempRow(formula, rowIndex, tempRow) {
         let expr = formula.trim();
         if (expr.startsWith('=')) expr = expr.slice(1).trimStart();
-        // ROW for a new row is `rows.length` (0-based)
         expr = expr.replace(/\bROW1\s*(?:\(\s*\))?/g, String(rowIndex + 1));
         expr = expr.replace(/\bROW\s*(?:\(\s*\))?(?!\s*\w)/g, String(rowIndex));
         expr = expr.replace(/\bCOUNT\b(?!IF)/gi, String(this.getRowCount() + 1));
-        // Substitute col refs from the temp row
         expr = expr.replace(/\{([^}]+)\}/g, (_m, rawRef) => {
             const colId = this.resolveColId(rawRef.trim());
             const val = tempRow[colId];
             return this.#valToExpr(val);
         });
-        // Cross-row helpers in new-row context: PREV reads last existing row
-        expr = this.#substituteRowHelpersForNewRow(expr);
-        expr = this.#substituteAggregateFuncs(expr, rowIndex);
+        expr = this.#substituteTableFunctions(expr, rowIndex, true);
         return this.#evalExpression(expr);
     }
 
@@ -750,60 +715,76 @@ export class TableFormulaEvaluator {
         return !isNaN(num) ? String(num) : JSON.stringify(String(val));
     }
 
-    // ─── Row reference helpers ────────────────────────────────────────────────
+    // ─── Single-pass table function substitution ───────────────────────────────
 
-    #substituteRowHelpers(expr, rowIndex) {
+    /**
+     * Replace all row-helper (PREV/NEXT/ROWVAL/WINDOW) and column-aggregate
+     * (SUM/AVG/MIN/MAX/RUNNINGIF/SUMIF/…) calls in a single O(n) left-to-right
+     * scan. Nested calls are handled via recursion on each function's arg string.
+     *
+     * Replaces the former pair of 20-pass regex loops, which were O(n²) in the
+     * number of function calls.
+     *
+     * @param {string}  expr      - Expression to process (no leading '=')
+     * @param {number}  rowIndex  - Current row index (0-based)
+     * @param {boolean} isNewRow  - True when evaluating default formulas for a new row
+     */
+    #substituteTableFunctions(expr, rowIndex, isNewRow) {
+        // Quick exit: none of the substitutable keywords present
         if (!expr.includes('PREV') && !expr.includes('NEXT') &&
-            !expr.includes('ROWVAL') && !expr.includes('WINDOW')) return expr;
-        const ROW_HELPERS = ['WINDOW', 'ROWVAL', 'PREV', 'NEXT'];
-        for (let pass = 0; pass < 20; pass++) {
-            let replaced = false;
-            for (const fn of ROW_HELPERS) {
-                const m = ROW_HELPER_RE[fn].exec(expr);
-                if (!m) continue;
-                replaced = true;
-                const openIdx  = m.index + m[0].length - 1;
-                const closeIdx = findCloseParen(expr, openIdx);
-                if (closeIdx === -1) continue;
-                const args = splitArgs(expr.slice(openIdx + 1, closeIdx));
-                const result = this.#callRowHelper(fn.toUpperCase(), args, rowIndex);
-                expr = expr.slice(0, m.index) + resultToExpr(result) + expr.slice(closeIdx + 1);
-                break;
-            }
-            if (!replaced) break;
-        }
-        return expr;
-    }
+            !expr.includes('ROWVAL') && !expr.includes('WINDOW') &&
+            !expr.includes('SUM') && !expr.includes('AVG') &&
+            !expr.includes('MIN') && !expr.includes('MAX') &&
+            !expr.includes('COUNT') && !expr.includes('RUNNING')) return expr;
 
-    #substituteRowHelpersForNewRow(expr) {
-        // For new-row context, PREV reads the last existing row; NEXT returns null.
-        const lastIdx = this.#rows.length - 1;
-        const ROW_HELPERS = ['WINDOW', 'ROWVAL', 'PREV', 'NEXT'];
-        for (let pass = 0; pass < 20; pass++) {
-            let replaced = false;
-            for (const fn of ROW_HELPERS) {
-                const m = ROW_HELPER_RE[fn].exec(expr);
-                if (!m) continue;
-                replaced = true;
-                const openIdx  = m.index + m[0].length - 1;
-                const closeIdx = findCloseParen(expr, openIdx);
-                if (closeIdx === -1) continue;
-                const args = splitArgs(expr.slice(openIdx + 1, closeIdx));
-                let result;
-                if (fn.toUpperCase() === 'PREV') {
-                    result = this.#callRowHelper('PREV', args, this.#rows.length);
-                } else if (fn.toUpperCase() === 'NEXT') {
-                    const def = args[1] !== undefined ? this.#evalArg(args[1]) : null;
-                    result = def;
+        // New RegExp per call so recursive calls don't share `lastIndex` state.
+        const RE = new RegExp(
+            '\\b(WINDOW|ROWVAL|PREV|NEXT|RUNNINGIFS|RUNNINGIF|SUMIFS|SUMIF|AVGIF|MINIF|MAXIF|COUNTIF|AVG|MIN|MAX|SUM)\\s*\\(',
+            'gi'
+        );
+
+        let result = '';
+        let lastEnd = 0;
+        let m;
+
+        while ((m = RE.exec(expr)) !== null) {
+            const fnName  = m[1].toUpperCase();
+            const openIdx = m.index + m[0].length - 1; // index of '('
+            const closeIdx = findCloseParen(expr, openIdx);
+            if (closeIdx === -1) continue;
+
+            // Recursively substitute any nested table functions inside the args
+            const innerRaw = expr.slice(openIdx + 1, closeIdx);
+            const innerSub = this.#substituteTableFunctions(innerRaw, rowIndex, isNewRow);
+            const rawArgs  = splitArgs(innerSub);
+
+            let callResult;
+            if (fnName === 'PREV' || fnName === 'NEXT' || fnName === 'ROWVAL' || fnName === 'WINDOW') {
+                if (isNewRow) {
+                    // New-row context: PREV reads last existing row, NEXT returns default/null
+                    if (fnName === 'PREV') {
+                        const colId = this.resolveColId(String(this.#evalArg(rawArgs[0] ?? '') ?? ''));
+                        callResult = this.#rows.length > 0
+                            ? this.#getComputed(this.#rows.length - 1, colId) ?? (rawArgs[1] !== undefined ? this.#evalArg(rawArgs[1]) : 0)
+                            : (rawArgs[1] !== undefined ? this.#evalArg(rawArgs[1]) : 0);
+                    } else if (fnName === 'NEXT') {
+                        callResult = rawArgs[1] !== undefined ? this.#evalArg(rawArgs[1]) : null;
+                    } else {
+                        callResult = this.#callRowHelper(fnName, rawArgs, this.#rows.length);
+                    }
                 } else {
-                    result = this.#callRowHelper(fn.toUpperCase(), args, this.#rows.length);
+                    callResult = this.#callRowHelper(fnName, rawArgs, rowIndex);
                 }
-                expr = expr.slice(0, m.index) + resultToExpr(result) + expr.slice(closeIdx + 1);
-                break;
+            } else {
+                callResult = this.#callAggregateFunc(fnName, rawArgs, rowIndex);
             }
-            if (!replaced) break;
+
+            result += expr.slice(lastEnd, m.index) + resultToExpr(callResult);
+            lastEnd = closeIdx + 1;
+            RE.lastIndex = lastEnd;
         }
-        return expr;
+
+        return result + expr.slice(lastEnd);
     }
 
     #callRowHelper(fn, rawArgs, rowIndex) {
@@ -842,32 +823,6 @@ export class TableFormulaEvaluator {
             }
             default: return null;
         }
-    }
-
-    // ─── Aggregate function substitution ─────────────────────────────────────
-
-    #substituteAggregateFuncs(expr, rowIndex) {
-        if (!expr.includes('SUM') && !expr.includes('AVG') && !expr.includes('MIN') &&
-            !expr.includes('MAX') && !expr.includes('COUNT') && !expr.includes('RUNNING')) return expr;
-        const KNOWN = ['RUNNINGIFS', 'RUNNINGIF', 'SUMIFS', 'SUMIF',
-                       'AVGIF', 'MINIF', 'MAXIF', 'COUNTIF',
-                       'AVG', 'MIN', 'MAX', 'SUM'];
-        for (let pass = 0; pass < 20; pass++) {
-            let replaced = false;
-            for (const fn of KNOWN) {
-                const m = AGGREGATE_RE[fn].exec(expr);
-                if (!m) continue;
-                replaced = true;
-                const openIdx  = m.index + m[0].length - 1;
-                const closeIdx = findCloseParen(expr, openIdx);
-                if (closeIdx === -1) continue;
-                const result = this.#callAggregateFunc(fn.toUpperCase(), splitArgs(expr.slice(openIdx + 1, closeIdx)), rowIndex);
-                expr = expr.slice(0, m.index) + resultToExpr(result) + expr.slice(closeIdx + 1);
-                break;
-            }
-            if (!replaced) break;
-        }
-        return expr;
     }
 
     #callAggregateFunc(fn, rawArgs, rowIndex) {

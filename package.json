@@ -14,12 +14,18 @@
     "deploy:frontend": "bash scripts/deploy.sh frontend",
     "deploy:servers": "bash scripts/deploy.sh servers",
     "deploy:servers:full": "bash scripts/deploy.sh servers:full",
-    "api": "node spreadsheet-api/server.js"
+    "api": "node spreadsheet-api/server.js",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@vite-pwa/assets-generator": "^0.2.6",
     "autoprefixer": "^10.4.24",
+    "eslint": "^10.4.0",
+    "eslint-plugin-svelte": "^3.17.1",
+    "globals": "^17.6.0",
     "postcss": "^8.5.6",
     "svelte": "^5.17.5",
     "tailwindcss": "^4.1.18",

@@ -44,8 +44,12 @@ export const NodeType = {
 
 /**
  * Tokenizer class
+ *
+ * Each token in the returned array carries `start` and `end` (exclusive) character
+ * positions in the original input string. These positions are used by formulaParser.js
+ * for formula-bar highlighting and ref-picking without duplicating lexical rules.
  */
-class Tokenizer {
+export class Tokenizer {
     constructor(input) {
         this.input = input;
         this.pos = 0;
@@ -111,6 +115,17 @@ class Tokenizer {
             this.advance();
         }
 
+        // Allow dots inside function names only when followed by a letter
+        // e.g. WORKDAY.INTL, NETWORKDAYS.INTL
+        while (this.currentChar === '.' && this.peek() && /[a-zA-Z_]/.test(this.peek())) {
+            result += this.currentChar; // consume the dot
+            this.advance();
+            while (this.currentChar && /[a-zA-Z0-9_$]/.test(this.currentChar)) {
+                result += this.currentChar;
+                this.advance();
+            }
+        }
+
         // Keyword comparison operators (case-insensitive)
         const keyword = result.toLowerCase();
         if (keyword === 'contains') {
@@ -141,20 +156,21 @@ class Tokenizer {
             if (!this.currentChar) break;
 
             const char = this.currentChar;
+            const tokenStart = this.pos;
 
             if (/\d/.test(char) || (char === '.' && /\d/.test(this.peek()))) {
-                tokens.push(this.readNumber());
+                const tok = this.readNumber();
+                tokens.push({ ...tok, start: tokenStart, end: this.pos });
             } else if (char === '"') {
-                tokens.push(this.readString(char));
+                const tok = this.readString(char);
+                tokens.push({ ...tok, start: tokenStart, end: this.pos });
             } else if (char === "'") {
                 // Single-quoted string OR quoted sheet name ('Sheet Name'!A1).
-                // Read the content, then decide by checking for a trailing '!'.
                 this.advance(); // consume opening '
                 let nameValue = '';
                 while (this.currentChar) {
                     if (this.currentChar === "'") {
                         if (this.peek() === "'") {
-                            // '' escape sequence inside quoted sheet name
                             nameValue += "'";
                             this.advance();
                             this.advance();
@@ -169,12 +185,13 @@ class Tokenizer {
                 }
                 if (this.currentChar === '!') {
                     this.advance(); // consume !
-                    tokens.push({ type: TokenType.SHEET_REF, value: nameValue });
+                    tokens.push({ type: TokenType.SHEET_REF, value: nameValue, start: tokenStart, end: this.pos });
                 } else {
-                    tokens.push({ type: TokenType.STRING, value: nameValue });
+                    tokens.push({ type: TokenType.STRING, value: nameValue, start: tokenStart, end: this.pos });
                 }
             } else if (/[a-zA-Z_]/.test(char)) {
-                tokens.push(this.readIdentifier());
+                const tok = this.readIdentifier();
+                tokens.push({ ...tok, start: tokenStart, end: this.pos });
             } else if (char === '$') {
                 // Absolute reference OR $rep variable
                 this.advance();
@@ -183,73 +200,68 @@ class Tokenizer {
                     result += this.currentChar;
                     this.advance();
                 }
-                // $rep is the repeater index variable
                 if (result.toLowerCase() === '$rep') {
-                    tokens.push({ type: TokenType.REP_VAR, value: '$rep' });
+                    tokens.push({ type: TokenType.REP_VAR, value: '$rep', start: tokenStart, end: this.pos });
                 } else if (this.currentChar === '!') {
-                    // Sheet reference like $Sheet1!A1
                     this.advance();
-                    tokens.push({ type: TokenType.SHEET_REF, value: result });
+                    tokens.push({ type: TokenType.SHEET_REF, value: result, start: tokenStart, end: this.pos });
                 } else {
-                    tokens.push({ type: TokenType.CELL_REF, value: result.toUpperCase() });
+                    tokens.push({ type: TokenType.CELL_REF, value: result.toUpperCase(), start: tokenStart, end: this.pos });
                 }
             } else if (char === '+') {
-                tokens.push({ type: TokenType.OPERATOR, value: '+' });
+                tokens.push({ type: TokenType.OPERATOR, value: '+', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '-') {
-                tokens.push({ type: TokenType.OPERATOR, value: '-' });
+                tokens.push({ type: TokenType.OPERATOR, value: '-', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '*') {
-                tokens.push({ type: TokenType.OPERATOR, value: '*' });
+                tokens.push({ type: TokenType.OPERATOR, value: '*', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '/') {
-                tokens.push({ type: TokenType.OPERATOR, value: '/' });
+                tokens.push({ type: TokenType.OPERATOR, value: '/', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '^') {
-                tokens.push({ type: TokenType.OPERATOR, value: '^' });
+                tokens.push({ type: TokenType.OPERATOR, value: '^', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '%') {
-                tokens.push({ type: TokenType.OPERATOR, value: '%' });
+                tokens.push({ type: TokenType.OPERATOR, value: '%', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '&') {
-                tokens.push({ type: TokenType.OPERATOR, value: '&' });
+                tokens.push({ type: TokenType.OPERATOR, value: '&', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '=') {
-                tokens.push({ type: TokenType.OPERATOR, value: '=' });
+                tokens.push({ type: TokenType.OPERATOR, value: '=', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === '<') {
                 if (this.peek() === '>') {
-                    tokens.push({ type: TokenType.OPERATOR, value: '<>' });
-                    this.advance();
-                    this.advance();
+                    tokens.push({ type: TokenType.OPERATOR, value: '<>', start: tokenStart, end: this.pos + 2 });
+                    this.advance(); this.advance();
                 } else if (this.peek() === '=') {
-                    tokens.push({ type: TokenType.OPERATOR, value: '<=' });
-                    this.advance();
-                    this.advance();
+                    tokens.push({ type: TokenType.OPERATOR, value: '<=', start: tokenStart, end: this.pos + 2 });
+                    this.advance(); this.advance();
                 } else {
-                    tokens.push({ type: TokenType.OPERATOR, value: '<' });
+                    tokens.push({ type: TokenType.OPERATOR, value: '<', start: tokenStart, end: this.pos + 1 });
                     this.advance();
                 }
             } else if (char === '>') {
                 if (this.peek() === '=') {
-                    tokens.push({ type: TokenType.OPERATOR, value: '>=' });
-                    this.advance();
-                    this.advance();
+                    tokens.push({ type: TokenType.OPERATOR, value: '>=', start: tokenStart, end: this.pos + 2 });
+                    this.advance(); this.advance();
                 } else {
-                    tokens.push({ type: TokenType.OPERATOR, value: '>' });
+                    tokens.push({ type: TokenType.OPERATOR, value: '>', start: tokenStart, end: this.pos + 1 });
                     this.advance();
                 }
             } else if (char === '(') {
-                tokens.push({ type: TokenType.LPAREN, value: '(' });
+                tokens.push({ type: TokenType.LPAREN, value: '(', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === ')') {
-                tokens.push({ type: TokenType.RPAREN, value: ')' });
+                tokens.push({ type: TokenType.RPAREN, value: ')', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === ',') {
-                tokens.push({ type: TokenType.COMMA, value: ',' });
+                tokens.push({ type: TokenType.COMMA, value: ',', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else if (char === ':') {
-                tokens.push({ type: TokenType.COLON, value: ':' });
+                tokens.push({ type: TokenType.COLON, value: ':', start: tokenStart, end: this.pos + 1 });
                 this.advance();
             } else {
                 throw new Error(`Unexpected character: ${char}`);
@@ -580,9 +592,12 @@ export function parseFormula(formula) {
 }
 
 /**
- * Extract all cell references from an AST
+ * Extract all cell references and ranges from an AST.
+ * Ranges are returned as descriptors rather than enumerating every cell,
+ * so SUM(A1:A1000) produces one range entry rather than 1000 cell entries.
+ *
  * @param {Object} ast - The AST
- * @returns {Array<{row: number, col: number}>} - Array of cell references
+ * @returns {Array<{row: number, col: number} | {startRow: number, endRow: number, startCol: number, endCol: number}>}
  */
 export function extractCellRefs(ast) {
     const refs = [];
@@ -596,12 +611,12 @@ export function extractCellRefs(ast) {
                 break;
 
             case NodeType.RANGE:
-                // Add all cells in the range
-                for (let r = node.start.row; r <= node.end.row; r++) {
-                    for (let c = node.start.col; c <= node.end.col; c++) {
-                        refs.push({ row: r, col: c });
-                    }
-                }
+                refs.push({
+                    startRow: Math.min(node.start.row, node.end.row),
+                    endRow:   Math.max(node.start.row, node.end.row),
+                    startCol: Math.min(node.start.col, node.end.col),
+                    endCol:   Math.max(node.start.col, node.end.col),
+                });
                 break;
 
             case NodeType.BINARY_OP:

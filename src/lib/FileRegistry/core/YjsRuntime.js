@@ -1,9 +1,12 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
+import { log } from '../../../util/log.js';
 
 // Message type for the server's file-meta sideband (matches server.js)
 const MESSAGE_FILE_META = 2;
+// Message type the server sends when a room's roomId has been rotated (snapshot restore).
+const MESSAGE_ROOM_ROTATED = 3;
 
 // Timeout for IndexedDB persistence sync (in milliseconds)
 const PERSISTENCE_TIMEOUT = 5000;
@@ -40,6 +43,12 @@ export class YjsRuntime {
         /** Called whenever a local (non-remote) update arrives on any active doc. */
         this.onDocUpdate = onDocUpdate ?? null;
 
+        /**
+         * Called when the server notifies us that a doc's room has been rotated
+         * (snapshot restore). Signature: (docId: string, newRoomId: string) => void.
+         */
+        this.onRoomRotated = options.onRoomRotated ?? null;
+
         /** @type {() => string|null} */
         this.getApiKey = options.getApiKey ?? null;
         /** @type {() => {username: string, color: string}|null} */
@@ -50,8 +59,14 @@ export class YjsRuntime {
         /** Tracks WS instances we've already attached a fileMeta listener to (avoid duplicates on same instance). */
         this._patchedWs = new WeakSet();
 
-        // Track offline state
+        // Track offline state (based on navigator.onLine — used only for UI labelling)
         this.isOffline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
+
+        // Per-doc WS liveness: true when the provider is connected AND has completed
+        // initial sync. More reliable than navigator.onLine for deciding whether edits
+        // need to be queued for background flushing.
+        /** @type {Map<string, boolean>} */
+        this._wsLive = new Map();
 
         // Set up offline/online listeners
         this._setupNetworkListeners();
@@ -64,13 +79,13 @@ export class YjsRuntime {
         if (typeof window === 'undefined') return;
 
         this._handleOnline = () => {
-            console.log('[YjsRuntime] Network connection restored');
+            log.debug('[YjsRuntime] Network connection restored');
             this.isOffline = false;
             this._reconnectAll();
         };
 
         this._handleOffline = () => {
-            console.log('[YjsRuntime] Network connection lost');
+            log.debug('[YjsRuntime] Network connection lost');
             this.isOffline = true;
             this._disconnectAll();
         };
@@ -84,10 +99,10 @@ export class YjsRuntime {
      * This prevents constant reconnection attempts.
      */
     _disconnectAll() {
-        console.log('[YjsRuntime] Disconnecting all WebSocket providers due to offline state');
+        log.debug('[YjsRuntime] Disconnecting all WebSocket providers due to offline state');
         for (const [docId, active] of this.activeDocs) {
             if (active.provider && active.provider.wsconnected) {
-                console.log(`[YjsRuntime] Disconnecting WebSocket for ${docId}`);
+                log.debug(`[YjsRuntime] Disconnecting WebSocket for ${docId}`);
                 active.provider.disconnect();
             }
         }
@@ -97,10 +112,10 @@ export class YjsRuntime {
      * Reconnect all WebSocket providers when coming back online.
      */
     _reconnectAll() {
-        console.log('[YjsRuntime] Reconnecting all WebSocket providers due to online state');
+        log.debug('[YjsRuntime] Reconnecting all WebSocket providers due to online state');
         for (const [docId, active] of this.activeDocs) {
             if (active.provider && !active.provider.wsconnected) {
-                console.log(`[YjsRuntime] Reconnecting WebSocket for ${docId}`);
+                log.debug(`[YjsRuntime] Reconnecting WebSocket for ${docId}`);
                 active.provider.connect();
             }
         }
@@ -115,29 +130,31 @@ export class YjsRuntime {
      *
      * @param {string} docId - The logical document ID.
      * @param {string} roomId - The physical room ID on the Yjs server.
+     * @param {string|null} [appType] - App type ('sheets'|'docs'|'svg') sent to the server
+     *   so snapshot diffs are correctly attributed even on fresh rooms.
      * @returns {Promise<import('yjs').Doc>}
      */
-    async load(docId, roomId) {
+    async load(docId, roomId, appType = null) {
         // Check if already loaded
         if (this.activeDocs.has(docId)) {
             const active = this.activeDocs.get(docId);
             // If roomId is the same, return existing. If different, we need to switch (shouldn't happen via loadDoc)
             if (active.provider.roomname === roomId) {
-                console.log(`[YjsRuntime] Document ${docId} already loaded, reusing`);
+                log.debug(`[YjsRuntime] Document ${docId} already loaded, reusing`);
                 return active.ydoc;
             }
-            console.log(`[YjsRuntime] Room ID changed for ${docId}, unloading old`);
+            log.debug(`[YjsRuntime] Room ID changed for ${docId}, unloading old`);
             this.unload(docId);
         }
 
         // Check if load is already in progress - return existing promise to deduplicate
         if (this.loadingDocs.has(docId)) {
-            console.log(`[YjsRuntime] Document ${docId} load already in progress, waiting...`);
+            log.debug(`[YjsRuntime] Document ${docId} load already in progress, waiting...`);
             return this.loadingDocs.get(docId);
         }
 
         // Start a new load
-        const loadPromise = this._doLoad(docId, roomId);
+        const loadPromise = this._doLoad(docId, roomId, appType);
         this.loadingDocs.set(docId, loadPromise);
 
         try {
@@ -149,26 +166,30 @@ export class YjsRuntime {
 
     /**
      * Internal load implementation
+     * @param {string} docId
+     * @param {string} roomId
+     * @param {string|null} appType
      */
-    async _doLoad(docId, roomId) {
-        console.log(`[YjsRuntime] Loading document ${docId} (room: ${roomId})...`);
+    async _doLoad(docId, roomId, appType = null) {
+        log.debug(`[YjsRuntime] Loading document ${docId} (room: ${roomId})...`);
         const startTime = performance.now();
 
         const ydoc = new Y.Doc();
 
         // 1. Start IndexedDB persistence
-        console.log(`[YjsRuntime] Initializing IndexedDB persistence for ${roomId}...`);
+        log.debug(`[YjsRuntime] Initializing IndexedDB persistence for ${roomId}...`);
         const persistence = new IndexeddbPersistence(roomId, ydoc);
 
         // 2. Start WebSocket in parallel with IndexedDB — on slow devices (e.g. mobile Safari)
         //    IndexedDB can take seconds to sync. Starting the WebSocket immediately means
         //    we can resolve as soon as either source delivers data.
-        console.log(`[YjsRuntime] Connecting WebSocket for ${roomId}...`);
+        log.debug(`[YjsRuntime] Connecting WebSocket for ${roomId}...`);
         /** @type {Record<string, string>} */
         const wsParams = {};
         const apiKey = this.getApiKey?.();
         if (apiKey) wsParams['auth'] = apiKey;
         wsParams['fileId'] = docId; // server uses this to group snapshots by file
+        if (appType) wsParams['appType'] = appType;
 
         const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, {
             params: wsParams,
@@ -185,7 +206,39 @@ export class YjsRuntime {
 
         this.activeDocs.set(docId, { ydoc, provider, persistence });
 
-        // Intercept file-meta sideband messages (type 2) from the server.
+        // Track WS liveness (connected + synced) so callsites can distinguish a
+        // dead connection from a genuine offline state, even when navigator.onLine lies.
+        this._wsLive.set(docId, false);
+        provider.on('status', ({ status }) => {
+            if (status !== 'connected') this._wsLive.set(docId, false);
+        });
+        provider.on('sync', (synced) => {
+            this._wsLive.set(docId, synced && provider.wsconnected);
+        });
+
+        // Watchdog: if no message has arrived for >45 s while the socket appears
+        // connected, force a reconnect. Recovers from half-open sockets (NAT timeout,
+        // laptop sleep/resume, proxy half-close) that the server-side 30 s ping misses
+        // because the server closes its side — the browser side may stay OPEN.
+        const WATCHDOG_INTERVAL_MS = 20_000;
+        const WATCHDOG_STALE_MS = 45_000;
+        const watchdogInterval = setInterval(() => {
+            const active = this.activeDocs.get(docId);
+            if (!active) { clearInterval(watchdogInterval); return; }
+            if (!provider.wsconnected) return;
+            const lastMsg = provider.wsLastMessageReceived;
+            if (lastMsg != null && Date.now() - lastMsg > WATCHDOG_STALE_MS) {
+                console.warn(`[YjsRuntime] Watchdog: stale connection for ${docId}, forcing reconnect`);
+                this._wsLive.set(docId, false);
+                provider.disconnect();
+                provider.connect();
+            }
+        }, WATCHDOG_INTERVAL_MS);
+        // Store the interval handle so unload() can clear it.
+        const existingActive = this.activeDocs.get(docId);
+        if (existingActive) existingActive._watchdog = watchdogInterval;
+
+        // Intercept file-meta sideband messages (type 2/3) from the server.
         this._setupFileMetaListener(docId, provider);
 
         // Fire onDocUpdate for local (non-remote) changes so the registry can update
@@ -203,7 +256,7 @@ export class YjsRuntime {
         // 3. Wait for IndexedDB OR WebSocket to deliver data, whichever is first.
         await new Promise((resolve) => {
             if (persistence.synced) {
-                console.log(`[YjsRuntime] Persistence already synced for ${roomId}`);
+                log.debug(`[YjsRuntime] Persistence already synced for ${roomId}`);
                 resolve();
                 return;
             }
@@ -222,14 +275,14 @@ export class YjsRuntime {
             }, PERSISTENCE_TIMEOUT);
 
             persistence.once('synced', () => {
-                console.log(`[YjsRuntime] Persistence synced for ${roomId}`);
+                log.debug(`[YjsRuntime] Persistence synced for ${roomId}`);
                 done();
             });
 
             // Resolve early if WebSocket delivers server state first (speeds up slow-IndexedDB devices)
             if (navigator.onLine) {
                 provider.once('sync', () => {
-                    console.log(`[YjsRuntime] WebSocket synced before persistence for ${roomId}`);
+                    log.debug(`[YjsRuntime] WebSocket synced before persistence for ${roomId}`);
                     done();
                 });
             }
@@ -262,7 +315,7 @@ export class YjsRuntime {
             });
         }
 
-        console.log(`[YjsRuntime] Document ${docId} loaded in ${Math.round(performance.now() - startTime)}ms`);
+        log.debug(`[YjsRuntime] Document ${docId} loaded in ${Math.round(performance.now() - startTime)}ms`);
 
         return ydoc;
     }
@@ -316,11 +369,13 @@ export class YjsRuntime {
     unload(docId) {
         const active = this.activeDocs.get(docId);
         if (active) {
+            if (active._watchdog != null) clearInterval(active._watchdog);
             active.provider.disconnect();
             active.provider.destroy();
             active.persistence.destroy();
             active.ydoc.destroy();
             this.activeDocs.delete(docId);
+            this._wsLive.delete(docId);
         }
     }
 
@@ -360,7 +415,7 @@ export class YjsRuntime {
                         if ((b & 0x80) === 0) break;
                         shift += 7;
                     }
-                    if (type !== MESSAGE_FILE_META) return;
+                    if (type !== MESSAGE_FILE_META && type !== MESSAGE_ROOM_ROTATED) return;
                     // Read varstring: varuint length, then UTF-8 bytes.
                     let len = 0; shift = 0;
                     while (pos < buf.length) {
@@ -369,8 +424,13 @@ export class YjsRuntime {
                         if ((b & 0x80) === 0) break;
                         shift += 7;
                     }
-                    const meta = JSON.parse(new TextDecoder().decode(buf.subarray(pos, pos + len)));
-                    this._fileMetaHandlers.get(docId)?.(meta);
+                    const payload = JSON.parse(new TextDecoder().decode(buf.subarray(pos, pos + len)));
+                    if (type === MESSAGE_FILE_META) {
+                        this._fileMetaHandlers.get(docId)?.(payload);
+                    } else if (type === MESSAGE_ROOM_ROTATED && this.onRoomRotated) {
+                        const { newRoomId } = payload;
+                        if (newRoomId) this.onRoomRotated(docId, newRoomId);
+                    }
                 } catch { /* ignore malformed or non-fileMeta messages */ }
             });
         };
@@ -398,6 +458,29 @@ export class YjsRuntime {
         for (const docId of this.activeDocs.keys()) {
             this.unload(docId);
         }
+    }
+
+    /**
+     * Returns true if the WebSocket for docId is currently connected AND has
+     * completed initial sync. More reliable than navigator.onLine for deciding
+     * whether local edits need offline-queue treatment.
+     * @param {string} docId
+     * @returns {boolean}
+     */
+    isLive(docId) {
+        return this._wsLive.get(docId) ?? false;
+    }
+
+    /**
+     * Returns true if at least one active doc has a live WebSocket connection.
+     * Used by the sync coordinator as a more reliable alternative to navigator.onLine.
+     * @returns {boolean}
+     */
+    isAnyLive() {
+        for (const live of this._wsLive.values()) {
+            if (live) return true;
+        }
+        return false;
     }
 
     /**
@@ -467,7 +550,7 @@ export class YjsRuntime {
      * @returns {Promise<import('yjs').Doc>}
      */
     async initialize(docId, roomId, initializer) {
-        console.log(`[YjsRuntime] Initializing document ${docId} (room: ${roomId})...`);
+        log.debug(`[YjsRuntime] Initializing document ${docId} (room: ${roomId})...`);
 
         // Load the document first
         const ydoc = await this.load(docId, roomId);
@@ -495,13 +578,13 @@ export class YjsRuntime {
 
                 active.persistence.once('synced', () => {
                     clearTimeout(timeout);
-                    console.log(`[YjsRuntime] Initialization synced for ${roomId}`);
+                    log.debug(`[YjsRuntime] Initialization synced for ${roomId}`);
                     resolve();
                 });
             });
         }
 
-        console.log(`[YjsRuntime] Document ${docId} initialized`);
+        log.debug(`[YjsRuntime] Document ${docId} initialized`);
         return ydoc;
     }
 }

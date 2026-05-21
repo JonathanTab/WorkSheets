@@ -22,7 +22,16 @@ import {
     DEFAULT_ROW_COUNT,
     DEFAULT_COL_COUNT
 } from './constants.js';
+import { buildCellRenderObject } from './cells/CellShape.js';
 import { MergeEngine } from './features/MergeEngine.svelte.js';
+import {
+    adjustByOffset,
+    adjustForRowInsert,
+    adjustForColInsert,
+    adjustForRowDelete,
+    adjustForColDelete,
+} from '../../formulas/refs.js';
+import { YJS_ORIGIN } from './yjsOrigins.js';
 
 // Frozen empty object for non-existent cells (prevents allocation churn)
 const EMPTY_CELL = Object.freeze({ v: undefined, exists: false });
@@ -135,6 +144,10 @@ export class SheetStore {
         this.mergeEngine = new MergeEngine(sheet, ydoc);
     }
 
+    // Convenience wrapper: every UI-originated mutation gets the UI origin so the
+    // UndoManager records it and migrations/remote changes are excluded from undo.
+    #transact(fn) { this.#ydoc.transact(fn, YJS_ORIGIN.UI); }
+
     // --- Initialization & Sync ---
 
     #syncSheetProps() {
@@ -192,29 +205,9 @@ export class SheetStore {
 
     /** Merge cellValues + cellStyles into a single plain render object for key "row,col". */
     #processCellData(key) {
-        const val = this.#cellValuesKV?.get(key);
-        const sty = this.#cellStylesKV?.get(key);
-        return {
-            v:               val?.v,
-            t:               val?.t,
-            tfr:             val?.tfr,
-            ct:              sty?.ct,
-            protected:       sty?.protected,
-            fontFamily:      sty?.fontFamily,
-            fontSize:        sty?.fontSize,
-            bold:            sty?.bold,
-            italic:          sty?.italic,
-            underline:       sty?.underline,
-            strikethrough:   sty?.strikethrough,
-            color:           sty?.color,
-            backgroundColor: sty?.backgroundColor,
-            border:          sty?.border,
-            horizontalAlign: sty?.horizontalAlign,
-            verticalAlign:   sty?.verticalAlign,
-            wrapText:        sty?.wrapText,
-            numberFormat:    sty?.numberFormat,
-            exists: true,
-        };
+        const val = this.#cellValuesKV?.get(key) ?? null;
+        const sty = this.#cellStylesKV?.get(key) ?? null;
+        return buildCellRenderObject(val, sty);
     }
 
     /** Return merged plain data object for a cell key, or null if the cell does not exist. */
@@ -429,7 +422,7 @@ export class SheetStore {
      */
     addFloatingImage(opts) {
         const id = crypto.randomUUID ? crypto.randomUUID() : `fi_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             let ymap = this.#sheet.get('floatingImages');
             if (!ymap) {
                 ymap = new Y.Map();
@@ -459,7 +452,7 @@ export class SheetStore {
         if (!ymap) return;
         const img = ymap.get(id);
         if (!img || !(img instanceof Y.Map)) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (const [k, v] of Object.entries(changes)) {
                 img.set(k, v);
             }
@@ -473,7 +466,7 @@ export class SheetStore {
     removeFloatingImage(id) {
         const ymap = this.#sheet.get('floatingImages');
         if (!ymap) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             ymap.delete(id);
         });
     }
@@ -523,7 +516,7 @@ export class SheetStore {
      */
     setCellValue(row, col, value) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (value === '' || value === null || value === undefined) {
                 this.#cellValuesKV?.delete(key);
             } else {
@@ -545,7 +538,7 @@ export class SheetStore {
      */
     setCellValueWithRuns(row, col, value, tfr) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (value === '' || value === null || value === undefined) {
                 this.#cellValuesKV?.delete(key);
                 return;
@@ -566,7 +559,7 @@ export class SheetStore {
      */
     setCellFormula(row, col, formula) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (!formula || formula === '') {
                 this.#cellValuesKV?.delete(key);
                 return;
@@ -585,7 +578,7 @@ export class SheetStore {
      */
     setCellProperties(row, col, props) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const valUpdates = {};
             const styUpdates = {};
             for (const [k, v] of Object.entries(props)) {
@@ -648,7 +641,7 @@ export class SheetStore {
      */
     clearCell(row, col) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             this.#deleteCellData(key);
         });
     }
@@ -709,7 +702,7 @@ export class SheetStore {
      */
     setRowFormatting(rowIndex, props) {
         if (!this.#rowMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#rowMetaKV.get(String(rowIndex)) ?? {};
             const upd = { ...cur };
             for (const [k, v] of Object.entries(props)) {
@@ -748,7 +741,7 @@ export class SheetStore {
      */
     setColFormatting(colIndex, props) {
         if (!this.#colMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#colMetaKV.get(String(colIndex)) ?? {};
             const upd = { ...cur };
             for (const [k, v] of Object.entries(props)) {
@@ -857,7 +850,7 @@ export class SheetStore {
      */
     setColTypeConfig(col, ct) {
         if (!this.#colMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#colMetaKV.get(String(col)) ?? {};
             if (ct === null) { const { [CELL_TYPE_CONFIG_KEY]: _, ...rest } = cur; this.#colMetaKV.set(String(col), rest); }
             else this.#colMetaKV.set(String(col), { ...cur, [CELL_TYPE_CONFIG_KEY]: ct });
@@ -871,7 +864,7 @@ export class SheetStore {
      */
     setRowTypeConfig(row, ct) {
         if (!this.#rowMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#rowMetaKV.get(String(row)) ?? {};
             if (ct === null) { const { [CELL_TYPE_CONFIG_KEY]: _, ...rest } = cur; this.#rowMetaKV.set(String(row), rest); }
             else this.#rowMetaKV.set(String(row), { ...cur, [CELL_TYPE_CONFIG_KEY]: ct });
@@ -903,7 +896,7 @@ export class SheetStore {
      * @param {number} rowIndex - The index where the new row should be inserted
      */
     insertRowAt(rowIndex) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             // 1. Shift all cells at or below rowIndex down by 1
             const cellsToShift = [];
             for (const key of this.#allCellKeys()) {
@@ -950,7 +943,7 @@ export class SheetStore {
      * @param {number} colIndex - The index where the new column should be inserted
      */
     insertColumnAt(colIndex) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             // 1. Shift all cells at or to the right of colIndex right by 1
             const cellsToShift = [];
             for (const key of this.#allCellKeys()) {
@@ -997,7 +990,7 @@ export class SheetStore {
      * @param {number} rowIndex - The index of the row to delete
      */
     deleteRowAt(rowIndex) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             // 1. Delete all cells in the row
             for (const key of this.#allCellKeys()) {
                 const [row] = key.split(',').map(Number);
@@ -1073,7 +1066,7 @@ export class SheetStore {
             return result;
         };
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             // ── 1. Cells ───────────────────────────────────────────────────────
             const allKeys = [...this.#allCellKeys()];
             const toDelete = [];
@@ -1188,7 +1181,7 @@ export class SheetStore {
      * @param {number} colIndex - The index of the column to delete
      */
     deleteColumnAt(colIndex) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             // 1. Delete all cells in the column
             for (const key of this.#allCellKeys()) {
                 const [, col] = key.split(',').map(Number);
@@ -1243,7 +1236,7 @@ export class SheetStore {
      */
     clearCellValue(row, col) {
         const key = `${row},${col}`;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#cellValuesKV?.get(key);
             if (!cur) return;
             const { v: _v, ...rest } = cur;
@@ -1281,7 +1274,7 @@ export class SheetStore {
                 return;
         }
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (style === null) {
                 this.#bordersKV.delete(edgeKey);
             } else {
@@ -1311,114 +1304,11 @@ export class SheetStore {
         }
     }
 
-    /**
-     * Adjust formula references when a row is inserted
-     * @param {string} formula
-     * @param {number} insertedRowIndex
-     * @returns {string}
-     */
-    #adjustFormulaForRowInsert(formula, insertedRowIndex) {
-        // insertedRowIndex is 0-based internal; formula rows are 1-based
-        const formulaRow = insertedRowIndex + 1;
-        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
-            const rowNum = parseInt(row, 10);
-            if (!rowAbs && rowNum >= formulaRow) {
-                return `${colAbs}${col}${rowAbs}${rowNum + 1}`;
-            }
-            return match;
-        });
-    }
-
-    /**
-     * Adjust formula references when a column is inserted
-     * @param {string} formula
-     * @param {number} insertedColIndex
-     * @returns {string}
-     */
-    #adjustFormulaForColInsert(formula, insertedColIndex) {
-        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
-            // Adjust if column reference is at or right of the inserted column (and not absolute)
-            if (!colAbs) {
-                const colNum = this.#colToNum(col);
-                if (colNum >= insertedColIndex) {
-                    return `${colAbs}${this.#numToCol(colNum + 1)}${rowAbs}${row}`;
-                }
-            }
-            return match;
-        });
-    }
-
-    /**
-     * Adjust formula references when a row is deleted
-     * @param {string} formula
-     * @param {number} deletedRowIndex
-     * @returns {string}
-     */
-    #adjustFormulaForRowDelete(formula, deletedRowIndex) {
-        // deletedRowIndex is 0-based internal; formula rows are 1-based
-        const formulaRow = deletedRowIndex + 1;
-        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
-            const rowNum = parseInt(row, 10);
-            if (!rowAbs) {
-                if (rowNum > formulaRow) {
-                    return `${colAbs}${col}${rowAbs}${rowNum - 1}`;
-                } else if (rowNum === formulaRow) {
-                    return `#REF!`;
-                }
-            }
-            return match;
-        });
-    }
-
-    /**
-     * Adjust formula references when a column is deleted
-     * @param {string} formula
-     * @param {number} deletedColIndex
-     * @returns {string}
-     */
-    #adjustFormulaForColDelete(formula, deletedColIndex) {
-        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
-            if (!colAbs) {
-                const colNum = this.#colToNum(col);
-                if (colNum > deletedColIndex) {
-                    return `${colAbs}${this.#numToCol(colNum - 1)}${rowAbs}${row}`;
-                } else if (colNum === deletedColIndex) {
-                    // Reference to deleted column becomes error
-                    return `#REF!`;
-                }
-            }
-            return match;
-        });
-    }
-
-    /**
-     * Convert column letters to number (A=0, B=1, etc.)
-     * @param {string} col
-     * @returns {number}
-     */
-    #colToNum(col) {
-        let num = 0;
-        for (let i = 0; i < col.length; i++) {
-            num = num * 26 + (col.charCodeAt(i) - 64);
-        }
-        return num - 1;
-    }
-
-    /**
-     * Convert number to column letters
-     * @param {number} num
-     * @returns {string}
-     */
-    #numToCol(num) {
-        let col = '';
-        num++;
-        while (num > 0) {
-            num--;
-            col = String.fromCharCode(65 + (num % 26)) + col;
-            num = Math.floor(num / 26);
-        }
-        return col;
-    }
+    // Formula-reference adjusters — all delegate to formulas/refs.js (single source of truth).
+    #adjustFormulaForRowInsert(f, i) { return adjustForRowInsert(f, i); }
+    #adjustFormulaForColInsert(f, i) { return adjustForColInsert(f, i); }
+    #adjustFormulaForRowDelete(f, i) { return adjustForRowDelete(f, i); }
+    #adjustFormulaForColDelete(f, i) { return adjustForColDelete(f, i); }
 
     /**
      * Shift borders when a row is inserted
@@ -1765,7 +1655,7 @@ export class SheetStore {
      */
     setRowHeight(rowIndex, height) {
         if (!this.#rowMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#rowMetaKV.get(String(rowIndex)) ?? {};
             this.#rowMetaKV.set(String(rowIndex), { ...cur, height });
         });
@@ -1787,7 +1677,7 @@ export class SheetStore {
      */
     setColWidth(colIndex, width) {
         if (!this.#colMetaKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cur = this.#colMetaKV.get(String(colIndex)) ?? {};
             this.#colMetaKV.set(String(colIndex), { ...cur, width });
         });
@@ -1853,17 +1743,6 @@ export class SheetStore {
         return this.mergeEngine.getMergeAt(row, col);
     }
 
-    // --- Conditional Formats ---
-
-    /**
-     * Get all conditional format rules
-     * @returns {Array<Y.Map>}
-     */
-    getConditionalFormats() {
-        const cf = this.#sheet.get('conditionalFormats');
-        return cf ? cf.toArray() : [];
-    }
-
     // --- Borders (Edge-based) ---
 
     /**
@@ -1895,7 +1774,7 @@ export class SheetStore {
      */
     setBorder(edgeKey, style) {
         if (!this.#bordersKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (style === null) {
                 this.#bordersKV.delete(edgeKey);
             } else {
@@ -1910,7 +1789,7 @@ export class SheetStore {
      */
     applyBorders(instructions) {
         if (!this.#bordersKV) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (const { edgeKey, style } of instructions) {
                 if (style === null) {
                     this.#bordersKV.delete(edgeKey);
@@ -1947,7 +1826,7 @@ export class SheetStore {
             }
         }
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (const key of keysToDelete) this.#bordersKV.delete(key);
         });
     }
@@ -1971,7 +1850,7 @@ export class SheetStore {
      * @param {Object} rule
      */
     addConditionalFormat(rule) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             let arr = this.#sheet.get('conditionalFormats');
             if (!arr) {
                 arr = new Y.Array();
@@ -1988,7 +1867,7 @@ export class SheetStore {
      * @param {Object} updates
      */
     updateConditionalFormat(id, updates) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const arr = this.#sheet.get('conditionalFormats');
             if (!arr) return;
             const rules = arr.toArray();
@@ -2005,7 +1884,7 @@ export class SheetStore {
      * @param {string} id
      */
     deleteConditionalFormat(id) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const arr = this.#sheet.get('conditionalFormats');
             if (!arr) return;
             const rules = arr.toArray();
@@ -2033,7 +1912,7 @@ export class SheetStore {
      * @param {Object} rule
      */
     addDataValidation(rule) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             let arr = this.#sheet.get('dataValidations');
             if (!arr) {
                 arr = new Y.Array();
@@ -2049,7 +1928,7 @@ export class SheetStore {
      * @param {Object} updates
      */
     updateDataValidation(id, updates) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const arr = this.#sheet.get('dataValidations');
             if (!arr) return;
             const rules = arr.toArray();
@@ -2065,7 +1944,7 @@ export class SheetStore {
      * @param {string} id
      */
     deleteDataValidation(id) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const arr = this.#sheet.get('dataValidations');
             if (!arr) return;
             const rules = arr.toArray();
@@ -2082,7 +1961,7 @@ export class SheetStore {
      * @param {number} endCol
      */
     clearRangeFormatting(startRow, startCol, endRow, endCol) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (const [key] of (this.#cellStylesKV?.map ?? [])) {
                 const [r, c] = key.split(',').map(Number);
                 if (r >= startRow && r <= endRow && c >= startCol && c <= endCol) {
@@ -2099,16 +1978,7 @@ export class SheetStore {
      * @param {number} colOffset
      * @returns {string}
      */
-    #adjustFormulaByOffset(formula, rowOffset, colOffset) {
-        if (rowOffset === 0 && colOffset === 0) return formula;
-        return formula.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (match, colAbs, col, rowAbs, row) => {
-            const colNum = this.#colToNum(col);
-            const rowNum = parseInt(row, 10);
-            const newCol = colAbs ? col : this.#numToCol(colNum + colOffset);
-            const newRow = rowAbs ? row : String(rowNum + rowOffset);
-            return `${colAbs}${newCol}${rowAbs}${newRow}`;
-        });
-    }
+    #adjustFormulaByOffset(f, r, c) { return adjustByOffset(f, r, c); }
 
     /**
      * Fill down: copy source row values+formatting down through the range.
@@ -2118,7 +1988,7 @@ export class SheetStore {
      * @param {number} endCol
      */
     fillDown(startRow, startCol, endRow, endCol) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (let c = startCol; c <= endCol; c++) {
                 const srcKey = `${startRow},${c}`;
                 const srcData = this.#getCellData(srcKey);
@@ -2146,7 +2016,7 @@ export class SheetStore {
      * @param {number} endCol
      */
     fillRight(startRow, startCol, endRow, endCol) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (let r = startRow; r <= endRow; r++) {
                 const srcKey = `${r},${startCol}`;
                 const srcData = this.#getCellData(srcKey);
@@ -2186,7 +2056,7 @@ export class SheetStore {
      */
     setPrintSettings(updates) {
         if (!updates || typeof updates !== 'object') return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             let ps = this.#sheet.get('printSettings');
             if (!ps) {
                 ps = new Y.Map();

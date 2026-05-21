@@ -26,7 +26,9 @@
  */
 
 /**
- * Core formatting function — can be called by wrapper types (currency, percent).
+ * Core formatting function. Exported so legacy ct configs (currency / percent
+ * type ids) still have a single implementation to delegate into via the
+ * registry's alias normalisation.
  * @param {any} rawValue
  * @param {Object} config
  * @returns {string}
@@ -141,11 +143,23 @@ function _formatScientific(num, decimals) {
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
 
+import NumberConfigPanel from './NumberConfigPanel.svelte';
+
 export const numberType = {
     id: 'number',
+    renderType: 'text',
+    configPanel: NumberConfigPanel,
 
     formatValue(rawValue, config) {
         return formatNumber(rawValue, config);
+    },
+
+    /**
+     * Numbers always right-align (matches the default in defaultStyle); kept here
+     * so untyped raw numbers also pick this up via the text descriptor.
+     */
+    valueAlign() {
+        return 'right';
     },
 
     /**

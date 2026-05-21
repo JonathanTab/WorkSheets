@@ -14,9 +14,10 @@
  * canvas paint logic.
  */
 
-import { drawCheckbox, drawRating } from '../cellTypes/painters.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { perfMon } from '../perf/PerfMonitor.js';
+import { buildWrappedLines } from './RichTextLayout.js';
+import { paintBordersCanvas } from './BorderGeometry.js';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 const DEFAULT_THEME = {
@@ -550,19 +551,9 @@ export class CanvasRenderer {
             return;
         }
 
-        switch (renderType) {
-            case 'checkbox':
-                this.#paintCheckboxContent(ctx, cell);
-                break;
-            case 'rating':
-                this.#paintRatingContent(ctx, cell);
-                break;
-            case 'dropdown':
-                this.#paintDropdownContent(ctx, cell);
-                break;
-            default:
-                this.#paintTextContent(ctx, cell);
-        }
+        // All typed cells with a paintCell descriptor are handled above.
+        // Remaining renderTypes (text, number, date, url, etc.) render as text.
+        this.#paintTextContent(ctx, cell);
     }
 
     // ─── Private: content painters ────────────────────────────────────────────
@@ -829,68 +820,17 @@ export class CanvasRenderer {
     }
 
     /**
-     * Word-wrap a single logical line (array of runs) to fit within maxWidth.
-     * Returns an array of visual lines (each an array of run objects with text).
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {Array} lineRuns
-     * @param {number} maxWidth
-     * @param {number} defaultSize
-     * @param {string} defaultFamily
-     * @param {boolean} defaultBold
-     * @param {boolean} defaultItalic
-     * @returns {Array<Array>}
+     * Word-wrap a single logical line of rich-text runs into visual sub-lines.
+     * Delegates to the shared RichTextLayout algorithm with ctx.measureText as
+     * the width function, keeping ctx.font in sync before each measurement.
      */
     #wrapLogicalLine(ctx, lineRuns, maxWidth, defaultSize, defaultFamily, defaultBold, defaultItalic) {
         if (lineRuns.length === 0) return [[]];
-
-        const visualLines = [[]];
-        let lineWidth = 0;
-
-        for (const run of lineRuns) {
+        return buildWrappedLines(lineRuns, maxWidth, (token, run) => {
             const font = this.#buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic);
             if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
-
-            // Split text into tokens (words and whitespace), keeping delimiters
-            const tokens = run.t.split(/(\s+)/);
-
-            for (const token of tokens) {
-                if (!token) continue;
-                const isWS = !token.trim();
-                const tokenW = ctx.measureText(token).width;
-
-                // Skip leading whitespace on a new line
-                if (lineWidth === 0 && isWS) continue;
-
-                if (!isWS && lineWidth > 0 && lineWidth + tokenW > maxWidth) {
-                    // Word doesn't fit — start a new visual line
-                    visualLines.push([]);
-                    lineWidth = 0;
-                }
-
-                const lastLine = visualLines[visualLines.length - 1];
-                const lastFrag = lastLine[lastLine.length - 1];
-                // Merge with last fragment if same run (same style key)
-                if (lastFrag && lastFrag._runRef === run) {
-                    lastFrag.t += token;
-                    lastFrag._w += tokenW;
-                } else {
-                    lastLine.push({ ...run, t: token, _runRef: run, _w: tokenW });
-                }
-                lineWidth += tokenW;
-            }
-        }
-
-        // Remove the _runRef helper before returning
-        for (const line of visualLines) {
-            for (const frag of line) delete frag._runRef;
-        }
-
-        // Drop any empty trailing lines (shouldn't happen, but guard)
-        while (visualLines.length > 1 && visualLines[visualLines.length - 1].length === 0) {
-            visualLines.pop();
-        }
-
-        return visualLines;
+            return ctx.measureText(token).width;
+        });
     }
 
     /**
@@ -1014,130 +954,17 @@ export class CanvasRenderer {
         this.#drawMagnifyingGlass(ctx, filterActive, x, y, width, height);
     }
 
-    /**
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {import('./CellPaintData.js').CellPaintItem} cell
-     */
-    #paintCheckboxContent(ctx, cell) {
-        const checked = !!cell.rawValue;
-        const size = Math.min(16, cell.height - 4, cell.width - 4);
-        const cx = cell.x + (cell.width - size) / 2;
-        const cy = cell.y + (cell.height - size) / 2;
-        drawCheckbox(ctx, cx, cy, size, checked);
-    }
-
-    /**
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {import('./CellPaintData.js').CellPaintItem} cell
-     */
-    #paintRatingContent(ctx, cell) {
-        drawRating(ctx, cell.x, cell.y, cell.width, cell.height, cell.rawValue ?? 0, cell.ratingMax ?? 5);
-    }
-
-    /**
-     * Paint a dropdown cell: text value + a ▾ chevron on the right.
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {import('./CellPaintData.js').CellPaintItem} cell
-     */
-    #paintDropdownContent(ctx, cell) {
-        const arrowW = 16;
-        const pad = 4;
-        const { x, y, width, height } = cell;
-        const dpr = this.#dpr;
-        const snap = (v) => Math.round(v * dpr) / dpr;
-        const text = cell.displayValue || '';
-        const font = this.#buildFont(cell);
-        if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
-        ctx.fillStyle = cell.textColor || this.#theme.defaultText;
-        ctx.textBaseline = 'middle';
-        ctx.textAlign = 'left';
-
-        // Clip text to leave room for the arrow
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x + pad, y, width - arrowW - pad * 2, height);
-        ctx.clip();
-        if (text) ctx.fillText(text, snap(x + pad), snap(y + height / 2));
-        ctx.restore();
-
-        // Draw dropdown arrow
-        const arrowX = x + width - arrowW / 2;
-        const arrowY = y + height / 2;
-        const arrowSize = 4;
-        ctx.fillStyle = '#64748b';
-        ctx.beginPath();
-        ctx.moveTo(arrowX - arrowSize, arrowY - arrowSize / 2);
-        ctx.lineTo(arrowX + arrowSize, arrowY - arrowSize / 2);
-        ctx.lineTo(arrowX, arrowY + arrowSize / 2);
-        ctx.closePath();
-        ctx.fill();
-    }
+    // #paintCheckboxContent, #paintRatingContent, #paintDropdownContent removed.
+    // All three types implement paintCell() on their descriptors; CanvasRenderer
+    // handles them through the descriptor path in #paintCellContent above. — dropdown now uses dropdownType.paintCell() via the
+    // descriptor path in #paintCellContent (CellPaintData sets _descriptor for any type
+    // that exposes paintCell).
 
     // ─── Private: border helpers ──────────────────────────────────────────────
 
-    /**
-     * @param {CanvasRenderingContext2D} ctx
-     * @param {{top?,right?,bottom?,left?}} borders
-     * @param {number} x
-     * @param {number} y
-     * @param {number} w
-     * @param {number} h
-     */
+    /** Delegates to the shared BorderGeometry module (single source of truth). */
     #paintCustomBorders(ctx, borders, x, y, w, h) {
-        const paintEdge = (edge, x1, y1, x2, y2, position = 'center') => {
-            if (!edge) return;
-            ctx.strokeStyle = edge.color || '#000000';
-            ctx.lineCap = 'square'; // extends stroke past endpoints to fill corners
-            const lineWidth = edge.width || 1;
-            const edgeStyle = edge.style || 'solid';
-
-            // Calculate offset based on line width to ensure proper positioning
-            // For lineWidth=1: offset=0.5 (center of pixel)
-            // For lineWidth>1: offset by half the width to position stroke outside the cell
-            const offset = lineWidth === 1 ? 0.5 : Math.ceil(lineWidth / 2);
-
-            // Adjust coordinates based on edge position
-            const adjust = (ax1, ay1, ax2, ay2) => {
-                let bx1 = ax1, by1 = ay1, bx2 = ax2, by2 = ay2;
-                if (position === 'top') { by1 -= (offset - 0.5); by2 -= (offset - 0.5); }
-                else if (position === 'bottom') { by1 += (offset - 0.5); by2 += (offset - 0.5); }
-                else if (position === 'left') { bx1 -= (offset - 0.5); bx2 -= (offset - 0.5); }
-                else if (position === 'right') { bx1 += (offset - 0.5); bx2 += (offset - 0.5); }
-                return [bx1, by1, bx2, by2];
-            };
-
-            if (edgeStyle === 'double') {
-                // Draw two thin parallel lines, 2px apart
-                ctx.lineWidth = 1;
-                ctx.setLineDash([]);
-                const gap = 2;
-                const isH = (y1 === y2);
-                // Line 1 (inward offset -gap)
-                let [ax1, ay1, ax2, ay2] = adjust(x1, y1, x2, y2);
-                if (isH) { ay1 -= gap; ay2 -= gap; } else { ax1 -= gap; ax2 -= gap; }
-                ctx.beginPath(); ctx.moveTo(ax1, ay1); ctx.lineTo(ax2, ay2); ctx.stroke();
-                // Line 2 (outward offset +gap)
-                let [bx1, by1, bx2, by2] = adjust(x1, y1, x2, y2);
-                if (isH) { by1 += gap; by2 += gap; } else { bx1 += gap; bx2 += gap; }
-                ctx.beginPath(); ctx.moveTo(bx1, by1); ctx.lineTo(bx2, by2); ctx.stroke();
-            } else {
-                ctx.lineWidth = lineWidth;
-                ctx.setLineDash(edgeStyle === 'dashed' ? [4, 4] : []);
-                const [ax1, ay1, ax2, ay2] = adjust(x1, y1, x2, y2);
-                ctx.beginPath();
-                ctx.moveTo(ax1, ay1);
-                ctx.lineTo(ax2, ay2);
-                ctx.stroke();
-                if (edgeStyle === 'dashed') ctx.setLineDash([]);
-            }
-        };
-
-        // Paint borders with proper positioning for their edges
-        if (borders.top) paintEdge(borders.top, x, y, x + w, y, 'top');
-        if (borders.right) paintEdge(borders.right, x + w, y, x + w, y + h, 'right');
-        if (borders.bottom) paintEdge(borders.bottom, x, y + h, x + w, y + h, 'bottom');
-        if (borders.left) paintEdge(borders.left, x, y, x, y + h, 'left');
-        ctx.lineCap = 'butt'; // restore default
+        paintBordersCanvas(ctx, borders, x, y, w, h);
     }
 
     // ─── Private: font / text helpers ─────────────────────────────────────────

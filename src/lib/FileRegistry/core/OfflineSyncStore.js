@@ -120,12 +120,20 @@ export class OfflineSyncStore {
     }
 
     /**
-     * Returns all pending mutations sorted by createdAt ascending.
+     * Returns all pending mutations sorted by seq (monotonic) ascending.
+     * Falls back to createdAt string comparison for pre-seq entries.
      * @returns {Promise<object[]>}
      */
     async getAllMutations() {
         const all = await this._getAll('mutations');
-        all.sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+        all.sort((a, b) => {
+            // Prefer numeric seq; fall back to ISO createdAt string (lexical = chronological)
+            const aKey = a.seq ?? a.createdAt;
+            const bKey = b.seq ?? b.createdAt;
+            if (aKey < bKey) return -1;
+            if (aKey > bKey) return 1;
+            return 0;
+        });
         return all;
     }
 

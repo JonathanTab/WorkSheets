@@ -12,23 +12,6 @@
      */
     import { onMount, onDestroy, untrack, setContext } from "svelte";
     import {
-        cut as cutIcon,
-        copy as copyIcon,
-        paste as pasteIcon,
-        trash as trashIcon,
-        settings as settingsIcon,
-        arrowUp,
-        arrowDown,
-        arrowLeft,
-        arrowRight,
-        merge as mergeIcon,
-        repeat as repeatIcon,
-        table as tableIcon,
-        plus as plusIcon,
-        close as closeIcon,
-        enter as enterIcon,
-    } from "../../lib/icons/index.js";
-    import {
         spreadsheetSession,
         selectionState,
         GridVirtualizer,
@@ -37,6 +20,23 @@
         HEADER_HEIGHT,
         HEADER_WIDTH,
     } from "../../stores/spreadsheetStore.svelte.js";
+    import {
+        TOUCH_MOVE_THRESHOLD,
+        DOUBLE_TAP_DELAY,
+        LONG_PRESS_DELAY,
+    } from "../../stores/spreadsheet/constants.js";
+    import {
+        OVERLAY_MARGIN_PX,
+        OVERLAY_OFFSET_PX,
+        PANEL_MIN_WIDTH,
+        PANEL_MIN_HEIGHT,
+        FILTER_POPOVER_DEFAULT_WIDTH,
+        FILTER_POPOVER_DEFAULT_HEIGHT,
+        EDIT_PANEL_DEFAULT_WIDTH,
+        EDIT_PANEL_DEFAULT_HEIGHT,
+        REPEATER_PANEL_ICON_OFFSET_PX,
+        TABLE_GRIP_HANDLE_PX,
+    } from "../../stores/spreadsheet/gridConstants.js";
     import { toRangeRef } from "../../formulas/refCoords.js";
     import {
         clipboardManager,
@@ -45,18 +45,19 @@
     } from "../../stores/spreadsheet/index.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { clearFormatting as clearFormattingCmd } from "../../stores/spreadsheet/formatCommands.js";
-    import { CanvasRenderer } from "../../stores/spreadsheet/rendering/CanvasRenderer.js";
-    import { SelectionRenderer } from "../../stores/spreadsheet/rendering/SelectionRenderer.js";
-    import { RenderScheduler } from "../../stores/spreadsheet/rendering/RenderScheduler.js";
     import { HitTestEngine } from "../../stores/spreadsheet/rendering/HitTestEngine.js";
-    import { buildPaneData } from "../../stores/spreadsheet/rendering/CellPaintData.js";
     import { buildRenderRuns, hitTestLink } from "../../stores/spreadsheet/textFormatRuns.js";
     import { perfMon } from "../../stores/spreadsheet/perf/PerfMonitor.js";
     import GridOverlays from "./grid/GridOverlays.svelte";
     import LinkPopover from "./grid/LinkPopover.svelte";
     import ColHeaders from "./grid/ColHeaders.svelte";
     import RowHeaders from "./grid/RowHeaders.svelte";
-    import ContextMenu from "../ui/ContextMenu.svelte";
+    import GridContextMenu from "./grid/GridContextMenu.svelte";
+    import { GridResizeController } from "./grid/GridResizeController.js";
+    import { GridFillHandle } from "./grid/GridFillHandle.svelte.js";
+    import { commitCellEdit } from "../../stores/spreadsheet/CellEditController.js";
+    import { GridKeyboardController } from "./grid/GridKeyboardController.svelte.js";
+    import { GridPaintCoordinator } from "./grid/GridPaintCoordinator.svelte.js";
     import FileViewer from "./cellTypes/FileViewer.svelte";
     import TableFilterPopover from "./features/TableFilterPopover.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
@@ -74,7 +75,6 @@
     import AlertModal from "../modals/AlertModal.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import SelectionHandles from "./grid/SelectionHandles.svelte";
-    import MobileCellActionBar from "./grid/MobileCellActionBar.svelte";
 
     // ─── Props ─────────────────────────────────────────────────────────────────
     let {
@@ -92,22 +92,31 @@
     let canvasEl = $state(null);
     let selectCanvasEl = $state(null);
 
-    // ─── Canvas rendering instances ───────────────────────────────────────────
-    /** @type {CanvasRenderer|null} */
-    let canvasRenderer = null;
-    /** @type {RenderScheduler|null} */
-    let renderScheduler = null;
-    /** @type {SelectionRenderer|null} */
-    let selectionRenderer = null;
-    /** @type {RenderScheduler|null} */
-    let selectionScheduler = null;
+
+
+    // ─── Resize controller ────────────────────────────────────────────────────
+    const resizeCtrl = new GridResizeController();
+
+    // ─── Fill-handle controller ───────────────────────────────────────────────
+    const fillCtrl = new GridFillHandle();
+
+    // ─── Keyboard controller ──────────────────────────────────────────────────
+    const kbCtrl = new GridKeyboardController();
+
+    // ─── Paint coordinator ────────────────────────────────────────────────────
+    const paintCoord = new GridPaintCoordinator();
+
+
+    // ─── Canvas rendering — owned by GridPaintCoordinator ────────────────────
+    // \ refs let all existing renderScheduler?.invalidateAll() calls work
+    // while the actual scheduler lives in paintCoord.
+    let renderScheduler = $derived(paintCoord.renderScheduler);
+    let selectionScheduler = $derived(paintCoord.selectionScheduler);
+    let canvasRenderer = $derived(paintCoord.canvasRenderer);
+    let selectionRenderer = $derived(paintCoord.selectionRenderer);
     const hitTestEngine = new HitTestEngine();
     // Expose to child components (e.g. SelectionHandles) without prop drilling
     setContext("hitTestEngine", hitTestEngine);
-    // Track which canvas element each renderer was created for, so we can
-    // detect when the {#if} block remounts and recreates canvas elements.
-    let rendererCanvasEl = null;
-    let selRendererCanvasEl = null;
 
     // ─── Grid virtualizer ─────────────────────────────────────────────────────
     let virtualizer = $state(null);
@@ -184,7 +193,6 @@
     let rangeStartCell = $state(null);
     let rangeEndCell = $state(null);
     let isMultiRefSelect = $state(false); // true when Ctrl/Cmd held during formula cell click
-    let resizing = $state(null);
     let currentCursor = $state("cell");
 
     // ─── Drag auto-scroll state ───────────────────────────────────────────────
@@ -192,13 +200,6 @@
     let dragClientX = 0;
     let dragClientY = 0;
 
-    // ─── Freeze-handle drag state ─────────────────────────────────────────────
-    // null | { axis: 'row'|'col', startPx: number, currentCount: number }
-    let freezeDrag = $state(null);
-
-    // ─── Fill-handle drag state ────────────────────────────────────────────────
-    // null | { srcRange: CellRange, fillRange: CellRange|null, direction: string|null }
-    let fillHandleDrag = $state(null);
 
     // ─── Link popover (shown when hovering a cell with link runs) ────────────
     // null | { url, cellLeft, cellTop, cellWidth, cellHeight }
@@ -250,7 +251,7 @@
         return Math.min(Math.max(v, min), max);
     }
 
-    function getOverlayViewportRect(margin = 8) {
+    function getOverlayViewportRect(margin = OVERLAY_MARGIN_PX) {
         if (!containerEl) return null;
         const width = containerEl.clientWidth;
         const visibleBottom = getContainerVisibleBottomPx();
@@ -269,13 +270,13 @@
      * @param {{ preferX?: 'start'|'end', preferY?: 'below'|'above', offset?: number, margin?: number }} [opts]
      */
     function placeOverlayNearAnchor(anchor, panel, opts = {}) {
-        const offset = opts.offset ?? 6;
-        const margin = opts.margin ?? 8;
+        const offset = opts.offset ?? OVERLAY_OFFSET_PX;
+        const margin = opts.margin ?? OVERLAY_MARGIN_PX;
         const bounds = getOverlayViewportRect(margin);
         if (!bounds) return { left: anchor.left, top: anchor.top + anchor.height + offset };
 
-        const panelWidth = Math.max(120, panel.width);
-        const panelHeight = Math.max(60, panel.height);
+        const panelWidth = Math.max(PANEL_MIN_WIDTH, panel.width);
+        const panelHeight = Math.max(PANEL_MIN_HEIGHT, panel.height);
         const preferX = opts.preferX ?? "start";
         const preferY = opts.preferY ?? "below";
 
@@ -329,8 +330,8 @@
         return placeOverlayNearAnchor(
             anchor,
             {
-                width: panelRect?.width ?? 244,
-                height: panelRect?.height ?? 320,
+                width: panelRect?.width ?? FILTER_POPOVER_DEFAULT_WIDTH,
+                height: panelRect?.height ?? FILTER_POPOVER_DEFAULT_HEIGHT,
             },
             {
                 preferX: "end",
@@ -356,8 +357,8 @@
         if (!containerEl || !virtualizer || !renderPlan) return { x: 0, y: 0 };
 
         const panelRect = editPanelEl?.getBoundingClientRect();
-        const panelWidth = panelRect?.width ?? 248;
-        const panelHeight = panelRect?.height ?? 380;
+        const panelWidth = panelRect?.width ?? EDIT_PANEL_DEFAULT_WIDTH;
+        const panelHeight = panelRect?.height ?? EDIT_PANEL_DEFAULT_HEIGHT;
 
         let anchorRight, anchorTop;
 
@@ -372,9 +373,9 @@
         anchorTop = rect.top;
 
         const placed = placeOverlayNearAnchor(
-            { left: anchorRight, top: anchorTop + 20, width: 18, height: 18 },
+            { left: anchorRight, top: anchorTop + REPEATER_PANEL_ICON_OFFSET_PX, width: 18, height: 18 },
             { width: panelWidth, height: panelHeight },
-            { preferX: "start", preferY: "below", offset: 6, margin: 8 },
+            { preferX: "start", preferY: "below", offset: OVERLAY_OFFSET_PX, margin: OVERLAY_MARGIN_PX },
         );
         return { x: placed.left, y: placed.top };
     }
@@ -412,9 +413,6 @@
     /** Stores last TABLE_ENTRY edit info for post-commit navigation (rich-text path). */
     let lastTableEntryEditInfo = $state(null);
     /** @type {{ row:number, col:number, options:string[], left:number, top:number, width:number, height:number }|null} */
-    let focusedDropdownCell = $state(null);
-    let dropdownFilter = $state("");
-    let dropdownFilterInputEl = $state(null);
     /** @type {{ type: 'repeater', store:any }|null} */
     let activeEditPanel = $state(null);
 
@@ -437,9 +435,6 @@
     let lastTapPos = null; // position of last tap
     let isLongPressDragging = false; // long-press-drag range selection mode
     let longPressTimer = null; // for long-press context menu
-    const TOUCH_MOVE_THRESHOLD = 8; // px — max movement still considered a tap
-    const DOUBLE_TAP_DELAY = 300; // ms — max interval between taps
-    const LONG_PRESS_DELAY = 600; // ms — hold time for context menu
 
     // ─── Dialog state ─────────────────────────────────────────────────────────
     let showCreateTableDialog = $state(false);
@@ -456,6 +451,49 @@
     let sheetStore = $derived(spreadsheetSession.activeSheetStore);
     let renderContext = $derived(spreadsheetSession.renderContext);
     let renderPlan = $derived(virtualizer ? virtualizer.renderPlan : null);
+
+    // Keep resize controller deps in sync with reactive Grid state
+    $effect(() => { resizeCtrl.virtualizer = virtualizer; });
+    $effect(() => { resizeCtrl.sheetStore = sheetStore; });
+    $effect(() => { resizeCtrl.containerEl = containerEl; });
+    $effect(() => { resizeCtrl.renderScheduler = renderScheduler; });
+
+    // Keep fill-handle controller deps in sync
+    $effect(() => { fillCtrl.sheetStore = sheetStore; });
+    $effect(() => { fillCtrl.renderContext = renderContext; });
+    $effect(() => { fillCtrl.renderScheduler = renderScheduler; });
+    $effect(() => { fillCtrl.selectionScheduler = selectionScheduler; });
+    $effect(() => { fillCtrl.doHitTest = doHitTest; });
+    $effect(() => { fillCtrl.getLocalCoords = getLocalCoords; });
+    $effect(() => { fillCtrl.onCursorChange = (c) => { currentCursor = c; }; });
+
+    // Keep keyboard controller context in sync
+    $effect(() => {
+        kbCtrl.ctx = {
+            virtualizer,
+            renderScheduler,
+            beginCellEdit,
+            commitEditAndMove,
+            cancelEdit,
+            moveSelectionMergeAware,
+            jumpToEdgeAndSelect,
+            scrollToAnchor,
+            scrollToFocus,
+            scrollToPrimaryCell,
+        };
+    });
+
+    // Keep paint coordinator deps in sync
+    $effect(() => { paintCoord.canvasEl = canvasEl; });
+    $effect(() => { paintCoord.selectCanvasEl = selectCanvasEl; });
+    $effect(() => { paintCoord.virtualizer = virtualizer; });
+    $effect(() => { paintCoord.renderPlan = renderPlan; });
+    $effect(() => { paintCoord.renderContext = renderContext; });
+    $effect(() => { paintCoord.sheetStore = sheetStore; });
+    $effect(() => { paintCoord.showGridlines = showGridlines; });
+    $effect(() => { paintCoord.showFormulas = showFormulas; });
+    $effect(() => { paintCoord.tableGripHoverRow = tableGripHoverRow; });
+    $effect(() => { paintCoord.tableRowDrag = tableRowDrag; });
 
     /**
      * Map from grid row → Y offset within the sticky table header band.
@@ -538,7 +576,6 @@
         });
     });
 
-    let hasLoggedZeroViewportWarning = $state(false);
 
     // ─── Virtualizer configuration ─────────────────────────────────────────────
     $effect(() => {
@@ -655,667 +692,6 @@
             }
         }
         return hitTestEngine.hitTest(localX, localY);
-    }
-
-    // ─── Canvas setup & resize ─────────────────────────────────────────────────
-    $effect(() => {
-        // Track sheetStore so this effect re-runs when the document loads.
-        // The virtualizer init effect (declared above) runs first in the same batch,
-        // so virtualizer is already set by the time we get here.
-        const _sheet = sheetStore;
-        if (!canvasEl || !virtualizer) return;
-
-        const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
-        const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
-        if (w <= 0 || h <= 0) return;
-
-        // Recreate renderer if canvas element changed (e.g. {#if} remount)
-        if (!canvasRenderer || rendererCanvasEl !== canvasEl) {
-            canvasRenderer?.destroy();
-            renderScheduler?.destroy();
-            canvasRenderer = new CanvasRenderer(canvasEl);
-            renderScheduler = new RenderScheduler(performPaint);
-            rendererCanvasEl = canvasEl;
-            spreadsheetSession.requestGridRepaint = () => untrack(() => renderScheduler?.invalidateAll());
-        }
-
-        canvasRenderer.resize(w, h);
-        // Flush immediately to avoid a blank-canvas frame while waiting for RAF.
-        // invalidateAll marks all panes dirty, then flush() paints synchronously.
-        untrack(() => {
-            renderScheduler?.invalidateAll();
-            renderScheduler?.flush();
-        });
-    });
-
-    $effect(() => {
-        const _sheet = sheetStore; // same as data canvas: re-run when sheet loads
-        if (!selectCanvasEl || !virtualizer) return;
-
-        const w = Math.max(0, virtualizer.containerWidth - HEADER_WIDTH);
-        const h = Math.max(0, virtualizer.containerHeight - HEADER_HEIGHT);
-        if (w <= 0 || h <= 0) return;
-
-        // Recreate renderer if canvas element changed (e.g. {#if} remount)
-        if (!selectionRenderer || selRendererCanvasEl !== selectCanvasEl) {
-            selectionRenderer?.destroy();
-            selectionScheduler?.destroy();
-            selectionRenderer = new SelectionRenderer(selectCanvasEl);
-            selectionScheduler = new RenderScheduler(performSelectionPaint);
-            selRendererCanvasEl = selectCanvasEl;
-        }
-
-        selectionRenderer.resize(w, h);
-        untrack(() => {
-            selectionScheduler?.invalidateAll();
-            selectionScheduler?.flush();
-        });
-    });
-
-    // ─── Data canvas repaint trigger ──────────────────────────────────────────
-    // Tracks only data/structure changes — NOT selection state or formula typing.
-    // Selection fills and formula highlights are on the separate selection canvas,
-    // so arrow-key navigation no longer causes an expensive full buildPaneData call.
-    //
-    // NOTE: We intentionally do NOT track renderPlan here. renderPlan changes on
-    // every scroll frame (visible row/col ranges shift), and handleScroll already
-    // does a synchronous performPaint in its RAF. Tracking renderPlan would cause
-    // a redundant second paint per scroll frame (~6ms wasted at DPR=3).
-    // Viewport resize is handled by the canvas resize effect (flush).
-    // Frozen dimension changes are tracked explicitly below.
-    $effect(() => {
-        const _cellsVer = sheetStore?.cellsVersion;
-        const _borders = sheetStore?.bordersVersion;
-        const _rowMetaVer = sheetStore?.rowMetaVersion;
-        const _colMetaVer = sheetStore?.colMetaVersion;
-        const _cfVer = sheetStore?.cfVersion;
-        const _mergeVer = renderContext?.mergeEngine?.version;
-        const _tableVer = renderContext?.tableManager?.tableVersion;
-        const _repVer = renderContext?.repeaterEngine?.repeaterVersion;
-        const _fr = virtualizer?.frozenRows;
-        const _fc = virtualizer?.frozenCols;
-        const _formulaVer = spreadsheetSession?.formulaEngine?.computedVersion;
-
-        untrack(() => {
-            if (!renderScheduler || !renderPlan || !virtualizer) return;
-            renderScheduler.invalidateAll();
-        });
-    });
-
-    // ─── View option change repaint ───────────────────────────────────────────
-    $effect(() => {
-        const _gl = showGridlines;
-        const _sf = showFormulas;
-        untrack(() => renderScheduler?.invalidateAll());
-    });
-
-    // ─── Selection canvas repaint trigger ─────────────────────────────────────
-    // Tracks selection state and formula edit deps only. Repaints are cheap
-    // (~0.3ms) since SelectionRenderer just draws fill rects — no data lookups.
-    // Like the data trigger, scroll-driven repaints are handled by handleScroll.
-    $effect(() => {
-        const _sel = selectionState.range;
-        const _selMode = selectionState.selectionMode;
-        const _selRows = selectionState.selectedRows;
-        const _selCols = selectionState.selectedCols;
-        const _anch = selectionState.anchor;
-        const _editing = editSessionState.isEditing;
-        const _formula = editSessionState.draft;
-        const _fr = virtualizer?.frozenRows;
-        const _fc = virtualizer?.frozenCols;
-
-        untrack(() => {
-            if (!selectionScheduler || !renderPlan || !virtualizer) return;
-            selectionScheduler.invalidateAll();
-        });
-    });
-
-    // ─── Warn on zero viewport ────────────────────────────────────────────────
-    $effect(() => {
-        if (!virtualizer || !renderPlan) return;
-        const zeroH = renderPlan.bodyViewportHeight <= 0;
-        if (zeroH && !hasLoggedZeroViewportWarning) {
-            console.warn("[Grid] body viewport height is 0");
-            hasLoggedZeroViewportWarning = true;
-        } else if (!zeroH) {
-            hasLoggedZeroViewportWarning = false;
-        }
-    });
-
-    // ─── Timed buildPaneData wrapper ──────────────────────────────────────────
-    function buildPaneDataTimed(params) {
-        if (!perfMon.enabled) return buildPaneData(params);
-        const t = performance.now();
-        const result = buildPaneData(params);
-        perfMon.record('render.buildPaneData', performance.now() - t);
-        perfMon.record('render.buildPaneCells', result.length);
-        return result;
-    }
-
-    // ─── Paint function (called by RenderScheduler on RAF) ────────────────────
-    // dirtyPanes: Set of 'body'|'top'|'left'|'corner' to repaint.
-    // When all four are present (default), the whole canvas is cleared first.
-    // Partial sets are used by performScrollPaint to skip unchanged frozen panes.
-    function performPaint(
-        dirtyPanes = new Set(["body", "top", "left", "corner"]),
-    ) {
-        if (!canvasEl || !canvasRenderer || !renderPlan || !virtualizer) return;
-
-        const frozenRows = virtualizer.frozenRows;
-        const frozenCols = virtualizer.frozenCols;
-        const frozenHeight = renderPlan.frozenHeight;
-        const frozenWidth = renderPlan.frozenWidth;
-        const bodyW = renderPlan.bodyViewportWidth;
-        const bodyH = renderPlan.bodyViewportHeight;
-        const scrollLeft = virtualizer.scrollLeft;
-        const scrollTop = virtualizer.scrollTop;
-
-        const commonParams = {
-            rowMetrics: virtualizer.rowMetrics,
-            colMetrics: virtualizer.colMetrics,
-            renderContext,
-            sheetStore,
-            session: spreadsheetSession,
-            frozenRows,
-            frozenCols,
-            frozenHeight,
-            frozenWidth,
-            showFormulas,
-        };
-
-        const isFullRepaint = dirtyPanes.size === 4;
-        if (isFullRepaint) {
-            canvasRenderer.clear();
-        }
-
-        // Body pane
-        if (dirtyPanes.has("body")) {
-            const bp = renderPlan.plans.body;
-            if (!isFullRepaint)
-                canvasRenderer.clearPane(
-                    frozenWidth,
-                    frozenHeight,
-                    bodyW,
-                    bodyH,
-                );
-            if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: bp.rowRange,
-                        colRange: bp.colRange,
-                        scrollLeft,
-                        scrollTop,
-                    }),
-                    {
-                        clipX: frozenWidth,
-                        clipY: frozenHeight,
-                        clipW: bodyW,
-                        clipH: bodyH,
-                        showGridLines: showGridlines,
-                    },
-                );
-            }
-        }
-
-        // Top pane (frozen rows × scrollable cols)
-        if (dirtyPanes.has("top")) {
-            const tp = renderPlan.plans.top;
-            if (!isFullRepaint)
-                canvasRenderer.clearPane(frozenWidth, 0, bodyW, frozenHeight);
-            if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: tp.rowRange,
-                        colRange: tp.colRange,
-                        scrollLeft,
-                        scrollTop: 0,
-                    }),
-                    {
-                        clipX: frozenWidth,
-                        clipY: 0,
-                        clipW: bodyW,
-                        clipH: frozenHeight,
-                        showGridLines: showGridlines,
-                    },
-                );
-            }
-        }
-
-        // Left pane (scrollable rows × frozen cols)
-        if (dirtyPanes.has("left")) {
-            const lp = renderPlan.plans.left;
-            if (!isFullRepaint)
-                canvasRenderer.clearPane(0, frozenHeight, frozenWidth, bodyH);
-            if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: lp.rowRange,
-                        colRange: lp.colRange,
-                        scrollLeft: 0,
-                        scrollTop,
-                    }),
-                    {
-                        clipX: 0,
-                        clipY: frozenHeight,
-                        clipW: frozenWidth,
-                        clipH: bodyH,
-                        showGridLines: showGridlines,
-                    },
-                );
-            }
-        }
-
-        // Corner pane (frozen rows × frozen cols)
-        if (dirtyPanes.has("corner")) {
-            const cp = renderPlan.plans.corner;
-            if (!isFullRepaint)
-                canvasRenderer.clearPane(0, 0, frozenWidth, frozenHeight);
-            if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: cp.rowRange,
-                        colRange: cp.colRange,
-                        scrollLeft: 0,
-                        scrollTop: 0,
-                    }),
-                    {
-                        clipX: 0,
-                        clipY: 0,
-                        clipW: frozenWidth,
-                        clipH: frozenHeight,
-                        showGridLines: showGridlines,
-                    },
-                );
-            }
-        }
-
-        // Sticky table headers — repaint whenever top or body changes (they live in the top strip)
-        if (dirtyPanes.has("top") || dirtyPanes.has("body") || isFullRepaint) {
-            const stickyHeaders = renderContext?.getStickyTableHeaders?.(
-                virtualizer.scrollTop,
-                renderPlan.frozenHeight,
-                virtualizer.rowMetrics,
-                virtualizer.colMetrics,
-            );
-            if (stickyHeaders?.length > 0) {
-                canvasRenderer.paintStickyHeaders(stickyHeaders, {
-                    frozenWidth,
-                    frozenHeight,
-                    scrollLeft,
-                });
-            }
-        }
-
-        // Grip icons for reorderable table rows (post-paint, direct 2d context)
-        paintTableGripIcons(scrollLeft, scrollTop, frozenHeight, bodyH);
-    }
-
-    function paintTableGripIcons(scrollLeft, scrollTop, frozenHeight, bodyH) {
-        if (!canvasEl || !virtualizer || !renderContext?.tableManager) return;
-        const ctx = canvasEl.getContext('2d');
-        if (!ctx) return;
-
-        const dpr = window.devicePixelRatio ?? 1;
-        ctx.save();
-        ctx.scale(dpr, dpr);
-
-        for (const table of renderContext.tableManager.stores.values()) {
-            if (table.isSourceOnly || table.sortColId) continue;
-
-            const tableCanvasX = virtualizer.colMetrics.offsetOf(table.startCol) - scrollLeft;
-            const colW = virtualizer.getColWidth(table.startCol);
-            if (tableCanvasX > virtualizer.containerWidth - HEADER_WIDTH || tableCanvasX + colW < 0) continue;
-
-            const firstDataRow = table.startRow + 2;
-            const rowCount = table.sortedFilteredRows.length;
-
-            for (let di = 0; di < rowCount; di++) {
-                const gridRow = firstDataRow + di;
-                const rowCanvasY = virtualizer.rowMetrics.offsetOf(gridRow) - scrollTop + frozenHeight;
-                const rowH = virtualizer.getRowHeight(gridRow);
-                if (rowCanvasY + rowH < frozenHeight || rowCanvasY > frozenHeight + bodyH) continue;
-
-                const isHovered = tableGripHoverRow === gridRow;
-                const isDragging = tableRowDrag?.fromGridRow === gridRow;
-                ctx.fillStyle = isDragging ? 'rgba(59,130,246,0.8)'
-                    : isHovered ? 'rgba(100,116,139,0.65)'
-                    : 'rgba(148,163,184,0.3)';
-
-                const cx = tableCanvasX + 7;
-                const cy = rowCanvasY + rowH / 2;
-                for (let r = 0; r < 3; r++) {
-                    for (let c = 0; c < 2; c++) {
-                        ctx.fillRect(Math.round(cx + c * 4 - 2), Math.round(cy + r * 4 - 4), 2, 2);
-                    }
-                }
-            }
-        }
-
-        ctx.restore();
-    }
-
-    // ─── Incremental scroll paint ──────────────────────────────────────────────
-    // Blits each scrolling pane's existing pixels by the scroll delta, then
-    // repaints only the thin strip of rows/cols that have newly entered the
-    // visible viewport.
-    //
-    // IMPORTANT: Only content inside the pane clip rect exists on the canvas.
-    // Overscan rows/cols are computed by buildPaneData but fall outside the clip
-    // region, so they are never rendered.  Strip computation must therefore use
-    // the *visible viewport* bounds (via indexAtOffset), not the overscan-inflated
-    // body-range.  The corner pane (frozen × frozen) never changes during scroll.
-    function performScrollPaint(dx, dy, prevST, prevSL) {
-        if (!canvasEl || !canvasRenderer || !renderPlan || !virtualizer) return;
-
-        const frozenRows = virtualizer.frozenRows;
-        const frozenCols = virtualizer.frozenCols;
-        const frozenHeight = renderPlan.frozenHeight;
-        const frozenWidth = renderPlan.frozenWidth;
-        const bodyW = renderPlan.bodyViewportWidth;
-        const bodyH = renderPlan.bodyViewportHeight;
-        const scrollLeft = virtualizer.scrollLeft;
-        const scrollTop = virtualizer.scrollTop;
-        const rowMetrics = virtualizer.rowMetrics;
-        const colMetrics = virtualizer.colMetrics;
-
-        const commonParams = {
-            rowMetrics,
-            colMetrics,
-            renderContext,
-            sheetStore,
-            session: spreadsheetSession,
-            frozenRows,
-            frozenCols,
-            frozenHeight,
-            frozenWidth,
-        };
-
-        // Pre-compute sticky headers so we can extend the upward-scroll strip to erase ghosts.
-        // When scrolling up, blitScroll shifts the sticky-header pixels down into the body,
-        // leaving a ghost copy. Extending the strip repaint to cover that ghost zone erases it.
-        // IMPORTANT: use prevST (the scroll position before this frame) to find what was
-        // sticky on the canvas before the blit — not scrollTop, which may have crossed the
-        // un-sticky threshold so it returns nothing and leaves the ghost un-erased.
-        const stickyHeaders = renderContext?.getStickyTableHeaders?.(
-            scrollTop, frozenHeight, rowMetrics, colMetrics,
-        ) ?? [];
-        const prevStickyHeaders = dy < 0
-            ? (renderContext?.getStickyTableHeaders?.(prevST, frozenHeight, rowMetrics, colMetrics) ?? [])
-            : stickyHeaders;
-        const stickyOverlayH = prevStickyHeaders.reduce(
-            (m, h) => Math.max(m, h.headerHeightPx + (h.showEntry ? h.entryHeightPx : 0)), 0,
-        );
-
-        // Helper: build a strip row range from pixel offsets (visible-viewport based)
-        function rowStripRange(fromOffset, toOffset) {
-            const s = Math.max(
-                frozenRows,
-                rowMetrics.indexAtOffset(fromOffset),
-            );
-            const e = Math.min(
-                virtualizer.rowCount - 1,
-                rowMetrics.indexAtOffset(toOffset) + 1,
-            );
-            return s <= e ? { start: s, end: e, count: e - s + 1 } : null;
-        }
-
-
-        const bp = renderPlan.plans.body;
-
-        // ── Body pane: blit + repaint exposed strips ──────────────────────────
-        canvasRenderer.blitScroll(
-            dx,
-            dy,
-            frozenWidth,
-            frozenHeight,
-            bodyW,
-            bodyH,
-        );
-
-        if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
-            // Vertical strip (rows entering top or bottom)
-            if (dy !== 0) {
-                let stripRows, clipY, clipH;
-                if (dy > 0) {
-                    // Scrolling down → bottom strip
-                    stripRows = rowStripRange(
-                        frozenHeight + prevST + bodyH,
-                        frozenHeight + scrollTop + bodyH,
-                    );
-                    clipY = frozenHeight + bodyH - dy;
-                    clipH = dy;
-                } else {
-                    // Scrolling up → top strip, extended by stickyOverlayH to repaint the ghost
-                    // zone where blitScroll shifted the sticky header pixels downward.
-                    stripRows = rowStripRange(frozenHeight + scrollTop, frozenHeight + prevST + stickyOverlayH);
-                    clipY = frozenHeight;
-                    clipH = Math.min(-dy + stickyOverlayH, bodyH);
-                }
-                if (stripRows) {
-                    canvasRenderer.paintPane(
-                        buildPaneDataTimed({
-                            ...commonParams,
-                            rowRange: stripRows,
-                            colRange: bp.colRange,
-                            scrollLeft,
-                            scrollTop,
-                        }),
-                        { clipX: frozenWidth, clipY, clipW: bodyW, clipH, showGridLines: showGridlines },
-                    );
-                }
-            }
-
-            // Horizontal strip (cols entering left or right)
-            if (dx !== 0) {
-                let clipX, clipW;
-                if (dx > 0) {
-                    clipX = frozenWidth + bodyW - dx;
-                    clipW = dx;
-                } else {
-                    clipX = frozenWidth;
-                    clipW = -dx;
-                }
-                // Use the full column range (not just the newly-exposed strip) so that
-                // cells outside the strip whose overflow text or merge spans extend INTO
-                // the strip are included in the paint pass. The clip rect limits actual
-                // drawing to the exposed pixels, so the blit pixels for stable cells are
-                // not overwritten.
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: bp.rowRange,
-                        colRange: bp.colRange,
-                        scrollLeft,
-                        scrollTop,
-                    }),
-                    { clipX, clipY: frozenHeight, clipW, clipH: bodyH, showGridLines: showGridlines },
-                );
-            }
-        }
-
-        // ── Top pane (frozen rows × scrollable cols): blit + col strip ────────
-        if (dx !== 0) {
-            const tp = renderPlan.plans.top;
-            if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
-                canvasRenderer.blitScroll(
-                    dx,
-                    0,
-                    frozenWidth,
-                    0,
-                    bodyW,
-                    frozenHeight,
-                );
-                let clipX, clipW;
-                if (dx > 0) {
-                    clipX = frozenWidth + bodyW - dx;
-                    clipW = dx;
-                } else {
-                    clipX = frozenWidth;
-                    clipW = -dx;
-                }
-                // Use full column range so overflow/merge cells outside the strip are
-                // included; clip rect limits drawing to the newly-exposed pixels.
-                canvasRenderer.paintPane(
-                    buildPaneDataTimed({
-                        ...commonParams,
-                        rowRange: tp.rowRange,
-                        colRange: tp.colRange,
-                        scrollLeft,
-                        scrollTop: 0,
-                    }),
-                    { clipX, clipY: 0, clipW, clipH: frozenHeight, showGridLines: showGridlines },
-                );
-            }
-        }
-
-        // ── Left pane (frozen cols × scrollable rows): blit + row strip ───────
-        if (dy !== 0) {
-            const lp = renderPlan.plans.left;
-            if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
-                canvasRenderer.blitScroll(
-                    0,
-                    dy,
-                    0,
-                    frozenHeight,
-                    frozenWidth,
-                    bodyH,
-                );
-                let stripRows, clipY, clipH;
-                if (dy > 0) {
-                    stripRows = rowStripRange(
-                        frozenHeight + prevST + bodyH,
-                        frozenHeight + scrollTop + bodyH,
-                    );
-                    clipY = frozenHeight + bodyH - dy;
-                    clipH = dy;
-                } else {
-                    stripRows = rowStripRange(frozenHeight + scrollTop, frozenHeight + prevST);
-                    clipY = frozenHeight;
-                    clipH = -dy;
-                }
-                if (stripRows) {
-                    canvasRenderer.paintPane(
-                        buildPaneDataTimed({
-                            ...commonParams,
-                            rowRange: stripRows,
-                            colRange: lp.colRange,
-                            scrollLeft: 0,
-                            scrollTop,
-                        }),
-                        { clipX: 0, clipY, clipW: frozenWidth, clipH, showGridLines: showGridlines },
-                    );
-                }
-            }
-        }
-
-        // Corner pane: never changes during scroll — skip entirely
-
-        // Sticky table headers — repaint after all blits/strips so they appear on top
-        if (stickyHeaders.length > 0) {
-            canvasRenderer.paintStickyHeaders(stickyHeaders, {
-                frozenWidth,
-                frozenHeight,
-                scrollLeft,
-            });
-        }
-    }
-
-    // ─── Selection canvas paint (called by selectionScheduler on RAF) ─────────
-    function performSelectionPaint() {
-        if (
-            !selectCanvasEl ||
-            !selectionRenderer ||
-            !renderPlan ||
-            !virtualizer
-        )
-            return;
-
-        const frozenRows = virtualizer.frozenRows;
-        const frozenCols = virtualizer.frozenCols;
-        const frozenHeight = renderPlan.frozenHeight;
-        const frozenWidth = renderPlan.frozenWidth;
-        const scrollLeft = virtualizer.scrollLeft;
-        const scrollTop = virtualizer.scrollTop;
-
-        const commonSelParams = {
-            rowMetrics: virtualizer.rowMetrics,
-            colMetrics: virtualizer.colMetrics,
-            selectionState,
-            formulaEditState: editSessionState,
-            frozenRows,
-            frozenCols,
-            frozenHeight,
-            frozenWidth,
-            rowCount,
-            colCount,
-            mergeEngine: renderContext?.mergeEngine ?? null,
-        };
-
-        selectionRenderer.clear();
-
-        const bp = renderPlan.plans.body;
-        if (bp.rowRange.count > 0 && bp.colRange.count > 0) {
-            selectionRenderer.paintSelectionPane({
-                ...commonSelParams,
-                rowRange: bp.rowRange,
-                colRange: bp.colRange,
-                scrollLeft,
-                scrollTop,
-                clipX: frozenWidth,
-                clipY: frozenHeight,
-                clipW: renderPlan.bodyViewportWidth,
-                clipH: renderPlan.bodyViewportHeight,
-            });
-        }
-
-        const tp = renderPlan.plans.top;
-        if (tp.rowRange.count > 0 && tp.colRange.count > 0) {
-            selectionRenderer.paintSelectionPane({
-                ...commonSelParams,
-                rowRange: tp.rowRange,
-                colRange: tp.colRange,
-                scrollLeft,
-                scrollTop: 0,
-                clipX: frozenWidth,
-                clipY: 0,
-                clipW: renderPlan.bodyViewportWidth,
-                clipH: frozenHeight,
-            });
-        }
-
-        const lp = renderPlan.plans.left;
-        if (lp.rowRange.count > 0 && lp.colRange.count > 0) {
-            selectionRenderer.paintSelectionPane({
-                ...commonSelParams,
-                rowRange: lp.rowRange,
-                colRange: lp.colRange,
-                scrollLeft: 0,
-                scrollTop,
-                clipX: 0,
-                clipY: frozenHeight,
-                clipW: frozenWidth,
-                clipH: renderPlan.bodyViewportHeight,
-            });
-        }
-
-        const cp = renderPlan.plans.corner;
-        if (cp.rowRange.count > 0 && cp.colRange.count > 0) {
-            selectionRenderer.paintSelectionPane({
-                ...commonSelParams,
-                rowRange: cp.rowRange,
-                colRange: cp.colRange,
-                scrollLeft: 0,
-                scrollTop: 0,
-                clipX: 0,
-                clipY: 0,
-                clipW: frozenWidth,
-                clipH: frozenHeight,
-            });
-        }
     }
 
     // ─── Pixel-to-container coordinate helpers ────────────────────────────────
@@ -1634,14 +1010,14 @@
     });
 
     let dropdownOverlayStyle = $derived.by(() => {
-        if (!focusedDropdownCell || !containerEl) return "display:none;";
-        const preferredWidth = Math.max(focusedDropdownCell.width, 164);
+        if (!kbCtrl.focusedDropdownCell || !containerEl) return "display:none;";
+        const preferredWidth = Math.max(kbCtrl.focusedDropdownCell.width, 164);
         const preferredHeight = 240;
         const anchor = {
-            left: focusedDropdownCell.left,
-            top: focusedDropdownCell.top,
-            width: focusedDropdownCell.width,
-            height: focusedDropdownCell.height,
+            left: kbCtrl.focusedDropdownCell.left,
+            top: kbCtrl.focusedDropdownCell.top,
+            width: kbCtrl.focusedDropdownCell.width,
+            height: kbCtrl.focusedDropdownCell.height,
         };
         const placed = placeOverlayNearAnchor(
             anchor,
@@ -1896,7 +1272,7 @@
     let fillHandlePos = $derived.by(() => {
         if (!virtualizer || !renderPlan || editSessionState.isEditing) return null;
         if (selectionState.selectionMode !== 'range') return null;
-        if (selectionState.isSelecting || fillHandleDrag) return null;
+        if (selectionState.isSelecting || fillCtrl.fillHandleDrag) return null;
         if (!anchor) return null;
         const eff = expandedRange;
         const endCol = eff ? eff.endCol : anchor.col;
@@ -1917,280 +1293,6 @@
         return selectionState.isColHighlighted(col);
     }
 
-    // ─── Fill-handle handlers ─────────────────────────────────────────────────
-    function handleFillHandleMouseDown(e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const range = selectionState.range;
-        const srcRange = range ?? (anchor ? { startRow: anchor.row, endRow: anchor.row, startCol: anchor.col, endCol: anchor.col } : null);
-        if (!srcRange) return;
-
-        fillHandleDrag = { srcRange, fillRange: null, direction: null };
-        currentCursor = 'crosshair';
-
-        function onMove(e) {
-            if (!fillHandleDrag || !virtualizer || !containerEl) return;
-            const { localX, localY } = getLocalCoords(e);
-            const hit = doHitTest(localX, localY);
-            if (hit.region !== 'cell') return;
-
-            const { row, col } = hit;
-            const src = fillHandleDrag.srcRange;
-            let fillRange = null;
-            let direction = null;
-
-            if (row > src.endRow) {
-                direction = 'down';
-                fillRange = { startRow: src.endRow + 1, endRow: row, startCol: src.startCol, endCol: src.endCol };
-            } else if (row < src.startRow) {
-                direction = 'up';
-                fillRange = { startRow: row, endRow: src.startRow - 1, startCol: src.startCol, endCol: src.endCol };
-            } else if (col > src.endCol) {
-                direction = 'right';
-                fillRange = { startRow: src.startRow, endRow: src.endRow, startCol: src.endCol + 1, endCol: col };
-            } else if (col < src.startCol) {
-                direction = 'left';
-                fillRange = { startRow: src.startRow, endRow: src.endRow, startCol: col, endCol: src.startCol - 1 };
-            }
-
-            fillHandleDrag = { ...fillHandleDrag, fillRange, direction };
-        }
-
-        function onUp() {
-            if (fillHandleDrag?.fillRange && fillHandleDrag.direction) {
-                applyFill(fillHandleDrag.srcRange, fillHandleDrag.fillRange, fillHandleDrag.direction);
-            }
-            fillHandleDrag = null;
-            currentCursor = 'cell';
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-        }
-
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-    }
-
-    // ─── Fill-handle series detection helpers ────────────────────────────────
-    const FILL_MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const FILL_MONTHS_LONG  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    const FILL_DAYS_SHORT   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    const FILL_DAYS_LONG    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-    const FILL_CYCLIC_LISTS = [FILL_MONTHS_SHORT, FILL_MONTHS_LONG, FILL_DAYS_SHORT, FILL_DAYS_LONG];
-
-    /**
-     * Given an array of raw (non-formula) source values ordered along the fill axis,
-     * returns a function (stepIndex) => value, or null if no series is detected.
-     * stepIndex is the 0-based offset from srcRange.startRow/Col — negative for up/left fills.
-     */
-    function detectFillSeries(rawValues) {
-        const vals = rawValues.filter(v => v !== null && v !== undefined);
-        if (vals.length === 0) return null;
-
-        // 1. Number series
-        if (vals.every(v => typeof v === 'number' || (typeof v === 'string' && v !== '' && !isNaN(Number(v))))) {
-            const nums = vals.map(Number);
-            const step = nums.length === 1 ? 1 : (nums[nums.length - 1] - nums[0]) / (nums.length - 1);
-            const base = nums[0];
-            return (si) => {
-                const result = base + si * step;
-                return Number.isInteger(step) ? Math.round(result) : result;
-            };
-        }
-
-        // 2. Cyclic named lists (months, weekdays)
-        for (const list of FILL_CYCLIC_LISTS) {
-            const lower = list.map(s => s.toLowerCase());
-            const indices = vals.map(v => (typeof v === 'string' ? lower.indexOf(v.toLowerCase()) : -1));
-            if (indices.every(i => i >= 0)) {
-                const baseIdx = indices[0];
-                const step = indices.length > 1
-                    ? ((indices[1] - indices[0] + list.length) % list.length) || 1
-                    : 1;
-                const n = list.length;
-                return (si) => list[((baseIdx + si * step) % n + n) % n];
-            }
-        }
-
-        // 3. String + number suffix  (e.g. "Q1", "Q2" or "Item 1", "Item 2")
-        const SFX = /^(.*?)(\d+)(\D*)$/;
-        const matches = vals.map(v => {
-            if (typeof v !== 'string') return null;
-            const m = v.match(SFX);
-            return m ? { prefix: m[1], num: parseInt(m[2], 10), padLen: m[2].length, suffix: m[3] } : null;
-        });
-        if (matches.every(m => m !== null)) {
-            const { prefix, padLen, suffix } = matches[0];
-            if (matches.every(m => m.prefix === prefix && m.suffix === suffix)) {
-                const nums = matches.map(m => m.num);
-                const step = nums.length === 1 ? 1 : Math.round((nums[nums.length - 1] - nums[0]) / (nums.length - 1));
-                return (si) => {
-                    const n = Math.round(nums[0] + si * step);
-                    const digits = String(Math.abs(n)).padStart(padLen, '0');
-                    return `${prefix}${n < 0 ? '-' : ''}${digits}${suffix}`;
-                };
-            }
-        }
-
-        return null;
-    }
-
-    function applyFill(srcRange, fillRange, direction) {
-        const store = sheetStore;
-        if (!store) return;
-
-        /**
-         * Write a fill value to cell (r,c), routing table cells to their store.
-         * Formulas are adjusted for table data cells to plain formula strings only
-         * if the column supports it; otherwise the raw value is used.
-         */
-        /** @param {number} r @param {number} c @param {any} value */
-        function writeFillValue(r, c, value) {
-            const ct = renderContext?.getCellType(r, c);
-            if (ct === CELL_TYPE.TABLE_DATA) {
-                const info = renderContext?.tableManager?.getCellInfo(r, c);
-                if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                    const parsed = typeof value === 'string' && value.startsWith('=')
-                        ? value
-                        : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                }
-                return; // never fall through to sheet store for table cells
-            }
-            if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
-            if (typeof value === 'string' && value.startsWith('=')) {
-                store.setCellFormula(r, c, value);
-            } else {
-                store.setCellValue(r, c, value);
-            }
-        }
-
-        const FORMAT_PROPS = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline',
-            'strikethrough', 'color', 'backgroundColor',
-            'horizontalAlign', 'verticalAlign', 'wrapText', 'numberFormat'];
-
-        /** Copy cell-level formatting (non-border) from source cell (sr,sc) to target (r,c). */
-        function writeFillFormat(r, c, sr, sc) {
-            const ct = renderContext?.getCellType(r, c);
-            if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
-            const srcCell = store.getCell(sr, sc);
-            const props = {};
-            for (const k of FORMAT_PROPS) {
-                props[k] = srcCell?.exists && srcCell[k] !== undefined ? srcCell[k] : null;
-            }
-            store.setCellProperties(r, c, props);
-        }
-
-        /**
-         * Copy edge-based borders from source cell (sr,sc) to fill cell (r,c).
-         * Only sets the edges "owned" by this cell (bottom + right), plus the left
-         * outer boundary for the leftmost fill column. Shared edges between the
-         * source range and fill range are intentionally left untouched so the
-         * source's own border stays intact.
-         */
-        function writeFillBorders(r, c, sr, sc) {
-            const ct = renderContext?.getCellType(r, c);
-            if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY) return;
-            const sb = store.getCellBorders(sr, sc);
-
-            // Bottom edge — skip for fill-up at the shared boundary row (= source's top edge)
-            if (!(direction === 'up' && r === fillRange.endRow)) {
-                store.setCellBorder(r, c, 'bottom', sb.bottom ?? null);
-            }
-
-            // Right edge — skip for fill-left at the shared boundary col (= source's left edge)
-            if (!(direction === 'left' && c === fillRange.endCol)) {
-                store.setCellBorder(r, c, 'right', sb.right ?? null);
-            }
-
-            // Left outer boundary — only for leftmost fill col, skip for fill-right (shared)
-            if (c === fillRange.startCol && direction !== 'right') {
-                store.setCellBorder(r, c, 'left', sb.left ?? null);
-            }
-        }
-
-        const srcRows = srcRange.endRow - srcRange.startRow + 1;
-        const srcCols = srcRange.endCol - srcRange.startCol + 1;
-        const isVertical = direction === 'down' || direction === 'up';
-
-        if (isVertical) {
-            for (let c = srcRange.startCol; c <= srcRange.endCol; c++) {
-                const laneValues = [];
-                let hasFormula = false;
-                for (let r = srcRange.startRow; r <= srcRange.endRow; r++) {
-                    const cell = store.getCell(r, c);
-                    const v = cell?.exists ? cell.v : null;
-                    if (typeof v === 'string' && v.startsWith('=')) hasFormula = true;
-                    laneValues.push(v);
-                }
-                const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
-
-                for (let r = fillRange.startRow; r <= fillRange.endRow; r++) {
-                    const srcRow = srcRange.startRow + (((r - srcRange.startRow) % srcRows) + srcRows) % srcRows;
-                    if (hasFormula) {
-                        const cell = store.getCell(srcRow, c);
-                        if (!cell?.exists) continue;
-                        const v = cell.v;
-                        if (v !== null && v !== undefined) {
-                            const adjusted = typeof v === 'string' && v.startsWith('=')
-                                ? clipboardManager.adjustFormula(v, r - srcRow, 0)
-                                : v;
-                            writeFillValue(r, c, adjusted);
-                        }
-                    } else if (seriesFn) {
-                        writeFillValue(r, c, seriesFn(r - srcRange.startRow));
-                    } else {
-                        const cell = store.getCell(srcRow, c);
-                        if (cell?.exists && cell.v !== null && cell.v !== undefined) {
-                            writeFillValue(r, c, cell.v);
-                        }
-                    }
-                    writeFillFormat(r, c, srcRow, c);
-                    writeFillBorders(r, c, srcRow, c);
-                }
-            }
-        } else {
-            for (let r = srcRange.startRow; r <= srcRange.endRow; r++) {
-                const laneValues = [];
-                let hasFormula = false;
-                for (let c = srcRange.startCol; c <= srcRange.endCol; c++) {
-                    const cell = store.getCell(r, c);
-                    const v = cell?.exists ? cell.v : null;
-                    if (typeof v === 'string' && v.startsWith('=')) hasFormula = true;
-                    laneValues.push(v);
-                }
-                const seriesFn = hasFormula ? null : detectFillSeries(laneValues);
-
-                for (let c = fillRange.startCol; c <= fillRange.endCol; c++) {
-                    const srcCol = srcRange.startCol + (((c - srcRange.startCol) % srcCols) + srcCols) % srcCols;
-                    if (hasFormula) {
-                        const cell = store.getCell(r, srcCol);
-                        if (!cell?.exists) continue;
-                        const v = cell.v;
-                        if (v !== null && v !== undefined) {
-                            const adjusted = typeof v === 'string' && v.startsWith('=')
-                                ? clipboardManager.adjustFormula(v, 0, c - srcCol)
-                                : v;
-                            writeFillValue(r, c, adjusted);
-                        }
-                    } else if (seriesFn) {
-                        writeFillValue(r, c, seriesFn(c - srcRange.startCol));
-                    } else {
-                        const cell = store.getCell(r, srcCol);
-                        if (cell?.exists && cell.v !== null && cell.v !== undefined) {
-                            writeFillValue(r, c, cell.v);
-                        }
-                    }
-                    writeFillFormat(r, c, r, srcCol);
-                    writeFillBorders(r, c, r, srcCol);
-                }
-            }
-        }
-
-        renderScheduler?.invalidateAll();
-        selectionScheduler?.invalidateAll();
-    }
-
     // ─── Event layer handlers ─────────────────────────────────────────────────
     function handleEventLayerMouseDown(e) {
         if (touchHandled) return; // suppress synthetic mouse events after touch
@@ -2209,10 +1311,10 @@
                 handleRowHeaderMouseDown(hit.row, e);
                 break;
             case "colResize":
-                startColResize(hit.resizeCol, e);
+                resizeCtrl.startColResize(hit.resizeCol, e);
                 break;
             case "rowResize":
-                startRowResize(hit.resizeRow, e);
+                resizeCtrl.startRowResize(hit.resizeRow, e);
                 break;
             case "cell":
                 if (hit.row >= 0 && hit.col >= 0) {
@@ -2228,18 +1330,18 @@
         const hit = doHitTest(localX, localY);
         currentCursor = hitTestEngine.getCursor(hit);
 
-        // Detect grip-handle hover: leftmost 14 px of a reorderable TABLE_DATA row.
+        // Detect grip-handle hover: leftmost TABLE_GRIP_HANDLE_PX of a reorderable TABLE_DATA row.
         if (hit.region === 'cell' && hit.row >= 0 && hit.col >= 0) {
             const cellType = renderContext?.getCellType(hit.row, hit.col);
             if (cellType === CELL_TYPE.TABLE_DATA) {
                 const info = renderContext?.tableManager?.getCellInfo(hit.row, hit.col);
                 if (info?.table && !info.table.sortColId && hit.col === info.table.startCol) {
                     const xInCell = localX - cellContainerLeft(hit.col);
-                    if (xInCell >= 0 && xInCell < 14) {
+                    if (xInCell >= 0 && xInCell < TABLE_GRIP_HANDLE_PX) {
                         currentCursor = tableRowDrag ? 'grabbing' : 'grab';
                         if (tableGripHoverRow !== hit.row) {
                             tableGripHoverRow = hit.row;
-                            untrack(() => renderScheduler?.invalidateAll());
+                            untrack(() => selectionScheduler?.invalidateAll());
                         }
                         return;
                     }
@@ -2248,7 +1350,7 @@
         }
         if (tableGripHoverRow !== -1) {
             tableGripHoverRow = -1;
-            untrack(() => renderScheduler?.invalidateAll());
+            untrack(() => selectionScheduler?.invalidateAll());
         }
 
         // Link hover detection — re-measure on demand (only when cell has tfr with links)
@@ -2687,10 +1789,10 @@
 
         // Close dropdown overlay if clicking elsewhere
         if (
-            focusedDropdownCell &&
-            (focusedDropdownCell.row !== row || focusedDropdownCell.col !== col)
+            kbCtrl.focusedDropdownCell &&
+            (kbCtrl.focusedDropdownCell.row !== row || kbCtrl.focusedDropdownCell.col !== col)
         ) {
-            focusedDropdownCell = null;
+            kbCtrl.focusedDropdownCell = null;
         }
 
         const cellType = renderContext?.getCellType(row, col);
@@ -2792,11 +1894,11 @@
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = renderContext?.tableManager?.getCellInfo(row, col);
 
-            // ── Drag handle: leftmost 14 px of the table's first column ─────
+            // ── Drag handle: leftmost TABLE_GRIP_HANDLE_PX of the table's first column ─────
             if (info?.table && !info.table.sortColId && col === info.table.startCol) {
                 const cellLeft = cellContainerLeft(col);
                 const { localX } = getLocalCoords(e);
-                if (localX - cellLeft >= 0 && localX - cellLeft < 14) {
+                if (localX - cellLeft >= 0 && localX - cellLeft < TABLE_GRIP_HANDLE_PX) {
                     e.preventDefault();
                     startTableRowDrag(e, info.table, info.dataIndex, row);
                     return;
@@ -3073,6 +2175,56 @@
         contextMenuVisible = false;
     }
 
+
+    // ─── Dropdown range / table resolver helpers ─────────────────────────────
+    function resolveRangeOptions(rangeStr) {
+        if (!sheetStore) return [];
+        let targetSheetId = null;
+        let cellRange = rangeStr.trim();
+        const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
+        if (sheetRefMatch) {
+            const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
+            cellRange = sheetRefMatch[3];
+            const entry = spreadsheetSession.sheets.find(s => s.name === sheetName);
+            if (entry) targetSheetId = entry.id;
+        }
+        const parts = cellRange.trim().toUpperCase().split(':');
+        function parseRef(ref) {
+            const m = ref.match(/^([A-Z]+)(\d+)$/);
+            if (!m) return null;
+            let col = 0;
+            for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
+            col--;
+            return { row: parseInt(m[2]) - 1, col };
+        }
+        const start = parseRef(parts[0]);
+        const end = parts[1] ? parseRef(parts[1]) : start;
+        if (!start || !end) return [];
+        const opts = [];
+        if (!targetSheetId || targetSheetId === spreadsheetSession.activeSheetId) {
+            for (let r = start.row; r <= end.row; r++)
+                for (let c = start.col; c <= end.col; c++) {
+                    const v = spreadsheetSession.getCellDisplayValue(r, c);
+                    if (v != null && v !== '') opts.push(String(v));
+                }
+        } else {
+            const values = spreadsheetSession.computeSheetRange(targetSheetId, start.row, start.col, end.row, end.col);
+            for (const v of values)
+                if (v != null && v !== '' && !(v instanceof Object)) opts.push(String(v));
+        }
+        return opts;
+    }
+
+    function resolveTableColumnOptions(tableName, columnId) {
+        const t = renderContext?.tableManager?.getTableByName(tableName);
+        if (t) {
+            return t.getColumn(t.resolveColId(String(columnId)))
+                .filter(v => v != null && v !== '')
+                .map(String);
+        }
+        return spreadsheetSession.getTableColumnValues(tableName, columnId);
+    }
+
     // ─── Editing ──────────────────────────────────────────────────────────────
     function beginCellEdit(row, col, options = {}) {
         const { seedText = null, surface = "grid" } = options;
@@ -3134,10 +2286,10 @@
                     ddOptions = ct.options;
                 }
                 if (ddOptions.length > 0) {
-                    dropdownFilter = seedText ?? "";
+                    kbCtrl.dropdownFilter = seedText ?? "";
                     const capturedInfo = info;
                     const capturedCellType = tblCellType;
-                    focusedDropdownCell = {
+                    kbCtrl.focusedDropdownCell = {
                         row, col,
                         options: ddOptions,
                         left: cellContainerLeft(col),
@@ -3203,9 +2355,9 @@
                 ddOptions = ct.options;
             }
             if (ddOptions.length > 0) {
-                dropdownFilter = seedText ?? "";
+                kbCtrl.dropdownFilter = seedText ?? "";
                 const capturedRow = row, capturedCol = col;
-                focusedDropdownCell = {
+                kbCtrl.focusedDropdownCell = {
                     row,
                     col,
                     options: ddOptions,
@@ -3264,63 +2416,6 @@
      * Persist an edit to a specific sheet (may differ from active sheet during cross-sheet formula editing).
      * Falls back to the active sheet when sheetId is null/undefined.
      */
-    function persistEditOnSheet(sheetId, payload) {
-        if (!payload) return;
-        const { row, col, value, tfr } = payload;
-        const targetSheetId = sheetId || spreadsheetSession.activeSheetId;
-
-        if (typeof value === "string" && value.startsWith("=")) {
-            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, row, col, value);
-        } else if (tfr && tfr.length > 0) {
-            // Rich text: store plain value + runs together
-            const targetStore =
-                targetSheetId === spreadsheetSession.activeSheetId ? sheetStore : null;
-            const ct = targetStore?.getCellTypeConfig(row, col);
-            const parsedValue = CellTypeRegistry.parseInput(ct, value);
-            targetStore?.setCellValueWithRuns(row, col, parsedValue, tfr);
-        } else {
-            const targetStore =
-                targetSheetId === spreadsheetSession.activeSheetId ? sheetStore : null;
-            const ct = targetStore?.getCellTypeConfig(row, col);
-            const parsedValue = CellTypeRegistry.parseInput(ct, value);
-            spreadsheetSession.setCellValueOnSheet(targetSheetId, row, col, parsedValue);
-        }
-    }
-
-    /**
-     * Persist a cell edit to the correct store (table or sheet).
-     * Routes to commitTableDataCell, commitTableEntryCell, renameColumn, or persistEditOnSheet.
-     * value may be a plain string or { value, tfr } for rich text.
-     */
-    function persistCellEdit(sheetId, row, col, value, tfr = null) {
-        // Unpack if caller passed a { value, tfr } object
-        let plainValue = value;
-        let runsTfr    = tfr;
-        if (value !== null && typeof value === 'object' && 'value' in value) {
-            plainValue = value.value;
-            runsTfr    = value.tfr ?? null;
-        }
-
-        const cellType = renderContext?.getCellType(row, col);
-        if (cellType === CELL_TYPE.TABLE_DATA) {
-            commitTableDataCell(renderContext.tableManager.getCellInfo(row, col), row, col, plainValue);
-            return;
-        }
-        if (cellType === CELL_TYPE.TABLE_ENTRY) {
-            commitTableEntryCell(renderContext.tableManager.getCellInfo(row, col), plainValue);
-            return;
-        }
-        if (cellType === CELL_TYPE.TABLE_HEADER) {
-            const info = renderContext?.tableManager?.getCellInfo(row, col);
-            if (info?.table && info.colDef) {
-                const newName = String(plainValue ?? "").trim();
-                if (newName) info.table.renameColumn(info.colDef.id, newName);
-            }
-            return;
-        }
-        persistEditOnSheet(sheetId, { row, col, value: plainValue, tfr: runsTfr });
-    }
-
     /**
      * Navigate within a table entry row after a commit.
      * @param {number} entryRow  Grid row of the entry row
@@ -3386,115 +2481,11 @@
         }
     }
 
-    function persistEdit(payload) {
-        if (!payload || !sheetStore) return;
-        const { row, col, value } = payload;
-
-        // Data validation check (skip for formulas)
-        if (typeof value !== "string" || !value.startsWith("=")) {
-            // Check explicit DV rules
-            const dvRules = sheetStore.getDataValidations?.() ?? [];
-            for (const rule of dvRules) {
-                if (row < rule.startRow || row > rule.endRow) continue;
-                if (col < rule.startCol || col > rule.endCol) continue;
-                const valid = checkDataValidation(value, rule);
-                if (!valid) {
-                    const msg = rule.message || `Invalid value for this cell.`;
-                    if (rule.strict !== false) {
-                        window.alert(msg);
-                        return; // Reject the edit
-                    } else {
-                        console.warn("Data validation warning:", msg);
-                    }
-                }
-                break;
-            }
-
-            // Check dropdown cell type validation setting
-            const cellCt = sheetStore.getCellTypeConfig(row, col);
-            if (
-                cellCt?.type === "dropdown" &&
-                cellCt.validation &&
-                cellCt.validation !== "none"
-            ) {
-                let ddOpts = [];
-                if (cellCt.source === "range" && cellCt.range) {
-                    ddOpts = resolveRangeOptions(cellCt.range);
-                } else if (Array.isArray(cellCt.options)) {
-                    ddOpts = cellCt.options;
-                }
-                if (ddOpts.length > 0 && !ddOpts.includes(String(value))) {
-                    const msg = `"${value}" is not a valid option.`;
-                    if (cellCt.validation === "hard") {
-                        window.alert(msg);
-                        return;
-                    } else {
-                        console.warn("Dropdown validation warning:", msg);
-                    }
-                }
-            }
-        }
-
-        if (typeof value === "string" && value.startsWith("=")) {
-            sheetStore.setCellFormula(row, col, value);
-        } else {
-            // Parse the value according to the cell's current type config
-            const ct = sheetStore.getCellTypeConfig(row, col);
-            const parsedValue = CellTypeRegistry.parseInput(ct, value);
-            sheetStore.setCellValue(row, col, parsedValue);
-        }
-    }
-
-    function checkDataValidation(value, rule) {
-        if (rule.type === "list") {
-            const options = rule.options || [];
-            return options.length === 0 || options.includes(String(value));
-        }
-        if (rule.type === "number") {
-            const num = Number(value);
-            if (isNaN(num)) return false;
-            return checkNumericCondition(num, rule);
-        }
-        if (rule.type === "date") {
-            const d = new Date(value);
-            if (isNaN(d.getTime())) return false;
-            return true; // Could extend with min/max date checks
-        }
-        if (rule.type === "text") {
-            const len = String(value).length;
-            return checkNumericCondition(len, rule);
-        }
-        return true;
-    }
-
-    function checkNumericCondition(num, rule) {
-        const min = Number(rule.min);
-        const max = Number(rule.max);
-        switch (rule.condition) {
-            case "between":
-                return num >= min && num <= max;
-            case "gt":
-                return num > min;
-            case "gte":
-                return num >= min;
-            case "lt":
-                return num < min;
-            case "lte":
-                return num <= min;
-            case "eq":
-                return num === min;
-            case "neq":
-                return num !== min;
-            default:
-                return true;
-        }
-    }
-
     function commitCurrentEdit() {
         const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
         if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
             spreadsheetSession.setActiveSheet(editingSheetId);
     }
@@ -3507,7 +2498,7 @@
         const payload = editSessionState.commit();
         if (!payload) return;
 
-        persistCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
 
         if (editCellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(payload.row, payload.col);
@@ -3540,7 +2531,7 @@
                 ? value.value : value;
             const tfr = (value !== null && typeof value === 'object' && 'tfr' in value)
                 ? value.tfr : null;
-            persistCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
+            commitCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
             lastTableEntryEditInfo = entryInfo?.table
                 ? { row: editRow, col: editCol, table: entryInfo.table }
                 : null;
@@ -3609,296 +2600,6 @@
         }
     });
 
-    // ─── Resize (columns & rows) ──────────────────────────────────────────────
-    function startColResize(col, e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        let indices = [col];
-        // For 'cols' mode, resize all selected columns (including extra ranges)
-        if (selectionState.selectionMode === "cols") {
-            const allColRanges = selectionState.allColRanges;
-            const inSelection = allColRanges.some(r => col >= r.start && col <= r.end);
-            if (inSelection) {
-                const colSet = new Set();
-                for (const r of allColRanges)
-                    for (let c = r.start; c <= r.end; c++) colSet.add(c);
-                indices = [...colSet].sort((a, b) => a - b);
-            }
-        } else if (
-            selection &&
-            col >= selection.startCol &&
-            col <= selection.endCol
-        ) {
-            indices = [];
-            for (let c = selection.startCol; c <= selection.endCol; c++)
-                indices.push(c);
-        }
-
-        resizing = {
-            type: "col",
-            index: col,
-            startPos: e.clientX,
-            startSize: virtualizer.getColWidth(col),
-            selectedIndices: indices,
-        };
-        document.addEventListener("mousemove", handleResizeMove);
-        document.addEventListener("mouseup", handleResizeEnd);
-    }
-
-    function startRowResize(row, e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        let indices = [row];
-        // For 'rows' mode, resize all selected rows (including extra ranges)
-        if (selectionState.selectionMode === "rows") {
-            const allRowRanges = selectionState.allRowRanges;
-            const inSelection = allRowRanges.some(r => row >= r.start && row <= r.end);
-            if (inSelection) {
-                const rowSet = new Set();
-                for (const r of allRowRanges)
-                    for (let i = r.start; i <= r.end; i++) rowSet.add(i);
-                indices = [...rowSet].sort((a, b) => a - b);
-            }
-        } else if (
-            selection &&
-            row >= selection.startRow &&
-            row <= selection.endRow
-        ) {
-            indices = [];
-            for (let r = selection.startRow; r <= selection.endRow; r++)
-                indices.push(r);
-        }
-
-        resizing = {
-            type: "row",
-            index: row,
-            startPos: e.clientY,
-            startSize: virtualizer.getRowHeight(row),
-            selectedIndices: indices,
-        };
-        document.addEventListener("mousemove", handleResizeMove);
-        document.addEventListener("mouseup", handleResizeEnd);
-    }
-
-    function handleResizeMove(e) {
-        if (!resizing || !virtualizer) return;
-        if (resizing.type === "col") {
-            const newWidth = Math.max(
-                20,
-                resizing.startSize + (e.clientX - resizing.startPos),
-            );
-            for (const idx of resizing.selectedIndices)
-                virtualizer.setTempColWidth(idx, newWidth);
-        } else {
-            const newHeight = Math.max(
-                10,
-                resizing.startSize + (e.clientY - resizing.startPos),
-            );
-            for (const idx of resizing.selectedIndices)
-                virtualizer.setTempRowHeight(idx, newHeight);
-        }
-    }
-
-    function handleResizeEnd() {
-        if (!resizing || !virtualizer || !sheetStore) return;
-        if (resizing.type === "col") {
-            const finalWidth = virtualizer.getColWidth(resizing.index);
-            for (const idx of resizing.selectedIndices)
-                sheetStore.setColWidth(idx, finalWidth);
-            virtualizer.clearTempColWidths();
-        } else {
-            const finalHeight = virtualizer.getRowHeight(resizing.index);
-            for (const idx of resizing.selectedIndices)
-                sheetStore.setRowHeight(idx, finalHeight);
-            virtualizer.clearTempRowHeights();
-        }
-        document.removeEventListener("mousemove", handleResizeMove);
-        document.removeEventListener("mouseup", handleResizeEnd);
-        resizing = null;
-    }
-
-    // ─── Touch-based resize ──────────────────────────────────────────────────
-
-    function handleResizeTouchMove(e) {
-        if (!resizing || !virtualizer || e.touches.length !== 1) return;
-        e.preventDefault();
-        const touch = e.touches[0];
-        if (resizing.type === "col") {
-            const newWidth = Math.max(20, resizing.startSize + (touch.clientX - resizing.startPos));
-            for (const idx of resizing.selectedIndices) virtualizer.setTempColWidth(idx, newWidth);
-        } else {
-            const newHeight = Math.max(10, resizing.startSize + (touch.clientY - resizing.startPos));
-            for (const idx of resizing.selectedIndices) virtualizer.setTempRowHeight(idx, newHeight);
-        }
-    }
-
-    function handleResizeTouchEnd() {
-        if (!resizing || !virtualizer || !sheetStore) return;
-        if (resizing.type === "col") {
-            const finalWidth = virtualizer.getColWidth(resizing.index);
-            for (const idx of resizing.selectedIndices) sheetStore.setColWidth(idx, finalWidth);
-            virtualizer.clearTempColWidths();
-        } else {
-            const finalHeight = virtualizer.getRowHeight(resizing.index);
-            for (const idx of resizing.selectedIndices) sheetStore.setRowHeight(idx, finalHeight);
-            virtualizer.clearTempRowHeights();
-        }
-        document.removeEventListener("touchmove", handleResizeTouchMove);
-        document.removeEventListener("touchend", handleResizeTouchEnd);
-        document.removeEventListener("touchcancel", handleResizeTouchEnd);
-        resizing = null;
-    }
-
-    function startColResizeTouch(col, e) {
-        const touch = e.touches[0];
-        let indices = [col];
-        if (selectionState.selectionMode === "cols") {
-            const allColRanges = selectionState.allColRanges;
-            if (allColRanges.some(r => col >= r.start && col <= r.end)) {
-                const colSet = new Set();
-                for (const r of allColRanges)
-                    for (let c = r.start; c <= r.end; c++) colSet.add(c);
-                indices = [...colSet].sort((a, b) => a - b);
-            }
-        }
-        resizing = { type: "col", index: col, startPos: touch.clientX, startSize: virtualizer.getColWidth(col), selectedIndices: indices };
-        document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
-        document.addEventListener("touchend", handleResizeTouchEnd);
-        document.addEventListener("touchcancel", handleResizeTouchEnd);
-    }
-
-    function startRowResizeTouch(row, e) {
-        const touch = e.touches[0];
-        let indices = [row];
-        if (selectionState.selectionMode === "rows") {
-            const allRowRanges = selectionState.allRowRanges;
-            if (allRowRanges.some(r => row >= r.start && row <= r.end)) {
-                const rowSet = new Set();
-                for (const r of allRowRanges)
-                    for (let i = r.start; i <= r.end; i++) rowSet.add(i);
-                indices = [...rowSet].sort((a, b) => a - b);
-            }
-        }
-        resizing = { type: "row", index: row, startPos: touch.clientY, startSize: virtualizer.getRowHeight(row), selectedIndices: indices };
-        document.addEventListener("touchmove", handleResizeTouchMove, { passive: false });
-        document.addEventListener("touchend", handleResizeTouchEnd);
-        document.addEventListener("touchcancel", handleResizeTouchEnd);
-    }
-
-    // ─── Freeze-handle drag ───────────────────────────────────────────────────
-
-    /**
-     * Snap a pixel offset to the nearest column boundary count.
-     * Returns the number of columns to freeze (0 = unfreeze all).
-     */
-    function snapToColFreezeCount(contentX) {
-        if (!virtualizer) return 0;
-        if (contentX <= 0) return 0;
-        const metrics = virtualizer.colMetrics;
-        const total = virtualizer.colCount;
-        let best = 0;
-        let bestDist = contentX; // distance to boundary at offset 0
-        for (let c = 1; c <= total; c++) {
-            const offset = metrics.offsetOf(c);
-            const dist = Math.abs(contentX - offset);
-            if (dist < bestDist) { bestDist = dist; best = c; }
-            if (offset > contentX + 80) break;
-        }
-        return best;
-    }
-
-    /**
-     * Snap a pixel offset to the nearest row boundary count.
-     */
-    function snapToRowFreezeCount(contentY) {
-        if (!virtualizer) return 0;
-        if (contentY <= 0) return 0;
-        const metrics = virtualizer.rowMetrics;
-        const total = virtualizer.rowCount;
-        let best = 0;
-        let bestDist = contentY;
-        for (let r = 1; r <= total; r++) {
-            const offset = metrics.offsetOf(r);
-            const dist = Math.abs(contentY - offset);
-            if (dist < bestDist) { bestDist = dist; best = r; }
-            if (offset > contentY + 80) break;
-        }
-        return best;
-    }
-
-    function startFreezeColDrag(e) {
-        if (!virtualizer || !sheetStore || !containerEl) return;
-        e.preventDefault();
-        e.stopPropagation();
-        freezeDrag = { axis: 'col', startClientX: e.clientX, startFrozenCount: virtualizer.frozenCols };
-
-        function onMove(e) {
-            if (!freezeDrag || !virtualizer || !containerEl) return;
-            const rect = containerEl.getBoundingClientRect();
-            const contentX = e.clientX - rect.left - HEADER_WIDTH;
-            const newCount = snapToColFreezeCount(contentX);
-            if (freezeDrag.currentCount !== newCount) {
-                freezeDrag = { ...freezeDrag, currentCount: newCount };
-                // Live preview via virtualizer (no Yjs write yet)
-                virtualizer.setFrozenDimensions(virtualizer.frozenRows, newCount);
-                renderScheduler?.invalidateAll();
-            }
-        }
-
-        function onUp(e) {
-            if (!sheetStore) return;
-            const rect = containerEl?.getBoundingClientRect();
-            if (rect) {
-                const contentX = e.clientX - rect.left - HEADER_WIDTH;
-                const newCount = snapToColFreezeCount(contentX);
-                sheetStore.setFrozenColumns(newCount);
-            }
-            freezeDrag = null;
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-        }
-
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-    }
-
-    function startFreezeRowDrag(e) {
-        if (!virtualizer || !sheetStore || !containerEl) return;
-        e.preventDefault();
-        e.stopPropagation();
-        freezeDrag = { axis: 'row', startClientY: e.clientY, startFrozenCount: virtualizer.frozenRows };
-
-        function onMove(e) {
-            if (!freezeDrag || !virtualizer || !containerEl) return;
-            const rect = containerEl.getBoundingClientRect();
-            const contentY = e.clientY - rect.top - HEADER_HEIGHT;
-            const newCount = snapToRowFreezeCount(contentY);
-            if (freezeDrag.currentCount !== newCount) {
-                freezeDrag = { ...freezeDrag, currentCount: newCount };
-                virtualizer.setFrozenDimensions(newCount, virtualizer.frozenCols);
-                renderScheduler?.invalidateAll();
-            }
-        }
-
-        function onUp(e) {
-            if (!sheetStore) return;
-            const rect = containerEl?.getBoundingClientRect();
-            if (rect) {
-                const contentY = e.clientY - rect.top - HEADER_HEIGHT;
-                const newCount = snapToRowFreezeCount(contentY);
-                sheetStore.setFrozenRows(newCount);
-            }
-            freezeDrag = null;
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-        }
-
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-    }
-
     // ─── Scrolling ────────────────────────────────────────────────────────────
     let scrollPending = false;
     let pendingScrollTop = 0;
@@ -3940,13 +2641,13 @@
                     Math.abs(dx) < bodyW;
 
                 if (canIncremental) {
-                    performScrollPaint(dx, dy, prevST, prevSL);
+                    paintCoord.performScrollPaint(dx, dy, prevST, prevSL);
                 } else {
-                    performPaint(new Set(["body", "top", "left", "corner"]));
+                    paintCoord.performPaint(new Set(["body", "top", "left", "corner"]));
                 }
 
                 if (selectionRenderer && renderPlan) {
-                    performSelectionPaint();
+                    paintCoord.performSelectionPaint();
                 }
             });
         }
@@ -4207,512 +2908,6 @@
         }
     }
 
-    // ─── Keyboard ─────────────────────────────────────────────────────────────
-    function handleKeydown(e) {
-        const target = e.target;
-        const isInput =
-            target.tagName === "INPUT" ||
-            target.tagName === "TEXTAREA" ||
-            target.isContentEditable;
-        if (isInput) return;
-
-        if (editSessionState.isEditing) {
-            if (e.key === "Enter") {
-                commitEditAndMove(1, 0);
-                e.preventDefault();
-            } else if (e.key === "Escape") {
-                cancelEdit();
-                e.preventDefault();
-            } else if (e.key === "Tab") {
-                commitEditAndMove(0, e.shiftKey ? -1 : 1);
-                e.preventDefault();
-            }
-            return;
-        }
-
-        // Space: toggle checkbox cells without starting an edit
-        if (e.key === ' ' && anchor && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            const spaceCt = renderContext?.getCellTypeConfig(anchor.row, anchor.col);
-            if (spaceCt?.type === 'checkbox') {
-                const spaceCellType = renderContext?.getCellType(anchor.row, anchor.col);
-                if (spaceCellType === CELL_TYPE.TABLE_DATA) {
-                    const info = renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
-                    if (info?.table && info.colDef) {
-                        const cur = info.table.getValue(info.dataIndex, info.colDef.id);
-                        info.table.updateCell(info.dataIndex, info.colDef.id, !cur);
-                        untrack(() => renderScheduler?.invalidateAll());
-                    }
-                } else if (spaceCellType === CELL_TYPE.TABLE_ENTRY) {
-                    const info = renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
-                    if (info?.table && info.colDef) {
-                        const cur = info.table.entryBuffer?.[info.colDef.id];
-                        info.table.setEntryValue(info.colDef.id, !cur);
-                        untrack(() => renderScheduler?.invalidateAll());
-                    }
-                } else {
-                    const cell = sheetStore?.getCell(anchor.row, anchor.col);
-                    sheetStore?.setCellValue(anchor.row, anchor.col, !cell?.v);
-                    untrack(() => renderScheduler?.invalidateAll());
-                }
-                e.preventDefault();
-                return;
-            }
-        }
-
-        // If dropdown overlay is open: Escape closes it, printable chars append to filter
-        if (focusedDropdownCell) {
-            if (e.key === 'Escape') {
-                focusedDropdownCell = null;
-                e.preventDefault();
-                return;
-            }
-            if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                dropdownFilter += e.key;
-                setTimeout(() => dropdownFilterInputEl?.focus(), 0);
-                e.preventDefault();
-                return;
-            }
-        }
-
-        // Typing a printable character (no modifier) starts editing the selected cell
-        if (
-            e.key.length === 1 &&
-            !e.ctrlKey &&
-            !e.metaKey &&
-            !e.altKey &&
-            anchor
-        ) {
-            const anchorCellType = renderContext?.getCellType(
-                anchor.row,
-                anchor.col,
-            );
-            // Block typing into non-template repeater cells
-            if (anchorCellType === CELL_TYPE.REPEATER) {
-                const repCtx =
-                    renderContext?.repeaterEngine?.getCellRepeaterContext(
-                        anchor.row,
-                        anchor.col,
-                    );
-                if (repCtx && repCtx.repIndex > 0) {
-                    e.preventDefault();
-                    return;
-                }
-            }
-            // Block typing into table header cells
-            if (anchorCellType === CELL_TYPE.TABLE_HEADER) {
-                e.preventDefault();
-                return;
-            }
-            // Block typing into table buffer zone (rows below last data row)
-            if (renderContext?.tableManager?.isTableShadowCell(anchor.row, anchor.col)) {
-                e.preventDefault();
-                return;
-            }
-
-            // Block typing into image cells — they use the image picker editor
-            const anchorCt = renderContext?.getCellTypeConfig(
-                anchor.row,
-                anchor.col,
-            );
-            if (anchorCt?.type === "image") {
-                e.preventDefault();
-                return;
-            }
-
-            // For TABLE_DATA and TABLE_ENTRY cells, use beginCellEdit with typed character
-            if (
-                anchorCellType === CELL_TYPE.TABLE_DATA ||
-                anchorCellType === CELL_TYPE.TABLE_ENTRY
-            ) {
-                const info = renderContext?.tableManager?.getCellInfo(
-                    anchor.row,
-                    anchor.col,
-                );
-                if (info?.table && info.colDef) {
-                    const colType = info.colDef.type;
-                    if (
-                        colType !== "checkbox" &&
-                        colType !== "rating" &&
-                        !info.colDef.isNonEntry
-                    ) {
-                        let targetCol = anchor.col;
-                        if (
-                            anchorCellType === CELL_TYPE.TABLE_ENTRY &&
-                            info.colDef.isNonEntry
-                        ) {
-                            const firstEditable = info.table.columns.findIndex(
-                                (c) => !c.isNonEntry,
-                            );
-                            if (firstEditable >= 0)
-                                targetCol = info.table.startCol + firstEditable;
-                        }
-                        beginCellEdit(anchor.row, targetCol, {
-                            seedText: e.key,
-                            surface: "grid",
-                        });
-                    }
-                }
-                e.preventDefault();
-                return;
-            }
-
-            beginCellEdit(anchor.row, anchor.col, {
-                seedText: e.key,
-                surface: "grid",
-            });
-            e.preventDefault();
-            return;
-        }
-
-        switch (e.key) {
-            case "ArrowUp":
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    jumpToEdgeAndSelect(-1, 0, e.shiftKey);
-                } else {
-                    moveSelectionMergeAware(-1, 0, e.shiftKey);
-                }
-                e.shiftKey ? scrollToFocus() : scrollToAnchor();
-                e.preventDefault();
-                break;
-            case "ArrowDown":
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    jumpToEdgeAndSelect(1, 0, e.shiftKey);
-                } else {
-                    moveSelectionMergeAware(1, 0, e.shiftKey);
-                }
-                e.shiftKey ? scrollToFocus() : scrollToAnchor();
-                e.preventDefault();
-                break;
-            case "ArrowLeft":
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    jumpToEdgeAndSelect(0, -1, e.shiftKey);
-                } else {
-                    moveSelectionMergeAware(0, -1, e.shiftKey);
-                }
-                e.shiftKey ? scrollToFocus() : scrollToAnchor();
-                e.preventDefault();
-                break;
-            case "ArrowRight":
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    jumpToEdgeAndSelect(0, 1, e.shiftKey);
-                } else {
-                    moveSelectionMergeAware(0, 1, e.shiftKey);
-                }
-                e.shiftKey ? scrollToFocus() : scrollToAnchor();
-                e.preventDefault();
-                break;
-            case "Home": {
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    // Ctrl+Home → jump to A1
-                    if (e.shiftKey) {
-                        selectionState.focus = { row: 0, col: 0 };
-                        scrollToFocus();
-                    } else {
-                        selectionState.selectionMode = 'range';
-                        selectionState.anchor = { row: 0, col: 0 };
-                        selectionState.focus = { row: 0, col: 0 };
-                        scrollToAnchor();
-                    }
-                } else {
-                    // Home → beginning of row
-                    const homeRow = e.shiftKey
-                        ? (selectionState.focus?.row ?? selectionState.anchor?.row ?? 0)
-                        : (selectionState.anchor?.row ?? 0);
-                    if (e.shiftKey) {
-                        selectionState.focus = { row: homeRow, col: 0 };
-                        scrollToFocus();
-                    } else {
-                        selectionState.selectionMode = 'range';
-                        selectionState.anchor = { row: homeRow, col: 0 };
-                        selectionState.focus = { row: homeRow, col: 0 };
-                        scrollToAnchor();
-                    }
-                }
-                e.preventDefault();
-                break;
-            }
-            case "End": {
-                focusedDropdownCell = null;
-                if (e.ctrlKey || e.metaKey) {
-                    // Ctrl+End → last used cell (bottom-right of data)
-                    let lastRow = 0, lastCol = 0;
-                    sheetStore?.cells.forEach((_cell, key) => {
-                        const [r, c] = key.split(',').map(Number);
-                        if (r > lastRow) lastRow = r;
-                        if (c > lastCol) lastCol = c;
-                    });
-                    const endDest = { row: lastRow, col: lastCol };
-                    if (e.shiftKey) {
-                        selectionState.focus = endDest;
-                        scrollToFocus();
-                    } else {
-                        selectionState.selectionMode = 'range';
-                        selectionState.anchor = endDest;
-                        selectionState.focus = endDest;
-                        scrollToAnchor();
-                    }
-                } else {
-                    // End → last col of current row
-                    const endRow = e.shiftKey
-                        ? (selectionState.focus?.row ?? selectionState.anchor?.row ?? 0)
-                        : (selectionState.anchor?.row ?? 0);
-                    const endCol = colCount - 1;
-                    if (e.shiftKey) {
-                        selectionState.focus = { row: endRow, col: endCol };
-                        scrollToFocus();
-                    } else {
-                        selectionState.selectionMode = 'range';
-                        selectionState.anchor = { row: endRow, col: endCol };
-                        selectionState.focus = { row: endRow, col: endCol };
-                        scrollToAnchor();
-                    }
-                }
-                e.preventDefault();
-                break;
-            }
-            case "PageUp": {
-                focusedDropdownCell = null;
-                const pageRows = Math.max(1, Math.floor((virtualizer?.bodyViewportHeight ?? ROW_HEIGHT) / ROW_HEIGHT));
-                if (e.shiftKey) {
-                    selectionState.moveSelection(-pageRows, 0, true, rowCount, colCount);
-                    scrollToFocus();
-                } else {
-                    selectionState.moveSelection(-pageRows, 0, false, rowCount, colCount);
-                    scrollToAnchor();
-                }
-                e.preventDefault();
-                break;
-            }
-            case "PageDown": {
-                focusedDropdownCell = null;
-                const pageRows = Math.max(1, Math.floor((virtualizer?.bodyViewportHeight ?? ROW_HEIGHT) / ROW_HEIGHT));
-                if (e.shiftKey) {
-                    selectionState.moveSelection(pageRows, 0, true, rowCount, colCount);
-                    scrollToFocus();
-                } else {
-                    selectionState.moveSelection(pageRows, 0, false, rowCount, colCount);
-                    scrollToAnchor();
-                }
-                e.preventDefault();
-                break;
-            }
-            case "Tab": {
-                focusedDropdownCell = null;
-                // A single merged-cell selection has anchor != focus (covers the merge
-                // extent) but should Tab like a single cell, not cycle within the range.
-                const isSingleMergeSelected = selectionState.hasTabSelection &&
-                    selectionState.extraRanges.length === 0 &&
-                    (() => {
-                        const r = selectionState.range;
-                        if (!r) return false;
-                        const me = renderContext?.mergeEngine;
-                        if (!me) return false;
-                        const m = me.getMergeAt(r.startRow, r.startCol);
-                        return m &&
-                            m.startRow === r.startRow && m.endRow === r.endRow &&
-                            m.startCol === r.startCol && m.endCol === r.endCol;
-                    })();
-                if (selectionState.hasTabSelection && !isSingleMergeSelected) {
-                    e.shiftKey ? selectionState.tabPrev() : selectionState.tabNext();
-                    scrollToPrimaryCell();
-                } else {
-                    moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
-                    scrollToAnchor();
-                }
-                e.preventDefault();
-                break;
-            }
-            case "Enter":
-                // Enter moves selection down, but opens editors for special cells.
-                if (anchor) {
-                    const anchorCellType = renderContext?.getCellType(
-                        anchor.row,
-                        anchor.col,
-                    );
-                    const anchorCt2 = renderContext?.getCellTypeConfig(
-                        anchor.row,
-                        anchor.col,
-                    );
-                    if (anchorCt2?.type === "image") {
-                        beginCellEdit(anchor.row, anchor.col, {
-                            surface: "grid",
-                        });
-                        e.preventDefault();
-                        break;
-                    }
-                    if (anchorCellType === CELL_TYPE.TABLE_ENTRY) {
-                        // Enter on entry row starts editing
-                        beginCellEdit(anchor.row, anchor.col, {
-                            surface: "grid",
-                        });
-                    } else if (anchorCellType !== CELL_TYPE.TABLE_HEADER) {
-                        moveSelectionMergeAware(1, 0, false);
-                        scrollToAnchor();
-                    }
-                }
-                e.preventDefault();
-                break;
-            case "F2":
-                // F2 opens the cell editor (standard spreadsheet shortcut).
-                if (anchor) {
-                    const f2CellType = renderContext?.getCellType(
-                        anchor.row,
-                        anchor.col,
-                    );
-                    if (f2CellType !== CELL_TYPE.TABLE_HEADER) {
-                        beginCellEdit(anchor.row, anchor.col, {
-                            surface: "grid",
-                        });
-                    }
-                }
-                e.preventDefault();
-                break;
-            case "Delete":
-            case "Backspace":
-                clearSelection();
-                e.preventDefault();
-                break;
-            case "z":
-                if (e.ctrlKey || e.metaKey) {
-                    e.shiftKey
-                        ? spreadsheetSession.redo()
-                        : spreadsheetSession.undo();
-                    e.preventDefault();
-                }
-                break;
-            case "y":
-                if (e.ctrlKey || e.metaKey) {
-                    spreadsheetSession.redo();
-                    e.preventDefault();
-                }
-                break;
-            case "p":
-                if (e.ctrlKey || e.metaKey) {
-                    document.dispatchEvent(new CustomEvent('openPdfExport'));
-                    e.preventDefault();
-                }
-                break;
-            case "c":
-                if ((e.ctrlKey || e.metaKey) && selection) {
-                    copySelection();
-                    // Don't preventDefault — browser fires a native copy event which
-                    // handleCopy() intercepts to write all MIME formats synchronously.
-                }
-                break;
-            case "x":
-                if ((e.ctrlKey || e.metaKey) && selection) {
-                    cutSelection();
-                    // Don't preventDefault — browser fires a native cut event which
-                    // handleCut() intercepts to write all MIME formats synchronously.
-                }
-                break;
-            case "v":
-                if ((e.ctrlKey || e.metaKey) && selection) {
-                    // Set pending paste mode — don't preventDefault so the browser
-                    // fires a native paste event, giving us access to all MIME types
-                    // (including Google Sheets' compact JSON) via e.clipboardData
-                    clipboardManager._pendingPasteMode = e.shiftKey ? "values" : "full";
-                }
-                break;
-            case "a":
-                if (e.ctrlKey || e.metaKey) {
-                    selectionState.selectAll();
-                    e.preventDefault();
-                }
-                break;
-            case "d":
-                if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-                    // Ctrl+D → fill down
-                    fillDown();
-                    e.preventDefault();
-                }
-                break;
-            case "r":
-                if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-                    // Ctrl+R → fill right
-                    fillRight();
-                    e.preventDefault();
-                }
-                break;
-            case "4":
-                if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
-                    // Ctrl+Shift+4 → format as currency
-                    applyTypeToSelection("currency", {
-                        decimals: 2,
-                        symbol: "$",
-                    });
-                    e.preventDefault();
-                }
-                break;
-            case "5":
-                if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
-                    // Ctrl+Shift+5 → format as percent
-                    applyTypeToSelection("percent", { decimals: 2 });
-                    e.preventDefault();
-                }
-                break;
-            case ";":
-                if (e.ctrlKey || e.metaKey) {
-                    // Ctrl+; → insert today's date
-                    insertDate();
-                    e.preventDefault();
-                }
-                break;
-            case "\\":
-                if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
-                    // Ctrl+\ → clear formatting
-                    clearFormatting();
-                    e.preventDefault();
-                }
-                break;
-            case "=":
-                if ((e.ctrlKey || e.metaKey) && e.altKey) {
-                    // Ctrl+Alt+= → insert row/column (when row/col selected)
-                    const mode = selectionState.selectionMode;
-                    if (mode === "rows") insertRowAbove();
-                    else if (mode === "cols") insertColumnLeft();
-                    e.preventDefault();
-                }
-                break;
-            case "-":
-                if ((e.ctrlKey || e.metaKey) && e.altKey) {
-                    // Ctrl+Alt+- → delete row/column (when row/col selected)
-                    const delMode = selectionState.selectionMode;
-                    if (delMode === "rows") deleteSelectedRows();
-                    else if (delMode === "cols") deleteSelectedColumns();
-                    e.preventDefault();
-                }
-                break;
-        }
-    }
-
-    // ─── Clipboard ────────────────────────────────────────────────────────────
-    function copySelection() {
-        if (sheetStore) clipboardManager.copy(sheetStore, spreadsheetSession);
-    }
-    function cutSelection() {
-        if (sheetStore && spreadsheetSession.ydoc)
-            clipboardManager.cut(
-                sheetStore,
-                spreadsheetSession,
-                spreadsheetSession.ydoc,
-            );
-    }
-    function pasteSelection(mode = "full") {
-        if (sheetStore && spreadsheetSession.ydoc)
-            clipboardManager.paste(
-                sheetStore,
-                spreadsheetSession,
-                spreadsheetSession.ydoc,
-                mode,
-            );
-    }
-
     /**
      * Handle native copy event — fires after keydown (Ctrl+C) when we do NOT
      * call preventDefault on the keydown. Delegates to ClipboardManager which
@@ -4774,288 +2969,8 @@
      * since those manage their own data.
      * Iterates only existing cells to avoid scanning millions of empty ones.
      */
-    function clearSelection() {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        if (ranges.length === 0) return;
 
-        // Handle table cells in the ranges (sparse map misses these)
-        let tableCleared = false;
-        for (const eff of ranges) {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
-                    const info = renderContext?.tableManager?.getCellInfo(r, c);
-                    if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
-                    if (ct === CELL_TYPE.TABLE_ENTRY) {
-                        info.table.setEntryValue(info.colDef.id, null);
-                    } else {
-                        info.table.updateCell(info.dataIndex, info.colDef.id, null);
-                    }
-                    tableCleared = true;
-                }
-            }
-        }
-        if (tableCleared) untrack(() => renderScheduler?.invalidateAll());
-
-        // Iterate only regular cells that actually exist (sparse map)
-        sheetStore.cells.forEach((_cell, key) => {
-            const [r, c] = key.split(",").map(Number);
-            if (!ranges.some(eff => r >= eff.startRow && r <= eff.endRow && c >= eff.startCol && c <= eff.endCol)) return;
-            // Skip table/repeater/viewport cells (handled above)
-            const ct = renderContext?.getCellType(r, c);
-            if (
-                ct === CELL_TYPE.TABLE_HEADER ||
-                ct === CELL_TYPE.TABLE_ENTRY ||
-                ct === CELL_TYPE.TABLE_DATA ||
-                ct === CELL_TYPE.VIEWPORT_OCCUPIED
-            )
-                return;
-            // Delete blob files when clearing file or image cells
-            const ctConfig = sheetStore.getCellTypeConfig(r, c);
-            if (ctConfig?.type === "file" || ctConfig?.type === "image") {
-                const blobId = sheetStore.getCell(r, c)?.v;
-                if (blobId) {
-                    storage.app.delete(blobId).catch(() => {});
-                }
-            }
-            sheetStore.clearCellValue(r, c);
-        });
-    }
-
-    // ─── Dropdown range resolver ──────────────────────────────────────────────
-    function resolveRangeOptions(rangeStr) {
-        if (!sheetStore) return [];
-
-        // Parse optional cross-sheet prefix: 'Sheet Name'!A1:A10 or SheetName!A1:A10
-        let targetSheetId = null;
-        let cellRange = rangeStr.trim();
-        const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
-        if (sheetRefMatch) {
-            const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
-            cellRange = sheetRefMatch[3];
-            const entry = spreadsheetSession.sheets.find(s => s.name === sheetName);
-            if (entry) targetSheetId = entry.id;
-        }
-
-        const parts = cellRange.trim().toUpperCase().split(":");
-        function parseRef(ref) {
-            const m = ref.match(/^([A-Z]+)(\d+)$/);
-            if (!m) return null;
-            let col = 0;
-            for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
-            col--;
-            return { row: parseInt(m[2]) - 1, col };
-        }
-        const start = parseRef(parts[0]);
-        const end = parts[1] ? parseRef(parts[1]) : start;
-        if (!start || !end) return [];
-
-        const opts = [];
-        if (!targetSheetId || targetSheetId === spreadsheetSession.activeSheetId) {
-            // Current sheet — use computed display values
-            for (let r = start.row; r <= end.row; r++) {
-                for (let c = start.col; c <= end.col; c++) {
-                    const v = spreadsheetSession.getCellDisplayValue(r, c);
-                    if (v != null && v !== "") opts.push(String(v));
-                }
-            }
-        } else {
-            // Another sheet — use a temporary FormulaEngine so spill/IMPORTRANGE values are visible
-            const values = spreadsheetSession.computeSheetRange(
-                targetSheetId, start.row, start.col, end.row, end.col
-            );
-            for (const v of values) {
-                if (v != null && v !== "" && !(v instanceof Object)) opts.push(String(v));
-            }
-        }
-        return opts;
-    }
-
-    function resolveTableColumnOptions(tableName, columnId) {
-        const t = renderContext?.tableManager?.getTableByName(tableName);
-        if (t) {
-            return t.getColumn(t.resolveColId(String(columnId)))
-                .filter(v => v != null && v !== "")
-                .map(String);
-        }
-        // Table is on a different sheet — read raw Yjs values via the session
-        return spreadsheetSession.getTableColumnValues(tableName, columnId);
-    }
-
-    // ─── Fill Down / Right ────────────────────────────────────────────────────
-    function fillDown() {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        spreadsheetSession.ydoc?.transact(() => {
-            for (const eff of ranges) {
-                if (eff.startRow === eff.endRow) continue;
-                sheetStore.fillDown(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
-            }
-        });
-    }
-
-    function fillRight() {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        spreadsheetSession.ydoc?.transact(() => {
-            for (const eff of ranges) {
-                if (eff.startCol === eff.endCol) continue;
-                sheetStore.fillRight(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
-            }
-        });
-    }
-
-    // ─── Apply cell type to selection ─────────────────────────────────────────
-    function applyTypeToSelection(type, extraOptions = {}) {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        if (ranges.length === 0) return;
-        const config = { type, ...extraOptions };
-        spreadsheetSession.ydoc?.transact(() => {
-            for (const eff of ranges) {
-                for (let r = eff.startRow; r <= eff.endRow; r++) {
-                    for (let c = eff.startCol; c <= eff.endCol; c++) {
-                        const ct = renderContext?.getCellType(r, c);
-                        if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_DATA ||
-                            ct === CELL_TYPE.TABLE_ENTRY) continue;
-                        sheetStore.setCellTypeConfig(r, c, config);
-                    }
-                }
-            }
-        });
-    }
-
-    // ─── Insert today's date ──────────────────────────────────────────────────
-    function insertDate() {
-        if (!anchor) return;
-        const t = new Date();
-        const mm = String(t.getMonth() + 1).padStart(2, "0");
-        const dd = String(t.getDate()).padStart(2, "0");
-        const yyyy = t.getFullYear();
-        const displayStr = `${mm}/${dd}/${yyyy}`;
-
-        // Table data cell: update via table store
-        const cellType = renderContext?.getCellType(anchor.row, anchor.col);
-        if (cellType === CELL_TYPE.TABLE_DATA || cellType === CELL_TYPE.TABLE_ENTRY) {
-            const info = renderContext?.tableManager?.getCellInfo(
-                anchor.row,
-                anchor.col,
-            );
-            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const colType = info.colDef.type;
-                // For date columns store "YYYY-MM-DD"; for others store the display string
-                const val =
-                    colType === "date"
-                        ? `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`
-                        : displayStr;
-                if (cellType === CELL_TYPE.TABLE_ENTRY) {
-                    info.table.setEntryValue(info.colDef.id, val);
-                    untrack(() => renderScheduler?.invalidateAll());
-                } else {
-                    info.table.updateCell(info.dataIndex, info.colDef.id, val);
-                    untrack(() => renderScheduler?.invalidateAll());
-                }
-            }
-            return;
-        }
-
-        // Regular sheet cell: parse through the cell's type descriptor
-        if (!sheetStore) return;
-        const ct = sheetStore.getCellTypeConfig(anchor.row, anchor.col);
-        const parsedValue = CellTypeRegistry.parseInput(ct, displayStr);
-        sheetStore.setCellValue(anchor.row, anchor.col, parsedValue);
-    }
-
-    // ─── Clear formatting ─────────────────────────────────────────────────────
-    function clearFormatting() {
-        clearFormattingCmd(spreadsheetSession, selectionState);
-    }
-
-    // ─── Row / Column insert / delete ─────────────────────────────────────────
-    function insertRowAbove() {
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        const count = eff.endRow - eff.startRow + 1;
-        for (let i = 0; i < count; i++) sheetStore.insertRowAt(eff.startRow);
-    }
-    function insertRowBelow() {
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        const count = eff.endRow - eff.startRow + 1;
-        for (let i = 0; i < count; i++)
-            sheetStore.insertRowAt(eff.endRow + 1 + i);
-    }
-    function insertColumnLeft() {
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        const count = eff.endCol - eff.startCol + 1;
-        for (let i = 0; i < count; i++) sheetStore.insertColumnAt(eff.startCol);
-    }
-    function insertColumnRight() {
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        const count = eff.endCol - eff.startCol + 1;
-        for (let i = 0; i < count; i++)
-            sheetStore.insertColumnAt(eff.endCol + 1 + i);
-    }
-
-    function deleteSelectedRows() {
-        if (!sheetStore) return;
-        const mode = selectionState.selectionMode;
-        // Collect all unique row indices across all selected ranges, then delete
-        // highest-to-lowest so indices don't shift as rows are removed.
-        const rows = new Set();
-        if (mode === 'rows') {
-            for (const r of selectionState.allRowRanges)
-                for (let i = r.start; i <= r.end; i++) rows.add(i);
-        } else {
-            const eff = selectionState.effectiveRange(rowCount, colCount);
-            if (!eff) return;
-            for (let i = eff.startRow; i <= eff.endRow; i++) rows.add(i);
-        }
-        sheetStore.deleteRowsAt([...rows]);
-    }
-    function deleteSelectedColumns() {
-        if (!sheetStore) return;
-        const mode = selectionState.selectionMode;
-        const cols = new Set();
-        if (mode === 'cols') {
-            for (const c of selectionState.allColRanges)
-                for (let i = c.start; i <= c.end; i++) cols.add(i);
-        } else {
-            const eff = selectionState.effectiveRange(rowCount, colCount);
-            if (!eff) return;
-            for (let i = eff.startCol; i <= eff.endCol; i++) cols.add(i);
-        }
-        const sorted = [...cols].sort((a, b) => b - a);
-        for (const col of sorted) sheetStore.deleteColumnAt(col);
-    }
-
-    // ─── Merge ────────────────────────────────────────────────────────────────
-    let canMerge = $derived.by(() => {
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return false;
-        return eff.startRow !== eff.endRow || eff.startCol !== eff.endCol;
-    });
-    let isMergePrimary = $derived.by(() => {
-        if (!anchor || !sheetStore?.mergeEngine) return false;
-        return sheetStore.mergeEngine.isMergePrimary(anchor.row, anchor.col);
-    });
-
-    // ─── Table / Repeater context (for context menu) ──────────────────────────
-    let tableCellInfo = $derived.by(() => {
-        if (!anchor || !spreadsheetSession.tableManager) return null;
-        return spreadsheetSession.tableManager.getCellInfo(
-            anchor.row,
-            anchor.col,
-        );
-    });
+    // ─── Repeater context (for range-outline active class in template) ──────────
     let repeaterContext = $derived.by(() => {
         if (!anchor || !spreadsheetSession.repeaterEngine) return null;
         return spreadsheetSession.repeaterEngine.getCellRepeaterContext(
@@ -5063,543 +2978,6 @@
             anchor.col,
         );
     });
-
-    // Display indices of all table data rows covered by the current selection,
-    // including all non-contiguous ranges in a multi-selection.
-    let tableSelectedDataRows = $derived.by(() => {
-        if (!tableCellInfo || tableCellInfo.rowType !== "data" || !spreadsheetSession.tableManager) return [];
-        const table = tableCellInfo.table;
-        const mode = selectionState.selectionMode;
-        const indices = new Set();
-
-        // Collect row spans to scan from all active ranges
-        /** @type {{ startRow: number, endRow: number }[]} */
-        const spans = [];
-        if (mode === 'range') {
-            for (const rng of selectionState.allRanges) spans.push(rng);
-        } else if (mode === 'rows') {
-            for (const r of selectionState.allRowRanges) spans.push({ startRow: r.start, endRow: r.end });
-        } else {
-            const eff = selectionState.effectiveRange(rowCount, colCount);
-            if (eff) spans.push(eff);
-        }
-
-        for (const span of spans) {
-            for (let r = span.startRow; r <= span.endRow; r++) {
-                const info = spreadsheetSession.tableManager.getCellInfo(r, table.startCol);
-                if (info?.table === table && info.rowType === "data") indices.add(info.dataIndex);
-            }
-        }
-        return indices.size > 0 ? [...indices] : [tableCellInfo.dataIndex];
-    });
-
-    function tableInsertRow() {
-        if (tableCellInfo?.rowType === "data")
-            tableCellInfo.table.insertRow({});
-    }
-    function tableDeleteRow() {
-        if (tableCellInfo?.rowType === "data")
-            tableCellInfo.table.deleteRows(tableSelectedDataRows);
-    }
-    function tableSortAsc() {
-        if (tableCellInfo?.colDef)
-            tableCellInfo.table.setSort(tableCellInfo.colDef.id, "asc");
-    }
-    function tableSortDesc() {
-        if (tableCellInfo?.colDef)
-            tableCellInfo.table.setSort(tableCellInfo.colDef.id, "desc");
-    }
-    function tableClearSort() {
-        if (tableCellInfo) tableCellInfo.table.clearSort();
-    }
-    function tableDelete() {
-        if (tableCellInfo && spreadsheetSession.tableManager)
-            spreadsheetSession.tableManager.deleteTable(tableCellInfo.table.id);
-    }
-    function repeaterAddOne() {
-        if (repeaterContext)
-            repeaterContext.repeater.setCount(
-                Math.min(100, repeaterContext.repeater.count + 1),
-            );
-    }
-    function repeaterRemoveOne() {
-        if (repeaterContext)
-            repeaterContext.repeater.setCount(
-                Math.max(1, repeaterContext.repeater.count - 1),
-            );
-    }
-    function repeaterDelete() {
-        if (repeaterContext && spreadsheetSession.repeaterEngine)
-            spreadsheetSession.repeaterEngine.deleteRepeater(
-                repeaterContext.repeater.id,
-            );
-    }
-
-    // Whether any selection exists (works for all modes)
-    let hasAnySelection = $derived(anchor !== null);
-
-    let selectionType = $derived.by(() => {
-        const mode = selectionState.selectionMode;
-        if (mode === "rows") return "row";
-        if (mode === "cols") return "column";
-        if (mode === "all") return "all";
-        if (!selection || !sheetStore) return "none";
-        const isSingle =
-            selection.startRow === selection.endRow &&
-            selection.startCol === selection.endCol;
-        if (isSingle) return "cell";
-        return "range";
-    });
-
-    // Row/col counts for context menu labels — sums across all selected ranges
-    let effSelRowCount = $derived.by(() => {
-        if (selectionState.selectionMode === "rows") {
-            return selectionState.allRowRanges.reduce((n, r) => n + r.end - r.start + 1, 0) || 1;
-        }
-        if (selectionState.selectionMode === "all") return rowCount;
-        // range mode: sum unique rows across all ranges
-        const rows = new Set();
-        for (const rng of selectionState.allRanges)
-            for (let r = rng.startRow; r <= rng.endRow; r++) rows.add(r);
-        return rows.size || (selection ? selection.endRow - selection.startRow + 1 : 1);
-    });
-    let effSelColCount = $derived.by(() => {
-        if (selectionState.selectionMode === "cols") {
-            return selectionState.allColRanges.reduce((n, c) => n + c.end - c.start + 1, 0) || 1;
-        }
-        if (selectionState.selectionMode === "all") return colCount;
-        const cols = new Set();
-        for (const rng of selectionState.allRanges)
-            for (let c = rng.startCol; c <= rng.endCol; c++) cols.add(c);
-        return cols.size || (selection ? selection.endCol - selection.startCol + 1 : 1);
-    });
-
-    let isHeaderSelection = $derived(
-        selectionType === "row" || selectionType === "column",
-    );
-
-    let tableSelectionRowType = $derived.by(() => {
-        if (!anchor) return null;
-        const info = spreadsheetSession.renderContext?.tableManager?.getCellInfo(anchor.row, anchor.col);
-        return (info?.rowType === 'entry' || info?.rowType === 'data') ? info.rowType : null;
-    });
-
-    function clearContents() {
-        if (!sheetStore) return;
-        const ranges = selectionState.allEffectiveRanges(rowCount, colCount);
-        if (ranges.length === 0) return;
-        spreadsheetSession.ydoc?.transact(() => {
-            for (const eff of ranges) {
-                for (let r = eff.startRow; r <= eff.endRow; r++) {
-                    for (let c = eff.startCol; c <= eff.endCol; c++) {
-                        sheetStore.clearCell(r, c);
-                    }
-                }
-            }
-        });
-    }
-
-    let contextMenuItems = $derived([
-        {
-            label: "Cut",
-            icon: cutIcon,
-            isSvgIcon: true,
-            shortcut: "Ctrl+X",
-            action: cutSelection,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: "Copy",
-            icon: copyIcon,
-            isSvgIcon: true,
-            shortcut: "Ctrl+C",
-            action: copySelection,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: tableSelectionRowType === 'entry' ? "Paste Rows" : "Paste",
-            icon: pasteIcon,
-            isSvgIcon: true,
-            shortcut: "Ctrl+V",
-            action: () => pasteSelection("full"),
-        },
-        ...(!isHeaderSelection && !tableSelectionRowType
-            ? [
-                  {
-                      label: "Paste Special...",
-                      submenu: [
-                          {
-                              label: "Values Only",
-                              action: () => pasteSelection("values"),
-                          },
-                          {
-                              label: "Formulas Only",
-                              action: () => pasteSelection("formulas"),
-                          },
-                          {
-                              label: "Formatting Only",
-                              action: () => pasteSelection("formatting"),
-                          },
-                          { divider: true },
-                          {
-                              label: "Values & Formatting",
-                              action: () => pasteSelection("valuesFormat"),
-                          },
-                          {
-                              label: "Formulas & Formatting",
-                              action: () => pasteSelection("formulasFormat"),
-                          },
-                      ],
-                  },
-              ]
-            : []),
-        {
-            label: "Clear Contents",
-            shortcut: "Del",
-            action: clearContents,
-            disabled: !hasAnySelection,
-        },
-        {
-            label: "Clear Formatting",
-            shortcut: "Ctrl+\\",
-            action: () => { clearFormatting(); closeContextMenu(); },
-            disabled: !hasAnySelection,
-        },
-        { divider: true },
-        ...(!isHeaderSelection
-            ? [
-                  {
-                      label: "Insert Image in Cell",
-                      icon: "🖼",
-                      action: () => {
-                          if (anchor) {
-                              sheetStore?.setCellTypeConfig(
-                                  anchor.row,
-                                  anchor.col,
-                                  {
-                                      type: "image",
-                                      fit: "contain",
-                                  },
-                              );
-                              beginCellEdit(anchor.row, anchor.col, {
-                                  surface: "grid",
-                              });
-                          }
-                      },
-                      disabled: selectionType !== "cell",
-                  },
-                  {
-                      label: "Attach File to Cell",
-                      icon: "📎",
-                      action: () => {
-                          if (anchor) {
-                              sheetStore?.setCellTypeConfig(
-                                  anchor.row,
-                                  anchor.col,
-                                  {
-                                      type: "file",
-                                  },
-                              );
-                              beginCellEdit(anchor.row, anchor.col, {
-                                  surface: "grid",
-                              });
-                          }
-                      },
-                      disabled: selectionType !== "cell",
-                  },
-                  {
-                      label: "Insert Floating Image…",
-                      icon: "🖼",
-                      action: () => {
-                          if (anchor && sheetStore) {
-                              showFloatingImageInsert = true;
-                          }
-                      },
-                      disabled: !anchor,
-                  },
-                  ...(!tableCellInfo
-                      ? [
-                            { divider: true },
-                            {
-                                label: "Merge Cells",
-                                icon: mergeIcon,
-                                isSvgIcon: true,
-                                action: () => {
-                                    if (selection && sheetStore)
-                                        sheetStore.mergeCells(
-                                            selection.startRow,
-                                            selection.startCol,
-                                            selection.endRow,
-                                            selection.endCol,
-                                        );
-                                },
-                                disabled: !canMerge,
-                            },
-                            {
-                                label: "Unmerge Cells",
-                                icon: mergeIcon,
-                                isSvgIcon: true,
-                                action: () => {
-                                    if (anchor && sheetStore)
-                                        sheetStore.unmergeCells(anchor.row, anchor.col);
-                                },
-                                disabled: !isMergePrimary,
-                            },
-                            { divider: true },
-                        ]
-                      : []),
-              ]
-            : []),
-        ...(!tableCellInfo
-            ? selectionType === "row"
-                ? [
-                      {
-                          label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Above`,
-                          icon: arrowUp,
-                          isSvgIcon: true,
-                          action: insertRowAbove,
-                      },
-                      {
-                          label: `Insert ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""} Below`,
-                          icon: arrowDown,
-                          isSvgIcon: true,
-                          action: insertRowBelow,
-                      },
-                      { divider: true },
-                      {
-                          label: `Delete ${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`,
-                          icon: trashIcon,
-                          isSvgIcon: true,
-                          action: deleteSelectedRows,
-                      },
-                  ]
-                : selectionType === "column"
-                  ? [
-                        {
-                            label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Left`,
-                            icon: arrowLeft,
-                            isSvgIcon: true,
-                            action: insertColumnLeft,
-                        },
-                        {
-                            label: `Insert ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""} Right`,
-                            icon: arrowRight,
-                            isSvgIcon: true,
-                            action: insertColumnRight,
-                        },
-                        { divider: true },
-                        {
-                            label: `Delete ${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`,
-                            icon: trashIcon,
-                            isSvgIcon: true,
-                            action: deleteSelectedColumns,
-                        },
-                    ]
-                  : [
-                        {
-                            label: "Insert...",
-                            submenu: [
-                                {
-                                    label: "Row Above",
-                                    icon: arrowUp,
-                                    isSvgIcon: true,
-                                    action: insertRowAbove,
-                                },
-                                {
-                                    label: "Row Below",
-                                    icon: arrowDown,
-                                    isSvgIcon: true,
-                                    action: insertRowBelow,
-                                },
-                                { divider: true },
-                                {
-                                    label: "Column Left",
-                                    icon: arrowLeft,
-                                    isSvgIcon: true,
-                                    action: insertColumnLeft,
-                                },
-                                {
-                                    label: "Column Right",
-                                    icon: arrowRight,
-                                    isSvgIcon: true,
-                                    action: insertColumnRight,
-                                },
-                            ],
-                            disabled: !hasAnySelection,
-                        },
-                        {
-                            label: "Delete...",
-                            submenu: [
-                                {
-                                    label: selectionType === "all"
-                                        ? `${effSelRowCount} Row${effSelRowCount > 1 ? "s" : ""}`
-                                        : "Row",
-                                    icon: trashIcon,
-                                    isSvgIcon: true,
-                                    action: deleteSelectedRows,
-                                },
-                                {
-                                    label: selectionType === "all"
-                                        ? `${effSelColCount} Column${effSelColCount > 1 ? "s" : ""}`
-                                        : "Column",
-                                    icon: trashIcon,
-                                    isSvgIcon: true,
-                                    action: deleteSelectedColumns,
-                                },
-                            ],
-                            disabled: !hasAnySelection,
-                        },
-                    ]
-            : []),
-        ...(tableCellInfo
-            ? [
-                  { divider: true },
-                  {
-                      label: `⊞ ${tableCellInfo.table.name}`,
-                      disabled: true,
-                  },
-                  // Row operations (when in data row)
-                  ...(tableCellInfo.rowType === "data"
-                      ? [
-                            {
-                                label: tableSelectedDataRows.length > 1
-                                    ? `Delete ${tableSelectedDataRows.length} Rows`
-                                    : "Delete This Row",
-                                icon: trashIcon,
-                                isSvgIcon: true,
-                                action: tableDeleteRow,
-                            },
-                            { divider: true },
-                        ]
-                      : []),
-                  // Entry row operations
-                  ...(tableCellInfo.rowType === "entry"
-                      ? [
-                            {
-                                label: "Commit Entry (Enter)",
-                                action: () => tableCellInfo.table.commitEntry(),
-                            },
-                            {
-                                label: "Clear Entry (Esc)",
-                                action: () => tableCellInfo.table.clearEntry(),
-                            },
-                            { divider: true },
-                        ]
-                      : []),
-                  // Column operations (when colDef exists)
-                  ...(tableCellInfo.colDef
-                      ? [
-                            {
-                                label: "Sort Ascending",
-                                action: tableSortAsc,
-                                icon: tableCellInfo.table.sortColId === tableCellInfo.colDef.id && tableCellInfo.table.sortDir === "asc" ? "▲" : "△",
-                            },
-                            {
-                                label: "Sort Descending",
-                                action: tableSortDesc,
-                                icon: tableCellInfo.table.sortColId === tableCellInfo.colDef.id && tableCellInfo.table.sortDir === "desc" ? "▼" : "▽",
-                            },
-                            {
-                                label: "Clear Sort",
-                                action: tableClearSort,
-                                disabled: !tableCellInfo.table.sortColId,
-                            },
-                            { divider: true },
-                            {
-                                label: "Configure Column…",
-                                icon: "⚙",
-                                action: () => {
-                                    if (tableCellInfo?.colDef) {
-                                        onShowTablesPanel?.(tableCellInfo.table.id, tableCellInfo.colDef.id);
-                                    }
-                                },
-                            },
-                            { divider: true },
-                        ]
-                      : []),
-                  // Table-wide operations
-                  {
-                      label: "Add Row",
-                      icon: "+",
-                      action: () => tableCellInfo.table.insertRow({}),
-                  },
-                  {
-                      label: "Configure Table ⊞",
-                      action: () => {
-                          if (tableCellInfo) {
-                              onShowTablesPanel?.(tableCellInfo.table.id);
-                          }
-                      },
-                  },
-                  {
-                      label: "Delete Table",
-                      icon: trashIcon,
-                      isSvgIcon: true,
-                      action: tableDelete,
-                  },
-              ]
-            : []),
-        ...(repeaterContext
-            ? [
-                  { divider: true },
-                  {
-                      label: `↻ ${repeaterContext.repeater.name}`,
-                      disabled: true,
-                  },
-                  {
-                      label: "Repeater Settings…",
-                      icon: "⚙",
-                      action: () => {
-                          if (repeaterContext) {
-                              activeEditPanel =
-                                  activeEditPanel?.store ===
-                                  repeaterContext.repeater
-                                      ? null
-                                      : {
-                                            type: "repeater",
-                                            store: repeaterContext.repeater,
-                                        };
-                          }
-                      },
-                  },
-                  {
-                      label: "+1 Repetition",
-                      action: repeaterAddOne,
-                      disabled: repeaterContext.repeater.count >= 100,
-                  },
-                  {
-                      label: "−1 Repetition",
-                      action: repeaterRemoveOne,
-                      disabled: repeaterContext.repeater.count <= 1,
-                  },
-                  {
-                      label: "Delete Repeater",
-                      icon: trashIcon,
-                      isSvgIcon: true,
-                      action: repeaterDelete,
-                  },
-              ]
-            : []),
-        ...(!tableCellInfo && !repeaterContext && selection
-            ? [
-                  { divider: true },
-                  {
-                      label: "Create Table Here",
-                      icon: "⊞",
-                      action: () => {
-                          showCreateTableDialog = true;
-                      },
-                  },
-                  {
-                      label: "Create Repeater",
-                      icon: "↻",
-                      action: () => {
-                          showCreateRepeaterDialog = true;
-                      },
-                  },
-              ]
-            : []),
-    ]);
 
     // ─── Spacer ───────────────────────────────────────────────────────────────
     // The event-layer starts at (HEADER_WIDTH, HEADER_HEIGHT), so the spacer
@@ -5806,15 +3184,10 @@
         document.removeEventListener("insertFloatingImage", handleInsertFloatingImageEvent);
         document.removeEventListener("mouseup", handleMouseUp);
         document.removeEventListener("mousemove", handleHeaderDragMouseMove);
-        document.removeEventListener("mousemove", handleResizeMove);
-        document.removeEventListener("mouseup", handleResizeEnd);
         if (resizeObserver) resizeObserver.disconnect();
         vvCleanup?.();
         virtualizer?.destroy();
-        renderScheduler?.destroy();
-        canvasRenderer?.destroy();
-        selectionScheduler?.destroy();
-        selectionRenderer?.destroy();
+        paintCoord.destroy();
         setOnLoadCallback(null);
         _stopStorageFilesWatch?.();
         window.removeEventListener("image-fit-change", handleImageFitChange);
@@ -5824,7 +3197,7 @@
     });
 </script>
 
-<svelte:window onkeydown={handleKeydown} oncopy={handleCopy} oncut={handleCut} onpaste={handlePaste} />
+<svelte:window onkeydown={kbCtrl.handleKeydown} oncopy={handleCopy} oncut={handleCut} onpaste={handlePaste} />
 
 <div class="grid-root" bind:this={containerEl}>
     {#if renderPlan && virtualizer}
@@ -5880,9 +3253,9 @@
                     {colHeader}
                     onColHeaderMouseDown={handleColHeaderMouseDown}
                     onColHeaderContextMenu={handleColHeaderContextMenu}
-                    onStartColResize={startColResize}
-                    onStartColResizeTouch={startColResizeTouch}
-                    onStartFreezeColDrag={startFreezeColDrag}
+                    onStartColResize={resizeCtrl.startColResize}
+                    onStartColResizeTouch={resizeCtrl.startColResizeTouch}
+                    onStartFreezeColDrag={resizeCtrl.startFreezeColDrag}
                 />
             </div>
 
@@ -5897,9 +3270,9 @@
                     {isRowSelected}
                     onRowHeaderMouseDown={handleRowHeaderMouseDown}
                     onRowHeaderContextMenu={handleRowHeaderContextMenu}
-                    onStartRowResize={startRowResize}
-                    onStartRowResizeTouch={startRowResizeTouch}
-                    onStartFreezeRowDrag={startFreezeRowDrag}
+                    onStartRowResize={resizeCtrl.startRowResize}
+                    onStartRowResizeTouch={resizeCtrl.startRowResizeTouch}
+                    onStartFreezeRowDrag={resizeCtrl.startFreezeRowDrag}
                 />
             </div>
 
@@ -5919,13 +3292,13 @@
                     class="fill-handle"
                     role="presentation"
                     style="transform: translate({fillHandlePos.right - 4}px, {fillHandlePos.bottom - 4}px);"
-                    onmousedown={handleFillHandleMouseDown}
+                    onmousedown={fillCtrl.handleFillHandleMouseDown}
                 ></div>
             {/if}
 
             <!-- Fill preview border (shown while dragging fill handle) -->
-            {#if fillHandleDrag?.fillRange && virtualizer}
-                {@const fr = fillHandleDrag.fillRange}
+            {#if fillCtrl.fillHandleDrag?.fillRange && virtualizer}
+                {@const fr = fillCtrl.fillHandleDrag.fillRange}
                 {@const fLeft = cellContainerLeft(fr.startCol)}
                 {@const fTop = cellContainerTop(fr.startRow)}
                 {@const fRight = cellContainerLeft(fr.endCol) + virtualizer.getColWidth(fr.endCol)}
@@ -6091,14 +3464,14 @@
             {/if}
 
             <!-- Dropdown cell overlay -->
-            {#if focusedDropdownCell}
-                {@const filteredOpts = dropdownFilter
-                    ? focusedDropdownCell.options.filter((o) =>
+            {#if kbCtrl.focusedDropdownCell}
+                {@const filteredOpts = kbCtrl.dropdownFilter
+                    ? kbCtrl.focusedDropdownCell.options.filter((o) =>
                           String(o)
                               .toLowerCase()
-                              .includes(dropdownFilter.toLowerCase()),
+                              .includes(kbCtrl.dropdownFilter.toLowerCase()),
                       )
-                    : focusedDropdownCell.options}
+                    : kbCtrl.focusedDropdownCell.options}
                 <div
                     class="dropdown-cell-overlay"
                     style={dropdownOverlayStyle}
@@ -6107,34 +3480,34 @@
                         class="dropdown-filter-input"
                         type="text"
                         placeholder="Search..."
-                        bind:value={dropdownFilter}
-                        bind:this={dropdownFilterInputEl}
+                        bind:value={kbCtrl.dropdownFilter}
+                        bind:this={kbCtrl.dropdownFilterInputEl}
                         autofocus
                         onkeydown={(e) => {
                             if (e.key === "Enter") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
-                                    if (focusedDropdownCell.onCommit) {
-                                        focusedDropdownCell.onCommit(filteredOpts[0]);
+                                    if (kbCtrl.focusedDropdownCell.onCommit) {
+                                        kbCtrl.focusedDropdownCell.onCommit(filteredOpts[0]);
                                     } else {
-                                        sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, filteredOpts[0]);
                                     }
-                                    focusedDropdownCell = null;
+                                    kbCtrl.focusedDropdownCell = null;
                                 }
                             } else if (e.key === "Tab") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
-                                    if (focusedDropdownCell.onCommit) {
-                                        focusedDropdownCell.onCommit(filteredOpts[0]);
+                                    if (kbCtrl.focusedDropdownCell.onCommit) {
+                                        kbCtrl.focusedDropdownCell.onCommit(filteredOpts[0]);
                                     } else {
-                                        sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, filteredOpts[0]);
+                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, filteredOpts[0]);
                                     }
                                 }
-                                focusedDropdownCell = null;
+                                kbCtrl.focusedDropdownCell = null;
                                 moveSelectionMergeAware(0, e.shiftKey ? -1 : 1, false);
                                 scrollToAnchor();
                             } else if (e.key === "Escape") {
-                                focusedDropdownCell = null;
+                                kbCtrl.focusedDropdownCell = null;
                             }
                         }}
                     />
@@ -6143,12 +3516,12 @@
                             class="dropdown-option"
                             onmousedown={(e) => {
                                 e.preventDefault();
-                                if (focusedDropdownCell.onCommit) {
-                                    focusedDropdownCell.onCommit(opt);
+                                if (kbCtrl.focusedDropdownCell.onCommit) {
+                                    kbCtrl.focusedDropdownCell.onCommit(opt);
                                 } else {
-                                    sheetStore?.setCellValue(focusedDropdownCell.row, focusedDropdownCell.col, opt);
+                                    sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, opt);
                                 }
-                                focusedDropdownCell = null;
+                                kbCtrl.focusedDropdownCell = null;
                             }}>{opt}</button
                         >
                     {/each}
@@ -6335,32 +3708,21 @@
     {/if}
 </div>
 
-<!-- Context menu (portalled) — desktop uses popup, mobile uses action bar -->
-{#if contextMenuVisible}
-    {#if mobileState.isMobile}
-        <MobileCellActionBar
-            rect={selectionHandleRect}
-            containerEl={containerEl}
-            tableInfo={tableCellInfo}
-            onClose={closeContextMenu}
-            onCopy={() => { clipboardManager.copy(); closeContextMenu(); }}
-            onCut={() => { clipboardManager.cut(); closeContextMenu(); }}
-            onPaste={() => { clipboardManager.paste(); closeContextMenu(); }}
-            onClear={() => { clearSelection(); closeContextMenu(); }}
-            onDeleteRow={() => {
-                tableDeleteRow();
-                closeContextMenu();
-            }}
-        />
-    {:else}
-        <ContextMenu
-            x={contextMenuPosition.x}
-            y={contextMenuPosition.y}
-            items={contextMenuItems}
-            onClose={closeContextMenu}
-        />
-    {/if}
-{/if}
+<!-- Context menu — desktop popup or mobile action bar -->
+<GridContextMenu
+    visible={contextMenuVisible}
+    position={contextMenuPosition}
+    onClose={closeContextMenu}
+    {containerEl}
+    {selectionHandleRect}
+    {activeEditPanel}
+    onSetActiveEditPanel={(panel) => { activeEditPanel = panel; }}
+    onBeginCellEdit={beginCellEdit}
+    onShowFloatingImageInsert={() => { showFloatingImageInsert = true; }}
+    onShowCreateTableDialog={() => { showCreateTableDialog = true; }}
+    onShowCreateRepeaterDialog={() => { showCreateRepeaterDialog = true; }}
+    {onShowTablesPanel}
+/>
 
 <!-- File viewer (portalled outside grid-root to escape contain:layout stacking context) -->
 {#if fileViewerProps}

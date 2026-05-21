@@ -45,6 +45,18 @@ export class FormulaEngine {
     #customFunctions = new Map();
 
     /**
+     * Singleton cell-value resolver for this engine instance.
+     * Created once; reads this.computedValues and this.#getCellValue at call time
+     * so it stays correct after clear() or setCellValueGetter() calls.
+     * @type {(row: number, col: number) => any}
+     */
+    #cellResolver = (r, c) => {
+        const k = cellKey(r, c);
+        if (k in this.computedValues) return this.computedValues[k];
+        return this.#getCellValue?.(r, c) ?? null;
+    };
+
+    /**
      * Spill ranges: anchorKey -> { anchorRow, anchorCol, rows, cols }
      * Tracks which cells were spilled by each array-formula anchor.
      * @type {Map<string, {anchorRow: number, anchorCol: number, rows: number, cols: number}>}
@@ -317,12 +329,7 @@ export class FormulaEngine {
         if (!formulaInfo?.ast) {
             return this.#getCellValue ? this.#getCellValue(row, col) : null;
         }
-        const getCellValueWithComputed = (r, c) => {
-            const k = cellKey(r, c);
-            if (k in this.computedValues) return this.computedValues[k];
-            return this.#getCellValue ? this.#getCellValue(r, c) : null;
-        };
-        return evaluate(formulaInfo.ast, getCellValueWithComputed, context, this.#customFunctions, this.#getCrossSheetValue);
+        return evaluate(formulaInfo.ast, this.#cellResolver, context, this.#customFunctions, this.#getCrossSheetValue);
     }
 
     /**
@@ -465,20 +472,7 @@ export class FormulaEngine {
             ast = formulaInfo.ast;
         }
 
-        // Create a getter that uses computed values for formula cells
-        const getCellValueWithComputed = (r, c) => {
-            const k = cellKey(r, c);
-
-            // If this cell has a computed value, use it
-            if (k in this.computedValues) {
-                return this.computedValues[k];
-            }
-
-            // Otherwise, get from the raw getter
-            return this.#getCellValue ? this.#getCellValue(r, c) : null;
-        };
-
-        return evaluate(ast, getCellValueWithComputed, {}, this.#customFunctions, this.#getCrossSheetValue);
+        return evaluate(ast, this.#cellResolver, {}, this.#customFunctions, this.#getCrossSheetValue);
     }
 
     /**

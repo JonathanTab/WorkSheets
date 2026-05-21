@@ -21,6 +21,8 @@ import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { buildRenderRuns } from '../textFormatRuns.js';
 
+const TABLE_HEADER_BORDER_WIDTH = 1.5; // px — default bottom border on table header cells
+
 /**
  * @typedef {Object} CellPaintItem
  * @property {number} row
@@ -332,7 +334,10 @@ export function buildPaneData(params) {
                 if (typeof rawV === 'string' && rawV.startsWith('=')) dispV = rawV;
             }
 
-            const descriptor = ct ? CellTypeRegistry.get(ct.type) : null;
+            // Resolve descriptor. Untyped cells default to the text descriptor so the
+            // smart-display logic (numeric grouping, value-dependent right-align,
+            // date-string reformatting) applies uniformly to plain cells.
+            const descriptor = CellTypeRegistry.get(ct?.type ?? 'text');
 
             /** @type {CellPaintItem} */
             const item = {
@@ -382,37 +387,38 @@ export function buildPaneData(params) {
             const isTableDataOrEntry = cellType === CELL_TYPE.TABLE_DATA || cellType === CELL_TYPE.TABLE_ENTRY;
             const cellRawValue = isTableDataOrEntry ? dispV : (sheetCell?.v ?? null);
 
-            // Determine render type
-            if (ct?.type === 'checkbox') {
-                item.renderType = 'checkbox';
+            // ── Render-type dispatch via descriptor ───────────────────────────
+            // Descriptors declare a renderType ('text' | 'checkbox' | 'rating' |
+            // 'dropdown' | 'image' | 'file'); the descriptor itself handles
+            // formatValue and provides defaultStyle / valueAlign hints below.
+            const renderType = descriptor?.renderType ?? 'text';
+            item.renderType = renderType;
+
+            if (renderType === 'checkbox') {
                 item.rawValue = !!cellRawValue;
                 item.hAlign = 'center';
-            } else if (ct?.type === 'rating') {
-                item.renderType = 'rating';
+            } else if (renderType === 'rating') {
                 item.rawValue = Number(cellRawValue) || 0;
-                item.ratingMax = ct.max || 5;
+                item.ratingMax = ct?.max || 5;
                 item.hAlign = 'center';
-            } else if (ct?.type === 'dropdown') {
-                item.renderType = 'dropdown';
+            } else if (renderType === 'dropdown') {
                 item.displayValue = dispV != null ? String(dispV) : '';
-                item.dropdownOptions = ct.options || [];
-            } else if (ct?.type === 'image') {
-                item.renderType = 'image';
+                item.dropdownOptions = ct?.options || [];
+            } else if (renderType === 'image') {
                 item.rawValue = cellRawValue ?? null; // blob ID string
                 item.ctConfig = ct;
                 item.clipContent = true;
                 item.hAlign = 'center';
                 item.vAlign = 'middle';
-            } else if (ct?.type === 'file') {
+            } else if (renderType === 'file') {
                 item.rawValue = cellRawValue ?? null; // blob ID string
                 item.ctConfig = ct;
                 item.clipContent = true;
             } else {
-                item.renderType = 'text';
-
-                // Apply cell type formatting
+                // Plain text rendering path — applies to text, number, date, url, and
+                // any future text-rendered type.
                 let formattedValue = dispV;
-                if (ct && dispV != null && dispV !== '') {
+                if (dispV != null && dispV !== '') {
                     formattedValue = CellTypeRegistry.formatValue(ct, dispV);
                 }
 
@@ -426,29 +432,25 @@ export function buildPaneData(params) {
                     item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
 
-                // Apply type-level alignment defaults
-                if (ct?.type === 'number' || ct?.type === 'currency' || ct?.type === 'percent') {
-                    item.hAlign = 'right';
-                } else if (!ct) {
-                    // No explicit type — infer right-align for raw numeric values
-                    const rawVal = sheetCell?.v;
-                    if (typeof rawVal === 'number') {
-                        item.hAlign = 'right';
-                    }
-                }
-                // Underline for URL type default
-                if (descriptor?.defaultStyle?.()) {
-                    const defStyle = descriptor.defaultStyle(ct);
-                    if (defStyle.underline) item.underline = true;
+                // Type-level default style (alignment, underline, link color, …).
+                // Cell-level / row-level / col-level formatting applied below still wins.
+                const defStyle = descriptor?.defaultStyle?.(ct);
+                if (defStyle) {
+                    if (defStyle.horizontalAlign) item.hAlign = defStyle.horizontalAlign;
+                    if (defStyle.verticalAlign)   item.vAlign = defStyle.verticalAlign;
+                    if (defStyle.underline)       item.underline = true;
                     if (defStyle.color && !sheetCell?.color) item.textColor = defStyle.color;
                 }
 
-                // Value-dependent color (e.g. red negatives) — set before cascade so
-                // explicit user/conditional-format color still overrides it
-                if (ct) {
-                    const typeColor = CellTypeRegistry.getTextColor(ct, cellRawValue ?? dispV);
-                    if (typeColor) item.textColor = typeColor;
-                }
+                // Value-dependent alignment override (numbers right-align even when
+                // sitting in an untyped cell with a numeric stored value).
+                const valueAlign = descriptor?.valueAlign?.(cellRawValue ?? dispV, ct);
+                if (valueAlign) item.hAlign = valueAlign;
+
+                // Value-dependent color (e.g. red negatives). Set before user-style
+                // cascade so explicit colors still override.
+                const typeColor = descriptor?.getTextColor?.(cellRawValue ?? dispV, ct);
+                if (typeColor) item.textColor = typeColor;
             }
 
             // ── Table-specific defaults (applied before sheet/row/col formatting) ──
@@ -460,7 +462,7 @@ export function buildPaneData(params) {
                     // Default: bold header with subtle background and bottom border
                     item.bold = true;
                     if (!item.bgColor) item.bgColor = '#f1f5f9';
-                    item.borders = { bottom: { color: '#94a3b8', width: 1.5 } };
+                    item.borders = { bottom: { color: '#94a3b8', width: TABLE_HEADER_BORDER_WIDTH } };
                     item.clipContent = true;
                     // Filter-icon info for CanvasRenderer
                     item.tableHeaderInfo = {

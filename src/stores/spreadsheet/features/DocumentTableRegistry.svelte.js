@@ -25,6 +25,7 @@
 
 import * as Y from 'yjs';
 import { TableStore } from './TableStore.svelte.js';
+import { YJS_ORIGIN } from '../yjsOrigins.js';
 
 export class DocumentTableRegistry {
     /** @type {import('yjs').Doc} */
@@ -126,7 +127,7 @@ export class DocumentTableRegistry {
         let gmap = this.#root.get('tables');
         if (!gmap) {
             gmap = new Y.Map();
-            this.#ydoc.transact(() => { this.#root.set('tables', gmap); });
+            this.#ydoc.transact(() => { this.#root.set('tables', gmap); }, YJS_ORIGIN.MIGRATION);
         }
         return gmap;
     }
@@ -140,11 +141,11 @@ export class DocumentTableRegistry {
         const sheetsMap  = this.#root.get('sheets');
         if (!sheetOrder || !sheetsMap) return;
 
-        // Ensure root.tables exists
+        // Ensure root.tables exists — must be inside a transaction
         let globalTables = this.#root.get('tables');
         if (!globalTables) {
             globalTables = new Y.Map();
-            this.#root.set('tables', globalTables);
+            this.#ydoc.transact(() => { this.#root.set('tables', globalTables); }, YJS_ORIGIN.MIGRATION);
         }
 
         this.#ydoc.transact(() => {
@@ -206,7 +207,7 @@ export class DocumentTableRegistry {
                     }
                 }
             }
-        });
+        }, YJS_ORIGIN.MIGRATION);
     }
 
     /**

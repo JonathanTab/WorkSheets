@@ -14,6 +14,7 @@
  */
 
 import { writable, get } from 'svelte/store';
+import { log } from '../util/log.js';
 import { createSvelteRegistry } from '../lib/FileRegistry/svelte/index.js';
 import { authStore } from './authStore.js';
 
@@ -48,7 +49,7 @@ storage.init = async function () {
 if (typeof window !== 'undefined') {
     /** @type {any} */ (window).storageDebug = {
         sync: () => storage.sync(),
-        state: () => console.log(storage.getSyncState()),
+        state: () => log.debug(storage.getSyncState()),
         files: () => console.table(storage.drive.listFiles()),
         folders: () => console.table(storage.drive.listFolders()),
         // Dev API key management (paste your API key to authenticate without cookies)
@@ -56,7 +57,7 @@ if (typeof window !== 'undefined') {
         clearApiKey: () => authStore.clearDevApiKey(),
         getApiKey: () => {
             const key = authStore.getApiKey();
-            console.log(key ? `API key set: ${key.substring(0, 8)}...` : 'No API key set (using session cookie)');
+            log.debug(key ? `API key set: ${key.substring(0, 8)}...` : 'No API key set (using session cookie)');
             return key;
         },
     };

@@ -73,6 +73,11 @@ export function initDb(levelDbPath, sqlitePath) {
 // does not try to re-store it. Exported so server.js can filter it out too.
 export const PERSISTENCE_ORIGIN = Symbol('y-leveldb-persistence');
 
+// Symbol used to stash the incremental update listener on the ydoc so
+// writeDocState can remove it before flushing, preventing late writes that
+// race with the full-state compaction.
+const LEVELDB_LISTENER = Symbol('leveldb-update-listener');
+
 /**
  * Bind a Y.Doc to leveldb persistence.
  *
@@ -86,23 +91,34 @@ export const PERSISTENCE_ORIGIN = Symbol('y-leveldb-persistence');
  * @param {string} roomId
  * @param {Y.Doc} ydoc
  */
+/**
+ * @param {string} roomId
+ * @param {Y.Doc} ydoc
+ * @returns {Promise<void>} Resolves once historical state has been applied (or failed).
+ *   Attach this to `doc.ready` so that setupWSConnection can await it before sending
+ *   Sync Step 1, eliminating the race where a new client receives an empty state vector.
+ */
 export function bindDocState(roomId, ydoc) {
-    // Step 1 — persist new updates incrementally (register before loading so
-    // we never miss an update, even ones that arrive while history is loading).
-    ydoc.on('update', (update, origin) => {
+    // Step 1 — persist new updates incrementally (register BEFORE loading so
+    // we never miss an update that arrives while history is loading).
+    const updateListener = (update, origin) => {
         if (origin === PERSISTENCE_ORIGIN) return;
         levelPersistence.storeUpdate(roomId, update).catch(err => {
             console.error(`[leveldb] storeUpdate failed for ${roomId}:`, err.message);
         });
-    });
+    };
+    ydoc[LEVELDB_LISTENER] = updateListener;
+    ydoc.on('update', updateListener);
 
-    // Step 2 — load historical state and apply (fire-and-forget).
-    levelPersistence.getYDoc(roomId).then(storedDoc => {
+    // Step 2 — load historical state and apply. Return the promise so callers
+    // can await it before sending a Sync Step 1 state vector to new clients.
+    return levelPersistence.getYDoc(roomId).then(storedDoc => {
         const update = Y.encodeStateAsUpdate(storedDoc);
         Y.applyUpdate(ydoc, update, PERSISTENCE_ORIGIN);
         storedDoc.destroy();
     }).catch(err => {
         console.warn(`[leveldb] Could not load state for ${roomId}:`, err.message);
+        // Non-fatal: the doc starts empty, which is safe (CRDT will merge on next sync).
     });
 }
 
@@ -117,6 +133,13 @@ export function bindDocState(roomId, ydoc) {
  * @returns {Promise<void>}
  */
 export async function writeDocState(roomId, ydoc) {
+    // Remove the incremental listener first so no late storeUpdate calls can
+    // race with the full-state write we're about to do.
+    const listener = ydoc[LEVELDB_LISTENER];
+    if (listener) {
+        ydoc.off('update', listener);
+        delete ydoc[LEVELDB_LISTENER];
+    }
     // Write the full current state as a single update (captures anything
     // that may not have been flushed from the incremental handler yet).
     await levelPersistence.storeUpdate(roomId, Y.encodeStateAsUpdate(ydoc));
@@ -141,7 +164,7 @@ export async function writeDocState(roomId, ydoc) {
  * @param {string|null} [appType] - 'sheets' | 'docs' | 'svg'
  * @returns {string|null} snapshot id, or null if aborted (no changes)
  */
-export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionChanges, description = null, appType = null) {
+export async function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionChanges, description = null, appType = null) {
     const effectiveFileId = fileId ?? roomId;
     const newStateBytes = Y.encodeStateAsUpdate(ydoc);
 
@@ -150,7 +173,7 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionC
         ? [...new Set(createdBy.split(',').map(s => s.trim()).filter(Boolean))].join(',') || null
         : null;
 
-    // Find predecessor snapshot for this file
+    // Find predecessor snapshot for this file — fast synchronous DB read
     const prevRow = sqliteDb.prepare(
         'SELECT state, app_type FROM snapshots WHERE file_id = ? ORDER BY created_at DESC LIMIT 1'
     ).get(effectiveFileId);
@@ -162,7 +185,10 @@ export function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionC
         // Initial snapshot — always keep it, no diff needed
         diffJson = JSON.stringify({ v: 2, appType: appType ?? 'unknown', isInitial: true, totals: { cells: 0, formatting: 0, structure: 0, tables: 0, sheetsAdded: 0, sheetsRemoved: 0 }, sheets: [], sheetsRenamed: [], sheetOrder: null });
     } else {
-        // Compute diff synchronously
+        // Yield the event loop before the heavy synchronous CPU work so incoming
+        // WebSocket messages can be processed while we compute the diff.
+        await new Promise(r => setImmediate(r));
+
         const prevStateBytes = _toUint8Array(prevRow.state);
 
         const prevDoc = new Y.Doc({ gc: false });

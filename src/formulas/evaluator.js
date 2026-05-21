@@ -7,6 +7,40 @@
 
 import { NodeType, parseFormula } from './parser.js';
 import { getFunction, isError, FormulaError, parseNumericString } from './functions.js';
+import { coerceToSerial } from './dateCore.js';
+
+/**
+ * If value is a non-numeric string that looks like a date, return its serial.
+ * Plain numeric strings are intentionally excluded — those are handled by
+ * parseNumericString before this is called.
+ * Returns null if coercion fails.
+ * @param {any} v
+ * @returns {number|null}
+ */
+function maybeDateSerial(v) {
+    if (typeof v !== 'string') return null;
+    if (!isNaN(parseNumericString(v))) return null; // plain number string — not a date
+    return coerceToSerial(v);
+}
+
+/**
+ * Resolve a value for use in arithmetic: number → itself, boolean → 0/1,
+ * numeric string → number, date string → serial, other string → original.
+ * @param {any} v
+ * @returns {any}
+ */
+function resolveNumeric(v) {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'boolean') return v ? 1 : 0;
+    if (v == null) return 0;
+    if (typeof v === 'string') {
+        const n = parseNumericString(v);
+        if (!isNaN(n)) return n;
+        const s = maybeDateSerial(v);
+        if (s !== null) return s;
+    }
+    return v;
+}
 
 // Formula string → AST cache. Parsing is expensive; the AST is a pure function
 // of the formula string so caching is safe. Limited to 1 000 entries (LRU-style eviction).
@@ -190,21 +224,12 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
 
     switch (ast.op) {
         case '+': {
-            // Treat null/undefined as 0 for numeric coercion, empty string for string concat
-            const leftCoerce = left ?? 0;
-            const rightCoerce = right ?? 0;
-            // Try to convert string numbers to actual numbers for addition
-            const _ln = typeof leftCoerce === 'string' ? parseNumericString(leftCoerce) : NaN;
-            const leftNum = typeof leftCoerce === 'string' && !isNaN(_ln) ? _ln : leftCoerce;
-            const _rn = typeof rightCoerce === 'string' ? parseNumericString(rightCoerce) : NaN;
-            const rightNum = typeof rightCoerce === 'string' && !isNaN(_rn) ? _rn : rightCoerce;
-
-            if (typeof leftNum === 'number' && typeof rightNum === 'number') {
-                return leftNum + rightNum;
-            }
-            // Only concatenate if at least one is a non-numeric string
-            if (typeof leftCoerce === 'string' || typeof rightCoerce === 'string') {
-                return String(leftCoerce) + String(rightCoerce);
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv + rv;
+            // String concatenation fallback
+            if (typeof (left ?? 0) === 'string' || typeof (right ?? 0) === 'string') {
+                return String(left ?? '') + String(right ?? '');
             }
             return FormulaError.VALUE;
         }
@@ -212,82 +237,100 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             return String(left ?? '') + String(right ?? '');
 
         case '-': {
-            const l = left ?? 0, r = right ?? 0;
-            if (typeof l === 'number' && typeof r === 'number') return l - r;
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv - rv;
             return FormulaError.VALUE;
         }
 
         case '*': {
-            const l = left ?? 0, r = right ?? 0;
-            if (typeof l === 'number' && typeof r === 'number') return l * r;
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv * rv;
             return FormulaError.VALUE;
         }
 
         case '/': {
-            const l = left ?? 0, r = right ?? 0;
-            if (typeof l === 'number' && typeof r === 'number') {
-                if (r === 0) return FormulaError.DIV_ZERO;
-                return l / r;
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') {
+                if (rv === 0) return FormulaError.DIV_ZERO;
+                return lv / rv;
             }
             return FormulaError.VALUE;
         }
 
         case '^': {
-            const l = left ?? 0, r = right ?? 0;
-            if (typeof l === 'number' && typeof r === 'number') return Math.pow(l, r);
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') return Math.pow(lv, rv);
             return FormulaError.VALUE;
         }
 
         case '%': {
-            const l = left ?? 0, r = right ?? 0;
-            if (typeof l === 'number' && typeof r === 'number') {
-                if (r === 0) return FormulaError.DIV_ZERO;
-                return l % r;
+            const lv = resolveNumeric(left  ?? 0);
+            const rv = resolveNumeric(right ?? 0);
+            if (typeof lv === 'number' && typeof rv === 'number') {
+                if (rv === 0) return FormulaError.DIV_ZERO;
+                return lv % rv;
             }
             return FormulaError.VALUE;
         }
 
-        case '=':
+        case '=': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            // If either resolved to a number (including from a date string), compare numerically
+            if (typeof lv === 'number' && typeof rv === 'number') return lv === rv;
             return left === right;
+        }
 
-        case '<>':
+        case '<>': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv !== rv;
             return left !== right;
+        }
 
-        case '<':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left < right;
-            }
+        case '<': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv < rv;
             if (typeof left === 'string' && typeof right === 'string') {
                 return left.localeCompare(right) < 0;
             }
             return FormulaError.VALUE;
+        }
 
-        case '>':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left > right;
-            }
+        case '>': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv > rv;
             if (typeof left === 'string' && typeof right === 'string') {
                 return left.localeCompare(right) > 0;
             }
             return FormulaError.VALUE;
+        }
 
-        case '<=':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left <= right;
-            }
+        case '<=': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv <= rv;
             if (typeof left === 'string' && typeof right === 'string') {
                 return left.localeCompare(right) <= 0;
             }
             return FormulaError.VALUE;
+        }
 
-        case '>=':
-            if (typeof left === 'number' && typeof right === 'number') {
-                return left >= right;
-            }
+        case '>=': {
+            const lv = resolveNumeric(left);
+            const rv = resolveNumeric(right);
+            if (typeof lv === 'number' && typeof rv === 'number') return lv >= rv;
             if (typeof left === 'string' && typeof right === 'string') {
                 return left.localeCompare(right) >= 0;
             }
             return FormulaError.VALUE;
+        }
 
         case 'contains':
             return String(left ?? '').toLowerCase().includes(String(right ?? '').toLowerCase());
@@ -324,25 +367,29 @@ function evaluateUnaryOp(ast, getCellValue, context, customFunctions, getCrossSh
 }
 
 /**
- * Evaluate a function call
+ * Evaluate a function call.
+ * Custom functions are checked FIRST so that table evaluation contexts can
+ * override the main registry (e.g. register a row-aware SUM that takes a
+ * column name instead of a range).
  */
 function evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCrossSheetValue) {
+    // Custom functions take precedence over the main registry.
+    const customFn = customFunctions?.get(ast.name.toUpperCase());
+    if (customFn) {
+        const evaluatedArgs = ast.args.map((arg) =>
+            evaluate(arg, getCellValue, context, customFunctions, getCrossSheetValue),
+        );
+        try {
+            return customFn(...evaluatedArgs);
+        } catch (err) {
+            console.error(`Error evaluating custom function ${ast.name}:`, err);
+            return FormulaError.ERROR;
+        }
+    }
+
     const funcDef = getFunction(ast.name);
 
     if (!funcDef) {
-        // Fall through to custom functions before returning an error
-        const customFn = customFunctions?.get(ast.name.toUpperCase());
-        if (customFn) {
-            const evaluatedArgs = ast.args.map((arg) =>
-                evaluate(arg, getCellValue, context, customFunctions, getCrossSheetValue),
-            );
-            try {
-                return customFn(...evaluatedArgs);
-            } catch (err) {
-                console.error(`Error evaluating custom function ${ast.name}:`, err);
-                return FormulaError.ERROR;
-            }
-        }
         return FormulaError.NAME;
     }
 

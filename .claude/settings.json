@@ -21,7 +21,17 @@
       "Read(//c/Users/Jon/code/plainTab/**)",
       "Bash(python3 -c ' *)",
       "Bash(node -e ' *)",
-      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; C:\\\\Users\\\\Jon\\\\.local\\\\bin\\\\ask-kimi.bat *)"
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; C:\\\\Users\\\\Jon\\\\.local\\\\bin\\\\ask-kimi.bat *)",
+      "Bash(Get-ChildItem *)",
+      "Bash(Get-Content *)",
+      "Bash(node --check *)",
+      "PowerShell($*)",
+      "Bash($file = *)",
+      "Bash($lines = *)",
+      "Bash($content = *)",
+      "Bash($kept = *)",
+      "Bash(node --input-type=module *)",
+      "Bash(cd * && node *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Jon\\code\\instrumenta\\instrumenta",

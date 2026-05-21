@@ -31,13 +31,19 @@ export function parseCellKey(key) {
  */
 export class DependencyGraph {
     constructor() {
-        // Map from cell key -> Set of cell keys it depends on (dependencies)
+        // Map from cell key -> Set of cell keys it depends on (individual cells)
         /** @type {Map<string, Set<string>>} */
         this.dependencies = new Map();
 
         // Map from cell key -> Set of cell keys that depend on it (dependents)
         /** @type {Map<string, Set<string>>} */
         this.dependents = new Map();
+
+        // Map from formula cell key -> Array of range descriptors it depends on.
+        // Ranges are stored as {startRow,endRow,startCol,endCol} — O(1) per range
+        // rather than O(rangeSize) cell entries.
+        /** @type {Map<string, Array<{startRow:number,endRow:number,startCol:number,endCol:number}>>} */
+        this.rangeDependencies = new Map();
 
         // Map from cell key -> parsed AST (for re-evaluation)
         /** @type {Map<string, Object>} */
@@ -46,19 +52,16 @@ export class DependencyGraph {
         // Set of dirty cells that need recalculation
         /** @type {Set<string>} */
         this.dirtyCells = new Set();
-
-        // Expose for external access
-        this.dependencies = this.dependencies;
-        this.dependents = this.dependents;
     }
 
     /**
-     * Set a cell's formula and update the dependency graph
+     * Set a cell's formula and update the dependency graph.
      * @param {number} row
      * @param {number} col
      * @param {string|null} formula - The formula string, or null to clear
      * @param {Object|null} ast - The parsed AST
-     * @param {Array<{row: number, col: number}>} refs - Cell references extracted from the formula
+     * @param {Array<{row:number,col:number}|{startRow:number,endRow:number,startCol:number,endCol:number}>} refs
+     *   Mixed array of individual cell refs and range descriptors from extractCellRefs().
      */
     setFormula(row, col, formula, ast, refs) {
         const key = cellKey(row, col);
@@ -70,20 +73,27 @@ export class DependencyGraph {
             // Store the formula and AST
             this.formulas.set(key, { formula, ast });
 
-            // Add new dependencies
+            // Partition refs into individual cells vs ranges
             const deps = new Set();
-            for (const ref of refs) {
-                const depKey = cellKey(ref.row, ref.col);
-                deps.add(depKey);
+            const ranges = [];
 
-                // Add to dependents map
-                if (!this.dependents.has(depKey)) {
-                    this.dependents.set(depKey, new Set());
+            for (const ref of refs) {
+                if ('startRow' in ref) {
+                    // Range descriptor — store as-is, don't enumerate
+                    ranges.push(ref);
+                } else {
+                    // Individual cell ref
+                    const depKey = cellKey(ref.row, ref.col);
+                    deps.add(depKey);
+                    if (!this.dependents.has(depKey)) {
+                        this.dependents.set(depKey, new Set());
+                    }
+                    this.dependents.get(depKey).add(key);
                 }
-                this.dependents.get(depKey).add(key);
             }
 
             this.dependencies.set(key, deps);
+            if (ranges.length > 0) this.rangeDependencies.set(key, ranges);
 
             // Mark this cell as dirty
             this.dirtyCells.add(key);
@@ -112,6 +122,8 @@ export class DependencyGraph {
             }
             this.dependencies.delete(key);
         }
+        // Clear range deps for this formula cell
+        this.rangeDependencies.delete(key);
     }
 
     /**
@@ -126,14 +138,29 @@ export class DependencyGraph {
     }
 
     /**
-     * Recursively mark dependents as dirty
-     * @param {string} key
+     * Recursively mark dependents as dirty, including formulas whose range
+     * dependencies contain the given changed cell.
+     * @param {string} key  - key of the changed cell ("row,col")
      * @returns {Set<string>} - Set of cells that need recalculation
      */
     markDependentsDirty(key) {
         const toRecalculate = new Set();
         const visited = new Set();
-        const stack = [key];
+
+        // Collect initial set from both point deps and range deps for the changed cell
+        const initial = new Set(this.dependents.get(key) ?? []);
+        const { row, col } = parseCellKey(key);
+        for (const [formulaKey, ranges] of this.rangeDependencies) {
+            for (const r of ranges) {
+                if (row >= r.startRow && row <= r.endRow && col >= r.startCol && col <= r.endCol) {
+                    initial.add(formulaKey);
+                    break;
+                }
+            }
+        }
+
+        const stack = [...initial];
+        for (const k of initial) toRecalculate.add(k);
 
         while (stack.length > 0) {
             const current = stack.pop();
@@ -143,17 +170,15 @@ export class DependencyGraph {
             const dependents = this.dependents.get(current);
             if (dependents) {
                 for (const depKey of dependents) {
-                    toRecalculate.add(depKey);
-                    stack.push(depKey);
+                    if (!toRecalculate.has(depKey)) {
+                        toRecalculate.add(depKey);
+                        stack.push(depKey);
+                    }
                 }
             }
         }
 
-        // Add all to dirty set
-        for (const cellKey of toRecalculate) {
-            this.dirtyCells.add(cellKey);
-        }
-
+        for (const k of toRecalculate) this.dirtyCells.add(k);
         return toRecalculate;
     }
 
@@ -264,6 +289,7 @@ export class DependencyGraph {
     clear() {
         this.dependencies.clear();
         this.dependents.clear();
+        this.rangeDependencies.clear();
         this.formulas.clear();
         this.dirtyCells.clear();
     }

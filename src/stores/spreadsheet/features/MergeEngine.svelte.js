@@ -10,6 +10,7 @@
  * enabling O(1) "is this cell merged?" queries.
  */
 import * as Y from 'yjs';
+import { YJS_ORIGIN } from '../yjsOrigins.js';
 
 // Numeric key avoids string allocation in hot loops.
 // Supports up to ~1M columns (2^20) which is far beyond any real sheet.
@@ -45,7 +46,7 @@ export class MergeEngine {
 
         // Ensure merges array exists (older documents might not have it)
         if (!this.#mergesYArray) {
-            ydoc.transact(() => sheet.set('merges', new Y.Array()));
+            ydoc.transact(() => sheet.set('merges', new Y.Array()), YJS_ORIGIN.MIGRATION);
             this.#mergesYArray = sheet.get('merges');
         }
 
@@ -191,7 +192,7 @@ export class MergeEngine {
                 this.#mergesYArray.delete(toRemove[i], 1);
             }
             this.#mergesYArray.push([{ startRow, startCol, endRow, endCol }]);
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -203,7 +204,7 @@ export class MergeEngine {
         const arr = this.#mergesYArray.toArray();
         const idx = arr.findIndex(m => m.startRow === startRow && m.startCol === startCol);
         if (idx !== -1) {
-            this.#ydoc.transact(() => this.#mergesYArray.delete(idx, 1));
+            this.#ydoc.transact(() => this.#mergesYArray.delete(idx, 1), YJS_ORIGIN.UI);
         }
     }
 
@@ -228,7 +229,7 @@ export class MergeEngine {
             for (let i = toRemove.length - 1; i >= 0; i--) {
                 this.#mergesYArray.delete(toRemove[i], 1);
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -287,7 +288,7 @@ export class MergeEngine {
                     this.#mergesYArray.insert(i, [m]);
                 }
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     // -------------------------------------------------------------------------

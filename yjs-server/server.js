@@ -70,7 +70,8 @@ const scheduler = new SnapshotScheduler(saveSnapshot, getSqliteDb());
 // ---------------------------------------------------------------------------
 const messageSync = 0;
 const messageAwareness = 1;
-const messageFileMeta = 2;  // sideband: { last_edit_at, last_edit_by }
+const messageFileMeta = 2;    // sideband: { last_edit_at, last_edit_by }
+const messageRoomRotated = 3; // sideband: { newRoomId } — sent on snapshot restore
 
 // ---------------------------------------------------------------------------
 // WSSharedDoc — mirrors the reference utils.js WSSharedDoc exactly,
@@ -96,6 +97,28 @@ const sendFileMeta = (doc, conn, meta) => send(doc, conn, _encodeFileMeta(meta))
 const broadcastFileMeta = (doc, meta) => {
     const msg = _encodeFileMeta(meta);
     doc.conns.forEach((_, conn) => send(doc, conn, msg));
+};
+
+/** Encode a roomRotated message. */
+const _encodeRoomRotated = (newRoomId) => {
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, messageRoomRotated);
+    encoding.writeVarString(enc, JSON.stringify({ newRoomId }));
+    return encoding.toUint8Array(enc);
+};
+
+/**
+ * Broadcast a room-rotated notification to every client connected to any room
+ * associated with the given fileId. Called after a snapshot restore so all
+ * currently-open tabs switch to the new room without needing a page reload.
+ */
+const broadcastRoomRotated = (fileId, newRoomId) => {
+    const msg = _encodeRoomRotated(newRoomId);
+    for (const doc of docs.values()) {
+        if (doc.fileId === fileId) {
+            doc.conns.forEach((_, conn) => send(doc, conn, msg));
+        }
+    }
 };
 
 // Per-room debounce state for last-edit
@@ -218,17 +241,39 @@ class WSSharedDoc extends Y.Doc {
 const docs = new Map();
 
 /**
+ * Tracks rooms that are currently being evicted (last client disconnected;
+ * writeDocState + destroy in progress). A new connection arriving for the same
+ * room name awaits this promise before creating a fresh doc, preventing a race
+ * where the new doc loads stale LevelDB state that the eviction flush hasn't
+ * written yet.
+ * @type {Map<string, Promise<void>>}
+ */
+const evicting = new Map();
+
+/**
  * Get or create a doc. Synchronous — bindDocState loads state in background.
  * @param {string} name
  * @param {string|null} fileId
  * @param {string|null} appType
  * @returns {WSSharedDoc}
  */
-const getDoc = (name, fileId, appType) => map.setIfUndefined(docs, name, () => {
-    const doc = new WSSharedDoc(name, fileId, appType);
-    bindDocState(name, doc); // fire-and-forget; state loads in background
-    return doc;
-});
+const getDoc = async (name, fileId, appType) => {
+    // If a previous connection's eviction (writeDocState + destroy) is still in
+    // flight for this room, wait for it to complete before creating a fresh doc.
+    // Without this, the new doc's bindDocState could load stale LevelDB state
+    // that the eviction flush hasn't written yet.
+    const pendingEvict = evicting.get(name);
+    if (pendingEvict) await pendingEvict;
+
+    return map.setIfUndefined(docs, name, () => {
+        const doc = new WSSharedDoc(name, fileId, appType);
+        // doc.ready resolves once historical state has been applied from LevelDB.
+        // setupWSConnection awaits this before sending Sync Step 1 so new clients
+        // never receive an empty state vector for a room that has persisted state.
+        doc.ready = bindDocState(name, doc);
+        return doc;
+    });
+};
 
 // ---------------------------------------------------------------------------
 // Connection helpers — mirrors reference closeConn and send exactly
@@ -272,15 +317,27 @@ const closeConn = (doc, conn) => {
     }
 
     if (doc.conns.size === 0) {
-        // Matches reference: writeState then destroy; delete from docs map first.
         scheduler.onRoomEmpty(doc.name, doc.fileId, doc, activeUsers);
         docs.delete(doc.name);
         scheduler.cleanup(doc.name);
-        writeDocState(doc.name, doc).then(() => {
+        // Release per-file in-memory debounce state when the room closes.
+        // The canonical data is in SQLite; on-connect we re-read from there.
+        if (doc.fileId) {
+            lastEditWritten.delete(doc.fileId);
+            lastEditBroadcast.delete(doc.fileId);
+            lastKnownFileMeta.delete(doc.fileId);
+        }
+        // Register an eviction promise so any reconnect that arrives before the
+        // flush completes will wait rather than loading a stale LevelDB snapshot.
+        const evictionDone = writeDocState(doc.name, doc).then(() => {
             doc.destroy();
-        }).catch(() => {
+        }).catch((err) => {
+            console.error(`[room] writeDocState failed for ${doc.name}:`, err?.message);
             doc.destroy();
+        }).finally(() => {
+            evicting.delete(doc.name);
         });
+        evicting.set(doc.name, evictionDone);
         console.log(`[room] ${doc.name} closed (last user: ${username})`);
     }
 
@@ -298,9 +355,9 @@ const closeConn = (doc, conn) => {
  * @param {string} username
  * @param {string|null} appType
  */
-const setupWSConnection = (conn, name, fileId, username, appType) => {
+const setupWSConnection = async (conn, name, fileId, username, appType) => {
     conn.binaryType = 'arraybuffer';
-    const doc = getDoc(name, fileId, appType);
+    const doc = await getDoc(name, fileId, appType);
     doc.conns.set(conn, new Set());
     doc.connUsers.set(conn, username);
 
@@ -308,6 +365,15 @@ const setupWSConnection = (conn, name, fileId, username, appType) => {
 
     // Notify scheduler of user count for collaborative session handling
     scheduler.updateUserCount(name, doc.conns.size);
+
+    // Wait for LevelDB state to load before sending Sync Step 1.
+    // Without this, a freshly-created room sends an empty state vector even
+    // when it has persisted state, causing the client to unnecessarily resend
+    // its full state rather than just the missing diff.
+    await doc.ready;
+
+    // Guard: the connection may have been closed while we were awaiting LevelDB.
+    if (!doc.conns.has(conn)) return;
 
     conn.on('message', /** @param {ArrayBuffer} message */ message => {
         try {
@@ -387,7 +453,10 @@ const setupWSConnection = (conn, name, fileId, username, appType) => {
 // ---------------------------------------------------------------------------
 // HTTP server + REST API
 // ---------------------------------------------------------------------------
-const wss = new WebSocketServer({ noServer: true });
+const MAX_WS_PAYLOAD  = parseInt(process.env.MAX_WS_PAYLOAD  ?? String(10 * 1024 * 1024)); // 10 MB
+const MAX_HTTP_BODY   = parseInt(process.env.MAX_HTTP_BODY   ?? String(1  * 1024 * 1024)); // 1 MB
+
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
 
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
@@ -416,7 +485,16 @@ function _json(res, status, data) {
 function _readBody(req) {
     return new Promise((resolve, reject) => {
         const chunks = [];
-        req.on('data', c => chunks.push(c));
+        let totalSize = 0;
+        req.on('data', c => {
+            totalSize += c.length;
+            if (totalSize > MAX_HTTP_BODY) {
+                req.destroy();
+                reject(new Error('Request body too large'));
+                return;
+            }
+            chunks.push(c);
+        });
         req.on('end', () => {
             try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); }
             catch { resolve({}); }
@@ -471,7 +549,7 @@ async function handleHttp(req, res, url) {
         // appType from body (PHP-provided) takes precedence over doc's stored value
         const resolvedAppType = appType ?? doc.appType ?? null;
         if (resolvedAppType && !doc.appType) doc.appType = resolvedAppType;
-        const id = saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null, resolvedAppType);
+        const id = await saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null, resolvedAppType);
         return _json(res, 200, { id });
     }
 
@@ -544,6 +622,9 @@ async function handleHttp(req, res, url) {
         if (!snapshotId) return _json(res, 400, { error: 'snapshotId required' });
         const result = await prepareRestore(snapshotId);
         if (!result) return _json(res, 404, { error: 'Snapshot not found' });
+        // Notify all clients currently connected to this file's rooms so they
+        // switch to the new room without requiring a page reload.
+        broadcastRoomRotated(result.fileId, result.newRoomId);
         return _json(res, 200, result);
     }
 
@@ -554,7 +635,10 @@ async function handleHttp(req, res, url) {
 // WebSocket upgrade — authenticate then hand off to setupWSConnection
 // ---------------------------------------------------------------------------
 wss.on('connection', (ws, _req, name, fileId, username, appType) => {
-    setupWSConnection(ws, name, fileId, username, appType);
+    setupWSConnection(ws, name, fileId, username, appType).catch(err => {
+        console.error(`[ws] setupWSConnection failed for ${name}:`, err?.message ?? err);
+        try { ws.close(1011, 'Internal server error'); } catch { }
+    });
 });
 
 server.on('upgrade', (req, socket, head) => {

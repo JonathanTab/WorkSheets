@@ -19,18 +19,24 @@
 import { jsPDF } from 'jspdf';
 import { buildPaneData } from './CellPaintData.js';
 import { PrintEngine } from '../features/PrintEngine.js';
-
-// ── Constants ──────────────────────────────────────────────────────────────────
-const PAPER_SIZES = {
-    A4:     { width: 210,   height: 297   },
-    letter: { width: 215.9, height: 279.4 },
-    legal:  { width: 215.9, height: 355.6 },
-    A3:     { width: 297,   height: 420   },
-    A5:     { width: 148,   height: 210   },
-};
-
-const CSS_PX_PER_INCH   = 96;
-const MM_PER_INCH       = 25.4;
+import { buildWrappedLines } from './RichTextLayout.js';
+import { orchestratePDF, downloadPDF as _downloadPDF } from './PDFOrchestrator.js';
+import {
+    PAPER_SIZES,
+    CSS_PX_PER_INCH,
+    MM_PER_INCH,
+    computeUsedArea,
+    substituteVars,
+    drawHF,
+    buildPageList,
+    buildHFVarsBase,
+} from './PrintShared.js';
+import { paintBordersVec } from './BorderGeometry.js';
+import {
+    checkboxLayout, ratingLayout, starVertices,
+    CHECKBOX_MAX_SIZE, CHECKBOX_PADDING,
+    RATING_MAX_SIZE, RATING_GAP,
+} from './CellPrimitiveGeometry.js';
 const PT_PER_INCH       = 72;
 // fontSize values are stored in points (matching the UI picker and Google Sheets convention).
 const DEFAULT_FONT_PT   = 10;
@@ -195,108 +201,50 @@ function fitRectMm(srcW, srcH, dstX, dstY, dstW, dstH, fit) {
     return { dx: dstX, dy: dstY, dw: dstW, dh: dstH };
 }
 
-// ── Variable substitution ──────────────────────────────────────────────────────
+// substituteVars, drawHF, computeUsedArea — imported from PrintShared.js
 
-function substituteVars(text, vars) {
-    if (!text) return '';
-    return text
-        .replace(/\{page\}/g,      String(vars.page))
-        .replace(/\{pages\}/g,     String(vars.pages))
-        .replace(/\{sheetName\}/g, vars.sheetName ?? '')
-        .replace(/\{docName\}/g,   vars.docName ?? '')
-        .replace(/\{date\}/g,      vars.date)
-        .replace(/\{time\}/g,      vars.time);
-}
-
-function drawHF(pdf, which, geo, texts) {
-    const { pageW, pageH, marginTop, marginBottom, marginLeft, marginRight } = geo;
-    const y = which === 'header' ? marginTop / 2 : pageH - marginBottom / 2;
-    pdf.setFont('helvetica', 'normal');
-    pdf.setFontSize(8);
-    pdf.setTextColor(80, 80, 80);
-    if (texts.left)   pdf.text(texts.left,   marginLeft,          y, { align: 'left',   baseline: 'middle' });
-    if (texts.center) pdf.text(texts.center, pageW / 2,           y, { align: 'center', baseline: 'middle' });
-    if (texts.right)  pdf.text(texts.right,  pageW - marginRight, y, { align: 'right',  baseline: 'middle' });
-}
-
-// ── Used-area detection ────────────────────────────────────────────────────────
-
-function computeUsedArea(sheetStore) {
-    let minRow = Infinity, maxRow = -Infinity;
-    let minCol = Infinity, maxCol = -Infinity;
-    sheetStore.cells.forEach((cell, key) => {
-        if (!cell || !cell.exists) return;
-        const comma = key.indexOf(',');
-        const row = parseInt(key.slice(0, comma), 10);
-        const col = parseInt(key.slice(comma + 1), 10);
-        if (row < minRow) minRow = row;
-        if (row > maxRow) maxRow = row;
-        if (col < minCol) minCol = col;
-        if (col > maxCol) maxCol = col;
-    });
-    if (maxRow < 0 || !isFinite(maxRow)) return null;
-    return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
-}
-
-// ── Vector shape painters ──────────────────────────────────────────────────────
+// ── Vector shape painters — use CellPrimitiveGeometry for shared layout math ────
 
 function drawCheckboxVec(pdf, cx, cy, cw, ch, checked, s) {
-    const sizeMm = Math.max(0.5, Math.min(px2mm(14, s), ch - px2mm(4, s), cw - px2mm(4, s)));
-    const bx = cx + (cw - sizeMm) / 2;
-    const by = cy + (ch - sizeMm) / 2;
-    const radius = Math.max(0.2, sizeMm * 0.12);
+    // CellPrimitiveGeometry constants are in px; convert to mm for this backend.
+    const maxMm  = px2mm(CHECKBOX_MAX_SIZE, s);
+    const padMm  = px2mm(CHECKBOX_PADDING,  s);
+    const { x: ox, y: oy, size, radius } = checkboxLayout(cw, ch, {
+        maxSize: maxMm, padding: padMm, minRadius: 0.2,
+    });
+    const bx = cx + ox;
+    const by = cy + oy;
 
     if (checked) {
         setFill(pdf, '#1a73e8');
-        pdf.roundedRect(bx, by, sizeMm, sizeMm, radius, radius, 'F');
-        // Checkmark
+        pdf.roundedRect(bx, by, size, size, radius, radius, 'F');
         pdf.setDrawColor(255, 255, 255);
-        pdf.setLineWidth(Math.max(0.3, sizeMm * 0.12));
+        pdf.setLineWidth(Math.max(0.3, size * 0.12));
         pdf.setLineCap('round');
         pdf.setLineJoin('round');
         pdf.lines(
-            [[sizeMm * 0.22, sizeMm * 0.20], [sizeMm * 0.38, -sizeMm * 0.44]],
-            bx + sizeMm * 0.20,
-            by + sizeMm * 0.52,
+            [[size * 0.22, size * 0.20], [size * 0.38, -size * 0.44]],
+            bx + size * 0.20, by + size * 0.52,
             [1, 1], 'S', false
         );
     } else {
         pdf.setFillColor(255, 255, 255);
         setDraw(pdf, '#c0c0c0');
         pdf.setLineWidth(0.2);
-        pdf.roundedRect(bx, by, sizeMm, sizeMm, radius, radius, 'FD');
+        pdf.roundedRect(bx, by, size, size, radius, radius, 'FD');
     }
 }
 
 function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
-    const starSizePx = Math.min(Math.floor(ch / s * CSS_PX_PER_INCH / MM_PER_INCH) - 6, 16);
-    const starSize   = px2mm(Math.max(2, starSizePx), s);
-    const outerR     = starSize / 2;
-    const innerR     = outerR * 0.4;
-    const gapMm      = px2mm(2, s);
-    const totalW     = max * (starSize + gapMm) - gapMm;
-    const startCx    = cx + (cw - totalW) / 2 + outerR;
-    const starCy     = cy + ch / 2;
-    const numPts     = 5;
-    const step       = Math.PI / numPts;
-
-    for (let i = 0; i < max; i++) {
-        const scx    = startCx + i * (starSize + gapMm);
-        const filled = i < value;
-        const coords = [];
-        for (let p = 0; p < 2 * numPts; p++) {
-            const r     = p % 2 === 0 ? outerR : innerR;
-            const angle = p * step - Math.PI / 2;
-            coords.push([scx + r * Math.cos(angle), starCy + r * Math.sin(angle)]);
-        }
-        const segs = [];
-        for (let j = 1; j < coords.length; j++) {
-            segs.push([coords[j][0] - coords[j - 1][0], coords[j][1] - coords[j - 1][1]]);
-        }
+    const maxMm = px2mm(RATING_MAX_SIZE, s);
+    const gapMm = px2mm(RATING_GAP,      s);
+    for (const { cx: scx, cy: scy, outerR, innerR, filled } of ratingLayout(value, max, cw, ch, { maxStarSize: maxMm, gap: gapMm })) {
+        const verts = starVertices(cx + scx, cy + scy, outerR, innerR);
+        const segs  = verts.slice(1).map((v, i) => [v[0] - verts[i][0], v[1] - verts[i][1]]);
         setFill(pdf, filled ? '#fbbc04' : '#d1d5db');
         setDraw(pdf, filled ? '#fbbc04' : '#d1d5db');
         pdf.setLineWidth(0.1);
-        pdf.lines(segs, coords[0][0], coords[0][1], [1, 1], 'FD', true);
+        pdf.lines(segs, verts[0][0], verts[0][1], [1, 1], 'FD', true);
     }
 }
 
@@ -304,49 +252,15 @@ function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
 
 /**
  * Word-wrap one '\n'-split line of rich-text runs to fit within maxW mm.
- * Splits at whitespace boundaries; a single word wider than maxW is kept whole.
- * Returns an array of wrapped sub-lines, each being an array of run segments.
+ * Delegates to the shared RichTextLayout algorithm with pdf.getStringUnitWidth
+ * (via textWidthMm) as the width function.
  */
 function wrapRichLine(pdf, runs, maxW, cell, s, defaultSizePt) {
-    const outLines = [[]];
-    let curW = 0;   // mm used by committed segments in the current output line
-
-    for (const run of runs) {
-        if (!run.t) continue;
+    const withText = runs.filter(r => r.t);
+    return buildWrappedLines(withText, maxW, (chunk, run) => {
         applyFont(pdf, cell, s, run);
-        const sizePt = run.f || defaultSizePt;
-
-        // Tokenize: alternating word / whitespace chunks
-        const chunks = run.t.split(/(\s+)/);
-        let segText = '';
-        let segW    = 0;
-
-        for (const chunk of chunks) {
-            if (!chunk) continue;
-            const chunkW   = textWidthMm(pdf, chunk, sizePt, s);
-            const isSpace  = /^\s+$/.test(chunk);
-
-            if (!isSpace && curW + segW + chunkW > maxW && curW + segW > 0) {
-                // Overflow — flush current segment, start new line
-                const trimmed = segText.trimEnd();
-                if (trimmed) outLines[outLines.length - 1].push({ ...run, t: trimmed });
-                outLines.push([]);
-                curW    = 0;
-                segText = chunk;
-                segW    = chunkW;
-            } else {
-                segText += chunk;
-                segW    += chunkW;
-            }
-        }
-
-        if (segText) {
-            outLines[outLines.length - 1].push({ ...run, t: segText });
-            curW += segW;
-        }
-    }
-
-    return outLines.filter(l => l.length > 0);
+        return textWidthMm(pdf, chunk, run.f || defaultSizePt, s);
+    }).filter(l => l.length > 0);
 }
 
 /**
@@ -547,41 +461,9 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 
 // ── Border painter ─────────────────────────────────────────────────────────────
 
+/** Delegates to the shared BorderGeometry module (single source of truth). */
 function drawBordersVec(pdf, borders, x, y, w, h) {
-    // Square linecap extends stroke past endpoints, filling corner gaps when
-    // adjacent edges meet at the same point.
-    pdf.setLineCap(2); // 2 = square
-    const edge = (b, x1, y1, x2, y2) => {
-        if (!b) return;
-        setDraw(pdf, b.color || '#000000', [0, 0, 0]);
-        const lineW = Math.max(0.1, (b.width || 1) * 0.264);
-        const style = b.style || 'solid';
-        if (style === 'double') {
-            pdf.setLineWidth(0.2);
-            const gap = 0.5;
-            const isH = (y1 === y2);
-            if (isH) {
-                pdf.line(x1, y1 - gap, x2, y2 - gap);
-                pdf.line(x1, y1 + gap, x2, y2 + gap);
-            } else {
-                pdf.line(x1 - gap, y1, x2 - gap, y2);
-                pdf.line(x1 + gap, y1, x2 + gap, y2);
-            }
-        } else if (style === 'dashed') {
-            pdf.setLineWidth(lineW);
-            pdf.setLineDashPattern([1.5, 1.5], 0);
-            pdf.line(x1, y1, x2, y2);
-            pdf.setLineDashPattern([], 0);
-        } else {
-            pdf.setLineWidth(lineW);
-            pdf.line(x1, y1, x2, y2);
-        }
-    };
-    edge(borders.top,    x,     y,     x + w, y    );
-    edge(borders.right,  x + w, y,     x + w, y + h);
-    edge(borders.bottom, x,     y + h, x + w, y + h);
-    edge(borders.left,   x,     y,     x,     y + h);
-    pdf.setLineCap(0); // restore butt
+    paintBordersVec(pdf, borders, x, y, w, h, parseColor);
 }
 
 // ── Main cell painter ──────────────────────────────────────────────────────────
@@ -696,232 +578,112 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     if (cell.borders) drawBordersVec(pdf, cell.borders, cx, cy, cw, ch);
 }
 
-// ── VectorPrintEngine class ────────────────────────────────────────────────────
+// ── VectorPageRenderer — inline backend for PDFOrchestrator ──────────────────
 
-export class VectorPrintEngine {
-    #printEngine;
+class VectorPageRenderer {
+    /** @type {Map<string, {dataUrl:string, naturalW:number, naturalH:number}>} */
+    #imgAssets = new Map();
+    #floatingImages = [];
+    #rowMetrics = null;
+    #colMetrics = null;
 
-    constructor() {
-        this.#printEngine = new PrintEngine();
+    extendUsedArea(used, params, { rowMetrics, colMetrics }) {
+        // Extend bounds to include floating images, matching the original logic.
+        this.#rowMetrics = rowMetrics;
+        this.#colMetrics = colMetrics;
+        const sheetStore = params.sheetStore;
+        this.#floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
+        let { startRow, startCol, endRow, endCol } = used;
+        for (const img of this.#floatingImages) {
+            const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
+            const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
+            if (imgRight  > 0) { const c = colMetrics.indexAtOffset(Math.max(0, imgRight  - 1)); if (c > endCol)   endCol   = c; }
+            if (imgBottom > 0) { const r = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1)); if (r > endRow)   endRow   = r; }
+            if (img.anchorRow < startRow) startRow = img.anchorRow;
+            if (img.anchorCol < startCol) startCol = img.anchorCol;
+        }
+        return endRow >= 0 ? { startRow, startCol, endRow, endCol } : null;
     }
 
-    /**
-     * Generate a PDF blob for the active sheet using vector ops.
-     * @returns {Promise<Blob>}
-     */
-    async generatePDF(params) {
-        const {
-            printSettings = {},
-            renderContext,
-            sheetStore,
-            session,
-            rowMetrics,
-            colMetrics,
-            docName = '',
-            fetchBlobFn = null,
-        } = params;
-
-        const totalRows = renderContext?.effectiveRowCount ?? sheetStore?.rowCount ?? 100;
-        const totalCols = renderContext?.effectiveColCount ?? sheetStore?.colCount ?? 26;
-
-        // ── Paper geometry ────────────────────────────────────────────────────
-        const orientation = printSettings.orientation ?? 'portrait';
-        const paperKey    = printSettings.paperSize ?? 'letter';
-        const paper       = PAPER_SIZES[paperKey] ?? PAPER_SIZES.letter;
-        const pageW = orientation === 'landscape' ? paper.height : paper.width;
-        const pageH = orientation === 'landscape' ? paper.width  : paper.height;
-
-        const marginTop    = printSettings.marginTop    ?? 19.05;
-        const marginBottom = printSettings.marginBottom ?? 19.05;
-        const marginLeft   = printSettings.marginLeft   ?? 19.05;
-        const marginRight  = printSettings.marginRight  ?? 19.05;
-
-        const printableW = pageW  - marginLeft - marginRight;
-        const printableH = pageH  - marginTop  - marginBottom;
-        const s          = printSettings.scale ?? 1.0; // user scale
-
-        // ── Floating images list (needed for both area bounds and rendering) ──
-        const floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
-
-        // ── Print area ────────────────────────────────────────────────────────
-        const printArea = printSettings.printArea ?? 'usedArea';
-        let settingsForBreaks = { ...printSettings };
-        if (printArea === 'usedArea') {
-            const used = computeUsedArea(sheetStore);
-            let startRow = used?.startRow ?? 0;
-            let startCol = used?.startCol ?? 0;
-            let endRow   = used?.endRow   ?? -1;
-            let endCol   = used?.endCol   ?? -1;
-            // Extend bounds in all directions to fully cover floating images
-            for (const img of floatingImages) {
-                const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
-                const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
-                if (imgRight  > 0) { const c = colMetrics.indexAtOffset(Math.max(0, imgRight  - 1)); if (c > endCol) endCol = c; }
-                if (imgBottom > 0) { const r = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1)); if (r > endRow) endRow = r; }
-                if (img.anchorRow < startRow) startRow = img.anchorRow;
-                if (img.anchorCol < startCol) startCol = img.anchorCol;
-            }
-            if (endRow >= 0) {
-                settingsForBreaks.areaStartRow = startRow;
-                settingsForBreaks.areaStartCol = startCol;
-                settingsForBreaks.areaEndRow   = endRow;
-                settingsForBreaks.areaEndCol   = Math.max(endCol, 0);
-            }
-        }
-
-        // ── Page breaks ───────────────────────────────────────────────────────
-        const { rowBreaks, colBreaks } = this.#printEngine.computePageBreaks(
-            settingsForBreaks, rowMetrics, colMetrics, totalRows, totalCols,
-        );
-
-        // ── Options ───────────────────────────────────────────────────────────
-        const showGridLines = printSettings.showGridLines ?? true;
-        const pageOrder     = printSettings.pageOrder ?? 'downThenOver';
-
-        // ── Header / footer ───────────────────────────────────────────────────
-        const now        = new Date();
-        const dateStr    = now.toLocaleDateString();
-        const timeStr    = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const sheetName  = sheetStore?.name ?? '';
-        const hfVarsBase = { sheetName, docName, date: dateStr, time: timeStr };
-        const hasHeader  = printSettings.headerLeft || printSettings.headerCenter || printSettings.headerRight;
-        const hasFooter  = printSettings.footerLeft || printSettings.footerCenter || printSettings.footerRight;
-        const totalPages = rowBreaks.length * colBreaks.length;
-
-        // ── Floating images: preload all unique blobs ─────────────────────────
-        /** @type {Map<string, {dataUrl:string, naturalW:number, naturalH:number}>} */
-        const imgAssets = new Map();
-        if (floatingImages.length && fetchBlobFn) {
-            const uniqueIds = [...new Set(floatingImages.map(f => f.blobId))];
-            await Promise.all(uniqueIds.map(async (blobId) => {
+    async prepare(params, _geo) {
+        const { fetchBlobFn = null, sheetStore } = params;
+        this.#floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
+        if (this.#floatingImages.length && fetchBlobFn) {
+            const uniqueIds = [...new Set(this.#floatingImages.map(f => f.blobId))];
+            await Promise.all(uniqueIds.map(async blobId => {
                 try {
                     const blob    = await fetchBlobFn(blobId);
                     const dataUrl = await blobToDataUrl(blob);
                     const { w, h } = await getImgNaturalSize(dataUrl);
-                    imgAssets.set(blobId, { dataUrl, naturalW: w, naturalH: h });
+                    this.#imgAssets.set(blobId, { dataUrl, naturalW: w, naturalH: h });
                 } catch { /* skip images that fail to load */ }
             }));
         }
+    }
 
-        // ── Build page list ───────────────────────────────────────────────────
-        const pages = [];
-        if (pageOrder === 'overThenDown') {
-            for (let ci = 0; ci < colBreaks.length; ci++)
-                for (let ri = 0; ri < rowBreaks.length; ri++)
-                    pages.push({ ri, ci });
-        } else {
-            for (let ri = 0; ri < rowBreaks.length; ri++)
-                for (let ci = 0; ci < colBreaks.length; ci++)
-                    pages.push({ ri, ci });
+    renderCells(pdf, cells, pd, _params) {
+        const { geo, s, showGridLines } = pd;
+        const { marginLeft, marginTop, printableW, printableH } = geo;
+
+        // White background
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, geo.pageW, geo.pageH, 'F');
+
+        beginClip(pdf, marginLeft, marginTop, printableW, printableH);
+        for (const cell of cells) {
+            drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines);
         }
+        endClip(pdf);
+    }
 
-        // ── Create PDF ────────────────────────────────────────────────────────
-        const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH] });
-        const geo = { pageW, pageH, marginTop, marginBottom, marginLeft, marginRight };
-        let isFirstPage = true;
-        let pageNum     = 0;
-
-        // ── Render pages ──────────────────────────────────────────────────────
-        for (const { ri, ci } of pages) {
-            pageNum++;
-
-            const startRow = rowBreaks[ri];
-            const endRow   = ri + 1 < rowBreaks.length
-                ? rowBreaks[ri + 1] - 1
-                : (settingsForBreaks.areaEndRow ?? totalRows - 1);
-            const startCol = colBreaks[ci];
-            const endCol   = ci + 1 < colBreaks.length
-                ? colBreaks[ci + 1] - 1
-                : (settingsForBreaks.areaEndCol ?? totalCols - 1);
-
-            const contentLeft = colMetrics.offsetOf(startCol);
-            const contentTop  = rowMetrics.offsetOf(startRow);
-            const rowRange    = { start: startRow, end: endRow, count: endRow - startRow + 1 };
-            const colRange    = { start: startCol, end: endCol, count: endCol - startCol + 1 };
-
-            // cell.x / cell.y are already 0-based relative to this page's content origin
-            const cells = buildPaneData({
-                rowRange, colRange, rowMetrics, colMetrics,
-                renderContext, sheetStore, session,
-                frozenRows: 0, frozenCols: 0, frozenHeight: 0, frozenWidth: 0,
-                scrollLeft: contentLeft,
-                scrollTop:  contentTop,
-            });
-
-            if (!isFirstPage) pdf.addPage([pageW, pageH], orientation);
-            isFirstPage = false;
-
-            // White background
-            pdf.setFillColor(255, 255, 255);
-            pdf.rect(0, 0, pageW, pageH, 'F');
-
-            // Clip all cell drawing to the printable area so content doesn't
-            // bleed into margins. Uses the corrected clip sequence: clip → discardPath.
-            const pageContentW = colMetrics.offsetOf(endCol + 1) - contentLeft;
-            const pageContentH = rowMetrics.offsetOf(endRow + 1) - contentTop;
-
-            beginClip(pdf, marginLeft, marginTop, printableW, printableH);
-            for (const cell of cells) {
-                drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines);
-            }
+    renderExtras(pdf, pd, params) {
+        const { geo, s, contentLeft, contentTop, contentW_css, contentH_css } = pd;
+        const { marginLeft, marginTop, printableW, printableH } = geo;
+        const rowMetrics = this.#rowMetrics ?? params.rowMetrics;
+        const colMetrics = this.#colMetrics ?? params.colMetrics;
+        for (const img of this.#floatingImages) {
+            const asset = this.#imgAssets.get(img.blobId);
+            if (!asset) continue;
+            const imgX = colMetrics.offsetOf(img.anchorCol) + img.offsetX - contentLeft;
+            const imgY = rowMetrics.offsetOf(img.anchorRow) + img.offsetY - contentTop;
+            if (imgX + img.width <= 0 || imgX >= contentW_css) continue;
+            if (imgY + img.height <= 0 || imgY >= contentH_css) continue;
+            const imgX_mm = marginLeft + px2mm(imgX, s);
+            const imgY_mm = marginTop  + px2mm(imgY, s);
+            const imgW_mm = px2mm(img.width,  s);
+            const imgH_mm = px2mm(img.height, s);
+            const { dx, dy, dw, dh } = fitRectMm(asset.naturalW, asset.naturalH, imgX_mm, imgY_mm, imgW_mm, imgH_mm, img.fit ?? 'contain');
+            const clipX  = Math.max(imgX_mm, marginLeft);
+            const clipY  = Math.max(imgY_mm, marginTop);
+            const clipX2 = Math.min(imgX_mm + imgW_mm, marginLeft + printableW);
+            const clipY2 = Math.min(imgY_mm + imgH_mm, marginTop  + printableH);
+            if (clipX2 <= clipX || clipY2 <= clipY) continue;
+            beginClip(pdf, clipX, clipY, clipX2 - clipX, clipY2 - clipY);
+            pdf.addImage(asset.dataUrl, '', dx, dy, dw, dh, undefined, 'FAST');
             endClip(pdf);
-
-            // Floating images: drawn outside the cell clip to avoid nested PDF clips.
-            // Each image gets its own clip = intersection(image bounds, printable area).
-            for (const img of floatingImages) {
-                const asset = imgAssets.get(img.blobId);
-                if (!asset) continue;
-                const imgX = colMetrics.offsetOf(img.anchorCol) + img.offsetX - contentLeft;
-                const imgY = rowMetrics.offsetOf(img.anchorRow) + img.offsetY - contentTop;
-                if (imgX + img.width <= 0 || imgX >= pageContentW) continue;
-                if (imgY + img.height <= 0 || imgY >= pageContentH) continue;
-                const imgX_mm = marginLeft + px2mm(imgX, s);
-                const imgY_mm = marginTop  + px2mm(imgY, s);
-                const imgW_mm = px2mm(img.width,  s);
-                const imgH_mm = px2mm(img.height, s);
-                const { dx, dy, dw, dh } = fitRectMm(asset.naturalW, asset.naturalH, imgX_mm, imgY_mm, imgW_mm, imgH_mm, img.fit ?? 'contain');
-                const clipX  = Math.max(imgX_mm, marginLeft);
-                const clipY  = Math.max(imgY_mm, marginTop);
-                const clipX2 = Math.min(imgX_mm + imgW_mm, marginLeft + printableW);
-                const clipY2 = Math.min(imgY_mm + imgH_mm, marginTop  + printableH);
-                if (clipX2 <= clipX || clipY2 <= clipY) continue;
-                beginClip(pdf, clipX, clipY, clipX2 - clipX, clipY2 - clipY);
-                pdf.addImage(asset.dataUrl, '', dx, dy, dw, dh, undefined, 'FAST');
-                endClip(pdf);
-            }
-
-            // Header / footer are drawn OUTSIDE the printable-area clip
-            const hfVars = { ...hfVarsBase, page: pageNum, pages: totalPages };
-            if (hasHeader) {
-                drawHF(pdf, 'header', geo, {
-                    left:   substituteVars(printSettings.headerLeft,   hfVars),
-                    center: substituteVars(printSettings.headerCenter, hfVars),
-                    right:  substituteVars(printSettings.headerRight,  hfVars),
-                });
-            }
-            if (hasFooter) {
-                drawHF(pdf, 'footer', geo, {
-                    left:   substituteVars(printSettings.footerLeft,   hfVars),
-                    center: substituteVars(printSettings.footerCenter, hfVars),
-                    right:  substituteVars(printSettings.footerRight,  hfVars),
-                });
-            }
         }
+    }
 
-        return pdf.output('blob');
+    cleanup() {
+        this.#imgAssets.clear();
+        this.#floatingImages = [];
+        this.#rowMetrics = null;
+        this.#colMetrics = null;
+    }
+}
+
+// ── VectorPrintEngine class ────────────────────────────────────────────────────
+
+export class VectorPrintEngine {
+    /** @returns {Promise<Blob>} */
+    async generatePDF(params) {
+        return orchestratePDF(params, new VectorPageRenderer());
     }
 
     async downloadPDF(params, filename = 'spreadsheet.pdf') {
-        const blob = await this.generatePDF(params);
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href     = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        return _downloadPDF(params, new VectorPageRenderer(), filename);
     }
 }
+
 
 export default VectorPrintEngine;

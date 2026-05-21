@@ -10,7 +10,7 @@
     import MobileMenuSheet from "./MobileMenuSheet.svelte";
     import { moreVertical } from "../../lib/icons/index.js";
     import { spreadsheetSession, selectionState } from "../../stores/spreadsheetStore.svelte.js";
-    import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
+    import { applyFormatting } from "../../stores/spreadsheet/cellFormattingCommands.js";
 
     let {
         onClose = undefined,
@@ -36,32 +36,8 @@
         return spreadsheetSession.activeSheetStore?.getCell(anchor.row, anchor.col)?.italic === true;
     });
 
-    function applyFormat(property, value) {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const eff = selectionState.effectiveRange(sheetStore.rowCount, sheetStore.colCount);
-        if (!eff) return;
-        const renderContext = spreadsheetSession.renderContext;
-        spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER) continue;
-                    if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
-                        const info = renderContext?.tableManager?.getCellInfo(r, c);
-                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
-                        }
-                        continue;
-                    }
-                    sheetStore.setCellProperties(r, c, { [property]: value });
-                }
-            }
-        });
-    }
-
-    function toggleBold() { applyFormat("bold", !isBold); }
-    function toggleItalic() { applyFormat("italic", !isItalic); }
+    function toggleBold()   { applyFormatting('bold',   !isBold); }
+    function toggleItalic() { applyFormatting('italic', !isItalic); }
 </script>
 
 <MobileToolbarShell {onClose}>

@@ -13,6 +13,11 @@
  * After a successful flush the 'flushed' BroadcastChannel message tells other
  * open apps to trigger a sync so their in-memory state reflects server truth.
  */
+// Module-level monotonic counter for within-ms ordering.
+// Starts at current epoch so cold restores honour rough chronological order.
+let _seq = Date.now();
+function nextSeq() { return ++_seq; }
+
 export class OfflineMutationQueue {
     /**
      * @param {object} opts
@@ -52,6 +57,7 @@ export class OfflineMutationQueue {
             type,
             payload,
             createdAt: new Date().toISOString(),
+            seq:       nextSeq(), // monotonic for same-ms ordering (C7)
             attempts:  0,
             lastError: null,
         };

@@ -4,6 +4,7 @@
         spreadsheetSession,
         getDocManager,
     } from "../../../stores/spreadsheetStore.svelte.js";
+    import { log } from "../../../util/log.js";
 
     // Connection states: 'offline' | 'disconnected' | 'connecting' | 'connected' | 'syncing'
     // All state uses $state.raw to prevent reactive triggers from value changes
@@ -69,7 +70,7 @@
 
     // Set up listeners when we have a provider
     function setupProviderListeners(provider, docId) {
-        console.log(
+        log.debug(
             "[ConnectionStatus] Setting up listeners for provider, initial state - wsconnected:",
             provider.wsconnected,
             "wsconnecting:",
@@ -78,7 +79,7 @@
 
         // Set up event listeners FIRST to avoid race conditions
         const handleStatus = (event) => {
-            console.log("[ConnectionStatus] Status event:", event.status);
+            log.debug("[ConnectionStatus] Status event:", event.status);
             if (event.status === "connected") {
                 setStatus("connected");
                 clearConnectionPoll();
@@ -91,7 +92,7 @@
 
         // Listen for sync events (data being exchanged)
         const handleSync = (isSynced) => {
-            console.log("[ConnectionStatus] Sync event:", isSynced);
+            log.debug("[ConnectionStatus] Sync event:", isSynced);
             if (isSynced) {
                 setStatus("connected");
                 clearConnectionPoll();
@@ -104,7 +105,7 @@
 
         // Return cleanup function
         listenerCleanup = () => {
-            console.log("[ConnectionStatus] Cleaning up provider listeners");
+            log.debug("[ConnectionStatus] Cleaning up provider listeners");
             try {
                 provider.off("status", handleStatus);
                 provider.off("sync", handleSync);
@@ -115,11 +116,11 @@
 
         // NOW check current status after listeners are set up
         if (provider.wsconnected) {
-            console.log("[ConnectionStatus] Provider already connected");
+            log.debug("[ConnectionStatus] Provider already connected");
             setStatus("connected");
         } else {
             // Not connected yet - show connecting state
-            console.log(
+            log.debug(
                 "[ConnectionStatus] Provider not connected, wsconnecting:",
                 provider.wsconnecting,
             );
@@ -158,7 +159,7 @@
                       }
                     : "no ws";
 
-                console.log(
+                log.debug(
                     "[ConnectionStatus] Polling... attempt",
                     pollAttempts,
                     "wsconnected:",
@@ -174,13 +175,13 @@
             const isWsOpen = ws && ws.readyState === WebSocket.OPEN;
 
             if (provider.wsconnected || isWsOpen) {
-                console.log("[ConnectionStatus] Poll detected connection");
+                log.debug("[ConnectionStatus] Poll detected connection");
                 setStatus("connected");
                 clearConnectionPoll();
             } else if (!provider.wsconnecting && !isWsOpen) {
                 notConnectingCount++;
                 if (notConnectingCount >= 30) {
-                    console.log(
+                    log.debug(
                         "[ConnectionStatus] WebSocket not connecting for 3+ seconds, assuming disconnected",
                     );
                     setStatus("disconnected");
@@ -191,7 +192,7 @@
             }
 
             if (pollAttempts >= maxPollAttempts) {
-                console.log(
+                log.debug(
                     "[ConnectionStatus] Connection poll timeout after",
                     pollAttempts * 100,
                     "ms",
@@ -216,10 +217,10 @@
         const provider = getProvider(docId);
 
         if (provider) {
-            console.log("[ConnectionStatus] Provider exists immediately");
+            log.debug("[ConnectionStatus] Provider exists immediately");
             setupProviderListeners(provider, docId);
         } else {
-            console.log(
+            log.debug(
                 "[ConnectionStatus] Provider not found, polling for availability",
             );
             setStatus("connecting");
@@ -232,7 +233,7 @@
                 const newProvider = getProvider(docId);
 
                 if (newProvider) {
-                    console.log(
+                    log.debug(
                         "[ConnectionStatus] Provider found after",
                         attempts * 100,
                         "ms",
@@ -241,7 +242,7 @@
                     providerPollInterval = null;
                     setupProviderListeners(newProvider, docId);
                 } else if (attempts >= maxAttempts) {
-                    console.log(
+                    log.debug(
                         "[ConnectionStatus] Timed out waiting for provider",
                     );
                     clearInterval(providerPollInterval);
@@ -261,7 +262,7 @@
             return;
         }
 
-        console.log(
+        log.debug(
             "[ConnectionStatus] docId changed from",
             previousDocId,
             "to",
@@ -278,12 +279,12 @@
     // Listen for browser online/offline events
     $effect(() => {
         const handleOnline = () => {
-            console.log("[ConnectionStatus] Browser online");
+            log.debug("[ConnectionStatus] Browser online");
             isBrowserOffline = false;
         };
 
         const handleOffline = () => {
-            console.log("[ConnectionStatus] Browser offline");
+            log.debug("[ConnectionStatus] Browser offline");
             isBrowserOffline = true;
             setStatus("offline");
             clearConnectionPoll();
@@ -301,7 +302,7 @@
     // Cleanup on component destroy
     $effect(() => {
         return () => {
-            console.log("[ConnectionStatus] Component destroy cleanup");
+            log.debug("[ConnectionStatus] Component destroy cleanup");
             clearAllTimers();
         };
     });

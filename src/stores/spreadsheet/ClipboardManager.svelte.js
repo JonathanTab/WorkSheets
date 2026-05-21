@@ -36,6 +36,8 @@
  */
 
 import { buildRenderRuns, normalizeTfr } from './textFormatRuns.js';
+import { colToNum, numToCol, adjustByOffset } from '../../formulas/refs.js';
+import { YJS_ORIGIN } from './yjsOrigins.js';
 
 // ─── MIME types ──────────────────────────────────────────────────────────────
 
@@ -147,7 +149,7 @@ class ClipboardManager {
                     }
                 }
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     // ─── Native Copy Event Handler ────────────────────────────────────────────
@@ -1391,7 +1393,7 @@ class ClipboardManager {
             } else {
                 this.applyPaste(sheetStore, session, data, range, mode, isInternal);
             }
-        });
+        }, YJS_ORIGIN.UI);
 
         // Cut source was already cleared in cut(); nothing to do here.
         if (isInternal && this.clipboardType === 'cut') {
@@ -1467,7 +1469,7 @@ class ClipboardManager {
             } else {
                 this.applyPaste(sheetStore, session, data, range, mode, isInternal);
             }
-        });
+        }, YJS_ORIGIN.UI);
 
         if (isInternal && this.clipboardType === 'cut') {
             this.clipboardData = null;
@@ -1860,48 +1862,10 @@ class ClipboardManager {
     }
 
     // ─── Formula Adjustment ───────────────────────────────────────────────────
-
-    adjustFormula(formula, rowOffset, colOffset) {
-        if (rowOffset === 0 && colOffset === 0) return formula;
-
-        // Protect double-quoted string literals from cell-ref regex
-        const literals = [];
-        const stripped = formula.replace(/"(?:[^"\\]|\\.)*"/g, (m) => {
-            literals.push(m);
-            return `\x00${literals.length - 1}\x00`;
-        });
-
-        const adjusted = stripped.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g,
-            (_match, colAbs, col, rowAbs, row) => {
-                const colNum = this.colToNum(col);
-                const rowNum = parseInt(row, 10);
-                const newCol = colAbs ? col : this.numToCol(colNum + colOffset);
-                const newRow = rowAbs ? row : String(rowNum + rowOffset);
-                return `${colAbs}${newCol}${rowAbs}${newRow}`;
-            }
-        );
-
-        return adjusted.replace(/\x00(\d+)\x00/g, (_placeholder, i) => literals[+i]);
-    }
-
-    colToNum(col) {
-        let num = 0;
-        for (let i = 0; i < col.length; i++) {
-            num = num * 26 + (col.charCodeAt(i) - 64);
-        }
-        return num - 1;
-    }
-
-    numToCol(num) {
-        let col = '';
-        num++;
-        while (num > 0) {
-            num--;
-            col = String.fromCharCode(65 + (num % 26)) + col;
-            num = Math.floor(num / 26);
-        }
-        return col;
-    }
+    // Delegate to formulas/refs.js — single source of truth.
+    adjustFormula(formula, rowOffset, colOffset) { return adjustByOffset(formula, rowOffset, colOffset); }
+    colToNum(col) { return colToNum(col); }
+    numToCol(num) { return numToCol(num); }
 
     // ─── Utility ─────────────────────────────────────────────────────────────
 

@@ -201,11 +201,15 @@ class AppView {
      * @returns {Promise<import('yjs').Doc>}
      */
     async loadDoc(id) {
+        // Wait for any in-flight drive sync to finish before reading roomId.
+        // A snapshot restore on another device rotates roomId server-side; if
+        // sync() is still running, our cached descriptor may be stale.
+        if (this._r._syncPromise) await this._r._syncPromise.catch(() => {});
         const file = this.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
         this._r._recordOpen(id);
-        return this._r._runtime.load(id, file.roomId);
+        return this._r._runtime.load(id, file.roomId, file.app ?? null);
     }
 
     /**
@@ -642,11 +646,15 @@ class DriveView {
      * @returns {Promise<import('yjs').Doc>}
      */
     async loadDoc(id, opts = {}) {
+        // Wait for any in-flight drive sync to finish before reading roomId.
+        // A snapshot restore on another device rotates roomId server-side; if
+        // sync() is still running, our cached descriptor may be stale.
+        if (this._r._syncPromise) await this._r._syncPromise.catch(() => {});
         const file = this.getFile(id);
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
         if (opts.recordOpen !== false) this._r._recordOpen(id);
-        return this._r._runtime.load(id, file.roomId);
+        return this._r._runtime.load(id, file.roomId, file.app ?? null);
     }
 
     /** @param {string} id @returns {import('yjs').Doc|null} */
@@ -962,6 +970,9 @@ export class FileRegistry extends EventEmitter {
                 username: this._username,
                 color: _userColor(this._username),
             }),
+            onRoomRotated: (docId, newRoomId) => {
+                this._handleRoomRotated(docId, newRoomId);
+            },
         });
         this._blobCache = new BlobCache();
         this._coordinator = null;
@@ -1054,6 +1065,9 @@ export class FileRegistry extends EventEmitter {
             runtime: this._runtime,
             getApiKey: this._options.getApiKey,
         });
+        this._coordinator.onError = (scope, err) => {
+            console.warn(`[YjsSyncCoordinator:${scope}]`, err?.message ?? err);
+        };
         this._coordinator.start();
 
         // Network + background sync
@@ -1082,6 +1096,12 @@ export class FileRegistry extends EventEmitter {
         this._syncState.isSyncing = true;
         this.emit('change'); // Announce sync started so UI shows syncing state
         try {
+            // Snapshot optimistic creates before clearing in-memory state (C8).
+            // Pending create_* mutations haven't reached the server yet — if we
+            // wipe the in-memory file map they disappear from the UI until the
+            // next mutation flush. Re-inject them after loading server data.
+            const pendingCreates = await this._getOptimisticPendingCreates();
+
             const { files, folders, recents } = await this._api.fullSync();
 
             const driveFiles = files.filter(f => f.scope === 'drive');
@@ -1097,6 +1117,11 @@ export class FileRegistry extends EventEmitter {
             this._folders.clear();
             for (const f of files) this._files.set(f.id, f);
             for (const f of folders) this._folders.set(f.id, f);
+
+            // Re-inject optimistic creates that the server doesn't know about yet
+            for (const f of pendingCreates) {
+                if (!this._files.has(f.id)) this._files.set(f.id, f);
+            }
 
             // Merge server recents (cross-device sync)
             if (recents?.length) {
@@ -1119,6 +1144,31 @@ export class FileRegistry extends EventEmitter {
             this.emit('change'); // Announce sync ended so UI updates
             if (err.message === 'AUTH_EXPIRED') this.emit('auth-error', err);
             throw err;
+        }
+    }
+
+    /**
+     * Return in-memory file descriptors for any pending create_* mutations
+     * that haven't reached the server yet. Used to prevent those files from
+     * disappearing from the UI when _doSync wipes and reloads the file map.
+     * @returns {Promise<object[]>}
+     */
+    async _getOptimisticPendingCreates() {
+        if (!this._sharedStore) return [];
+        try {
+            const mutations = await this._sharedStore.getAllMutations();
+            const creates = [];
+            for (const m of mutations) {
+                if (!m.type.startsWith('create_')) continue;
+                const id = m.payload?.id;
+                if (id) {
+                    const existing = this._files.get(id);
+                    if (existing) creates.push(existing);
+                }
+            }
+            return creates;
+        } catch {
+            return [];
         }
     }
 
@@ -1203,8 +1253,42 @@ export class FileRegistry extends EventEmitter {
     async restoreSnapshot(fileId, snapshotId) {
         const updatedFile = await this._api.restoreVersion(fileId, snapshotId);
         this._upsertFile(updatedFile);
+        // Await the IDB persist so the new roomId is durable before the room switches.
+        await this._sharedStore?.putDriveFile(updatedFile).catch(() => {});
         await this._runtime.clearAndSwitchRoom(fileId, updatedFile.roomId);
+        // Notify other tabs in the same browser so they can switch rooms too.
+        this._driveChannel?.postMessage({
+            type: 'drive_room_rotated',
+            fileId,
+            newRoomId: updatedFile.roomId,
+        });
         return updatedFile;
+    }
+
+    /**
+     * Handle a room rotation notification (from the server WS sideband or cross-tab
+     * BroadcastChannel). Switches the live doc to the new room and propagates to
+     * other tabs.
+     * @param {string} docId
+     * @param {string} newRoomId
+     */
+    async _handleRoomRotated(docId, newRoomId) {
+        const file = this._files.get(docId);
+        if (!file || file.roomId === newRoomId) return;
+        const updatedFile = { ...file, roomId: newRoomId };
+        this._files.set(docId, updatedFile);
+        await this._sharedStore?.putDriveFile(updatedFile).catch(() => {});
+        // If the doc is currently open in this tab, switch rooms.
+        if (this._runtime.activeDocs.has(docId)) {
+            await this._runtime.clearAndSwitchRoom(docId, newRoomId).catch(() => {});
+        }
+        // Notify other tabs.
+        this._driveChannel?.postMessage({
+            type: 'drive_room_rotated',
+            fileId: docId,
+            newRoomId,
+        });
+        this.emit('change');
     }
 
     async shutdown() {
@@ -1598,17 +1682,25 @@ export class FileRegistry extends EventEmitter {
         const now = new Date().toISOString();
         const updated = { ...file, mtime: now };
         this._files.set(docId, updated);
-        this._persistFile(updated).catch(() => { });
+        this._persistFile(updated).catch((err) => {
+            console.warn('[FileRegistry] _persistFile failed:', err?.message);
+        });
         this.emit('change');
 
         if (!this._coordinator) return;
 
-        if (offline) {
-            this._coordinator.markNeedsSync(docId, file.roomId, this._options.wsUrl)
-                .catch(() => { });
+        // Queue for background sync if the WebSocket is not live — this catches
+        // the case where navigator.onLine is true but the connection is actually
+        // broken (captive portals, sleep/resume, proxy half-close, etc.).
+        const wsLive = this._runtime.isLive(docId);
+        if (!wsLive) {
+            this._coordinator.markNeedsSync(docId, file.roomId, this._options.wsUrl, file.app ?? null)
+                .catch((err) => console.warn('[FileRegistry] markNeedsSync failed:', err?.message));
         }
 
-        this._coordinator.queueTouch(docId).catch(() => { });
+        this._coordinator.queueTouch(docId).catch((err) => {
+            console.warn('[FileRegistry] queueTouch failed:', err?.message);
+        });
     }
 
     // -------------------------------------------------------
@@ -1635,6 +1727,10 @@ export class FileRegistry extends EventEmitter {
             } else if (data.type === 'drive_synced') {
                 // Another app did a full sync — reload drive from shared store
                 this._reloadDriveFromSharedStore().catch(() => { });
+            } else if (data.type === 'drive_room_rotated' && data.fileId && data.newRoomId) {
+                // Another tab performed a snapshot restore — switch to the new room.
+                // _handleRoomRotated is idempotent (no-ops if roomId already matches).
+                this._handleRoomRotated(data.fileId, data.newRoomId).catch(() => {});
             } else if (data.type === 'recents_updated' && data.fileId) {
                 // Another tab opened a file — reflect in our in-memory recents immediately
                 const { fileId, appName, atime } = data;

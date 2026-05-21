@@ -5,6 +5,7 @@ import { drawRating } from '../painters.js';
 
 export const ratingType = {
     id: 'rating',
+    renderType: 'rating',
     formatValue(rawValue) {
         return ''; // Rendered via canvas painter
     },
@@ -24,7 +25,9 @@ export const ratingType = {
      * @param {Object} style
      */
     paintCell(ctx, value, config, rect, style) {
-        const max = config?.max ?? 5;
+        // config is the CellPaintItem; ratingMax is set by CellPaintData from ct.max.
+        // Also accept config?.max for direct descriptor calls with the ct object.
+        const max = config?.ratingMax ?? config?.max ?? 5;
         drawRating(ctx, rect.x, rect.y, rect.width, rect.height, Number(value) || 0, max);
     },
     handlesClick: true,

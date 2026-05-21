@@ -1,8 +1,6 @@
 <script>
     /**
      * MobileFormattingSheet — slide-up formatting drawer for mobile.
-     * Provides all formatting controls from FormattingToolbar in large-touch-target rows.
-     * Reuses the same store operations as FormattingToolbar.
      */
     import BottomSheet from "../ui/BottomSheet.svelte";
     import ColorPicker from "./toolbar/ColorPicker.svelte";
@@ -13,16 +11,18 @@
         spreadsheetSession,
         selectionState,
     } from "../../stores/spreadsheetStore.svelte.js";
-    import {
-        clipboardManager,
-        editSessionState,
-    } from "../../stores/spreadsheet/index.js";
+    import { clipboardManager } from "../../stores/spreadsheet/index.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
+    import {
+        applyFormatting,
+        handleBorderChange,
+        computeSelectedFormatting,
+        computeBorderSelectionRange,
+    } from "../../stores/spreadsheet/cellFormattingCommands.js";
 
     let { open = false, onClose = undefined } = $props();
 
-    // Sub-sheet state
-    let activeSection = $state(null); // 'color-text' | 'color-bg' | 'borders' | 'alignment' | 'cell-type'
+    let activeSection = $state(null);
 
     const fontFamilies = [
         { value: "Arial", label: "Arial" },
@@ -32,141 +32,32 @@
         { value: "Verdana", label: "Verdana" },
         { value: "Courier New", label: "Courier New" },
     ];
-
     const fontSizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
-    const MAX_SAMPLE_CELLS = 200;
+    let selectedFormatting  = $derived.by(computeSelectedFormatting);
+    let borderSelectionRange = $derived.by(computeBorderSelectionRange);
 
-    let selectedFormatting = $derived.by(() => {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return null;
-        sheetStore.cellsVersion;
+    let currentFontSize   = $derived(typeof selectedFormatting?.fontSize   === 'number' ? selectedFormatting.fontSize   : 12);
+    let currentFontFamily = $derived(typeof selectedFormatting?.fontFamily  === 'string' ? selectedFormatting.fontFamily  : 'Arial');
+    let textColor         = $derived(typeof selectedFormatting?.color       === 'string' ? selectedFormatting.color       : null);
+    let bgColor           = $derived(typeof selectedFormatting?.backgroundColor === 'string' ? selectedFormatting.backgroundColor : null);
 
-        const mode = selectionState.selectionMode;
-        const rowCount = sheetStore.rowCount;
-        const colCount = sheetStore.colCount;
-
-        if (mode === "rows" && selectionState.selectedRows) {
-            const fmt = sheetStore.getRowFormatting?.(selectionState.selectedRows.start) ?? {};
-            return { bold: fmt.bold ?? null, italic: fmt.italic ?? null, underline: fmt.underline ?? null,
-                fontSize: fmt.fontSize ?? null, fontFamily: fmt.fontFamily ?? null,
-                color: fmt.color ?? null, backgroundColor: fmt.backgroundColor ?? null,
-                horizontalAlign: fmt.horizontalAlign ?? null, verticalAlign: fmt.verticalAlign ?? null };
-        }
-        if (mode === "cols" && selectionState.selectedCols) {
-            const fmt = sheetStore.getColFormatting?.(selectionState.selectedCols.start) ?? {};
-            return { bold: fmt.bold ?? null, italic: fmt.italic ?? null, underline: fmt.underline ?? null,
-                fontSize: fmt.fontSize ?? null, fontFamily: fmt.fontFamily ?? null,
-                color: fmt.color ?? null, backgroundColor: fmt.backgroundColor ?? null,
-                horizontalAlign: fmt.horizontalAlign ?? null, verticalAlign: fmt.verticalAlign ?? null };
-        }
-
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return null;
-        const renderContext = spreadsheetSession.renderContext;
-        const props = {};
-        const keys = ["bold","italic","underline","fontSize","fontFamily","color","backgroundColor","horizontalAlign","verticalAlign"];
-        for (const key of keys) props[key] = { values: new Set() };
-        let sampled = 0;
-        outer: for (let r = eff.startRow; r <= eff.endRow && sampled < MAX_SAMPLE_CELLS; r++) {
-            for (let c = eff.startCol; c <= eff.endCol && sampled < MAX_SAMPLE_CELLS; c++) {
-                const ct = renderContext?.getCellType(r, c);
-                if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
-                    ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.VIEWPORT_OCCUPIED) continue;
-                const cell = sheetStore.getCell(r, c);
-                for (const key of keys) props[key].values.add(cell[key] ?? null);
-                sampled++;
-            }
-        }
-        const result = {};
-        for (const key of keys) {
-            const { values } = props[key];
-            result[key] = values.size === 1 ? [...values][0] : "mixed";
-        }
-        return result;
-    });
-
-    function applyFormatting(property, value) {
-        if (editSessionState.isEditing && editSessionState.applyInlineFormat) {
-            const tfrPropMap = {
-                bold: 'bold', italic: 'italic', underline: 'underline',
-                strikethrough: 'strikethrough', color: 'foregroundColor',
-                fontSize: 'fontSize', fontFamily: 'fontFamily',
-            };
-            const tfrProp = tfrPropMap[property];
-            const toggleProps = new Set(['bold', 'italic', 'underline', 'strikethrough']);
-            if (tfrProp && editSessionState.applyInlineFormat(tfrProp, toggleProps.has(property) ? undefined : value)) return;
-        }
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const mode = selectionState.selectionMode;
-        const rowCount = sheetStore.rowCount;
-        const colCount = sheetStore.colCount;
-        if (mode === "rows" && selectionState.selectedRows) {
-            const { start, end } = selectionState.selectedRows;
-            spreadsheetSession.ydoc?.transact(() => {
-                for (let r = start; r <= end; r++) sheetStore.setRowFormatting?.(r, { [property]: value });
-            });
-            return;
-        }
-        if (mode === "cols" && selectionState.selectedCols) {
-            const { start, end } = selectionState.selectedCols;
-            spreadsheetSession.ydoc?.transact(() => {
-                for (let c = start; c <= end; c++) sheetStore.setColFormatting?.(c, { [property]: value });
-            });
-            return;
-        }
-        const eff = selectionState.effectiveRange(rowCount, colCount);
-        if (!eff) return;
-        const renderContext = spreadsheetSession.renderContext;
-        spreadsheetSession.ydoc?.transact(() => {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct === CELL_TYPE.TABLE_HEADER) continue;
-                    if (ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.TABLE_ENTRY) {
-                        const info = renderContext?.tableManager?.getCellInfo(r, c);
-                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
-                        }
-                        continue;
-                    }
-                    sheetStore.setCellProperties(r, c, { [property]: value });
-                }
-            }
-        });
-    }
-
-    function toggleBold() { applyFormatting("bold", selectedFormatting?.bold === true ? false : true); }
-    function toggleItalic() { applyFormatting("italic", selectedFormatting?.italic === true ? false : true); }
-    function toggleUnderline() { applyFormatting("underline", selectedFormatting?.underline === true ? false : true); }
-    function toggleStrikethrough() { applyFormatting("strikethrough", selectedFormatting?.strikethrough === true ? false : true); }
+    function toggleBold()          { applyFormatting('bold',          selectedFormatting?.bold          === true ? false : true); }
+    function toggleItalic()        { applyFormatting('italic',        selectedFormatting?.italic        === true ? false : true); }
+    function toggleUnderline()     { applyFormatting('underline',     selectedFormatting?.underline     === true ? false : true); }
+    function toggleStrikethrough() { applyFormatting('strikethrough', selectedFormatting?.strikethrough === true ? false : true); }
 
     function decrementFontSize() {
-        const current = selectedFormatting?.fontSize || 12;
+        const current = currentFontSize;
         const idx = fontSizes.findLastIndex(s => s < current);
-        if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
+        if (idx >= 0) applyFormatting('fontSize', fontSizes[idx]);
     }
     function incrementFontSize() {
-        const current = selectedFormatting?.fontSize || 12;
+        const current = currentFontSize;
         const idx = fontSizes.findIndex(s => s > current);
-        if (idx >= 0) applyFormatting("fontSize", fontSizes[idx]);
+        if (idx >= 0) applyFormatting('fontSize', fontSizes[idx]);
     }
 
-    function handleBorderChange(borderInstructions) {
-        if (!borderInstructions || !Array.isArray(borderInstructions)) return;
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const clearInstruction = borderInstructions.find(i => i.type === "clear-range");
-        if (clearInstruction) {
-            const { startRow, endRow, startCol, endCol } = clearInstruction;
-            sheetStore.clearBordersInRange(startRow, endRow, startCol, endCol);
-            return;
-        }
-        sheetStore.applyBorders(borderInstructions);
-    }
-
-    // Row / col operations using selectionState
     function insertRowAbove() {
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
@@ -231,45 +122,6 @@
             }
         }
     }
-
-    let currentFontSize = $derived(
-        typeof selectedFormatting?.fontSize === "number" ? selectedFormatting.fontSize : 12
-    );
-    let currentFontFamily = $derived(
-        typeof selectedFormatting?.fontFamily === "string" ? selectedFormatting.fontFamily : "Arial"
-    );
-    let textColor = $derived(
-        typeof selectedFormatting?.color === "string" ? selectedFormatting.color : null
-    );
-    let bgColor = $derived(
-        typeof selectedFormatting?.backgroundColor === "string" ? selectedFormatting.backgroundColor : null
-    );
-
-    // Border selection range (same logic as FormattingToolbar)
-    let borderSelectionRange = $derived.by(() => {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return null;
-        const mode = selectionState.selectionMode;
-        if (mode !== 'range') return selectionState.effectiveRange(sheetStore.rowCount, sheetStore.colCount);
-        const range = selectionState.range;
-        if (!range) return null;
-        const mergeEngine = sheetStore.mergeEngine;
-        if (!mergeEngine || mergeEngine.merges.length === 0) return range;
-        let { startRow, endRow, startCol, endCol } = range;
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const m of mergeEngine.merges) {
-                if (m.startRow <= endRow && m.endRow >= startRow && m.startCol <= endCol && m.endCol >= startCol) {
-                    if (m.startRow < startRow) { startRow = m.startRow; changed = true; }
-                    if (m.endRow > endRow)      { endRow   = m.endRow;   changed = true; }
-                    if (m.startCol < startCol)  { startCol = m.startCol; changed = true; }
-                    if (m.endCol > endCol)      { endCol   = m.endCol;   changed = true; }
-                }
-            }
-        }
-        return { startRow, endRow, startCol, endCol };
-    });
 </script>
 
 <BottomSheet {open} {onClose} title="Format" maxHeight="85vh">
@@ -278,13 +130,13 @@
         <!-- ── Clipboard ─────────────────────────── -->
         <div class="fmt-section">
             <div class="fmt-row clipboard-row">
-                <button class="clipboard-btn" onclick={() => { clipboardManager.copy(); onClose?.(); }}>
+                <button class="clipboard-btn" onclick={() => { const ss = spreadsheetSession.activeSheetStore; if (ss) clipboardManager.copy(ss, spreadsheetSession); onClose?.(); }}>
                     <span class="clipboard-icon">⎘</span> Copy
                 </button>
-                <button class="clipboard-btn" onclick={() => { clipboardManager.cut(); onClose?.(); }}>
+                <button class="clipboard-btn" onclick={() => { const ss = spreadsheetSession.activeSheetStore; if (ss && spreadsheetSession.ydoc) clipboardManager.cut(ss, spreadsheetSession, spreadsheetSession.ydoc); onClose?.(); }}>
                     <span class="clipboard-icon">✂</span> Cut
                 </button>
-                <button class="clipboard-btn" onclick={() => { clipboardManager.paste(); onClose?.(); }}>
+                <button class="clipboard-btn" onclick={() => { const ss = spreadsheetSession.activeSheetStore; if (ss && spreadsheetSession.ydoc) clipboardManager.paste(ss, spreadsheetSession, spreadsheetSession.ydoc); onClose?.(); }}>
                     <span class="clipboard-icon">📋</span> Paste
                 </button>
                 <button class="clipboard-btn danger" onclick={() => { clearSelection(); onClose?.(); }}>
@@ -372,7 +224,7 @@
                 <div class="color-picker-inline">
                     <ColorPicker
                         value={textColor || '#1e293b'}
-                        onChange={(c) => applyFormatting("color", c)}
+                        onchange={(c) => applyFormatting("color", c)}
                     />
                 </div>
             {/if}
@@ -391,7 +243,7 @@
                 <div class="color-picker-inline">
                     <ColorPicker
                         value={bgColor || '#ffffff'}
-                        onChange={(c) => applyFormatting("backgroundColor", c)}
+                        onchange={(c) => applyFormatting("backgroundColor", c)}
                     />
                 </div>
             {/if}
@@ -414,10 +266,13 @@
             {#if activeSection === 'alignment'}
                 <div class="picker-inline">
                     <AlignmentPicker
-                        horizontalAlign={selectedFormatting?.horizontalAlign}
-                        verticalAlign={selectedFormatting?.verticalAlign}
-                        onHorizontalChange={(v) => applyFormatting("horizontalAlign", v)}
-                        onVerticalChange={(v) => applyFormatting("verticalAlign", v)}
+                        value={selectedFormatting?.horizontalAlign ?? 'left'}
+                        onchange={(v) => applyFormatting("horizontalAlign", v)}
+                    />
+                    <AlignmentPicker
+                        vertical
+                        value={selectedFormatting?.verticalAlign ?? 'middle'}
+                        onchange={(v) => applyFormatting("verticalAlign", v)}
                     />
                 </div>
             {/if}
@@ -441,7 +296,7 @@
                 <div class="picker-inline">
                     <BorderPicker
                         selectionRange={borderSelectionRange}
-                        onChange={handleBorderChange}
+                        onchange={handleBorderChange}
                     />
                 </div>
             {/if}

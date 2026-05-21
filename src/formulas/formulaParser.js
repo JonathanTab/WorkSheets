@@ -11,6 +11,7 @@
  */
 
 import { parseCellRef } from './refCoords.js';
+import { Tokenizer } from './parser.js';
 
 // ── Color palette ─────────────────────────────────────────────────────────────
 
@@ -38,67 +39,76 @@ export const REFERENCE_COLORS = [
  * @property {string}    text   - raw matched text
  */
 
+// Token type constants from parser.js (mirrored here to avoid importing the enum object)
+const _FUNCTION  = 'FUNCTION';
+const _CELL_REF  = 'CELL_REF';
+const _COLON     = 'COLON';
+const _SHEET_REF = 'SHEET_REF';
+
 /**
  * Scan a formula content string (without leading =) and return every token
- * sorted by start position, with string literals and already-claimed spans
- * excluded via a Uint8Array mask (O(n) build, O(1) query).
+ * sorted by start position.
+ *
+ * Uses parser.js's Tokenizer so lexical rules (string literals, quoted sheet
+ * names, $-prefixed refs, etc.) are defined in exactly one place.
  *
  * @param {string} content
  * @returns {RefToken[]}
  */
 export function scanRefTokens(content) {
-    const mask = new Uint8Array(content.length);
-    let i = 0, m;
-
-    // Mark string literals in mask
-    while (i < content.length) {
-        if (content[i] === '"') {
-            const s = i++;
-            while (i < content.length) {
-                if (content[i++] === '"') {
-                    if (content[i] === '"') i++; // escaped ""
-                    else break;
-                }
-            }
-            mask.fill(1, s, i);
-        } else { i++; }
+    let rawTokens;
+    try {
+        rawTokens = new Tokenizer(content).tokenize();
+    } catch {
+        return [];
     }
 
     const tokens = /** @type {RefToken[]} */ ([]);
 
-    // Cross-sheet refs first (Sheet1!A1 or Sheet1!A1:B5)
-    const crossSheetRe =
-        /(?:'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*)!\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?/g;
-    while ((m = crossSheetRe.exec(content)) !== null) {
-        if (mask[m.index]) continue;
-        tokens.push({ kind: m[0].includes(':') ? 'cross-sheet-range' : 'cross-sheet-cell',
-                      start: m.index, end: m.index + m[0].length, text: m[0] });
-        mask.fill(2, m.index, m.index + m[0].length);
+    for (let i = 0; i < rawTokens.length; i++) {
+        const tok = rawTokens[i];
+
+        if (tok.type === _FUNCTION) {
+            tokens.push({ kind: 'function', start: tok.start, end: tok.end, text: content.slice(tok.start, tok.end) });
+            continue;
+        }
+
+        if (tok.type === _SHEET_REF) {
+            // SHEET_REF already consumed the '!' — next token is a CELL_REF
+            const next = rawTokens[i + 1];
+            if (!next || next.type !== _CELL_REF) continue;
+            const afterNext = rawTokens[i + 2];
+            if (afterNext?.type === _COLON) {
+                const end2 = rawTokens[i + 3];
+                if (end2?.type === _CELL_REF) {
+                    const text = content.slice(tok.start, end2.end);
+                    tokens.push({ kind: 'cross-sheet-range', start: tok.start, end: end2.end, text });
+                    i += 3;
+                    continue;
+                }
+            }
+            const text = content.slice(tok.start, next.end);
+            tokens.push({ kind: 'cross-sheet-cell', start: tok.start, end: next.end, text });
+            i += 1;
+            continue;
+        }
+
+        if (tok.type === _CELL_REF) {
+            const next = rawTokens[i + 1];
+            if (next?.type === _COLON) {
+                const end2 = rawTokens[i + 2];
+                if (end2?.type === _CELL_REF) {
+                    const text = content.slice(tok.start, end2.end);
+                    tokens.push({ kind: 'range', start: tok.start, end: end2.end, text });
+                    i += 2;
+                    continue;
+                }
+            }
+            tokens.push({ kind: 'cell', start: tok.start, end: tok.end, text: content.slice(tok.start, tok.end) });
+        }
     }
 
-    // Same-sheet ranges (A1:B5)
-    const rangeRe = /\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+/g;
-    while ((m = rangeRe.exec(content)) !== null) {
-        if (mask[m.index]) continue;
-        tokens.push({ kind: 'range', start: m.index, end: m.index + m[0].length, text: m[0] });
-        mask.fill(2, m.index, m.index + m[0].length);
-    }
-
-    // Single-cell refs
-    const cellRe = /\$?[A-Za-z]+\$?\d+/g;
-    while ((m = cellRe.exec(content)) !== null) {
-        if (mask[m.index]) continue;
-        tokens.push({ kind: 'cell', start: m.index, end: m.index + m[0].length, text: m[0] });
-    }
-
-    // Function names (identifier immediately before '(')
-    const funcRe = /[A-Za-z_][A-Za-z0-9_]*(?=\()/g;
-    while ((m = funcRe.exec(content)) !== null) {
-        if (mask[m.index]) continue;
-        tokens.push({ kind: 'function', start: m.index, end: m.index + m[0].length, text: m[0] });
-    }
-
-    return tokens.sort((a, b) => a.start - b.start);
+    return tokens;
 }
 
 // ── Ref descriptors ───────────────────────────────────────────────────────────

@@ -25,6 +25,10 @@ import {
     META_KEYS,
     CELL_VALUE_KEYS,
 } from './constants.js';
+import { YJS_ORIGIN } from './yjsOrigins.js';
+
+/** Shorthand: run a Yjs transaction tagged as a migration (never undoable). */
+const migrateTransact = (ydoc, fn) => ydoc.transact(fn, YJS_ORIGIN.MIGRATION);
 
 // ─── Public helpers ────────────────────────────────────────────────────────────
 
@@ -116,7 +120,7 @@ export function initializeDocument(ydoc, metadata = {}) {
     const root = ydoc.getMap('spreadsheet');
     if (root.get('sheets')) return;
 
-    ydoc.transact(() => {
+    migrateTransact(ydoc, () => {
         const metadataMap = new Y.Map();
         if (metadata.description)      metadataMap.set(META_KEYS.DESCRIPTION,       metadata.description);
         metadataMap.set(META_KEYS.CREATED, Date.now());
@@ -248,7 +252,7 @@ export const spreadsheetSchema = {
         sheets.forEach((sheet) => {
             const existing = sheet.get('borders');
             if (existing instanceof Y.Map) {
-                ydoc.transact(() => {
+                migrateTransact(ydoc, () => {
                     const arr   = new Y.Array();
                     const items = [];
                     existing.forEach((value, key) => items.push({ key, val: value }));
@@ -261,7 +265,7 @@ export const spreadsheetSchema = {
         // v4a: cells Y.Map<Y.Map> → cellValues + cellStyles Y.Arrays (YKeyValue).
         sheets.forEach((sheet) => {
             if (sheet.has('cells') && !sheet.has('cellValues')) {
-                ydoc.transact(() => {
+                migrateTransact(ydoc, () => {
                     const oldCells = sheet.get('cells');
                     const cvItems  = [];
                     const csItems  = [];
@@ -295,7 +299,7 @@ export const spreadsheetSchema = {
             for (const metaKey of ['rowMeta', 'colMeta']) {
                 const existing = sheet.get(metaKey);
                 if (existing instanceof Y.Map) {
-                    ydoc.transact(() => {
+                    migrateTransact(ydoc, () => {
                         const arr   = new Y.Array();
                         const items = [];
                         existing.forEach((metaYMap, key) => {
@@ -308,7 +312,81 @@ export const spreadsheetSchema = {
                 }
             }
         });
+
+        // v5: rewrite legacy cell type ids ('currency', 'percent', 'automatic') into
+        // their modern equivalents. Idempotent — re-running is a no-op once done.
+        migrateLegacyCellTypes(ydoc, sheets);
     },
 };
+
+// ── v5 helpers ────────────────────────────────────────────────────────────────
+
+/** Legacy ct.type → modern config patch. */
+const LEGACY_CT_REMAP = {
+    currency:  { type: 'number', subFormat: 'currency' },
+    percent:   { type: 'number', subFormat: 'percent'  },
+    automatic: { type: 'text' },
+};
+
+/**
+ * Return a modernised ct, or null if no remap is needed.
+ * @param {any} ct
+ * @returns {object|null}
+ */
+function remapCt(ct) {
+    if (!ct || typeof ct !== 'object') return null;
+    const patch = LEGACY_CT_REMAP[ct.type];
+    return patch ? { ...ct, ...patch } : null;
+}
+
+/**
+ * Walk every place a cell type config lives and rewrite legacy ids in place.
+ * @param {Y.Doc} ydoc
+ * @param {Y.Map} sheets
+ */
+function migrateLegacyCellTypes(ydoc, sheets) {
+    ydoc.transact(() => {
+        sheets.forEach((sheet) => {
+            // 1. cellStyles entries — { ct, ...formatting }
+            for (const ykvKey of ['cellStyles', 'rowMeta', 'colMeta']) {
+                const arr = sheet.get(ykvKey);
+                if (!(arr instanceof Y.Array)) continue;
+                const kv = new YKeyValue(arr);
+                for (const [key, { val: data }] of kv.map) {
+                    const newCt = remapCt(data?.ct);
+                    if (newCt) kv.set(key, { ...data, ct: newCt });
+                }
+            }
+
+            // 2. Table column definitions — each colDef Y.Map holds `type` and `typeConfig` (JSON string)
+            const tables = sheet.get('tables');
+            if (tables instanceof Y.Map) {
+                tables.forEach((table) => {
+                    if (!(table instanceof Y.Map)) return;
+                    const defsMap = table.get('columnDefs');
+                    if (!(defsMap instanceof Y.Map)) return;
+                    defsMap.forEach((colDef) => {
+                        if (!(colDef instanceof Y.Map)) return;
+                        const t = colDef.get('type');
+                        const patch = LEGACY_CT_REMAP[t];
+                        if (!patch) return;
+                        colDef.set('type', patch.type);
+                        // Update typeConfig JSON if present
+                        const tc = colDef.get('typeConfig');
+                        if (typeof tc === 'string') {
+                            try {
+                                const parsed = JSON.parse(tc);
+                                colDef.set('typeConfig', JSON.stringify({ ...parsed, ...patch }));
+                            } catch { /* ignore malformed JSON */ }
+                        } else {
+                            // No prior typeConfig — write one capturing the subFormat
+                            colDef.set('typeConfig', JSON.stringify(patch));
+                        }
+                    });
+                });
+            }
+        });
+    });
+}
 
 export default spreadsheetSchema;

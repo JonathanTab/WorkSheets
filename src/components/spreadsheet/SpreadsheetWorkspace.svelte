@@ -23,6 +23,7 @@
     import { toCellRef } from "../../formulas/refCoords.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { CellTypeRegistry } from "../../stores/spreadsheet/index.js";
+    import { commitCellEdit } from "../../stores/spreadsheet/CellEditController.js";
     import { authStore } from "../../stores/authStore.js";
     import { router } from "../../lib/router.svelte.js";
 
@@ -97,46 +98,23 @@
     });
 
     async function loadDoc(id) {
-        console.log("[SpreadsheetWorkspace] loadDoc() called with id:", id);
-
-        if (!id) {
-            console.log("[SpreadsheetWorkspace] No id provided, returning");
-            return;
-        }
-
-        // Guard against loading the same doc or concurrent loads
-        if (isLoadInProgress) {
-            console.log(
-                "[SpreadsheetWorkspace] Load already in progress, returning",
-            );
-            return;
-        }
-
-        if (id === currentLoadedDocId && !error) {
-            console.log(
-                "[SpreadsheetWorkspace] Already loaded this doc, returning early",
-            );
-            return;
-        }
+        if (!id) return;
+        if (isLoadInProgress) return;
+        if (id === currentLoadedDocId && !error) return;
 
         isLoadInProgress = true;
-        console.log("[SpreadsheetWorkspace] Starting document load...");
         isLoading = true;
         error = null;
 
         try {
-            console.log("[SpreadsheetWorkspace] Calling loadDocument()...");
             await loadDocument(id);
-            console.log("[SpreadsheetWorkspace] loadDocument() returned");
             currentLoadedDocId = id;
         } catch (e) {
             console.error("[SpreadsheetWorkspace] Failed to load document:", e);
             error = e.message;
         } finally {
-            console.log("[SpreadsheetWorkspace] Setting isLoading=false");
             isLoading = false;
             isLoadInProgress = false;
-            console.log("[SpreadsheetWorkspace] loadDoc() complete");
         }
     }
 
@@ -178,7 +156,6 @@
     $effect(() => {
         // Only react to docId changes, and only if it's different from what we've loaded
         if (docId && docId !== currentLoadedDocId && !isLoadInProgress) {
-            console.log("[SpreadsheetWorkspace] docId changed to:", docId);
             loadDoc(docId);
         }
     });
@@ -372,104 +349,10 @@
                     bind:this={formulaBarRef}
                     {selectedCell}
                     onEdit={(value, row, col, sheetId) => {
-                        // Use provided row/col if available (from editingCell tracking)
-                        // otherwise fall back to current anchor
                         const targetRow = row ?? selectionState.anchor?.row;
                         const targetCol = col ?? selectionState.anchor?.col;
-                        if (targetRow === undefined || targetCol === undefined)
-                            return;
-
-                        // Route table cell edits to the table store, not the sheet store
-                        const renderContext = spreadsheetSession.renderContext;
-                        if (renderContext) {
-                            const cellType = renderContext.getCellType(
-                                targetRow,
-                                targetCol,
-                            );
-                            if (cellType === CELL_TYPE.TABLE_DATA) {
-                                const info =
-                                    renderContext.tableManager?.getCellInfo(
-                                        targetRow,
-                                        targetCol,
-                                    );
-                                if (
-                                    info?.table &&
-                                    info.colDef &&
-                                    !info.colDef.isNonEntry
-                                ) {
-                                    const parsed = CellTypeRegistry.parseInput(
-                                        { type: info.colDef.type },
-                                        value,
-                                    );
-                                    info.table.updateCell(
-                                        info.dataIndex,
-                                        info.colDef.id,
-                                        parsed,
-                                    );
-                                }
-                                return;
-                            }
-                            if (cellType === CELL_TYPE.TABLE_ENTRY) {
-                                const info =
-                                    renderContext.tableManager?.getCellInfo(
-                                        targetRow,
-                                        targetCol,
-                                    );
-                                if (
-                                    info?.table &&
-                                    info.colDef &&
-                                    !info.colDef.isNonEntry
-                                ) {
-                                    const parsed = CellTypeRegistry.parseInput(
-                                        { type: info.colDef.type },
-                                        value,
-                                    );
-                                    info.table.setEntryValue(
-                                        info.colDef.id,
-                                        parsed,
-                                    );
-                                    spreadsheetSession.requestGridRepaint?.();
-                                }
-                                return;
-                            }
-                            if (cellType === CELL_TYPE.TABLE_HEADER) {
-                                const info =
-                                    renderContext.tableManager?.getCellInfo(
-                                        targetRow,
-                                        targetCol,
-                                    );
-                                if (info?.table && info.colDef) {
-                                    const newName = String(value ?? "").trim();
-                                    if (newName)
-                                        info.table.renameColumn(
-                                            info.colDef.id,
-                                            newName,
-                                        );
-                                }
-                                return;
-                            }
-                        }
-
-                        const targetSheetId =
-                            sheetId ?? spreadsheetSession.activeSheetId;
-                        if (
-                            typeof value === "string" &&
-                            value.startsWith("=")
-                        ) {
-                            spreadsheetSession.setCellFormulaOnSheet(
-                                targetSheetId,
-                                targetRow,
-                                targetCol,
-                                value,
-                            );
-                        } else {
-                            spreadsheetSession.setCellValueOnSheet(
-                                targetSheetId,
-                                targetRow,
-                                targetCol,
-                                value,
-                            );
-                        }
+                        if (targetRow === undefined || targetCol === undefined) return;
+                        commitCellEdit(sheetId, targetRow, targetCol, value);
                     }}
                 />
                 {/if}
@@ -483,41 +366,7 @@
                         const targetRow = row ?? selectionState.anchor?.row;
                         const targetCol = col ?? selectionState.anchor?.col;
                         if (targetRow === undefined || targetCol === undefined) return;
-                        const renderContext = spreadsheetSession.renderContext;
-                        if (renderContext) {
-                            const cellType = renderContext.getCellType(targetRow, targetCol);
-                            if (cellType === CELL_TYPE.TABLE_DATA) {
-                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                                    const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
-                                }
-                                return;
-                            }
-                            if (cellType === CELL_TYPE.TABLE_ENTRY) {
-                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                                if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                                    const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
-                                    info.table.setEntryValue(info.colDef.id, parsed);
-                                    spreadsheetSession.requestGridRepaint?.();
-                                }
-                                return;
-                            }
-                            if (cellType === CELL_TYPE.TABLE_HEADER) {
-                                const info = renderContext.tableManager?.getCellInfo(targetRow, targetCol);
-                                if (info?.table && info.colDef) {
-                                    const newName = String(value ?? "").trim();
-                                    if (newName) info.table.renameColumn(info.colDef.id, newName);
-                                }
-                                return;
-                            }
-                        }
-                        const targetSheetId = sheetId ?? spreadsheetSession.activeSheetId;
-                        if (typeof value === "string" && value.startsWith("=")) {
-                            spreadsheetSession.setCellFormulaOnSheet(targetSheetId, targetRow, targetCol, value);
-                        } else {
-                            spreadsheetSession.setCellValueOnSheet(targetSheetId, targetRow, targetCol, value);
-                        }
+                        commitCellEdit(sheetId, targetRow, targetCol, value);
                     }}
                 />
                 {/if}
@@ -698,8 +547,7 @@
     /* ── Mobile layout: input bar floats at bottom ── */
     .workspace-container.mobile .grid-container {
         border-bottom: none;
-        /* Reserve space for MobileInputBar: faux bar (44px) + tools (44px) */
-        padding-bottom: 88px;
+        padding-bottom: 0;
     }
 
     .workspace-container.mobile :global(.sheet-tabs) {

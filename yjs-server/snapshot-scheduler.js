@@ -292,17 +292,14 @@ export class SnapshotScheduler {
         this._commitSnapshot(roomId, entry.fileId, entry.ydoc, trigger, createdBy, entry.sessionChanges, entry);
     }
 
-    /** Persist the snapshot and update entry bookkeeping. */
+    /** Persist the snapshot and update entry bookkeeping.
+     *  saveSnapshot is async (yields event loop before heavy diff compute), so we
+     *  update entry state eagerly to prevent duplicate triggers during the await,
+     *  then fire-and-forget the async work.
+     */
     _commitSnapshot(roomId, fileId, ydoc, trigger, createdBy, changeCount, entry) {
-        try {
-            // Pass appType from the WSSharedDoc instance if available
-            const appType = ydoc?.appType ?? null;
-            this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, changeCount ?? 0, null, appType);
-        } catch (err) {
-            console.error(`[snapshot-scheduler] Failed to save snapshot for ${roomId}:`, err);
-            return;
-        }
-
+        // Update bookkeeping immediately so concurrent triggers see this room as
+        // already snapshotted even while the async diff is still running.
         if (entry) {
             entry.dirty          = false;
             entry.lastSnapshot   = Date.now();
@@ -311,6 +308,12 @@ export class SnapshotScheduler {
             entry.sessionUsers   = new Set();
             entry.lastSnapshotSV = Y.encodeStateVector(ydoc);
         }
+
+        const appType = ydoc?.appType ?? null;
+        Promise.resolve(this.save(roomId, fileId, ydoc, trigger, createdBy ?? null, changeCount ?? 0, null, appType))
+            .catch(err => {
+                console.error(`[snapshot-scheduler] Failed to save snapshot for ${roomId}:`, err);
+            });
     }
 
     // -------------------------------------------------------------------------

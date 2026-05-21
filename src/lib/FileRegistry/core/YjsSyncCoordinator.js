@@ -23,6 +23,7 @@
  */
 
 import * as Y from 'yjs';
+import { log } from '../../../util/log.js';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 
@@ -46,6 +47,15 @@ export class YjsSyncCoordinator {
         this._api          = api;
         this._runtime      = runtime;
         this._getApiKey    = getApiKey;
+
+        // True if we believe we have network connectivity — uses both navigator.onLine
+        // and the runtime's per-doc WS liveness to avoid false "online" readings.
+        this._isOnline = () => navigator.onLine || (this._runtime?.isAnyLive() ?? false);
+
+        // Optional error sink. Wire this up in FileRegistry to surface sync failures
+        // in DevTools / logging rather than swallowing them silently.
+        /** @type {((scope: string, err: Error) => void)|null} */
+        this.onError = null;
 
         this._isLeader      = false;
         this._channel       = null;
@@ -78,6 +88,18 @@ export class YjsSyncCoordinator {
         };
         window.addEventListener('online', this._onOnline);
 
+        // Also sweep on visibility restore — catches laptop resume and tab re-focus
+        // where 'online' doesn't fire but network is available again.
+        this._onVisible = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (this._isLeader) {
+                this._processPending().catch(() => {});
+            } else {
+                this._channel?.postMessage({ type: 'online' });
+            }
+        };
+        document.addEventListener('visibilitychange', this._onVisible);
+
         // Compete for leader lock. If Web Locks API unavailable, every tab acts as
         // leader independently (safe due to Yjs CRDT idempotency).
         if ('locks' in navigator) {
@@ -89,13 +111,14 @@ export class YjsSyncCoordinator {
             ).catch(err => {
                 if (err.name !== 'AbortError') {
                     console.warn('[YjsSyncCoordinator] Lock request failed:', err);
+                    this.onError?.('lock', err);
                     // Fall back to running as leader without coordination
-                    this._runLeaderLoop().catch(() => {});
+                    this._runLeaderLoop().catch(e => this.onError?.('leader-loop', e));
                 }
             });
         } else {
             // No Web Locks support - run inline (all tabs will process, harmless)
-            this._runLeaderLoop().catch(() => {});
+            this._runLeaderLoop().catch(e => this.onError?.('leader-loop', e));
         }
     }
 
@@ -104,12 +127,14 @@ export class YjsSyncCoordinator {
      * @param {string} fileId
      * @param {string} roomId
      * @param {string} wsUrl
+     * @param {string|null} [appType]
      */
-    async markNeedsSync(fileId, roomId, wsUrl) {
+    async markNeedsSync(fileId, roomId, wsUrl, appType = null) {
         await this._pendingStore.addPending({
             fileId,
             roomId,
             wsUrl,
+            appType: appType ?? null,
             mtime: new Date().toISOString(),
         });
     }
@@ -124,13 +149,14 @@ export class YjsSyncCoordinator {
             mtime: new Date().toISOString(),
         });
         // Process immediately if we're online and leading
-        if (navigator.onLine && this._isLeader) {
+        if (this._isOnline() && this._isLeader) {
             this._processTouchQueue().catch(() => {});
         }
     }
 
     shutdown() {
         if (this._onOnline) window.removeEventListener('online', this._onOnline);
+        if (this._onVisible) document.removeEventListener('visibilitychange', this._onVisible);
         // Release the leader lock by resolving the promise returned to locks.request
         this._leaderResolve?.();
         // Cancel any pending lock acquisition
@@ -148,30 +174,30 @@ export class YjsSyncCoordinator {
 
     async _runLeaderLoop() {
         this._isLeader = true;
-        console.log('[YjsSyncCoordinator] Became sync leader');
+        log.debug('[YjsSyncCoordinator] Became sync leader');
 
         // Initial pass
-        if (navigator.onLine) {
-            await this._processPending().catch(() => {});
+        if (this._isOnline()) {
+            await this._processPending().catch(e => this.onError?.('initial-pass', e));
         }
 
         // Hold the lock / keep running until shutdown()
         await new Promise(resolve => {
             this._leaderResolve = resolve;
             this._pollInterval = setInterval(async () => {
-                if (navigator.onLine) await this._processPending().catch(() => {});
+                if (this._isOnline()) await this._processPending().catch(e => this.onError?.('poll', e));
             }, POLL_INTERVAL);
         });
 
         clearInterval(this._pollInterval);
         this._pollInterval = null;
         this._isLeader = false;
-        console.log('[YjsSyncCoordinator] Released leader role');
+        log.debug('[YjsSyncCoordinator] Released leader role');
     }
 
     _onChannelMessage(data) {
         if (data.type === 'online' && this._isLeader) {
-            this._processPending().catch(() => {});
+            this._processPending().catch(e => this.onError?.('channel-trigger', e));
         }
     }
 
@@ -186,15 +212,15 @@ export class YjsSyncCoordinator {
             return;
         }
 
-        console.log(`[YjsSyncCoordinator] Processing ${pending.length} pending sync item(s)`);
+        log.debug(`[YjsSyncCoordinator] Processing ${pending.length} pending sync item(s)`);
         const now = Date.now();
 
         for (const entry of pending) {
-            if (!navigator.onLine) break;
+            if (!this._isOnline()) break;
 
             // Expire stale entries (file likely deleted or permanently offline)
             if (entry.mtime && now - new Date(entry.mtime).getTime() > MAX_AGE_MS) {
-                console.log(`[YjsSyncCoordinator] Expiring stale pending entry for ${entry.fileId}`);
+                log.debug(`[YjsSyncCoordinator] Expiring stale pending entry for ${entry.fileId}`);
                 await this._pendingStore.removePending(entry.fileId);
                 continue;
             }
@@ -208,10 +234,10 @@ export class YjsSyncCoordinator {
             }
 
             try {
-                await this._syncRoom(entry.fileId, entry.roomId, entry.wsUrl);
+                await this._syncRoom(entry.fileId, entry.roomId, entry.wsUrl, entry);
                 await this._pendingStore.removePending(entry.fileId);
                 this._channel?.postMessage({ type: 'synced', fileId: entry.fileId });
-                console.log(`[YjsSyncCoordinator] Synced room ${entry.roomId}`);
+                log.debug(`[YjsSyncCoordinator] Synced room ${entry.roomId}`);
             } catch (err) {
                 console.warn(`[YjsSyncCoordinator] Failed to sync ${entry.fileId}: ${err.message}`);
                 // Leave in queue for next poll
@@ -224,8 +250,10 @@ export class YjsSyncCoordinator {
     /**
      * Open a temporary Yjs connection to flush IndexedDB offline edits to the server.
      * Safe to call concurrently with other connections to the same room (CRDT merge).
+     * @param {string} fileId @param {string} roomId @param {string} wsUrl
+     * @param {{appType?: string|null}} [entry] - pending store entry (for appType)
      */
-    async _syncRoom(fileId, roomId, wsUrl) {
+    async _syncRoom(fileId, roomId, wsUrl, entry = null) {
         const doc = new Y.Doc();
         const persistence = new IndexeddbPersistence(roomId, doc);
 
@@ -240,6 +268,8 @@ export class YjsSyncCoordinator {
         const wsParams = {};
         const apiKey = this._getApiKey?.();
         if (apiKey) wsParams['auth'] = apiKey;
+        wsParams['fileId'] = fileId; // needed for server-side file_meta + snapshot attribution
+        if (entry?.appType) wsParams['appType'] = entry.appType;
         const provider = new WebsocketProvider(wsUrl, roomId, doc, { params: wsParams });
         try {
             await new Promise((resolve, reject) => {
@@ -268,7 +298,7 @@ export class YjsSyncCoordinator {
         if (!this._api) return;
         const queue = await this._pendingStore.getAllTouchQueue();
         for (const entry of queue) {
-            if (!navigator.onLine) break;
+            if (!this._isOnline()) break;
             try {
                 await this._api.touchFile(entry.fileId);
                 await this._pendingStore.removeFromTouchQueue(entry.fileId);

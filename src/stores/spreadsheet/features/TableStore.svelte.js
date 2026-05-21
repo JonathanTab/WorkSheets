@@ -70,6 +70,7 @@
 import * as Y from "yjs";
 import { TableFormulaEvaluator, matchCondition } from './tableFormulaEval.js';
 import { cmpValues, initPos, computeInsertPos } from './tableRowHelpers.js';
+import { YJS_ORIGIN } from '../yjsOrigins.js';
 
 /**
  * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
@@ -291,6 +292,9 @@ export class TableStore {
         this.#observeYjs();
     }
 
+    // Tags all user-initiated mutations with UI origin so UndoManager records them.
+    #transact(fn) { this.#transact(fn, YJS_ORIGIN.UI); }
+
     /**
      * One-time migrations:
      * 1. Converts old `columns` Y.Array<Y.Map> to `columnDefs`/`columnOrder`.
@@ -317,7 +321,7 @@ export class TableStore {
                     this.#tableYMap.set("columnDefs", defsMap);
                     this.#tableYMap.set("columnOrder", orderArr);
                     this.#tableYMap.delete("columns");
-                });
+                }, YJS_ORIGIN.MIGRATION);
             }
         }
 
@@ -337,7 +341,7 @@ export class TableStore {
                         if (f) cm.set("defaultFormula", f);
                         cm.delete("formula");
                     });
-                });
+                }, YJS_ORIGIN.MIGRATION);
             }
         }
     }
@@ -394,7 +398,7 @@ export class TableStore {
         let pf = this.#tableYMap.get("persistedFilters");
         if (!pf) {
             pf = new Y.Map();
-            this.#ydoc.transact(() => { this.#tableYMap.set("persistedFilters", pf); });
+            this.#transact(() => { this.#tableYMap.set("persistedFilters", pf); });
         }
         return pf;
     }
@@ -677,7 +681,7 @@ export class TableStore {
             }
         }
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const yRow = new Y.Map();
             // Store all columns except isNonEntry (pure computed, never stored)
             for (const [k, v] of Object.entries(withDefaults)) {
@@ -725,7 +729,7 @@ export class TableStore {
         // Deduplicate and sort descending so each deletion doesn't shift later indices.
         const sorted = [...new Set(rawIndices)].sort((a, b) => b - a);
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             for (const rawIndex of sorted) {
                 rowArr.delete(rawIndex, 1);
             }
@@ -761,7 +765,7 @@ export class TableStore {
         const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             initPos(rowArr);
 
             // Build display list with the moved row removed to find its new neighbours.
@@ -838,7 +842,7 @@ export class TableStore {
                 if (!targetRow) return;
                 const rawIndex = this.rows.findIndex(r => r === targetRow);
                 if (rawIndex < 0) return;
-                this.#ydoc.transact(() => {
+                this.#transact(() => {
                     initPos(rowArr);
                     const newPos = computeInsertPos(rowArr, this.insertSortColId, this.insertSortDir, val, rawIndex);
                     const yRow = rowArr.get(rawIndex);
@@ -872,7 +876,7 @@ export class TableStore {
         const rawIndex = this.rows.findIndex((r) => r === sortedRow);
         if (rawIndex < 0) return;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const yRow = rowArr.get(rawIndex);
             if (yRow) {
                 yRow.set(colId, value);
@@ -960,7 +964,7 @@ export class TableStore {
     setCellFormatting(displayIndex, colId, props) {
         const yRow = this.#getRowYMap(displayIndex);
         if (!yRow) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const existing = yRow.get('_fmt');
             const fmt = existing ? JSON.parse(existing) : {};
             if (!fmt[colId]) fmt[colId] = {};
@@ -983,7 +987,7 @@ export class TableStore {
     setTableRowFormatting(displayIndex, props) {
         const yRow = this.#getRowYMap(displayIndex);
         if (!yRow) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const existing = yRow.get('_rowFmt');
             const fmt = existing ? JSON.parse(existing) : {};
             for (const [k, v] of Object.entries(props)) {
@@ -1005,7 +1009,7 @@ export class TableStore {
         if (!yRow) return;
         const existing = yRow.get('_fmt');
         if (!existing) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             try {
                 const fmt = JSON.parse(existing);
                 delete fmt[colId];
@@ -1018,7 +1022,7 @@ export class TableStore {
     renameColumn(colId, newName) {
         const defsMap = this.#getColSource().get("columnDefs");
         if (!defsMap) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cm = defsMap.get(colId);
             if (cm) cm.set("name", newName);
         });
@@ -1032,7 +1036,7 @@ export class TableStore {
     updateColumnDef(colId, changes) {
         const defsMap = this.#getColSource().get("columnDefs");
         if (!defsMap) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cm = defsMap.get(colId);
             if (!cm) return;
             for (const [key, value] of Object.entries(changes)) {
@@ -1109,7 +1113,7 @@ export class TableStore {
 
         const colId = colDef.id ?? `col${Date.now()}`;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const cm = new Y.Map();
             cm.set("id", colId);
             cm.set("name", colDef.name ?? "Column");
@@ -1138,7 +1142,7 @@ export class TableStore {
         const rowArr = src.get("rows");
         if (!defsMap || !orderArr) return;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             defsMap.delete(colId);
             const idx = orderArr.toArray().indexOf(colId);
             if (idx >= 0) orderArr.delete(idx, 1);
@@ -1161,7 +1165,7 @@ export class TableStore {
         if (!orderArr || fromIndex === toIndex) return;
         if (fromIndex < 0 || toIndex < 0 || fromIndex >= orderArr.length || toIndex >= orderArr.length) return;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             const colId = orderArr.get(fromIndex);
             orderArr.delete(fromIndex, 1);
             orderArr.insert(toIndex, [colId]);
@@ -1173,7 +1177,7 @@ export class TableStore {
      * @param {string} newName
      */
     rename(newName) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             this.#tableYMap.set("name", newName);
         });
     }
@@ -1182,7 +1186,7 @@ export class TableStore {
 
     setSort(colId, dir = "asc") {
         const sortMap = this.#sourceYMap ?? this.#tableYMap;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             sortMap.set("sortColId", colId);
             sortMap.set("sortDir", dir);
         });
@@ -1190,7 +1194,7 @@ export class TableStore {
 
     clearSort() {
         const sortMap = this.#sourceYMap ?? this.#tableYMap;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             sortMap.set("sortColId", null);
             sortMap.set("sortDir", "asc");
         });
@@ -1198,7 +1202,7 @@ export class TableStore {
 
     setInsertSort(colId, dir = "desc") {
         const sortMap = this.#sourceYMap ?? this.#tableYMap;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             sortMap.set("insertSortColId", colId);
             sortMap.set("insertSortDir", dir);
         });
@@ -1206,7 +1210,7 @@ export class TableStore {
 
     clearInsertSort() {
         const sortMap = this.#sourceYMap ?? this.#tableYMap;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             sortMap.set("insertSortColId", null);
             sortMap.set("insertSortDir", "asc");
         });
@@ -1214,7 +1218,7 @@ export class TableStore {
 
     /** Update startRow and startCol (move table to new grid position). */
     moveTo(startRow, startCol) {
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             this.#tableYMap.set("startRow", startRow);
             this.#tableYMap.set("startCol", startCol);
         });
@@ -1263,7 +1267,7 @@ export class TableStore {
     setViewFilter(colId, op, value) {
         if (!this.#sourceYMap) return;
         const pf = this.#getOrCreatePersistedFilters();
-        this.#ydoc.transact(() => { pf.set(colId, JSON.stringify({ op, value })); });
+        this.#transact(() => { pf.set(colId, JSON.stringify({ op, value })); });
         this.viewDefinitionFilters = { ...this.viewDefinitionFilters, [colId]: { op, value } };
         this.#rebuildView(false);
         this._onFilterChange?.();
@@ -1276,7 +1280,7 @@ export class TableStore {
     clearViewFilter(colId) {
         if (!this.#sourceYMap) return;
         const pf = this.#tableYMap.get("persistedFilters");
-        if (pf) this.#ydoc.transact(() => { pf.delete(colId); });
+        if (pf) this.#transact(() => { pf.delete(colId); });
         const vdf = { ...this.viewDefinitionFilters };
         delete vdf[colId];
         this.viewDefinitionFilters = vdf;
@@ -1288,7 +1292,7 @@ export class TableStore {
     clearAllViewFilters() {
         if (!this.#sourceYMap) return;
         const pf = this.#tableYMap.get("persistedFilters");
-        if (pf) this.#ydoc.transact(() => {
+        if (pf) this.#transact(() => {
             for (const k of [...pf.keys()]) pf.delete(k);
         });
         this.viewDefinitionFilters = {};
@@ -1385,7 +1389,7 @@ export class TableStore {
         );
         skipped = dataRows.length - nonBlankRows.length;
 
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             initPos(rowArr);
             const basePos = Math.max(0, ...rowArr.toArray().map(r => r?.get?.('_pos') ?? 0));
             const n = nonBlankRows.length;
@@ -1479,7 +1483,7 @@ export class TableStore {
                 }
             } else {
                 // Overflow row — append as new
-                this.#ydoc.transact(() => {
+                this.#transact(() => {
                     const yRow = new Y.Map();
                     for (let j = 0; j < srcRow.length; j++) {
                         const colDef = colMap[j];
@@ -1650,7 +1654,7 @@ export class TableStore {
         if (!this.#sourceYMap) return;
         const arr = this.#tableYMap.get("visibleColumns");
         if (!arr) return;
-        this.#ydoc.transact(() => {
+        this.#transact(() => {
             if (arr.length > 0) arr.delete(0, arr.length);
             if (colIds.length > 0) arr.push(colIds);
         });

@@ -50,7 +50,12 @@ class DocSession {
             this._metaObserver = () => this._readMeta(metaMap);
             metaMap.observe(this._metaObserver);
 
-            // Set default metadata if empty
+            // Wait for server sync before writing any defaults, so we don't
+            // shadow remote values with local defaults on a cold load (new device,
+            // cleared storage). Mirrors the guard in SpreadsheetSession.#doLoad.
+            await storage.drive.waitForServerSync(docId);
+
+            // Set default metadata if still empty after sync
             if (!metaMap.get('createdAt')) {
                 ydoc.transact(() => {
                     metaMap.set('createdAt', Date.now());
@@ -58,7 +63,7 @@ class DocSession {
                 });
             }
 
-            // Initialize page setup settings if not present
+            // Initialize page setup settings if not present after sync
             const pageSetupMap = ydoc.getMap('pageSetup');
             if (!pageSetupMap.get('paperSize')) {
                 ydoc.transact(() => {

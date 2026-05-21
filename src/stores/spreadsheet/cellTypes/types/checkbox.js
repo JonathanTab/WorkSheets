@@ -1,10 +1,11 @@
 /**
  * Checkbox cell type descriptor
  */
-import { drawCheckbox } from '../painters.js';
+import { drawCheckboxInCell } from '../painters.js';
 
 export const checkboxType = {
     id: 'checkbox',
+    renderType: 'checkbox',
     formatValue(rawValue) {
         return ''; // Rendered via canvas painter
     },
@@ -26,11 +27,7 @@ export const checkboxType = {
      * @param {Object} style    Cell style info
      */
     paintCell(ctx, value, config, rect, style) {
-        const checked = !!value;
-        const size = Math.min(16, rect.height - 4, rect.width - 4);
-        const cx = rect.x + (rect.width - size) / 2;
-        const cy = rect.y + (rect.height - size) / 2;
-        drawCheckbox(ctx, cx, cy, size, checked);
+        drawCheckboxInCell(ctx, rect.x, rect.y, rect.width, rect.height, !!value);
     },
     handlesClick: true,
 };

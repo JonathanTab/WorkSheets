@@ -2,21 +2,23 @@
     /**
      * FormulaDocsPanel — Full formula reference, opened from Help menu.
      *
-     * Renders as a fixed full-screen overlay with:
-     *   - Search bar
-     *   - Category sidebar
-     *   - Scrollable function list with syntax, description, and examples
+     * math/logic/text/date/lookup/info/aggregate/array entries are generated from
+     * the function registry. Table-specific entries are static (DSL tokens and
+     * dynamically-registered TABLE_* functions).
      */
+
+    import { functions } from '../../formulas/functions/index.js';
 
     let { onclose } = $props();
 
-    // ── Formula data ─────────────────────────────────────────────────────────
+    // ── Categories ───────────────────────────────────────────────────────────
 
     const CATEGORIES = [
         { id: "all", label: "All Functions" },
         { id: "math", label: "Math & Stats" },
         { id: "logic", label: "Logic" },
         { id: "text", label: "Text" },
+        { id: "date", label: "Date & Time" },
         { id: "lookup", label: "Lookup" },
         { id: "info", label: "Information" },
         { id: "aggregate", label: "Conditional Aggregate" },
@@ -25,415 +27,22 @@
         { id: "tableext", label: "Table (cross-sheet)" },
     ];
 
+    // Generate registry-backed entries (math, logic, text, date, lookup, info, aggregate, array).
+    // Only functions with category + syntax + desc are included.
+    const _registryFormulas = Object.entries(functions)
+        .filter(([, fn]) => fn.category && fn.syntax && fn.desc)
+        .map(([name, fn]) => ({
+            cat: fn.category,
+            name,
+            syntax: fn.syntax,
+            desc: fn.desc,
+            example: fn.example ?? '',
+            note: fn.note,
+        }));
+
+    // Static entries for table-formula DSL tokens and cross-sheet TABLE_* functions.
     /** @type {Array<{cat: string, name: string, syntax: string, desc: string, example: string, note?: string}>} */
-    const FORMULAS = [
-        // ── Math & Stats ────────────────────────────────────────────────────
-        {
-            cat: "math",
-            name: "SUM",
-            syntax: "SUM(value1, [value2, …])",
-            desc: "Returns the sum of all numeric values. Accepts individual values, cell references, and ranges.",
-            example:
-                "=SUM(A1:A10)  →  sum of rows 1–10\n=SUM(A1, B1, C1)  →  sum of three cells",
-        },
-        {
-            cat: "math",
-            name: "AVERAGE",
-            syntax: "AVERAGE(value1, [value2, …])",
-            desc: "Returns the arithmetic mean of all numeric values. Non-numeric values are ignored.",
-            example: "=AVERAGE(B1:B5)  →  average of five values",
-        },
-        {
-            cat: "math",
-            name: "COUNT",
-            syntax: "COUNT(value1, [value2, …])",
-            desc: "Counts cells that contain numbers. Text and empty cells are not counted.",
-            example: "=COUNT(A1:A20)  →  how many cells contain numbers",
-        },
-        {
-            cat: "math",
-            name: "COUNTA",
-            syntax: "COUNTA(value1, [value2, …])",
-            desc: "Counts all non-empty cells regardless of type (numbers, text, dates, etc.).",
-            example: "=COUNTA(A1:A20)  →  how many cells are non-empty",
-        },
-        {
-            cat: "math",
-            name: "MIN",
-            syntax: "MIN(value1, [value2, …])",
-            desc: "Returns the smallest value in a set of numbers.",
-            example: "=MIN(A1:A10)  →  lowest number in range",
-        },
-        {
-            cat: "math",
-            name: "MAX",
-            syntax: "MAX(value1, [value2, …])",
-            desc: "Returns the largest value in a set of numbers.",
-            example: "=MAX(A1:A10)  →  highest number in range",
-        },
-        {
-            cat: "math",
-            name: "ABS",
-            syntax: "ABS(number)",
-            desc: "Returns the absolute (non-negative) value of a number.",
-            example:
-                "=ABS(-5)  →  5\n=ABS(A1 - B1)  →  magnitude of difference",
-        },
-        {
-            cat: "math",
-            name: "ROUND",
-            syntax: "ROUND(number, decimals)",
-            desc: "Rounds a number to the specified number of decimal places. Use 0 for whole numbers, negative values to round left of the decimal.",
-            example: "=ROUND(3.14159, 2)  →  3.14\n=ROUND(1234, -2)  →  1200",
-        },
-        {
-            cat: "math",
-            name: "FLOOR",
-            syntax: "FLOOR(number)",
-            desc: "Rounds a number down to the nearest integer (toward negative infinity).",
-            example: "=FLOOR(3.9)  →  3\n=FLOOR(-1.2)  →  -2",
-        },
-        {
-            cat: "math",
-            name: "CEILING",
-            syntax: "CEILING(number)",
-            desc: "Rounds a number up to the nearest integer (toward positive infinity).",
-            example: "=CEILING(3.1)  →  4\n=CEILING(-1.8)  →  -1",
-        },
-        {
-            cat: "math",
-            name: "SQRT",
-            syntax: "SQRT(number)",
-            desc: "Returns the positive square root of a number.",
-            example: "=SQRT(16)  →  4\n=SQRT(A1)",
-        },
-        {
-            cat: "math",
-            name: "POWER",
-            syntax: "POWER(base, exponent)",
-            desc: "Raises a number to a given power. Equivalent to the ^ operator.",
-            example:
-                "=POWER(2, 10)  →  1024\n=POWER(A1, 0.5)  →  square root of A1",
-        },
-        {
-            cat: "math",
-            name: "MOD",
-            syntax: "MOD(number, divisor)",
-            desc: "Returns the remainder after dividing number by divisor.",
-            example:
-                "=MOD(10, 3)  →  1\n=MOD(ROW(), 2)  →  0 for even rows, 1 for odd",
-        },
-        {
-            cat: "math",
-            name: "MROUND",
-            syntax: "MROUND(number, multiple)",
-            desc: "Rounds a number to the nearest specified multiple. number and multiple must have the same sign, or an error is returned. A multiple of 0 returns 0.",
-            example:
-                "=MROUND(16, 5)  →  15\n=MROUND(18, 5)  →  20\n=MROUND(1.23, 0.05)  →  1.25\n=MROUND(-10, -3)  →  -9",
-        },
-
-        // ── Logic ─────────────────────────────────────────────────────────
-        {
-            cat: "logic",
-            name: "IF",
-            syntax: "IF(condition, value_if_true, value_if_false)",
-            desc: "Returns one value if a condition is true and another value if it is false. Conditions use comparison operators: =, <>, >, <, >=, <=, contains.",
-            example:
-                '=IF(A1 > 0, "Positive", "Non-positive")\n=IF(B1 = "done", 1, 0)',
-        },
-        {
-            cat: "logic",
-            name: "AND",
-            syntax: "AND(condition1, [condition2, …])",
-            desc: "Returns TRUE if all conditions are true, FALSE if any condition is false.",
-            example:
-                '=AND(A1 > 0, B1 < 100)  →  TRUE only if both hold\n=IF(AND(A1="yes", B1>5), "pass", "fail")',
-        },
-        {
-            cat: "logic",
-            name: "OR",
-            syntax: "OR(condition1, [condition2, …])",
-            desc: "Returns TRUE if at least one condition is true.",
-            example: '=OR(A1 = "yes", A1 = "maybe")  →  TRUE if either matches',
-        },
-        {
-            cat: "logic",
-            name: "NOT",
-            syntax: "NOT(condition)",
-            desc: "Reverses the logical value: NOT(TRUE) returns FALSE, and vice versa.",
-            example: "=NOT(ISBLANK(A1))  →  TRUE if A1 is not blank",
-        },
-        {
-            cat: "logic",
-            name: "IFERROR",
-            syntax: "IFERROR(value, value_if_error)",
-            desc: "Returns value_if_error if the first argument evaluates to an error, otherwise returns the value itself. Useful for suppressing #DIV/0!, #REF!, #N/A, etc.",
-            example:
-                '=IFERROR(A1/B1, 0)  →  0 if B1 is zero\n=IFERROR(VLOOKUP(A1, B:C, 2, FALSE), "Not found")',
-        },
-
-        // ── Text ──────────────────────────────────────────────────────────
-        {
-            cat: "text",
-            name: "LEN",
-            syntax: "LEN(text)",
-            desc: "Returns the number of characters in a text string.",
-            example: '=LEN("hello")  →  5\n=LEN(A1)',
-        },
-        {
-            cat: "text",
-            name: "UPPER",
-            syntax: "UPPER(text)",
-            desc: "Converts all characters in a text string to uppercase.",
-            example: '=UPPER("hello")  →  "HELLO"',
-        },
-        {
-            cat: "text",
-            name: "LOWER",
-            syntax: "LOWER(text)",
-            desc: "Converts all characters in a text string to lowercase.",
-            example: '=LOWER("HELLO")  →  "hello"',
-        },
-        {
-            cat: "text",
-            name: "TRIM",
-            syntax: "TRIM(text)",
-            desc: "Removes leading and trailing spaces, and reduces internal multiple spaces to a single space.",
-            example: '=TRIM("  hello  ")  →  "hello"',
-        },
-        {
-            cat: "text",
-            name: "LEFT",
-            syntax: "LEFT(text, num_chars)",
-            desc: "Returns the specified number of characters from the start (left side) of a text string.",
-            example: '=LEFT("Formula", 3)  →  "For"',
-        },
-        {
-            cat: "text",
-            name: "RIGHT",
-            syntax: "RIGHT(text, num_chars)",
-            desc: "Returns the specified number of characters from the end (right side) of a text string.",
-            example: '=RIGHT("Formula", 4)  →  "mula"',
-        },
-        {
-            cat: "text",
-            name: "MID",
-            syntax: "MID(text, start, num_chars)",
-            desc: "Returns a substring from inside a text string. start is 1-based (1 = first character).",
-            example: '=MID("Formula", 2, 3)  →  "orm"',
-        },
-        {
-            cat: "text",
-            name: "CONCATENATE",
-            syntax: "CONCATENATE(text1, [text2, …])",
-            desc: "Joins multiple text strings into one. You can also use the & operator.",
-            example:
-                '=CONCATENATE("Hello", " ", "World")  →  "Hello World"\n=A1 & " " & B1',
-        },
-
-        // ── Lookup ─────────────────────────────────────────────────────────
-        {
-            cat: "lookup",
-            name: "VLOOKUP",
-            syntax: "VLOOKUP(search_key, range, col_index, [exact_match])",
-            desc: "Searches for a value in the first column of a range and returns a value from a specified column in the same row. Set exact_match to FALSE for approximate match (useful for sorted data).",
-            example:
-                '=VLOOKUP(A1, B1:D10, 2, TRUE)  →  finds A1 in col B, returns col C\n=VLOOKUP("John", A:C, 3, TRUE)  →  finds "John", returns 3rd column',
-        },
-        {
-            cat: "lookup",
-            name: "IMPORTRANGE",
-            syntax: "IMPORTRANGE(fileId, rangeString)",
-            desc: 'Import data from another spreadsheet. fileId can be a file ID or URL. rangeString specifies the sheet and cells to import (e.g., "Sheet1!A1:C10"). Returns a spill range with the imported data.',
-            example:
-                '=IMPORTRANGE("1a2b3c4d5e", "Sheet1!A1:C10")  →  import data from another file\n=IMPORTRANGE(A1, "Data!A:A")  →  import column A from another sheet',
-        },
-
-        // ── Information ─────────────────────────────────────────────────────
-        {
-            cat: "info",
-            name: "ISBLANK",
-            syntax: "ISBLANK(value)",
-            desc: "Returns TRUE if the referenced cell is empty, FALSE otherwise.",
-            example: "=ISBLANK(A1)  →  TRUE if A1 is empty",
-        },
-        {
-            cat: "info",
-            name: "ISNUMBER",
-            syntax: "ISNUMBER(value)",
-            desc: "Returns TRUE if the value is a number.",
-            example: "=ISNUMBER(A1)  →  TRUE if A1 contains a number",
-        },
-        {
-            cat: "info",
-            name: "ISTEXT",
-            syntax: "ISTEXT(value)",
-            desc: "Returns TRUE if the value is text.",
-            example: "=ISTEXT(A1)  →  TRUE if A1 contains text",
-        },
-        {
-            cat: "info",
-            name: "ISERROR",
-            syntax: "ISERROR(value)",
-            desc: "Returns TRUE if the value is any error (#ERROR!, #REF!, #DIV/0!, etc.).",
-            example: "=ISERROR(A1/B1)  →  TRUE if division fails",
-        },
-        {
-            cat: "info",
-            name: "NA",
-            syntax: "NA()",
-            desc: "Returns the #N/A error value. Used to mark cells that should not be matched or calculated.",
-            example: "=NA()  →  #N/A",
-        },
-
-        // ── Conditional Aggregate ───────────────────────────────────────────
-        {
-            cat: "aggregate",
-            name: "SUMIF",
-            syntax: "SUMIF(range, criteria, [sum_range])",
-            desc: "Sum of cells that match a condition. If sum_range is omitted, the range being summed is the same as the range being tested.",
-            example:
-                '=SUMIF(A1:A10, ">100")  →  sum of values > 100\n=SUMIF(Status, "done", Amount)  →  sum amounts for done items\n=SUMIF(Category, "Food", Price)  →  sum food prices',
-        },
-        {
-            cat: "aggregate",
-            name: "COUNTIF",
-            syntax: "COUNTIF(range, criteria)",
-            desc: "Count of cells that match a condition. Supports exact matches, comparisons (>5, >=5, <5, <=5, <>5), and wildcards (* and ?).",
-            example:
-                '=COUNTIF(A1:A10, "Yes")  →  count "Yes" values\n=COUNTIF(Score, ">=90")  →  count high scores\n=COUNTIF(Name, "J*")  →  count names starting with J',
-        },
-        {
-            cat: "aggregate",
-            name: "AVERAGEIF",
-            syntax: "AVERAGEIF(range, criteria, [average_range])",
-            desc: "Average of cells that match a condition. If average_range is omitted, the range being averaged is the same as the range being tested.",
-            example:
-                '=AVERAGEIF(A1:A10, ">100")  →  average of values > 100\n=AVERAGEIF(Grade, "A", Score)  →  average score for A-grade\n=AVERAGEIF(Region, "West", Revenue)  →  average west revenue',
-        },
-
-        // ── Array & Spill ──────────────────────────────────────────────────
-        {
-            cat: "array",
-            name: "FILTER",
-            syntax: "FILTER(range, condition1, [condition2, …])",
-            desc: "Filter a range by one or more conditions (AND logic). Returns matching rows in a spill range. Each condition should evaluate to TRUE/FALSE for each row. Non-numeric values are treated as TRUE if non-zero/non-empty.",
-            example:
-                '=FILTER(A1:C10, B1:B10 > 100)  →  rows where B > 100\n=FILTER(Data, Status = "Active", Amount > 50)  →  multiple conditions\n=FILTER(A:C, (B:B="Sales") * (C:C>1000))  →  complex filter',
-        },
-        {
-            cat: "array",
-            name: "SORT",
-            syntax: "SORT(range, [sort_index], [sort_order], [sort_index2], [sort_order2], …])",
-            desc: "Sort a range by one or more columns. sort_index is 1-based column number. sort_order: TRUE (ascending, default) or FALSE (descending). Returns spilled result.",
-            example:
-                "=SORT(A1:C10)  →  sort by first column ascending\n=SORT(A1:C10, 2, FALSE)  →  sort by 2nd column descending\n=SORT(A1:C10, 1, TRUE, 2, FALSE)  →  primary sort col 1 asc, secondary col 2 desc",
-        },
-        {
-            cat: "array",
-            name: "UNIQUE",
-            syntax: "UNIQUE(range)",
-            desc: "Return unique rows from a range, removing duplicates. Preserves first occurrence order.",
-            example:
-                "=UNIQUE(A1:A100)  →  unique values\n=UNIQUE(A1:C10)  →  unique rows from 2D range\n=UNIQUE(Names)  →  deduplicated list",
-        },
-        {
-            cat: "array",
-            name: "TRANSPOSE",
-            syntax: "TRANSPOSE(range)",
-            desc: "Swap rows and columns. A 3×5 range becomes 5×3.",
-            example:
-                "=TRANSPOSE(A1:C5)  →  flip rows/columns\n=TRANSPOSE(Data)  →  transpose entire range",
-        },
-        {
-            cat: "array",
-            name: "TOCOL",
-            syntax: "TOCOL(range)",
-            desc: "Flatten a range into a single column. 2D arrays and 1D arrays both become a vertical list.",
-            example:
-                "=TOCOL(A1:C5)  →  all values in single column\n=TOCOL(Matrix)  →  flatten to column",
-        },
-        {
-            cat: "array",
-            name: "TOROW",
-            syntax: "TOROW(range)",
-            desc: "Flatten a range into a single row. 2D arrays and 1D arrays both become a horizontal list.",
-            example:
-                "=TOROW(A1:C5)  →  all values in single row\n=TOROW(Matrix)  →  flatten to row",
-        },
-        {
-            cat: "array",
-            name: "HSTACK",
-            syntax: "HSTACK(range1, range2, […])",
-            desc: "Stack arrays horizontally (side by side). Combines multiple ranges left-to-right.",
-            example:
-                "=HSTACK(A1:B10, D1:E10)  →  place side by side\n=HSTACK(List1, List2, List3)  →  combine 3 lists",
-        },
-        {
-            cat: "array",
-            name: "VSTACK",
-            syntax: "VSTACK(range1, range2, […])",
-            desc: "Stack arrays vertically (one below another). Combines multiple ranges top-to-bottom.",
-            example:
-                "=VSTACK(A1:C5, A7:C10)  →  stack vertically\n=VSTACK(Jan, Feb, Mar)  →  combine months",
-        },
-        {
-            cat: "array",
-            name: "TAKE",
-            syntax: "TAKE(range, rows, [cols])",
-            desc: "Take N rows/columns from a range. Positive rows = from top, negative = from bottom. Same logic for cols.",
-            example:
-                "=TAKE(A1:C10, 5)  →  first 5 rows\n=TAKE(A1:C10, -3)  →  last 3 rows\n=TAKE(A1:C10, 5, 2)  →  first 5 rows, first 2 cols",
-        },
-        {
-            cat: "array",
-            name: "DROP",
-            syntax: "DROP(range, rows, [cols])",
-            desc: "Drop (skip) N rows/columns. Positive rows = drop from top, negative = from bottom.",
-            example:
-                "=DROP(A1:C10, 1)  →  all rows except first (skip headers)\n=DROP(A1:C10, -2)  →  drop last 2 rows\n=DROP(A1:C10, 1, 1)  →  skip first row and column",
-        },
-        {
-            cat: "array",
-            name: "CHOOSEROWS",
-            syntax: "CHOOSEROWS(range, row_num1, [row_num2, …])",
-            desc: "Select specific rows by index (1-based). Negative indices count from end (-1 = last row).",
-            example:
-                "=CHOOSEROWS(A1:C10, 1, 3, 5)  →  rows 1, 3, 5\n=CHOOSEROWS(Data, 1, -1)  →  first and last row\n=CHOOSEROWS(List, 2)  →  second row only",
-        },
-        {
-            cat: "array",
-            name: "CHOOSECOLS",
-            syntax: "CHOOSECOLS(range, col_num1, [col_num2, …])",
-            desc: "Select specific columns by index (1-based). Negative indices count from end (-1 = last column).",
-            example:
-                "=CHOOSECOLS(A1:C10, 1, 3)  →  columns A and C\n=CHOOSECOLS(Data, 2)  →  column B only\n=CHOOSECOLS(Data, -1)  →  last column",
-        },
-        {
-            cat: "array",
-            name: "WRAPCOLS",
-            syntax: "WRAPCOLS(range, wrap_count, [pad_value])",
-            desc: "Wrap a flat (1D) range into columns of a given size. Useful for reshaping data.",
-            example:
-                '=WRAPCOLS(A1:A20, 3)  →  wrap 20 items into 3-item columns\n=WRAPCOLS(Numbers, 5, "N/A")  →  wrap with padding',
-        },
-        {
-            cat: "array",
-            name: "WRAPROWS",
-            syntax: "WRAPROWS(range, wrap_count, [pad_value])",
-            desc: "Wrap a flat (1D) range into rows of a given size. Useful for reshaping data.",
-            example:
-                "=WRAPROWS(A1:A20, 5)  →  wrap 20 items into 5-item rows\n=WRAPROWS(Data, 3)  →  reshape to 3-item rows",
-        },
-        {
-            cat: "array",
-            name: "EXPAND",
-            syntax: "EXPAND(range, rows, cols, [pad_value])",
-            desc: "Expand a range to specified dimensions (rows × cols), padding with a value (default empty).",
-            example:
-                '=EXPAND(A1:B2, 5, 5)  →  expand to 5×5\n=EXPAND(Data, 10, 10, 0)  →  pad with zeros\n=EXPAND(Cell, 3, 3, "")  →  expand to 3×3 grid',
-        },
-
+    const _tableFormulas = [
         // ── Table Formulas ─────────────────────────────────────────────────
         {
             cat: "table",
@@ -731,6 +340,9 @@
         },
     ];
 
+    // Merged formula list: registry entries + static table entries.
+    const FORMULAS = [..._registryFormulas, ..._tableFormulas];
+
     // ── Filter state ─────────────────────────────────────────────────────────
 
     let query = $state("");
@@ -739,10 +351,7 @@
     let filtered = $derived.by(() => {
         const q = query.trim().toLowerCase();
         return FORMULAS.filter((f) => {
-            // Category filter
-            if (activeCategory !== "all" && f.cat !== activeCategory)
-                return false;
-            // Search filter
+            if (activeCategory !== "all" && f.cat !== activeCategory) return false;
             if (!q) return true;
             return (
                 f.name.toLowerCase().includes(q) ||
@@ -755,15 +364,9 @@
     let counts = $derived.by(() => {
         const q = query.trim().toLowerCase();
         const map = { all: 0 };
-        for (const cat of CATEGORIES.filter((c) => c.id !== "all")) {
-            map[cat.id] = 0;
-        }
+        for (const cat of CATEGORIES.filter((c) => c.id !== "all")) map[cat.id] = 0;
         for (const f of FORMULAS) {
-            if (
-                !q ||
-                f.name.toLowerCase().includes(q) ||
-                f.desc.toLowerCase().includes(q)
-            ) {
+            if (!q || f.name.toLowerCase().includes(q) || f.desc.toLowerCase().includes(q)) {
                 map[f.cat] = (map[f.cat] ?? 0) + 1;
                 map.all++;
             }
@@ -784,7 +387,6 @@
         if (e.target === e.currentTarget) onclose?.();
     }
 
-    /** Group filtered results by category for section headers */
     let grouped = $derived.by(() => {
         if (activeCategory !== "all")
             return [{ cat: activeCategory, items: filtered }];
@@ -794,15 +396,8 @@
             map.get(f.cat).push(f);
         }
         const order = [
-            "math",
-            "logic",
-            "text",
-            "lookup",
-            "info",
-            "aggregate",
-            "array",
-            "table",
-            "tableext",
+            "math", "logic", "text", "date", "lookup", "info",
+            "aggregate", "array", "table", "tableext",
         ];
         return order
             .filter((c) => map.has(c))

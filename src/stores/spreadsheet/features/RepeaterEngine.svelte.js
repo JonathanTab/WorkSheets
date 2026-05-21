@@ -23,6 +23,7 @@
  */
 
 import * as Y from "yjs";
+import { YJS_ORIGIN } from "../yjsOrigins.js";
 
 // ─── RepeaterStore ────────────────────────────────────────────────────────────
 
@@ -225,19 +226,19 @@ export class RepeaterStore {
     // ─── Mutation API ─────────────────────────────────────────────────────────
 
     setCount(count) {
-        this.#ydoc.transact(() => this.#repYMap.set("count", count));
+        this.#ydoc.transact(() => this.#repYMap.set("count", count), YJS_ORIGIN.UI);
     }
 
     setGap(gap) {
-        this.#ydoc.transact(() => this.#repYMap.set("gap", gap));
+        this.#ydoc.transact(() => this.#repYMap.set("gap", gap), YJS_ORIGIN.UI);
     }
 
     setDirection(direction) {
-        this.#ydoc.transact(() => this.#repYMap.set("direction", direction));
+        this.#ydoc.transact(() => this.#repYMap.set("direction", direction), YJS_ORIGIN.UI);
     }
 
     setName(name) {
-        this.#ydoc.transact(() => this.#repYMap.set("name", name));
+        this.#ydoc.transact(() => this.#repYMap.set("name", name), YJS_ORIGIN.UI);
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -409,7 +410,7 @@ export class RepeaterEngine {
             rm.set("count", opts.count ?? 1);
             rm.set("gap", opts.gap ?? 0);
             this.#repeatersYMap.set(repId, rm);
-        });
+        }, YJS_ORIGIN.UI);
 
         return repId;
     }
@@ -419,7 +420,7 @@ export class RepeaterEngine {
      */
     deleteRepeater(repId) {
         if (!this.#repeatersYMap) return;
-        this.#ydoc.transact(() => this.#repeatersYMap.delete(repId));
+        this.#ydoc.transact(() => this.#repeatersYMap.delete(repId), YJS_ORIGIN.UI);
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────

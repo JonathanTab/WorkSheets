@@ -19,6 +19,7 @@
     } from "../../../lib/icons/index.js";
     import { clipboardManager } from "../../../stores/spreadsheet/index.js";
     import { clearFormatting as clearFormattingCmd } from "../../../stores/spreadsheet/formatCommands.js";
+    import { applyFormatting as applyFormattingCmd } from "../../../stores/spreadsheet/cellFormattingCommands.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
     import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
     import { openModal } from "../../../lib/ui/modalStore.svelte.js";
@@ -576,39 +577,39 @@
                 { label: "Plain text", action: () => applyNumberFormat({ type: "text" }) },
                 { divider: true },
                 { label: "Number  1,000.00", action: () => applyNumberFormat({ type: "number", decimals: 2 }) },
-                { label: "Percent  10%", action: () => applyNumberFormat({ type: "percent", decimals: 1 }) },
-                { label: "Scientific  1.00E+3", action: () => applyNumberFormat({ type: "scientific", decimals: 2 }) },
+                { label: "Percent  10%", action: () => applyNumberFormat({ type: "number", subFormat: "percent", decimals: 1 }) },
+                { label: "Scientific  1.00E+3", action: () => applyNumberFormat({ type: "number", subFormat: "scientific", decimals: 2 }) },
                 { divider: true },
                 { label: "Accounting  $ 1,000.00", action: () => applyNumberFormat({ type: "number", subFormat: "accounting", decimals: 2, symbol: "$" }) },
                 { label: "Financial  (1,000.00)", action: () => applyNumberFormat({ type: "number", subFormat: "financial", decimals: 2 }) },
-                { label: "Currency  $1,000.00", action: () => applyNumberFormat({ type: "currency", decimals: 2, symbol: "$" }) },
-                { label: "Currency rounded  $1,000", action: () => applyNumberFormat({ type: "currency", decimals: 0, symbol: "$" }) },
+                { label: "Currency  $1,000.00", action: () => applyNumberFormat({ type: "number", subFormat: "currency", decimals: 2, symbol: "$" }) },
+                { label: "Currency rounded  $1,000", action: () => applyNumberFormat({ type: "number", subFormat: "currency", decimals: 0, symbol: "$" }) },
                 { divider: true },
-                { label: "Date  3/20/2026", action: () => applyNumberFormat({ type: "date", format: "MM/DD/YYYY" }) },
-                { label: "Time  1:30 PM", action: () => applyNumberFormat({ type: "time", format: "h:mm A" }) },
-                { label: "Date time  3/20/2026 1:30 PM", action: () => applyNumberFormat({ type: "datetime", format: "MM/DD/YYYY h:mm A" }) },
+                { label: "Date  3/20/2026", action: () => applyNumberFormat({ type: "date", subFormat: "date", datePreset: "MM/DD/YYYY" }) },
+                { label: "Time  1:30 PM", action: () => applyNumberFormat({ type: "date", subFormat: "time", timePreset: "h:mm A" }) },
+                { label: "Date time  3/20/2026 1:30 PM", action: () => applyNumberFormat({ type: "date", subFormat: "datetime", datePreset: "MM/DD/YYYY", timePreset: "h:mm A" }) },
                 { label: "Duration  1:30:00", action: () => applyNumberFormat({ type: "duration" }) },
             ],
         },
         {
             label: "Text",
             submenu: [
-                { label: "Bold", action: () => applyFormat("bold", true), shortcut: "Ctrl+B" },
-                { label: "Italic", action: () => applyFormat("italic", true), shortcut: "Ctrl+I" },
-                { label: "Underline", action: () => applyFormat("underline", true), shortcut: "Ctrl+U" },
-                { label: "Strikethrough", action: () => applyFormat("strikethrough", true) },
+                { label: "Bold", action: () => applyFormattingCmd("bold", true), shortcut: "Ctrl+B" },
+                { label: "Italic", action: () => applyFormattingCmd("italic", true), shortcut: "Ctrl+I" },
+                { label: "Underline", action: () => applyFormattingCmd("underline", true), shortcut: "Ctrl+U" },
+                { label: "Strikethrough", action: () => applyFormattingCmd("strikethrough", true) },
             ],
         },
         {
             label: "Alignment",
             submenu: [
-                { label: "Left", action: () => applyFormat("hAlign", "left") },
-                { label: "Center", action: () => applyFormat("hAlign", "center") },
-                { label: "Right", action: () => applyFormat("hAlign", "right") },
+                { label: "Left", action: () => applyFormattingCmd("horizontalAlign", "left") },
+                { label: "Center", action: () => applyFormattingCmd("horizontalAlign", "center") },
+                { label: "Right", action: () => applyFormattingCmd("horizontalAlign", "right") },
                 { divider: true },
-                { label: "Top", action: () => applyFormat("vAlign", "top") },
-                { label: "Middle", action: () => applyFormat("vAlign", "middle") },
-                { label: "Bottom", action: () => applyFormat("vAlign", "bottom") },
+                { label: "Top", action: () => applyFormattingCmd("verticalAlign", "top") },
+                { label: "Middle", action: () => applyFormattingCmd("verticalAlign", "middle") },
+                { label: "Bottom", action: () => applyFormattingCmd("verticalAlign", "bottom") },
             ],
         },
         {
@@ -625,7 +626,7 @@
             submenu: [6, 7, 8, 9, 10, 11, 12, null, 14, 18, 24, 36].map(sz =>
                 sz === null
                     ? { divider: true }
-                    : { label: String(sz), action: () => applyFormat("fontSize", sz) }
+                    : { label: String(sz), action: () => applyFormattingCmd("fontSize", sz) }
             ),
         },
         { divider: true },
@@ -678,30 +679,6 @@
     ];
 
     // ─── ACTION HANDLERS ──────────────────────────────────────────────────────
-
-    function applyFormat(property, value) {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        const range = selectionState.range;
-        if (!sheetStore || !range) return;
-        const renderContext = spreadsheetSession.renderContext;
-
-        spreadsheetSession.ydoc?.transact(() => {
-            for (let r = range.startRow; r <= range.endRow; r++) {
-                for (let c = range.startCol; c <= range.endCol; c++) {
-                    const ct = renderContext?.getCellType(r, c);
-                    if (ct === 'TABLE_HEADER') continue;
-                    if (ct === 'TABLE_DATA' || ct === 'TABLE_ENTRY') {
-                        const info = renderContext?.tableManager?.getCellInfo(r, c);
-                        if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                            info.table.setCellFormatting(info.dataIndex, info.colDef.id, { [property]: value });
-                        }
-                        continue;
-                    }
-                    sheetStore.setCellProperties(r, c, { [property]: value });
-                }
-            }
-        });
-    }
 
     function applyNumberFormat(config) {
         const sheetStore = spreadsheetSession.activeSheetStore;

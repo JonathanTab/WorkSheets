@@ -48,13 +48,9 @@
         if (overlayEl) overlayEl.scrollLeft = scrollLeft;
     }
 
-    // Keep overlay scrolled in sync during formula editing via rAF loop.
+    // Reset overlay scroll when switching away from formula mode.
     $effect(() => {
-        if (!isFormula || !scrollable || !inputEl) { syncScroll(0); return; }
-        let id = 0;
-        const tick = () => { syncScroll(inputEl?.scrollLeft || 0); id = requestAnimationFrame(tick); };
-        id = requestAnimationFrame(tick);
-        return () => cancelAnimationFrame(id);
+        if (!isFormula || !scrollable) syncScroll(0);
     });
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -105,7 +101,7 @@
             <span class="fi-overlay-text">
                 {#each segments as seg}
                     {#if seg.color}
-                        <span style="color:{seg.color}; font-weight:600;">{seg.text}</span>
+                        <span style="color:{seg.color};">{seg.text}</span>
                     {:else if seg.type === 'FUNCTION'}
                         <span class="fi-function">{seg.text}</span>
                     {:else}
@@ -121,19 +117,24 @@
 <style>
     .formula-input-root {
         position: relative;
-        display: contents; /* let parent control sizing */
+        display: block;
+        width: 100%;
+        height: 100%;
     }
 
     .fi-input {
         width: 100%;
         height: 100%;
         box-sizing: border-box;
+        margin: 0;
         border: none;
         outline: none;
         background: transparent;
         font: inherit;
         color: inherit;
-        padding: inherit;
+        padding: 0;
+        line-height: inherit;
+        letter-spacing: inherit;
         position: relative;
         z-index: 2;
     }
@@ -149,10 +150,13 @@
         position: absolute;
         inset: 0;
         pointer-events: none;
+        box-sizing: border-box;
         font: inherit;
         color: var(--text-color, #1e293b);
         background: var(--input-bg, #ffffff);
-        padding: inherit;
+        padding: 0;
+        line-height: inherit;
+        letter-spacing: inherit;
         z-index: 1;
         display: flex;
         align-items: center;
@@ -170,11 +174,11 @@
     .fi-overlay-text {
         white-space: pre;
         display: inline-block;
+        line-height: inherit;
         flex-shrink: 0;
     }
 
     .fi-function {
-        font-weight: 600;
         color: var(--function-color, #7c3aed);
     }
 </style>

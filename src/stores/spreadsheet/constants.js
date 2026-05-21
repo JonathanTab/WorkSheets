@@ -12,6 +12,15 @@ export const HEADER_WIDTH = 50;
 export const TOTAL_ROWS = 10000;
 export const TOTAL_COLS = 100;
 
+// Resize minimum sizes
+export const MIN_COL_WIDTH = 20;   // px — smallest allowed column width
+export const MIN_ROW_HEIGHT = 10;  // px — smallest allowed row height
+
+// Touch interaction thresholds
+export const TOUCH_MOVE_THRESHOLD = 8;   // px — max movement still considered a tap
+export const DOUBLE_TAP_DELAY = 300;     // ms — max interval between double-tap
+export const LONG_PRESS_DELAY = 600;     // ms — hold time before context menu fires
+
 // Viewport buffer for virtualization
 export const BUFFER_ROWS = 5;
 export const BUFFER_COLS = 2;
@@ -26,16 +35,15 @@ export const OVERSCAN_ROWS = OVERSCAN_PX_ROWS;
 export const OVERSCAN_COLS = OVERSCAN_PX_COLS;
 
 // Schema version
-export const SCHEMA_VERSION = '4';
+export const SCHEMA_VERSION = '5';
 
 // Default sheet dimensions
 export const DEFAULT_ROW_COUNT = 1000;
 export const DEFAULT_COL_COUNT = 26;
 
-// Which cell properties live in cellValues (YKeyValue) vs cellStyles (YKeyValue).
-// cellValues = computational data { v, t, tfr }
-// cellStyles = display/config data (everything else)
-export const CELL_VALUE_KEYS = new Set(['v', 't', 'tfr']);
+// Which cell properties live in cellValues vs cellStyles — derived from CellShape.
+// Import directly from cells/CellShape.js for access to the full declarative table.
+export { CELL_VALUE_KEY_SET as CELL_VALUE_KEYS } from './cells/CellShape.js';
 
 // Cell property keys (short names for storage efficiency)
 // Note: Formulas are stored in VALUE ('v') field with '=' prefix

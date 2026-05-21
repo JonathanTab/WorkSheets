@@ -200,15 +200,6 @@ export class GridVirtualizer {
     }
 
     /**
-     * Set scroll position immediately (no throttling)
-     * @param {number} top
-     * @param {number} left
-     */
-    setScrollImmediate(top, left) {
-        this.setScroll(top, left);
-    }
-
-    /**
      * Set frozen row and column counts
      * @param {number} frozenRows
      * @param {number} frozenCols
@@ -610,44 +601,6 @@ export class GridVirtualizer {
         const width = this.#colMetrics.offsetOf(endCol + 1) - x;
         const height = this.#rowMetrics.offsetOf(endRow + 1) - y;
         return { x, y, width, height };
-    }
-
-    /**
-     * Get cell at a pixel position
-     * @param {number} x - X coordinate relative to grid content area
-     * @param {number} y - Y coordinate relative to grid content area
-     * @returns {{ row: number, col: number }}
-     */
-    getCellAtPosition(x, y) {
-        // Account for headers
-        const contentX = x - HEADER_WIDTH;
-        const contentY = y - HEADER_HEIGHT;
-
-        // Determine which pane the click is in
-        const frozenHeight = this.frozenHeight;
-        const frozenWidth = this.frozenWidth;
-
-        let row, col;
-
-        if (contentY < frozenHeight) {
-            // In frozen rows area
-            row = this.#rowMetrics.indexAtOffset(contentY);
-        } else {
-            // In scrollable rows area: canvas y = rowOffset - scrollTop, so rowOffset = contentY + scrollTop
-            row = this.#rowMetrics.indexAtOffset(contentY + this.scrollTop);
-            if (row < this.frozenRows) row = this.frozenRows;
-        }
-
-        if (contentX < frozenWidth) {
-            // In frozen cols area
-            col = this.#colMetrics.indexAtOffset(contentX);
-        } else {
-            // In scrollable cols area: canvas x = colOffset - scrollLeft, so colOffset = contentX + scrollLeft
-            col = this.#colMetrics.indexAtOffset(contentX + this.scrollLeft);
-            if (col < this.frozenCols) col = this.frozenCols;
-        }
-
-        return { row, col };
     }
 
     // --- Lifecycle ---

@@ -13,6 +13,7 @@ import storage from '../../../storage.js';
 
 export const imageType = {
     id: 'image',
+    renderType: 'image',
 
     formatValue(blobId) {
         return blobId ? String(blobId) : '';

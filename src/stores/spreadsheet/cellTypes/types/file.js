@@ -46,6 +46,7 @@ export function formatFileSize(bytes) {
 
 export const fileType = {
     id: 'file',
+    renderType: 'file',
 
     formatValue(blobId) {
         return blobId ? String(blobId) : '';

@@ -13,6 +13,8 @@
  * 6. Single `v` field stores value OR formula (formulas start with "=")
  */
 import * as Y from 'yjs';
+import { log } from '../../util/log.js';
+import { YJS_ORIGIN } from './yjsOrigins.js';
 import { storage } from '../storage.js';
 import { authStore } from '../authStore.js';
 import { get } from 'svelte/store';
@@ -146,18 +148,8 @@ export class SpreadsheetSession {
      * @param {string} docId
      */
     async load(docId) {
-        console.log('[SpreadsheetSession] load() called with docId:', docId);
-
-        // Wait for any existing load to complete
-        if (this.#loadPromise) {
-            console.log('[SpreadsheetSession] Waiting for existing load to complete...');
-            await this.#loadPromise;
-        }
-
-        if (this.docId === docId && this.ydoc) {
-            console.log('[SpreadsheetSession] Already loaded, returning early');
-            return; // Already loaded
-        }
+        if (this.#loadPromise) await this.#loadPromise;
+        if (this.docId === docId && this.ydoc) return;
 
         // Start new load with lock
         this.#loadPromise = this.#doLoad(docId);
@@ -199,41 +191,19 @@ export class SpreadsheetSession {
     async #doLoad(docId) {
         this.isLoading = true;
         this.error = null;
-
-        console.log('[SpreadsheetSession] Starting document load...');
         performance.mark('ss:load:start');
 
         try {
-            // Tear down previous session state and release the old Yjs runtime doc.
-            // We call unload() (not #teardownSession) so the old doc's providers are
-            // properly disconnected before we open the new one.
-            console.log('[SpreadsheetSession] Unloading previous session...');
             await this.unload();
-            console.log('[SpreadsheetSession] Previous session unloaded');
 
-            // Load the document using the new Storage facade
-            console.log('[SpreadsheetSession] Calling storage.drive.loadDoc()...');
             performance.mark('ss:yjsLoad:start');
             const ydoc = await storage.drive.loadDoc(docId);
             performance.mark('ss:yjsLoad:end');
             performance.measure('ss:yjsLoad', 'ss:yjsLoad:start', 'ss:yjsLoad:end');
-            console.log('[SpreadsheetSession] storage.drive.loadDoc() returned');
 
             const root = ydoc.getMap('spreadsheet');
-            console.log('[SpreadsheetSession] Got root map');
 
-            // If the root `sheets` structure is missing, the local copy hasn't
-            // synced yet from the server. We MUST wait for server sync before
-            // proceeding — otherwise migrate()/the session would observe an
-            // empty doc and (historically) auto-init a blank Sheet 1, racing
-            // the real server data and overwriting the user's content.
-            //
-            // Initialization is exclusively a creation-time concern
-            // (createDocument → initializeDocument). If a doc has a valid ID,
-            // it must already exist on the server, so we never auto-create
-            // the root structure on load.
             if (!root.get('sheets')) {
-                console.log('[SpreadsheetSession] sheets missing — waiting for server sync');
                 const synced = await storage.drive.waitForServerSync(docId);
                 if (!root.get('sheets')) {
                     if (!synced) {
@@ -254,17 +224,12 @@ export class SpreadsheetSession {
             this.docId = docId;
             this.ydoc = ydoc;
             this.root = root;
-            console.log('[SpreadsheetSession] Set docId, ydoc, root');
 
-            // Set up observers for reactivity
             this.#setupObservers();
 
-            // Set up undo manager and active sheet
-            console.log('[SpreadsheetSession] Setting up undo manager...');
             const sheets = root.get('sheets');
             const sheetOrder = root.get('sheetOrder');
             const firstSheetId = sheetOrder?.get(0) || 'sheet-1';
-            console.log('[SpreadsheetSession] First sheet ID:', firstSheetId);
 
             this.activeSheetId = firstSheetId;
 
@@ -308,7 +273,8 @@ export class SpreadsheetSession {
                     // Source tables live in root.tables, not in the per-sheet tables map.
                     const rootTables = root.get('tables');
                     this.undoManager = new Y.UndoManager(
-                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0, rootTables].filter(Boolean)
+                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0, rootTables].filter(Boolean),
+                        { trackedOrigins: new Set([YJS_ORIGIN.UI]) }
                     );
 
                     // Set up observer to update reactive undo/redo state
@@ -336,16 +302,11 @@ export class SpreadsheetSession {
                 this.repeaterEngine = new RepeaterEngine(activeSheet, ydoc);
                 this.renderContext.repeaterEngine = this.repeaterEngine;
             }
-            console.log('[SpreadsheetSession] Undo manager set up');
-
-            // Set up awareness (for collaboration)
-            console.log('[SpreadsheetSession] Setting up awareness...');
             const provider = storage._runtime?.activeDocs?.get(docId)?.provider;
             if (provider) {
                 this.awareness = provider.awareness;
                 this.#setupAwarenessObserver();
             }
-            console.log('[SpreadsheetSession] Awareness set up');
 
             // Initialize document title from Storage
             this.#updateDocTitle();
@@ -365,9 +326,7 @@ export class SpreadsheetSession {
         } finally {
             performance.mark('ss:load:end');
             performance.measure('ss:load:total', 'ss:load:start', 'ss:load:end');
-            console.log('[SpreadsheetSession] Setting isLoading=false');
             this.isLoading = false;
-            console.log('[SpreadsheetSession] Document load complete');
         }
     }
 
@@ -884,7 +843,7 @@ export class SpreadsheetSession {
 
         // ── Try cache first ───────────────────────────────────────────────────
         if (this.#restoreSheetFromCache(sheetId)) {
-            console.log(`[SpreadsheetSession] Sheet switch (cache hit): ${(performance.now() - _switchT).toFixed(1)}ms`);
+            log.debug(`[SpreadsheetSession] Sheet switch (cache hit): ${(performance.now() - _switchT).toFixed(1)}ms`);
             return;
         }
 
@@ -930,7 +889,7 @@ export class SpreadsheetSession {
             this.renderContext.tableManager = this.tableManager;
             this.renderContext.repeaterEngine = this.repeaterEngine;
         }
-        console.log(`[SpreadsheetSession] Sheet switch (cache miss): ${(performance.now() - _switchT).toFixed(1)}ms`);
+        log.debug(`[SpreadsheetSession] Sheet switch (cache miss): ${(performance.now() - _switchT).toFixed(1)}ms`);
     }
 
     // ========================================================================
@@ -1677,19 +1636,13 @@ export async function initializeSpreadsheet() {
     if (isInitialized) return true;
 
     initPromise = (async () => {
-        console.log('[SpreadsheetStore] Starting initialization...');
-        const startTime = performance.now();
-
         await storage.init();
 
-        // Subscribe to auth errors after initialization
         storage.on('auth-error', () => {
             authStore.logout();
         });
 
         isInitialized = true;
-
-        console.log(`[SpreadsheetStore] Initialization complete in ${Math.round(performance.now() - startTime)}ms`);
         return true;
     })();
 

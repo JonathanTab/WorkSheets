@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { log } from '../util/log.js';
 
 const AUTH_URL = 'https://instrumenta.cc/api/auth.php';
 const USER_CACHE = 'scriptorium:user'; // only stores {username} — not a secret
@@ -110,7 +111,7 @@ function createAuthStore() {
         if (devApiKey) {
             // In dev mode, validate the API key and get actual username
             set({ user: null, isLoading: true, error: null, apiKey: null });
-            console.log('[dev] Using API key authentication mode');
+            log.debug('[dev] Using API key authentication mode');
 
             if (navigator.onLine) {
                 try {
@@ -121,7 +122,7 @@ function createAuthStore() {
                         const data = await res.json();
                         if (data?.username) {
                             set({ user: { username: data.username }, isLoading: false, error: null, apiKey: null });
-                            console.log(`[dev] Authenticated as ${data.username}`);
+                            log.debug(`[dev] Authenticated as ${data.username}`);
                             return true;
                         }
                     } else if (res.status === 401) {
@@ -246,10 +247,10 @@ function createAuthStore() {
         try {
             if (key) {
                 localStorage.setItem(DEV_API_KEY, key);
-                console.log('[dev] API key set. Reload to use Bearer token auth.');
+                log.debug('[dev] API key set. Reload to use Bearer token auth.');
             } else {
                 localStorage.removeItem(DEV_API_KEY);
-                console.log('[dev] API key cleared. Reload to use session cookie auth.');
+                log.debug('[dev] API key cleared. Reload to use session cookie auth.');
             }
         } catch {
             console.error('[dev] Failed to access localStorage');
