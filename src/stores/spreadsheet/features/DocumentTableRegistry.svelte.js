@@ -6,21 +6,20 @@
  * previously performed on every TABLE_* formula call.
  *
  * ## Storage model
- * - Source tables (data + schema, isSourceOnly) live in `root.tables` (document-level Y.Map).
- *   They are not tied to any specific sheet.
- * - Views live in `sheet.tables` (per-sheet Y.Map) and reference a source via `sourceTableId`.
- * - Legacy tables (no isSourceOnly, no sourceTableId) are migrated on first load:
- *   the data is moved to `root.tables` and a view entry is written into `sheet.tables`.
+ * - Source tables (data + schema) live in `root.tableData` (document-level Y.Map).
+ *   They are not tied to any specific sheet and are never rendered directly on a grid.
+ * - Views live in `sheet.tableViews` (per-sheet Y.Map) and reference a source via `tableId`.
  *
  * ## Querying
  * - getById(tableId)        → live TableStore or null
  * - getByName(name)         → live TableStore or null (cross-sheet, case-insensitive)
- * - getSourceTables()       → [{tableId,sheetId,store}] — non-view tables only
- * - getViewsForTable(id)    → [{viewId,sheetId,store}] — views of a specific table
+ * - getSourceTables()       → [{tableId,sheetId,store}] — source tables only
+ * - getViewsForTable(id)    → [{viewId,sheetId,store}] — views of a specific source
  *
  * ## Reactivity
  * tableVersion ($state) increments on any structural change so UI can re-derive.
- * onTableChange fires when any table's row data changes → wired to formula recalc.
+ * onTableChange fires with the source table's id and the Y.YEvent[] from the deep
+ * observer; SpreadsheetSession parses the events for surgical formula recalc.
  */
 
 import * as Y from 'yjs';
@@ -34,16 +33,23 @@ export class DocumentTableRegistry {
     /** @type {import('yjs').Map<any>} root spreadsheet Y.Map */
     #root;
 
-    /** @type {import('yjs').Map<any> | null} document-level source tables map */
-    #globalTablesMap = null;
+    /** @type {import('yjs').Map<any> | null} root.tableData */
+    #tableDataMap = null;
 
     /** tableId → TableStore */
     #stores = new Map();
 
-    /** tableName.toUpperCase() → tableId  (last-wins on duplicate names) */
+    /**
+     * tableName.toUpperCase() → Set<tableId>
+     *
+     * Tracks ALL tables sharing a given (uppercased) name so that when the
+     * "winning" table is deleted or renamed, the index can recover the next
+     * candidate rather than leaving a ghost entry. getByName() returns the
+     * store for the first (insertion-order) tableId in the set.
+     */
     #nameIndex = new Map();
 
-    /** tableId → sheetId — which sheet each view lives on; '' for global sources */
+    /** tableId → sheetId — '' for global source tables */
     #sheetOf = new Map();
 
     /**
@@ -53,8 +59,8 @@ export class DocumentTableRegistry {
     #viewsOf = new Map();
 
     /** WeakSets to guard against double-registering */
-    #watchedTablesMap = new WeakSet();
-    #watchedSheets    = new WeakSet();
+    #watchedTableDataMap = new WeakSet();
+    #watchedSheets       = new WeakSet();
 
     /**
      * rowArr objects already given an onTableChange observer.
@@ -72,9 +78,12 @@ export class DocumentTableRegistry {
     tableVersion = $state(0);
 
     /**
-     * Fired when any table's row data mutates.
-     * SpreadsheetSession wires this to formulaEngine.recalculateTableDependents().
-     * @type {(() => void) | null}
+     * Fired when any table's row data mutates. The callback receives:
+     *   sourceTableId - the table ID whose row Y.Array changed
+     *   events        - Y.YEvent[] from the deep observer
+     *   rowArr        - the source Y.Array<Y.Map> that changed
+     * SpreadsheetSession parses the events for surgical formula recalc.
+     * @type {((info: { sourceTableId: string, events: import('yjs').YEvent<any>[], rowArr: import('yjs').Array<import('yjs').Map<any>> }) => void) | null}
      */
     onTableChange = null;
 
@@ -91,15 +100,11 @@ export class DocumentTableRegistry {
     // ─── Initialisation ───────────────────────────────────────────────────────
 
     #init() {
-        // Run migration first (converts legacy tables, moves isSourceOnly to root.tables)
-        // before setting up any observers so stores see the final state.
-        this.#migrate();
+        // Watch document-level source tables (root.tableData).
+        this.#tableDataMap = this.#getOrCreateTableData();
+        this.#watchTableData(this.#tableDataMap);
 
-        // Watch document-level source tables
-        this.#globalTablesMap = this.#getOrCreateGlobalTables();
-        this.#watchGlobalTables(this.#globalTablesMap);
-
-        // Watch per-sheet tables (views only after migration)
+        // Watch per-sheet view tables (sheet.tableViews).
         const sheetOrder = this.#root.get('sheetOrder');
         const sheetsMap  = this.#root.get('sheets');
         if (!sheetOrder || !sheetsMap) return;
@@ -120,151 +125,21 @@ export class DocumentTableRegistry {
     }
 
     /**
-     * Get or create the document-level tables map at root.tables.
+     * Get or create the document-level tableData map at root.tableData.
      * @returns {import('yjs').Map<any>}
      */
-    #getOrCreateGlobalTables() {
-        let gmap = this.#root.get('tables');
+    #getOrCreateTableData() {
+        let gmap = this.#root.get('tableData');
         if (!gmap) {
             gmap = new Y.Map();
-            this.#ydoc.transact(() => { this.#root.set('tables', gmap); }, YJS_ORIGIN.MIGRATION);
+            this.#ydoc.transact(() => { this.#root.set('tableData', gmap); }, YJS_ORIGIN.MIGRATION);
         }
         return gmap;
     }
 
-    /**
-     * Migrate legacy tables and isSourceOnly-in-sheet tables to root.tables.
-     * Runs once at init inside a Yjs transaction before any observers are attached.
-     */
-    #migrate() {
-        const sheetOrder = this.#root.get('sheetOrder');
-        const sheetsMap  = this.#root.get('sheets');
-        if (!sheetOrder || !sheetsMap) return;
-
-        // Ensure root.tables exists — must be inside a transaction
-        let globalTables = this.#root.get('tables');
-        if (!globalTables) {
-            globalTables = new Y.Map();
-            this.#ydoc.transact(() => { this.#root.set('tables', globalTables); }, YJS_ORIGIN.MIGRATION);
-        }
-
-        this.#ydoc.transact(() => {
-            for (const sheetId of sheetOrder.toArray()) {
-                const sheetYMap = sheetsMap.get(sheetId);
-                const tablesMap = sheetYMap?.get('tables');
-                if (!tablesMap) continue;
-
-                /** @type {[string, import('yjs').Map<any>][]} */
-                const entries = [];
-                tablesMap.forEach((tableYMap, tableId) => entries.push([tableId, tableYMap]));
-
-                for (const [tableId, tableYMap] of entries) {
-                    const isSourceOnly  = tableYMap.get('isSourceOnly') === true;
-                    const sourceTableId = tableYMap.get('sourceTableId');
-
-                    if (sourceTableId) {
-                        // Already a proper view — no migration needed.
-                        continue;
-                    }
-
-                    if (isSourceOnly) {
-                        // Source table in sheet.tables → move to root.tables.
-                        if (globalTables.has(tableId)) continue; // already migrated
-                        const src = this.#cloneSourceYMap(tableYMap);
-                        globalTables.set(tableId, src);
-                        tablesMap.delete(tableId);
-                    } else {
-                        // Legacy combined table → split into source + view.
-                        if (globalTables.has(tableId)) continue; // already migrated
-
-                        const sourceId = tableId;
-                        const viewId   = `view-${tableId}`;
-
-                        // Source: data + schema in root.tables
-                        const src = this.#cloneSourceYMap(tableYMap);
-                        globalTables.set(sourceId, src);
-
-                        // View: positioning + sourceTableId in sheet.tables
-                        const vm = new Y.Map();
-                        vm.set('id', viewId);
-                        vm.set('name', tableYMap.get('name') ?? '');
-                        vm.set('mode', 'inline');
-                        vm.set('startRow', tableYMap.get('startRow') ?? 0);
-                        vm.set('startCol', tableYMap.get('startCol') ?? 0);
-                        vm.set('sortColId', null);
-                        vm.set('sortDir', 'asc');
-                        vm.set('sourceTableId', sourceId);
-                        vm.set('visibleColumns', new Y.Array()); // [] = show all
-                        // Copy any persisted filters (legacy tables may not have them)
-                        const legacyPF = tableYMap.get('persistedFilters');
-                        const pf = new Y.Map();
-                        if (legacyPF) legacyPF.forEach((v, k) => pf.set(k, v));
-                        vm.set('persistedFilters', pf);
-                        tablesMap.set(viewId, vm);
-
-                        // Remove legacy entry
-                        tablesMap.delete(tableId);
-                    }
-                }
-            }
-        }, YJS_ORIGIN.MIGRATION);
-    }
-
-    /**
-     * Deep-copy a source/legacy table Y.Map into a new Y.Map suitable for root.tables.
-     * Copies scalar fields, columnDefs, columnOrder, and rows.
-     * @param {import('yjs').Map<any>} tableYMap
-     * @returns {import('yjs').Map<any>}
-     */
-    #cloneSourceYMap(tableYMap) {
-        const src = new Y.Map();
-        // Scalar fields
-        for (const k of ['id', 'name', 'sortColId', 'sortDir', 'insertSortColId', 'insertSortDir']) {
-            const v = tableYMap.get(k);
-            if (v !== undefined) src.set(k, v);
-        }
-        src.set('isSourceOnly', true);
-
-        // columnDefs: Y.Map<colId → Y.Map>
-        const srcDefs = tableYMap.get('columnDefs');
-        const newDefs = new Y.Map();
-        if (srcDefs) {
-            srcDefs.forEach((colMap, colId) => {
-                const newCol = new Y.Map();
-                if (colMap?.forEach) colMap.forEach((v, k) => newCol.set(k, v));
-                newDefs.set(colId, newCol);
-            });
-        }
-        src.set('columnDefs', newDefs);
-
-        // columnOrder: Y.Array<string>
-        const srcOrder = tableYMap.get('columnOrder');
-        const newOrder = new Y.Array();
-        if (srcOrder?.length) newOrder.push(srcOrder.toArray());
-        src.set('columnOrder', newOrder);
-
-        // rows: Y.Array<Y.Map>
-        const srcRows = tableYMap.get('rows');
-        const newRows = new Y.Array();
-        if (srcRows?.length) {
-            const rowMaps = srcRows.toArray().map(rowMap => {
-                const nr = new Y.Map();
-                if (rowMap?.forEach) rowMap.forEach((v, k) => nr.set(k, v));
-                return nr;
-            });
-            if (rowMaps.length) newRows.push(rowMaps);
-        }
-        src.set('rows', newRows);
-
-        // filters (reserved, carry along as empty)
-        src.set('filters', new Y.Map());
-
-        return src;
-    }
-
-    #watchGlobalTables(gmap) {
-        if (this.#watchedTablesMap.has(gmap)) return;
-        this.#watchedTablesMap.add(gmap);
+    #watchTableData(gmap) {
+        if (this.#watchedTableDataMap.has(gmap)) return;
+        this.#watchedTableDataMap.add(gmap);
 
         gmap.forEach((tableYMap, tableId) => {
             this.#addStore(null, tableId, tableYMap);
@@ -288,25 +163,42 @@ export class DocumentTableRegistry {
         if (this.#watchedSheets.has(sheetYMap)) return;
         this.#watchedSheets.add(sheetYMap);
 
-        const tablesMap = sheetYMap.get('tables');
-        if (!tablesMap) return;
+        /** @type {import('yjs').Map<any> | null} */
+        let observedViewsMap = null;
 
-        tablesMap.forEach((tableYMap, tableId) => {
-            this.#addStore(sheetId, tableId, tableYMap);
-        });
+        const attachViewsMap = (viewsMap) => {
+            if (!viewsMap || observedViewsMap === viewsMap) return;
+            observedViewsMap = viewsMap;
 
-        const tablesObs = (event) => {
-            event.changes.keys.forEach((change, tableId) => {
-                if (change.action === 'add') {
-                    const tYMap = tablesMap.get(tableId);
-                    if (tYMap) this.#addStore(sheetId, tableId, tYMap);
-                } else if (change.action === 'delete') {
-                    this.#removeStore(tableId);
-                }
+            viewsMap.forEach((tableYMap, tableId) => {
+                this.#addStore(sheetId, tableId, tableYMap);
             });
+
+            const viewsObs = (event) => {
+                event.changes.keys.forEach((change, tableId) => {
+                    if (change.action === 'add') {
+                        const tYMap = viewsMap.get(tableId);
+                        if (tYMap) this.#addStore(sheetId, tableId, tYMap);
+                    } else if (change.action === 'delete') {
+                        this.#removeStore(tableId);
+                    }
+                });
+            };
+            viewsMap.observe(viewsObs);
+            this.#observers.push(() => viewsMap.unobserve(viewsObs));
         };
-        tablesMap.observe(tablesObs);
-        this.#observers.push(() => tablesMap.unobserve(tablesObs));
+
+        attachViewsMap(sheetYMap.get('tableViews'));
+
+        // Catch lazy creation of tableViews (e.g. SpreadsheetSession writing it
+        // after DocumentTableRegistry has already called #watchSheet).
+        const sheetTopObs = (event) => {
+            if (event.keysChanged?.has('tableViews')) {
+                attachViewsMap(sheetYMap.get('tableViews'));
+            }
+        };
+        sheetYMap.observe(sheetTopObs);
+        this.#observers.push(() => sheetYMap.unobserve(sheetTopObs));
     }
 
     // ─── Store management ─────────────────────────────────────────────────────
@@ -317,48 +209,45 @@ export class DocumentTableRegistry {
     #addStore(sheetId, tableId, tableYMap) {
         if (this.#stores.has(tableId)) return;
 
-        const sourceTableId = tableYMap.get('sourceTableId') ?? null;
+        const sourceTableId = tableYMap.get('tableId') ?? null;
         const sourceTableYMap = sourceTableId
             ? this.#resolveTableYMap(sourceTableId)
             : null;
-        // Pass the live source store so the view can borrow rows/allColumns directly
-        // instead of re-reading and re-parsing from Yjs on every change.
         const sourceStore = sourceTableId ? (this.#stores.get(sourceTableId) ?? null) : null;
 
         const tableResolver = (name) => this.getByName(name);
         const store = new TableStore(tableYMap, this.#ydoc, sourceTableYMap, sourceStore, tableResolver);
         this.#stores.set(tableId, store);
         this.#sheetOf.set(tableId, sheetId ?? '');
-        this.#nameIndex.set((store.name ?? '').toUpperCase(), tableId);
+        this.#nameIndexAdd((store.name ?? '').toUpperCase(), tableId);
 
         // Track view membership.
         if (sourceTableId) {
-            // New-style view: points to a separate source table.
             if (!this.#viewsOf.has(sourceTableId)) this.#viewsOf.set(sourceTableId, new Set());
             this.#viewsOf.get(sourceTableId).add(tableId);
-        } else if (!store.isSourceOnly) {
-            // Legacy combined table (shouldn't appear after migration, but handle defensively).
-            if (!this.#viewsOf.has(tableId)) this.#viewsOf.set(tableId, new Set());
-            this.#viewsOf.get(tableId).add(tableId);
         }
 
-        // Keep name index current
+        // Keep name index current when the table is renamed.
+        let lastObservedName = (store.name ?? '').toUpperCase();
         const nameObs = () => {
-            for (const [k, id] of this.#nameIndex) {
-                if (id === tableId) { this.#nameIndex.delete(k); break; }
-            }
-            this.#nameIndex.set((store.name ?? '').toUpperCase(), tableId);
+            const newName = (store.name ?? '').toUpperCase();
+            if (newName === lastObservedName) return;
+            this.#nameIndexRemove(lastObservedName, tableId);
+            lastObservedName = newName;
+            this.#nameIndexAdd(newName, tableId);
         };
         tableYMap.observe(nameObs);
         this.#observers.push(() => tableYMap.unobserve(nameObs));
 
-        // Row-change → formula recalc (one observer per unique rowArr)
+        // Row-change → formula recalc. One observer per unique rowArr.
+        // For views, effectiveSourceId points at the shared source table.
         const rowArr = (sourceTableYMap ?? tableYMap).get('rows');
+        const effectiveSourceId = sourceTableId ?? tableId;
         if (rowArr && !this.#trackedRowArrs.has(rowArr)) {
             this.#trackedRowArrs.add(rowArr);
-            const rowObs = () => {
-                this.#invalidateNonEntryEvals();
-                this.onTableChange?.();
+            const rowObs = (events) => {
+                this.#invalidateNonEntryEvals(effectiveSourceId);
+                this.onTableChange?.({ sourceTableId: effectiveSourceId, events, rowArr });
             };
             rowArr.observeDeep(rowObs);
             this.#observers.push(() => rowArr.unobserveDeep(rowObs));
@@ -373,40 +262,19 @@ export class DocumentTableRegistry {
         store.destroy();
         this.#stores.delete(tableId);
         this.#sheetOf.delete(tableId);
-        for (const [k, id] of this.#nameIndex) {
-            if (id === tableId) { this.#nameIndex.delete(k); break; }
-        }
-        // Remove from view membership index (covers both views-of-others and self-referential legacy)
+        this.#nameIndexRemove((store.name ?? '').toUpperCase(), tableId);
         for (const views of this.#viewsOf.values()) views.delete(tableId);
         this.#viewsOf.delete(tableId);
         this.tableVersion++;
     }
 
     /**
-     * Resolve a source table's Y.Map by ID.
-     * Checks root.tables first, then falls back to scanning sheet tables (backward compat).
+     * Resolve a source table's Y.Map by ID from root.tableData.
      * @param {string} tableId
      * @returns {import('yjs').Map<any> | null}
      */
     #resolveTableYMap(tableId) {
-        // Check document-level tables first
-        const globalTables = this.#root.get('tables');
-        if (globalTables) {
-            const tYMap = globalTables.get(tableId);
-            if (tYMap) return tYMap;
-        }
-        // Fallback: scan per-sheet tables (for any pre-migration sources)
-        const sheetOrder = this.#root.get('sheetOrder');
-        const sheetsMap  = this.#root.get('sheets');
-        if (!sheetOrder || !sheetsMap) return null;
-        for (const sheetId of sheetOrder.toArray()) {
-            const sheetYMap = sheetsMap.get(sheetId);
-            const tablesMap = sheetYMap?.get('tables');
-            if (!tablesMap) continue;
-            const tYMap = tablesMap.get(tableId);
-            if (tYMap) return tYMap;
-        }
-        return null;
+        return this.#root.get('tableData')?.get(tableId) ?? null;
     }
 
     // ─── Public query API ─────────────────────────────────────────────────────
@@ -420,27 +288,44 @@ export class DocumentTableRegistry {
         return this.#stores.get(tableId) ?? null;
     }
 
+    #nameIndexAdd(upperName, tableId) {
+        if (!upperName) return;
+        if (!this.#nameIndex.has(upperName)) this.#nameIndex.set(upperName, new Set());
+        this.#nameIndex.get(upperName).add(tableId);
+    }
+
+    #nameIndexRemove(upperName, tableId) {
+        if (!upperName) return;
+        const set = this.#nameIndex.get(upperName);
+        if (!set) return;
+        set.delete(tableId);
+        if (set.size === 0) this.#nameIndex.delete(upperName);
+    }
+
     /**
      * Get a TableStore by name (case-insensitive). Returns null if not found.
+     * When multiple tables share a name the first-registered one is returned.
      * @param {string} name
      * @returns {TableStore | null}
      */
     getByName(name) {
-        const id = this.#nameIndex.get(String(name ?? '').toUpperCase());
-        return id ? (this.#stores.get(id) ?? null) : null;
+        const set = this.#nameIndex.get(String(name ?? '').toUpperCase());
+        if (!set) return null;
+        for (const id of set) {
+            const store = this.#stores.get(id);
+            if (store) return store;
+        }
+        return null;
     }
 
     /**
-     * All source tables across the document.
-     * Includes:
-     *   - Document-level source tables (isSourceOnly: true in root.tables)
-     *   - Legacy tables that are their own source+view (no isSourceOnly, no sourceTableId)
+     * All source tables across the document (those in root.tableData, not views).
      * @returns {{ tableId: string, sheetId: string, store: TableStore }[]}
      */
     getSourceTables() {
         const result = [];
         for (const [tableId, store] of this.#stores) {
-            if (store.isSourceOnly || !store.isView) {
+            if (!store.isView) {
                 result.push({ tableId, sheetId: this.#sheetOf.get(tableId) ?? '', store });
             }
         }
@@ -448,11 +333,9 @@ export class DocumentTableRegistry {
     }
 
     /**
-     * All views whose sourceTableId matches the given table.
-     * For legacy combined tables (no isSourceOnly, no sourceTableId), returns the
-     * table itself as a single self-referential view with `isLegacy: true`.
+     * All views whose source table ID matches the given ID.
      * @param {string} sourceTableId
-     * @returns {{ viewId: string, sheetId: string, store: TableStore, isLegacy: boolean }[]}
+     * @returns {{ viewId: string, sheetId: string, store: TableStore }[]}
      */
     getViewsForTable(sourceTableId) {
         const viewIds = this.#viewsOf.get(sourceTableId);
@@ -460,12 +343,7 @@ export class DocumentTableRegistry {
         const result = [];
         for (const viewId of viewIds) {
             const store = this.#stores.get(viewId);
-            if (store) result.push({
-                viewId,
-                sheetId: this.#sheetOf.get(viewId) ?? '',
-                store,
-                isLegacy: viewId === sourceTableId,
-            });
+            if (store) result.push({ viewId, sheetId: this.#sheetOf.get(viewId) ?? '', store });
         }
         return result;
     }
@@ -481,19 +359,32 @@ export class DocumentTableRegistry {
     }
 
     /**
-     * The document-level source tables Y.Map (root.tables).
+     * The document-level source tables Y.Map (root.tableData).
      * Used by TableManager to create new source tables.
      * @returns {import('yjs').Map<any>}
      */
-    getGlobalTablesMap() {
-        return this.#globalTablesMap ?? this.#getOrCreateGlobalTables();
+    getTableDataMap() {
+        return this.#tableDataMap ?? this.#getOrCreateTableData();
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
-    /** Rebuild formula evaluators for all tables that have isNonEntry formula columns. */
-    #invalidateNonEntryEvals() {
-        for (const store of this.#stores.values()) {
+    /**
+     * Rebuild formula evaluators for tables affected by row changes in `sourceTableId`.
+     * @param {string} sourceTableId
+     */
+    #invalidateNonEntryEvals(sourceTableId) {
+        const affected = new Set();
+        const src = this.#stores.get(sourceTableId);
+        if (src) affected.add(src);
+        const viewIds = this.#viewsOf.get(sourceTableId);
+        if (viewIds) {
+            for (const id of viewIds) {
+                const s = this.#stores.get(id);
+                if (s) affected.add(s);
+            }
+        }
+        for (const store of affected) {
             if (store.columns.some(c => c.isNonEntry && c.defaultFormula)) {
                 store.invalidate();
             }

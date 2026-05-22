@@ -285,7 +285,7 @@ export class GridPaintCoordinator {
         ctx.scale(dpr, dpr);
 
         for (const table of renderContext.tableManager.stores.values()) {
-            if (table.isSourceOnly || table.sortColId) continue;
+            if (table.sortColId) continue;
             const tableCanvasX = virtualizer.colMetrics.offsetOf(table.startCol) - scrollLeft;
             const colW = virtualizer.getColWidth(table.startCol);
             if (tableCanvasX > virtualizer.containerWidth - HEADER_WIDTH || tableCanvasX + colW < 0) continue;

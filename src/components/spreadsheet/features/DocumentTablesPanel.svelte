@@ -299,13 +299,13 @@
         if (!session?.ydoc || !session?.root) return;
         const sheetId = registry?.getSheetId(id);
         if (sheetId) {
-            // View or legacy table on a specific sheet
-            const tablesMap = session.root.get('sheets')?.get(sheetId)?.get('tables');
-            if (tablesMap) session.ydoc.transact(() => tablesMap.delete(id));
+            // View entry on a specific sheet
+            const viewsMap = session.root.get('sheets')?.get(sheetId)?.get('tableViews');
+            if (viewsMap) session.ydoc.transact(() => viewsMap.delete(id));
         } else {
-            // Document-level source table in root.tables
-            const globalTables = session.root.get('tables');
-            if (globalTables) session.ydoc.transact(() => globalTables.delete(id));
+            // Source table in root.tableData
+            const tableData = session.root.get('tableData');
+            if (tableData) session.ydoc.transact(() => tableData.delete(id));
         }
     }
 

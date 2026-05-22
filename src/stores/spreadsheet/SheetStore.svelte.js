@@ -318,11 +318,11 @@ export class SheetStore {
             if (event.keysChanged.has('printSettings')) {
                 // tryAttachPrintSettings is defined later in the same scope;
                 // closures evaluate at call time so this is safe.
-                tryAttachPrintSettings(); // eslint-disable-line no-use-before-define
+                tryAttachPrintSettings();
                 this.printSettingsVersion++;
             }
             if (event.keysChanged.has('floatingImages')) {
-                tryAttachFloatingImages(); // eslint-disable-line no-use-before-define
+                tryAttachFloatingImages();
                 this.#syncFloatingImages();
                 this.floatingImagesVersion++;
             }
@@ -872,21 +872,22 @@ export class SheetStore {
     }
 
     // --- Sheet Property Setters ---
+    // All sheet-level mutations route through #transact so they're tagged with
+    // YJS_ORIGIN.UI and tracked by the UndoManager.
 
-    setName(name) { this.#sheet.set('name', name); }
-    setRowCount(count) { this.#sheet.set('rowCount', count); }
-    setColCount(count) { this.#sheet.set('colCount', count); }
-    setFrozenRows(count) { this.#sheet.set('frozenRows', count); }
-    setFrozenColumns(count) { this.#sheet.set('frozenColumns', count); }
-    setDefaultRowHeight(height) { this.#sheet.set('defaultRowHeight', height); }
-    setDefaultColWidth(width) { this.#sheet.set('defaultColWidth', width); }
-    setHidden(hidden) { this.#sheet.set('hidden', hidden); }
+    setName(name)              { this.#transact(() => this.#sheet.set('name', name)); }
+    setRowCount(count)         { this.#transact(() => this.#sheet.set('rowCount', count)); }
+    setColCount(count)         { this.#transact(() => this.#sheet.set('colCount', count)); }
+    setFrozenRows(count)       { this.#transact(() => this.#sheet.set('frozenRows', count)); }
+    setFrozenColumns(count)    { this.#transact(() => this.#sheet.set('frozenColumns', count)); }
+    setDefaultRowHeight(height){ this.#transact(() => this.#sheet.set('defaultRowHeight', height)); }
+    setDefaultColWidth(width)  { this.#transact(() => this.#sheet.set('defaultColWidth', width)); }
+    setHidden(hidden)          { this.#transact(() => this.#sheet.set('hidden', hidden)); }
     setTabColor(color) {
-        if (color === undefined) {
-            this.#sheet.delete('tabColor');
-        } else {
-            this.#sheet.set('tabColor', color);
-        }
+        this.#transact(() => {
+            if (color === undefined) this.#sheet.delete('tabColor');
+            else this.#sheet.set('tabColor', color);
+        });
     }
 
     // --- Row/Column Operations ---
@@ -1535,23 +1536,39 @@ export class SheetStore {
      * @param {number} delta
      */
     #shiftTables(axis, atIndex, delta) {
-        const tables = this.#sheet.get('tables');
+        const tables = this.#sheet.get('tableViews');
         if (!tables) return;
 
         const startKey = axis === 'row' ? 'startRow' : 'startCol';
+        // Inline tables have an endCol that must be kept in sync on column ops.
+        // Row axis: tables don't store an endRow for inline mode (the row range is
+        // derived from the row count), so no end key to shift on row ops.
+        const endKey = axis === 'col' ? 'endCol' : null;
         const vpStartKey = axis === 'row' ? 'vpStartRow' : 'vpStartCol';
         const vpEndKey = axis === 'row' ? 'vpEndRow' : 'vpEndCol';
 
         tables.forEach((tm) => {
             const mode = tm.get('mode') ?? 'inline';
             const start = tm.get(startKey);
+            const end = endKey != null ? tm.get(endKey) : undefined;
 
             if (delta > 0) {
-                if (start >= atIndex) tm.set(startKey, start + delta);
-            } else {
-                if (start > atIndex) tm.set(startKey, start + delta);
-                else if (start === atIndex && axis === 'col') {
-                    // Column deletion might affect table width, but we don't have endCol for inline
+                // Insertion at/before start → shift whole range right/down
+                if (start >= atIndex) {
+                    tm.set(startKey, start + delta);
+                    if (endKey != null && typeof end === 'number') tm.set(endKey, end + delta);
+                } else if (endKey != null && typeof end === 'number' && end >= atIndex) {
+                    // Insertion inside the table → extend its right edge
+                    tm.set(endKey, end + delta);
+                }
+            } else if (delta < 0) {
+                // Deletion strictly before start → shift whole range left/up
+                if (start > atIndex) {
+                    tm.set(startKey, start + delta);
+                    if (endKey != null && typeof end === 'number') tm.set(endKey, end + delta);
+                } else if (endKey != null && typeof end === 'number' && atIndex <= end) {
+                    // Deletion inside the table → contract right edge (never below start)
+                    tm.set(endKey, Math.max(start, end + delta));
                 }
             }
 
@@ -1858,7 +1875,7 @@ export class SheetStore {
             }
             arr.push([rule]);
         });
-        this.cfVersion++;
+        // cfVersion is incremented by the cfHandler observer; no manual bump needed.
     }
 
     /**
@@ -1876,7 +1893,6 @@ export class SheetStore {
             arr.delete(idx, 1);
             arr.insert(idx, [{ ...rules[idx], ...updates }]);
         });
-        this.cfVersion++;
     }
 
     /**
@@ -1891,7 +1907,6 @@ export class SheetStore {
             const idx = rules.findIndex(r => r.id === id);
             if (idx !== -1) arr.delete(idx, 1);
         });
-        this.cfVersion++;
     }
 
     // --- Data Validation ---

@@ -4,17 +4,20 @@
  * Defines the Yjs document structure for spreadsheet documents.
  *
  * ## Document Root Structure (Y.Map):
- * - metadata: Y.Map - Document-level metadata
- * - sheets: Y.Map<sheetId, Y.Map> - Collection of sheets
- * - sheetOrder: Y.Array<string> - Ordered list of sheet IDs
- * - namedRanges: Y.Map<name, Y.Map> - Named range definitions
+ * - metadata:   Y.Map  — document-level metadata
+ * - sheets:     Y.Map<sheetId, Y.Map>  — collection of sheets
+ * - sheetOrder: Y.Array<string>  — ordered list of sheet IDs
+ * - namedRanges: Y.Map<name, Y.Map>  — named range definitions
+ * - tableData:  Y.Map<tableId, Y.Map>  — source tables (data + schema, not tied to any sheet)
  *
- * ## Sheet cell storage (v4):
- * - cellValues: Y.Array (YKeyValue) — { v, t } per "row,col" key
- * - cellStyles: Y.Array (YKeyValue) — { ct, protected, formatting props } per "row,col" key
- * - rowMeta:   Y.Array (YKeyValue) — { height, hidden, formatting } per row index key
- * - colMeta:   Y.Array (YKeyValue) — { width, hidden, formatting } per col index key
- * - borders:   Y.Array (YKeyValue) — { style, width, color } per "h|v,row,col" edge key
+ * ## Sheet structure:
+ * - cellValues:  Y.Array (YKeyValue) — { v, t } per "row,col" key
+ * - cellStyles:  Y.Array (YKeyValue) — { ct, protected, formatting props } per "row,col" key
+ * - rowMeta:     Y.Array (YKeyValue) — { height, hidden, formatting } per row index key
+ * - colMeta:     Y.Array (YKeyValue) — { width, hidden, formatting } per col index key
+ * - borders:     Y.Array (YKeyValue) — { style, width, color } per "h|v,row,col" edge key
+ * - tableViews:  Y.Map<viewId, Y.Map>  — table views positioned on this sheet, each referencing
+ *                                        a source table via `tableId`
  */
 import * as Y from 'yjs';
 import { YKeyValue } from 'y-utility/y-keyvalue';
@@ -93,7 +96,7 @@ export function createSheetYMap(ydoc, id, name, options = {}) {
     sheet.set('borders', new Y.Array());
 
     sheet.set('merges',            new Y.Array());
-    sheet.set('tables',            new Y.Map());
+    sheet.set('tableViews',        new Y.Map());
     sheet.set('repeaters',         new Y.Map());
     sheet.set('printSettings',     new Y.Map());
     sheet.set('conditionalFormats',new Y.Array());
@@ -135,6 +138,7 @@ export function initializeDocument(ydoc, metadata = {}) {
         root.set('sheets',      new Y.Map());
         root.set('sheetOrder',  new Y.Array());
         root.set('namedRanges', new Y.Map());
+        root.set('tableData',   new Y.Map());
 
         const sheets     = root.get('sheets');
         const sheetOrder = root.get('sheetOrder');
@@ -143,8 +147,20 @@ export function initializeDocument(ydoc, metadata = {}) {
     });
 }
 
-// ─── Table / repeater / named-range helpers (unchanged) ───────────────────────
+// ─── Table / repeater / named-range helpers ───────────────────────────────────
 
+/**
+ * Create a source-table Y.Map for storage in root.tableData.
+ *   columnDefs:  Y.Map<colId, Y.Map>  — column definitions
+ *   columnOrder: Y.Array<string>       — ordered column IDs
+ *   rows:        Y.Array<Y.Map>        — data rows
+ *
+ * @param {string} id
+ * @param {string} name
+ * @param {Object} [options]
+ * @param {Array<{id?:string, name:string, type?:string, required?:boolean, isNonEntry?:boolean, defaultFormula?:string}>} [options.columns]
+ * @returns {import('yjs').Map<any>}
+ */
 export function createTableYMap(id, name, options = {}) {
     const table = new Y.Map();
     table.set('id', id);
@@ -152,36 +168,41 @@ export function createTableYMap(id, name, options = {}) {
     table.set('mode', options.mode ?? 'inline');
     table.set('startRow', options.startRow ?? 0);
     table.set('startCol', options.startCol ?? 0);
-    table.set('endCol',   options.endCol   ?? (options.startCol ?? 0));
     if (options.mode === 'viewport') {
         table.set('vpStartRow', options.vpStartRow ?? 0);
         table.set('vpStartCol', options.vpStartCol ?? 0);
         table.set('vpEndRow',   options.vpEndRow   ?? 10);
         table.set('vpEndCol',   options.vpEndCol   ?? 5);
     }
-    table.set('columns',   new Y.Array());
-    table.set('rows',      new Y.Array());
-    table.set('sortColId', null);
-    table.set('sortDir',   'asc');
-    return table;
-}
 
-export function createTableColumnYMap(options = {}) {
-    const col = new Y.Map();
-    col.set('id',           options.id ?? `col-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-    col.set('name',         options.name     ?? '');
-    col.set('dataType',     options.dataType ?? 'text');
-    col.set('required',     options.required ?? false);
-    col.set('sortOrder',    options.sortOrder ?? 0);
-    col.set('conditionalFormats', new Y.Array());
-    col.set('width',         options.width  ?? null);
-    col.set('defaultFormula', options.defaultFormula ?? options.formula ?? null);
-    if (options.dataValidation) {
-        const dv = new Y.Map();
-        Object.entries(options.dataValidation).forEach(([k, v]) => dv.set(k, v));
-        col.set('dataValidation', dv);
+    // Modern column storage: columnDefs map + columnOrder array.
+    const defsMap  = new Y.Map();
+    const orderArr = new Y.Array();
+    if (Array.isArray(options.columns)) {
+        for (const c of options.columns) {
+            const colId = c.id ?? `col-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const cm = new Y.Map();
+            cm.set('id',           colId);
+            cm.set('name',         c.name         ?? '');
+            cm.set('type',         c.type         ?? 'text');
+            cm.set('required',     c.required     ?? false);
+            cm.set('isNonEntry',   c.isNonEntry   ?? false);
+            if (c.defaultFormula) cm.set('defaultFormula', c.defaultFormula);
+            if (c.hAlign) cm.set('hAlign', c.hAlign);
+            defsMap.set(colId, cm);
+            orderArr.push([colId]);
+        }
     }
-    return col;
+    table.set('columnDefs',  defsMap);
+    table.set('columnOrder', orderArr);
+
+    table.set('rows',         new Y.Array());
+    table.set('filters',      new Y.Map());
+    table.set('sortColId',    null);
+    table.set('sortDir',      'asc');
+    table.set('insertSortColId', null);
+    table.set('insertSortDir',   'asc');
+    return table;
 }
 
 export function createRepeaterYMap(id, name, options = {}) {
@@ -241,11 +262,15 @@ export const spreadsheetSchema = {
 
         if (!sheets) return;
 
-        // Add sub-fields missing from pre-v3 docs.
-        sheets.forEach((sheet) => {
-            if (!sheet.has('tables'))       sheet.set('tables',       new Y.Map());
-            if (!sheet.has('repeaters'))    sheet.set('repeaters',    new Y.Map());
-            if (!sheet.has('printSettings'))sheet.set('printSettings',new Y.Map());
+        // Add sub-fields missing from pre-v3 docs. Tag as MIGRATION so these
+        // writes never enter the UndoManager and aren't broadcast as separate
+        // user-origin transactions.
+        migrateTransact(ydoc, () => {
+            sheets.forEach((sheet) => {
+                if (!sheet.has('tableViews'))   sheet.set('tableViews',   new Y.Map());
+                if (!sheet.has('repeaters'))    sheet.set('repeaters',    new Y.Map());
+                if (!sheet.has('printSettings'))sheet.set('printSettings',new Y.Map());
+            });
         });
 
         // v3: borders Y.Map → Y.Array (YKeyValue backing).
@@ -345,7 +370,7 @@ function remapCt(ct) {
  * @param {Y.Map} sheets
  */
 function migrateLegacyCellTypes(ydoc, sheets) {
-    ydoc.transact(() => {
+    migrateTransact(ydoc, () => {
         sheets.forEach((sheet) => {
             // 1. cellStyles entries — { ct, ...formatting }
             for (const ykvKey of ['cellStyles', 'rowMeta', 'colMeta']) {
@@ -358,8 +383,8 @@ function migrateLegacyCellTypes(ydoc, sheets) {
                 }
             }
 
-            // 2. Table column definitions — each colDef Y.Map holds `type` and `typeConfig` (JSON string)
-            const tables = sheet.get('tables');
+            // 2. Table column definitions (in source tables at root.tableData)
+            const tables = sheet.get('tableViews');
             if (tables instanceof Y.Map) {
                 tables.forEach((table) => {
                     if (!(table instanceof Y.Map)) return;

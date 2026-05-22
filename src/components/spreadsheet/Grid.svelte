@@ -2216,12 +2216,6 @@
     }
 
     function resolveTableColumnOptions(tableName, columnId) {
-        const t = renderContext?.tableManager?.getTableByName(tableName);
-        if (t) {
-            return t.getColumn(t.resolveColId(String(columnId)))
-                .filter(v => v != null && v !== '')
-                .map(String);
-        }
         return spreadsheetSession.getTableColumnValues(tableName, columnId);
     }
 

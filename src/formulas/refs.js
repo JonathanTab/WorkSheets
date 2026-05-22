@@ -101,10 +101,13 @@ export function adjustByOffset(formula, rowOffset, colOffset) {
  */
 export function adjustForRowInsert(formula, insertedRowIndex) {
     const threshold = insertedRowIndex + 1; // convert to 1-based formula row
+    // Structural ops move the underlying data, so both relative AND absolute
+    // refs must shift — otherwise an absolute ref silently retargets to whatever
+    // happens to be at the original coordinates after the insertion.
     return withLiteralProtection(formula, (s) =>
         s.replace(REF_RE, (match, colAbs, col, rowAbs, row) => {
             const rowNum = parseInt(row, 10);
-            if (!rowAbs && rowNum >= threshold) {
+            if (rowNum >= threshold) {
                 return `${colAbs}${col}${rowAbs}${rowNum + 1}`;
             }
             return match;
@@ -121,13 +124,13 @@ export function adjustForRowInsert(formula, insertedRowIndex) {
  * @returns {string}
  */
 export function adjustForColInsert(formula, insertedColIndex) {
+    // Structural ops move underlying data — both relative AND absolute col refs
+    // must shift so the formula keeps pointing at the same cell.
     return withLiteralProtection(formula, (s) =>
         s.replace(REF_RE, (match, colAbs, col, rowAbs, row) => {
-            if (!colAbs) {
-                const colNum = colToNum(col);
-                if (colNum >= insertedColIndex) {
-                    return `${colAbs}${numToCol(colNum + 1)}${rowAbs}${row}`;
-                }
+            const colNum = colToNum(col);
+            if (colNum >= insertedColIndex) {
+                return `${colAbs}${numToCol(colNum + 1)}${rowAbs}${row}`;
             }
             return match;
         })
@@ -145,13 +148,13 @@ export function adjustForColInsert(formula, insertedColIndex) {
  */
 export function adjustForRowDelete(formula, deletedRowIndex) {
     const formulaRow = deletedRowIndex + 1; // 1-based
+    // Structural delete invalidates absolute refs to the deleted row and shifts
+    // both relative and absolute refs to rows below.
     return withLiteralProtection(formula, (s) =>
         s.replace(REF_RE, (match, colAbs, col, rowAbs, row) => {
             const rowNum = parseInt(row, 10);
-            if (!rowAbs) {
-                if (rowNum === formulaRow) return '#REF!';
-                if (rowNum > formulaRow) return `${colAbs}${col}${rowAbs}${rowNum - 1}`;
-            }
+            if (rowNum === formulaRow) return '#REF!';
+            if (rowNum > formulaRow) return `${colAbs}${col}${rowAbs}${rowNum - 1}`;
             return match;
         })
     );
@@ -167,13 +170,13 @@ export function adjustForRowDelete(formula, deletedRowIndex) {
  * @returns {string}
  */
 export function adjustForColDelete(formula, deletedColIndex) {
+    // Structural delete invalidates absolute refs to the deleted column and
+    // shifts both relative and absolute refs to columns to the right.
     return withLiteralProtection(formula, (s) =>
         s.replace(REF_RE, (match, colAbs, col, rowAbs, row) => {
-            if (!colAbs) {
-                const colNum = colToNum(col);
-                if (colNum === deletedColIndex) return '#REF!';
-                if (colNum > deletedColIndex) return `${colAbs}${numToCol(colNum - 1)}${rowAbs}${row}`;
-            }
+            const colNum = colToNum(col);
+            if (colNum === deletedColIndex) return '#REF!';
+            if (colNum > deletedColIndex) return `${colAbs}${numToCol(colNum - 1)}${rowAbs}${row}`;
             return match;
         })
     );

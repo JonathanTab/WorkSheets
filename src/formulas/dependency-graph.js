@@ -26,10 +26,18 @@ export function parseCellKey(key) {
     return { row, col };
 }
 
+/** Ranges spanning more than this many rows skip the row index and use a linear scan. */
+const MAX_RANGE_INDEX_ROWS = 256;
+
 /**
  * DependencyGraph class
  */
 export class DependencyGraph {
+    /** @type {Map<number, Set<string>>} */
+    #rangeRowIndex = new Map();
+    /** @type {Set<string>} */
+    #largeRangeFormulas = new Set();
+
     constructor() {
         // Map from cell key -> Set of cell keys it depends on (individual cells)
         /** @type {Map<string, Set<string>>} */
@@ -45,6 +53,8 @@ export class DependencyGraph {
         /** @type {Map<string, Array<{startRow:number,endRow:number,startCol:number,endCol:number}>>} */
         this.rangeDependencies = new Map();
 
+        // #rangeRowIndex and #largeRangeFormulas are initialised by class field declarations.
+
         // Map from cell key -> parsed AST (for re-evaluation)
         /** @type {Map<string, Object>} */
         this.formulas = new Map();
@@ -52,6 +62,43 @@ export class DependencyGraph {
         // Set of dirty cells that need recalculation
         /** @type {Set<string>} */
         this.dirtyCells = new Set();
+
+        /**
+         * Keys found to be in a circular dependency during the last
+         * getDirtyCellsOrdered() call. FormulaEngine reads this to mark them
+         * with #CIRC! instead of evaluating them.
+         * @type {Set<string>}
+         */
+        this.circularCells = new Set();
+    }
+
+    // ── Row-index helpers ─────────────────────────────────────────────────────
+
+    #addRangeToRowIndex(formulaKey, range) {
+        const span = range.endRow - range.startRow;
+        if (span > MAX_RANGE_INDEX_ROWS) {
+            this.#largeRangeFormulas.add(formulaKey);
+            return;
+        }
+        for (let r = range.startRow; r <= range.endRow; r++) {
+            if (!this.#rangeRowIndex.has(r)) this.#rangeRowIndex.set(r, new Set());
+            this.#rangeRowIndex.get(r).add(formulaKey);
+        }
+    }
+
+    #removeRangeFromRowIndex(formulaKey, range) {
+        const span = range.endRow - range.startRow;
+        if (span > MAX_RANGE_INDEX_ROWS) {
+            // Managed via #largeRangeFormulas — remove only if no remaining large ranges.
+            return;
+        }
+        for (let r = range.startRow; r <= range.endRow; r++) {
+            const set = this.#rangeRowIndex.get(r);
+            if (set) {
+                set.delete(formulaKey);
+                if (set.size === 0) this.#rangeRowIndex.delete(r);
+            }
+        }
     }
 
     /**
@@ -93,7 +140,10 @@ export class DependencyGraph {
             }
 
             this.dependencies.set(key, deps);
-            if (ranges.length > 0) this.rangeDependencies.set(key, ranges);
+            if (ranges.length > 0) {
+                this.rangeDependencies.set(key, ranges);
+                for (const r of ranges) this.#addRangeToRowIndex(key, r);
+            }
 
             // Mark this cell as dirty
             this.dirtyCells.add(key);
@@ -110,20 +160,25 @@ export class DependencyGraph {
     clearDependencies(key) {
         const oldDeps = this.dependencies.get(key);
         if (oldDeps) {
-            // Remove this cell from dependents of its old dependencies
             for (const depKey of oldDeps) {
                 const dependents = this.dependents.get(depKey);
                 if (dependents) {
                     dependents.delete(key);
-                    if (dependents.size === 0) {
-                        this.dependents.delete(depKey);
-                    }
+                    if (dependents.size === 0) this.dependents.delete(depKey);
                 }
             }
             this.dependencies.delete(key);
         }
-        // Clear range deps for this formula cell
-        this.rangeDependencies.delete(key);
+
+        // Clear range deps and their row-index entries.
+        const oldRanges = this.rangeDependencies.get(key);
+        if (oldRanges) {
+            for (const r of oldRanges) this.#removeRangeFromRowIndex(key, r);
+            this.rangeDependencies.delete(key);
+        }
+        // Remove from large-range set (may be stale if all large ranges are gone —
+        // #addRangeToRowIndex will re-add if a new large range is registered).
+        this.#largeRangeFormulas.delete(key);
     }
 
     /**
@@ -147,12 +202,37 @@ export class DependencyGraph {
         const toRecalculate = new Set();
         const visited = new Set();
 
-        // Collect initial set from both point deps and range deps for the changed cell
+        // Collect initial set: point deps + range-dep candidates.
         const initial = new Set(this.dependents.get(key) ?? []);
         const { row, col } = parseCellKey(key);
-        for (const [formulaKey, ranges] of this.rangeDependencies) {
+
+        // Fast path: row-indexed lookup for small ranges.
+        const rowCandidates = this.#rangeRowIndex.get(row);
+        if (rowCandidates) {
+            for (const formulaKey of rowCandidates) {
+                // Precise column check — the row index is a necessary but not
+                // sufficient filter (it only covers the row dimension).
+                const ranges = this.rangeDependencies.get(formulaKey);
+                if (!ranges) continue;
+                for (const r of ranges) {
+                    if (r.endRow - r.startRow <= MAX_RANGE_INDEX_ROWS &&
+                        row >= r.startRow && row <= r.endRow &&
+                        col >= r.startCol && col <= r.endCol) {
+                        initial.add(formulaKey);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Linear scan only for formulas with "large" range deps (spans > MAX_RANGE_INDEX_ROWS).
+        for (const formulaKey of this.#largeRangeFormulas) {
+            if (initial.has(formulaKey)) continue;
+            const ranges = this.rangeDependencies.get(formulaKey);
+            if (!ranges) continue;
             for (const r of ranges) {
-                if (row >= r.startRow && row <= r.endRow && col >= r.startCol && col <= r.endCol) {
+                if (row >= r.startRow && row <= r.endRow &&
+                    col >= r.startCol && col <= r.endCol) {
                     initial.add(formulaKey);
                     break;
                 }
@@ -183,30 +263,63 @@ export class DependencyGraph {
     }
 
     /**
-     * Get all dirty cells in topological order
-     * @returns {Array<string>} - Cell keys in dependency order
+     * Get all dirty cells in topological order.
+     *
+     * Range dependencies (stored in rangeDependencies) must be included in the
+     * sort — otherwise a formula like B1=SUM(A1:A10) whose range contains a
+     * dirty formula cell A5 would be evaluated BEFORE A5 and see a stale value.
+     *
+     * For each dirty formula cell K we check both its point deps (dependencies)
+     * and any dirty formula cells that fall inside its range deps
+     * (rangeDependencies). Only dirty cells matter for ordering since
+     * non-dirty formula cells already have correct values in computedValues.
+     *
+     * @returns {Array<string>} - Cell keys in evaluation order (deps before dependents)
      */
     getDirtyCellsOrdered() {
-        // Topological sort of dirty cells
+        this.circularCells.clear();
         const result = [];
         const visited = new Set();
         const visiting = new Set();
 
+        // Pre-parse every dirty cell key so we don't re-parse inside inner loops.
+        const dirtyParsed = new Map();
+        for (const key of this.dirtyCells) {
+            dirtyParsed.set(key, parseCellKey(key));
+        }
+
         const visit = (key) => {
             if (visited.has(key)) return;
             if (visiting.has(key)) {
-                // Circular dependency detected
-                console.warn(`Circular dependency detected involving cell ${key}`);
+                // Circular dependency — record it; FormulaEngine will mark #CIRC!
+                this.circularCells.add(key);
                 return;
             }
 
             visiting.add(key);
 
+            // 1. Point dependencies (individual cell refs).
             const deps = this.dependencies.get(key);
             if (deps) {
                 for (const depKey of deps) {
-                    if (this.formulas.has(depKey)) {
-                        visit(depKey);
+                    if (this.formulas.has(depKey)) visit(depKey);
+                }
+            }
+
+            // 2. Range dependencies: check whether any OTHER dirty formula cell
+            //    falls inside one of this formula's ranges. If so, that cell
+            //    must be evaluated first.
+            const ranges = this.rangeDependencies.get(key);
+            if (ranges && ranges.length > 0) {
+                for (const [otherKey, { row, col }] of dirtyParsed) {
+                    if (otherKey === key) continue;
+                    if (!this.formulas.has(otherKey)) continue;
+                    for (const r of ranges) {
+                        if (row >= r.startRow && row <= r.endRow &&
+                            col >= r.startCol && col <= r.endCol) {
+                            visit(otherKey);
+                            break;
+                        }
                     }
                 }
             }
@@ -216,7 +329,6 @@ export class DependencyGraph {
             result.push(key);
         };
 
-        // Visit all dirty cells
         for (const key of this.dirtyCells) {
             visit(key);
         }
@@ -290,8 +402,11 @@ export class DependencyGraph {
         this.dependencies.clear();
         this.dependents.clear();
         this.rangeDependencies.clear();
+        this.#rangeRowIndex.clear();
+        this.#largeRangeFormulas.clear();
         this.formulas.clear();
         this.dirtyCells.clear();
+        this.circularCells.clear();
     }
 
     /**

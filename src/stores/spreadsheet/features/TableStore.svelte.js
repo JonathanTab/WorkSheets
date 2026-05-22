@@ -81,7 +81,7 @@ import { YJS_ORIGIN } from '../yjsOrigins.js';
  *   Reads:  source rows + columns (filtered by view's visibleColumns)
  *   Writes: insertRow / updateCell / deleteRow → source rows Y.Array
  *   Own Y.Map stores: id, name, mode, startRow, startCol,
- *                     sourceSheetId, sourceTableId, visibleColumns (Y.Array)
+ *                     tableId (reference to source in root.tableData), visibleColumns (Y.Array)
  */
 
 /** Maps column type → display icon glyph */
@@ -287,64 +287,12 @@ export class TableStore {
         this.#sourceYMap = sourceTableYMap;
         this.#sourceStore = sourceStore;
         if (tableResolver) this.#tableResolver = tableResolver;
-        this.#migrateColumnsIfNeeded();
         this.#syncFromYjs();
         this.#observeYjs();
     }
 
     // Tags all user-initiated mutations with UI origin so UndoManager records them.
-    #transact(fn) { this.#transact(fn, YJS_ORIGIN.UI); }
-
-    /**
-     * One-time migrations:
-     * 1. Converts old `columns` Y.Array<Y.Map> to `columnDefs`/`columnOrder`.
-     * 2. Renames `formula` → `defaultFormula` on each column def (the old model
-     *    coupled formula with isNonEntry=true; the new model separates them).
-     */
-    #migrateColumnsIfNeeded() {
-        // Migration 1: old flat columns array → columnDefs map + columnOrder array
-        if (!this.#tableYMap.has("columnDefs") && !this.#tableYMap.has("columnOrder")) {
-            const oldCols = this.#tableYMap.get("columns");
-            if (oldCols) {
-                this.#ydoc.transact(() => {
-                    const defsMap = new Y.Map();
-                    const orderArr = new Y.Array();
-                    for (let i = 0; i < oldCols.length; i++) {
-                        const old = oldCols.get(i);
-                        const colId = old.get("id");
-                        if (!colId) continue;
-                        const cm = new Y.Map();
-                        for (const [k, v] of old.entries()) cm.set(k, v);
-                        defsMap.set(colId, cm);
-                        orderArr.push([colId]);
-                    }
-                    this.#tableYMap.set("columnDefs", defsMap);
-                    this.#tableYMap.set("columnOrder", orderArr);
-                    this.#tableYMap.delete("columns");
-                }, YJS_ORIGIN.MIGRATION);
-            }
-        }
-
-        // Migration 2: rename `formula` → `defaultFormula` on each column def
-        const src = this.#sourceYMap ?? this.#tableYMap;
-        const defsMap = src.get("columnDefs");
-        if (defsMap) {
-            let needsMigration = false;
-            defsMap.forEach((cm) => {
-                if (cm && cm.has && cm.has("formula") && !cm.has("defaultFormula")) needsMigration = true;
-            });
-            if (needsMigration) {
-                this.#ydoc.transact(() => {
-                    defsMap.forEach((cm) => {
-                        if (!cm || !cm.has || !cm.has("formula") || cm.has("defaultFormula")) return;
-                        const f = cm.get("formula");
-                        if (f) cm.set("defaultFormula", f);
-                        cm.delete("formula");
-                    });
-                }, YJS_ORIGIN.MIGRATION);
-            }
-        }
-    }
+    #transact(fn) { this.#ydoc.transact(fn, YJS_ORIGIN.UI); }
 
     // ─── Yjs sync ────────────────────────────────────────────────────────────
 
@@ -419,8 +367,7 @@ export class TableStore {
             return;
         }
 
-        // Source/legacy table: parse column defs from Y.Map once.
-        // allColumns and columns are identical for source tables (no visibleColumns filter).
+        // Source table: parse column defs. allColumns and columns are identical (no visibility filter).
         const colSrc = this.#sourceYMap ?? this.#tableYMap;
         const defsMap = colSrc.get("columnDefs");
         const orderArr = colSrc.get("columnOrder");
@@ -475,7 +422,7 @@ export class TableStore {
             this.#rebuildView();
             return;
         }
-        // Source/legacy table: read rows from Y.Map and notify registered views.
+        // Source table: read rows from Y.Map and notify registered views.
         const rowSrc = this.#sourceYMap ?? this.#tableYMap;
         const arr = rowSrc.get("rows");
         if (!arr) {
@@ -484,17 +431,8 @@ export class TableStore {
             this.#notifyViewStores();
             return;
         }
-        this.#_rows = arr.toArray().map((r) => {
-            const obj = r.toJSON ? r.toJSON() : { ...r };
-            // Parse per-row and per-cell formatting JSON eagerly so paint reads are O(1)
-            if (typeof obj._rowFmt === 'string') {
-                try { obj._rowFmt = JSON.parse(obj._rowFmt); } catch { obj._rowFmt = undefined; }
-            }
-            if (typeof obj._fmt === 'string') {
-                try { obj._fmt = JSON.parse(obj._fmt); } catch { obj._fmt = undefined; }
-            }
-            return obj;
-        });
+        // _fmt / _rowFmt are Y.Maps — r.toJSON() returns nested plain objects.
+        this.#_rows = arr.toArray().map((r) => r.toJSON ? r.toJSON() : { ...r });
         this.#rebuildView();
         this.#notifyViewStores();
     }
@@ -965,16 +903,23 @@ export class TableStore {
         const yRow = this.#getRowYMap(displayIndex);
         if (!yRow) return;
         this.#transact(() => {
-            const existing = yRow.get('_fmt');
-            const fmt = existing ? JSON.parse(existing) : {};
-            if (!fmt[colId]) fmt[colId] = {};
-            for (const [k, v] of Object.entries(props)) {
-                if (v == null) delete fmt[colId][k];
-                else fmt[colId][k] = v;
+            let fmtMap = yRow.get('_fmt');
+            if (!(fmtMap instanceof Y.Map)) {
+                // Legacy string remnant or missing — replace with a fresh Y.Map.
+                fmtMap = new Y.Map();
+                yRow.set('_fmt', fmtMap);
             }
-            if (Object.keys(fmt[colId]).length === 0) delete fmt[colId];
-            if (Object.keys(fmt).length === 0) yRow.delete('_fmt');
-            else yRow.set('_fmt', JSON.stringify(fmt));
+            let colMap = fmtMap.get(colId);
+            if (!(colMap instanceof Y.Map)) {
+                colMap = new Y.Map();
+                fmtMap.set(colId, colMap);
+            }
+            for (const [k, v] of Object.entries(props)) {
+                if (v == null) colMap.delete(k);
+                else colMap.set(k, v);
+            }
+            if (colMap.size === 0) fmtMap.delete(colId);
+            if (fmtMap.size === 0) yRow.delete('_fmt');
         });
     }
 
@@ -988,14 +933,16 @@ export class TableStore {
         const yRow = this.#getRowYMap(displayIndex);
         if (!yRow) return;
         this.#transact(() => {
-            const existing = yRow.get('_rowFmt');
-            const fmt = existing ? JSON.parse(existing) : {};
-            for (const [k, v] of Object.entries(props)) {
-                if (v == null) delete fmt[k];
-                else fmt[k] = v;
+            let rowFmtMap = yRow.get('_rowFmt');
+            if (!(rowFmtMap instanceof Y.Map)) {
+                rowFmtMap = new Y.Map();
+                yRow.set('_rowFmt', rowFmtMap);
             }
-            if (Object.keys(fmt).length === 0) yRow.delete('_rowFmt');
-            else yRow.set('_rowFmt', JSON.stringify(fmt));
+            for (const [k, v] of Object.entries(props)) {
+                if (v == null) rowFmtMap.delete(k);
+                else rowFmtMap.set(k, v);
+            }
+            if (rowFmtMap.size === 0) yRow.delete('_rowFmt');
         });
     }
 
@@ -1010,12 +957,13 @@ export class TableStore {
         const existing = yRow.get('_fmt');
         if (!existing) return;
         this.#transact(() => {
-            try {
-                const fmt = JSON.parse(existing);
-                delete fmt[colId];
-                if (Object.keys(fmt).length === 0) yRow.delete('_fmt');
-                else yRow.set('_fmt', JSON.stringify(fmt));
-            } catch { /* malformed JSON — just delete */ yRow.delete('_fmt'); }
+            if (existing instanceof Y.Map) {
+                existing.delete(colId);
+                if (existing.size === 0) yRow.delete('_fmt');
+                return;
+            }
+            // Legacy string remnant — just nuke it.
+            yRow.delete('_fmt');
         });
     }
 
@@ -1466,36 +1414,55 @@ export class TableStore {
         const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
         if (!rowArr) return;
 
+        // Resolve target Y.Maps up front by identity in this.rows. We must do this
+        // BEFORE the transaction so observer-driven re-sorts of sortedFilteredRows
+        // mid-loop can't cause subsequent iterations to target the wrong row.
+        // (Without this, editing a column that drives the sort would re-order the
+        // view between cell writes and shift the displayIndex meaning.)
+        const targets = []; // { yRow|null, srcRow }
         for (let i = 0; i < rows2D.length; i++) {
             const srcRow = rows2D[i];
-            if (srcRow.every(cell => !String(cell ?? '').trim())) continue;
-
+            if (srcRow.every(cell => !String(cell ?? '').trim())) {
+                targets.push(null);
+                continue;
+            }
             const displayIndex = startDisplayIndex + i;
-
             if (displayIndex < this.sortedFilteredRows.length) {
-                // Update existing row via updateCell — same path as keyboard editing
-                for (let j = 0; j < srcRow.length; j++) {
-                    const colDef = colMap[j];
-                    if (!colDef) continue;
-                    const raw = String(srcRow[j] ?? '').trim();
-                    if (!raw) continue;
-                    this.updateCell(displayIndex, colDef.id, this.#parseValueForType(raw, colDef.type));
-                }
+                const sortedRow = this.sortedFilteredRows[displayIndex];
+                const rawIndex = this.rows.findIndex(r => r === sortedRow);
+                const yRow = rawIndex >= 0 ? rowArr.get(rawIndex) : null;
+                targets.push({ yRow, srcRow, append: false });
             } else {
-                // Overflow row — append as new
-                this.#transact(() => {
+                targets.push({ yRow: null, srcRow, append: true });
+            }
+        }
+
+        // Single transaction for all writes: prevents the rows observer from
+        // firing N times and re-syncing the store mid-loop.
+        this.#transact(() => {
+            for (const t of targets) {
+                if (!t) continue;
+                if (t.append) {
                     const yRow = new Y.Map();
-                    for (let j = 0; j < srcRow.length; j++) {
+                    for (let j = 0; j < t.srcRow.length; j++) {
                         const colDef = colMap[j];
                         if (!colDef) continue;
-                        const raw = String(srcRow[j] ?? '').trim();
+                        const raw = String(t.srcRow[j] ?? '').trim();
                         if (!raw) continue;
                         yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
                     }
                     rowArr.push([yRow]);
-                });
+                } else if (t.yRow) {
+                    for (let j = 0; j < t.srcRow.length; j++) {
+                        const colDef = colMap[j];
+                        if (!colDef || colDef.isNonEntry) continue;
+                        const raw = String(t.srcRow[j] ?? '').trim();
+                        if (!raw) continue;
+                        t.yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                    }
+                }
             }
-        }
+        });
     }
 
     // ─── Query API ────────────────────────────────────────────────────────────
@@ -1629,21 +1596,40 @@ export class TableStore {
         return this.columns[idx] ?? null;
     }
 
+    /** Grid row for a data display index (0-based within the visible data rows). */
+    gridRowForDisplayIndex(displayIndex) {
+        return this.startRow + 2 + displayIndex;
+    }
+
+    /** Grid column for a column ID, or -1 if the column is not visible in this view. */
+    gridColForColumnId(colId) {
+        const idx = this.columns.findIndex(c => c.id === colId);
+        return idx < 0 ? -1 : this.startCol + idx;
+    }
+
+    /**
+     * Display index of a source row (identified by its position in the source
+     * Y.Array) within this view, or -1 if filtered out / out of range.
+     *
+     * `this.rows[rawIndex]` is the plain-object snapshot built by `#syncRows`;
+     * `sortedFilteredRows` holds the same references in sort/filter order, so
+     * identity-based `indexOf` finds the display position in O(n).
+     */
+    displayIndexOfRawRow(rawIndex) {
+        const plain = this.rows[rawIndex];
+        if (!plain) return -1;
+        return this.sortedFilteredRows.indexOf(plain);
+    }
+
     /** True when this store is a view of another table. */
     get isView() { return this.#sourceYMap !== null; }
 
     /**
      * The Y.Map that owns rows, columnDefs, and columnOrder for this store.
-     * For views this is the source Y.Map; for source/legacy tables it is the table's own Y.Map.
+     * For views this is the source Y.Map; for source tables it is the table's own Y.Map.
      * Used by TableManager to attach row/column change observers.
      */
     get sourceYMapForObservation() { return this.#sourceYMap ?? this.#tableYMap; }
-
-    /**
-     * True when this is a source-only table (data + schema, not displayed on grid).
-     * Source-only tables are skipped in the row index and never rendered as grid cells.
-     */
-    get isSourceOnly() { return this.#tableYMap.get('isSourceOnly') === true; }
 
     /**
      * Set the visible columns for a view (replaces the visibleColumns Y.Array).

@@ -16,7 +16,8 @@ export const FormulaError = {
     NAME:     '#NAME?',
     NUM:      '#NUM!',
     NA:       '#N/A',
-    ERROR:    '#ERROR!'
+    ERROR:    '#ERROR!',
+    CIRC:     '#CIRC!',
 };
 
 export function isError(value) {

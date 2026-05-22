@@ -37,7 +37,6 @@ export {
     createSheetYMap,
     createNamedRangeYMap,
     createTableYMap,
-    createTableColumnYMap,
     createRepeaterYMap,
     initializeDocument
 } from './schema.js';

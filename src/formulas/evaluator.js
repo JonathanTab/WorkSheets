@@ -71,12 +71,6 @@ export function cachedParseFormula(formula) {
 export function evaluate(ast, getCellValue, context = {}, customFunctions = null, getCrossSheetValue = null) {
     if (!ast) return null;
 
-    // Handle errors propagating
-    const errorValue = checkForError(ast);
-    if (errorValue !== null) {
-        return errorValue;
-    }
-
     switch (ast.type) {
         case NodeType.NUMBER:
             return ast.value;
@@ -106,20 +100,18 @@ export function evaluate(ast, getCellValue, context = {}, customFunctions = null
             // $rep variable – returns the current repetition index (0-based)
             return context?.rep ?? 0;
 
+        case 'Missing':
+            // Missing optional argument (e.g. trailing comma in IF(A1,1,))
+            return undefined;
+
         default:
             return FormulaError.VALUE;
     }
 }
 
-/**
- * Check if AST contains an error and return it
- * @param {Object} ast
- * @returns {any|null}
- */
-function checkForError(ast) {
-    // This is called recursively, so we check node types
-    return null;
-}
+// (checkForError stub was removed — the parser never emits error-literal nodes,
+// so per-node pre-checks were always a no-op.  Error propagation happens through
+// the evaluators via isError() checks on evaluated sub-expressions.)
 
 /**
  * Evaluate a cell reference
@@ -227,10 +219,7 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             const lv = resolveNumeric(left  ?? 0);
             const rv = resolveNumeric(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') return lv + rv;
-            // String concatenation fallback
-            if (typeof (left ?? 0) === 'string' || typeof (right ?? 0) === 'string') {
-                return String(left ?? '') + String(right ?? '');
-            }
+            // `+` is arithmetic-only; use `&` for string concatenation.
             return FormulaError.VALUE;
         }
         case '&':
@@ -267,69 +256,60 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             return FormulaError.VALUE;
         }
 
-        case '%': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
-            if (typeof lv === 'number' && typeof rv === 'number') {
-                if (rv === 0) return FormulaError.DIV_ZERO;
-                return lv % rv;
-            }
-            return FormulaError.VALUE;
-        }
+        // Binary '%' is not emitted by the parser (% is postfix-only via parsePercent);
+        // removed to avoid dead-code confusion.
 
         case '=': {
             const lv = resolveNumeric(left);
             const rv = resolveNumeric(right);
-            // If either resolved to a number (including from a date string), compare numerically
             if (typeof lv === 'number' && typeof rv === 'number') return lv === rv;
-            return left === right;
+            // Normalise null/undefined to empty string so `=A1=""` is true
+            // when A1 is empty (null), matching Excel's behaviour.
+            const ls = left == null ? '' : left;
+            const rs = right == null ? '' : right;
+            if (typeof ls === 'string' && typeof rs === 'string')
+                return ls.toLowerCase() === rs.toLowerCase(); // case-insensitive like Excel
+            return ls === rs;
         }
 
         case '<>': {
             const lv = resolveNumeric(left);
             const rv = resolveNumeric(right);
             if (typeof lv === 'number' && typeof rv === 'number') return lv !== rv;
-            return left !== right;
+            const ls = left == null ? '' : left;
+            const rs = right == null ? '' : right;
+            if (typeof ls === 'string' && typeof rs === 'string')
+                return ls.toLowerCase() !== rs.toLowerCase();
+            return ls !== rs;
         }
 
-        case '<': {
-            const lv = resolveNumeric(left);
-            const rv = resolveNumeric(right);
-            if (typeof lv === 'number' && typeof rv === 'number') return lv < rv;
-            if (typeof left === 'string' && typeof right === 'string') {
-                return left.localeCompare(right) < 0;
-            }
-            return FormulaError.VALUE;
-        }
-
-        case '>': {
-            const lv = resolveNumeric(left);
-            const rv = resolveNumeric(right);
-            if (typeof lv === 'number' && typeof rv === 'number') return lv > rv;
-            if (typeof left === 'string' && typeof right === 'string') {
-                return left.localeCompare(right) > 0;
-            }
-            return FormulaError.VALUE;
-        }
-
-        case '<=': {
-            const lv = resolveNumeric(left);
-            const rv = resolveNumeric(right);
-            if (typeof lv === 'number' && typeof rv === 'number') return lv <= rv;
-            if (typeof left === 'string' && typeof right === 'string') {
-                return left.localeCompare(right) <= 0;
-            }
-            return FormulaError.VALUE;
-        }
-
+        case '<':
+        case '>':
+        case '<=':
         case '>=': {
             const lv = resolveNumeric(left);
             const rv = resolveNumeric(right);
-            if (typeof lv === 'number' && typeof rv === 'number') return lv >= rv;
-            if (typeof left === 'string' && typeof right === 'string') {
-                return left.localeCompare(right) >= 0;
+            // Both numeric (or coerced to numeric): compare numerically.
+            if (typeof lv === 'number' && typeof rv === 'number') {
+                if (ast.op === '<')  return lv <  rv;
+                if (ast.op === '>')  return lv >  rv;
+                if (ast.op === '<=') return lv <= rv;
+                return lv >= rv;
             }
-            return FormulaError.VALUE;
+            // Excel type-ordering: numbers < text < booleans.
+            // When types differ, numbers always win (less-than) over strings.
+            const lIsNum = typeof lv === 'number';
+            const rIsNum = typeof rv === 'number';
+            if (lIsNum && !rIsNum) { return ast.op === '<' || ast.op === '<='; }
+            if (!lIsNum && rIsNum) { return ast.op === '>' || ast.op === '>='; }
+            // Both strings
+            const ls = String(left ?? '');
+            const rs = String(right ?? '');
+            const cmp = ls.toLowerCase().localeCompare(rs.toLowerCase());
+            if (ast.op === '<')  return cmp < 0;
+            if (ast.op === '>')  return cmp > 0;
+            if (ast.op === '<=') return cmp <= 0;
+            return cmp >= 0;
         }
 
         case 'contains':
@@ -349,17 +329,25 @@ function evaluateUnaryOp(ast, getCellValue, context, customFunctions, getCrossSh
     if (isError(operand)) return operand;
 
     switch (ast.op) {
-        case '+':
-            if (typeof operand === 'number') return operand;
+        case '+': {
+            // Coerce numeric strings/booleans so `+"5"` → 5 (Excel-compatible)
+            const v = resolveNumeric(operand);
+            if (typeof v === 'number') return v;
             return FormulaError.VALUE;
+        }
 
-        case '-':
-            if (typeof operand === 'number') return -operand;
+        case '-': {
+            // Coerce numeric strings/booleans so `-"5"` → -5 (Excel-compatible)
+            const v = resolveNumeric(operand);
+            if (typeof v === 'number') return -v;
             return FormulaError.VALUE;
+        }
 
-        case '%':
-            if (typeof operand === 'number') return operand / 100;
+        case '%': {
+            const v = resolveNumeric(operand);
+            if (typeof v === 'number') return v / 100;
             return FormulaError.VALUE;
+        }
 
         default:
             return FormulaError.VALUE;

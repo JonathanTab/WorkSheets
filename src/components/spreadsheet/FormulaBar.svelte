@@ -42,6 +42,7 @@
 
     let displayValue = $derived.by(() => {
         if (!selectedCell) return '';
+        void spreadsheetSession.activeSheetStore?.cellsVersion;
         return _getEditValue(selectedCell.row, selectedCell.col);
     });
 

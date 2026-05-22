@@ -9,23 +9,14 @@
 
 import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
-import { YKeyValue } from 'y-utility/y-keyvalue';
 import { TableFormulaEvaluator } from '../stores/spreadsheet/features/tableFormulaEval.js';
 import { cmpValues, initPos, computeInsertPos } from '../stores/spreadsheet/features/tableRowHelpers.js';
+import { mkCellValuesKV, mkCellStylesKV, createSheetYMap } from '../stores/spreadsheet/schema.js';
+import { CELL_VALUE_KEYS } from '../stores/spreadsheet/constants.js';
 
-// ─── Cell KV helpers ────────────────────────────────────────────────────────
-
-/** @param {any} sheetYMap */
-function cellValuesKV(sheetYMap) {
-    const arr = sheetYMap.get('cellValues');
-    return arr instanceof Y.Array ? new YKeyValue(arr) : null;
-}
-
-/** @param {import('yjs').Map} sheetYMap */
-function cellStylesKV(sheetYMap) {
-    const arr = sheetYMap.get('cellStyles');
-    return arr instanceof Y.Array ? new YKeyValue(arr) : null;
-}
+// Local aliases matching the pre-existing call sites (sheetYMap is always a Y.Map).
+const cellValuesKV = mkCellValuesKV;
+const cellStylesKV = mkCellStylesKV;
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
@@ -44,40 +35,34 @@ function sheetById(ydoc, sheetId) {
 }
 
 /**
- * Resolve a table Y.Map by ID, checking root.tables (sources), then sheet.tables (views/legacy).
- * If the entry is a view (has sourceTableId), follows the reference to return the source Y.Map.
- * This means callers always get the Y.Map that contains rows and columnDefs.
+ * Resolve a source table Y.Map by ID.
+ * Checks root.tableData first, then follows the `tableId` reference on a view entry
+ * in sheet.tableViews. Always returns the Y.Map that contains rows and columnDefs.
  */
 function _getTable(ydoc, sheetId, tableId) {
-    // Check document-level source tables first
-    const globalTables = root(ydoc).get('tables');
-    if (globalTables) {
-        const src = globalTables.get(tableId);
+    const tableData = root(ydoc).get('tableData');
+    if (tableData) {
+        const src = tableData.get(tableId);
         if (src) return src;
     }
-    // Check sheet tables (views or legacy)
-    const tables = sheetById(ydoc, sheetId).get('tables');
-    const entry = tables?.get(tableId);
+    // Fall back to sheet.tableViews — if it's a view, follow its tableId to the source.
+    const views = sheetById(ydoc, sheetId).get('tableViews');
+    const entry = views?.get(tableId);
     if (!entry) throw new Error(`Table "${tableId}" not found`);
-    // If it's a view, follow sourceTableId to the source
-    const sourceId = entry.get('sourceTableId');
-    if (sourceId && globalTables) {
-        const src = globalTables.get(sourceId);
+    const sourceId = entry.get('tableId');
+    if (sourceId && tableData) {
+        const src = tableData.get(sourceId);
         if (src) return src;
     }
     return entry;
 }
 
-/** Returns ordered column Y.Maps for a table, supporting both new and legacy layouts. */
+/** Returns ordered column Y.Maps for a source table. */
 function _getOrderedColMaps(table) {
-    const defsMap = table.get('columnDefs');
+    const defsMap  = table.get('columnDefs');
     const orderArr = table.get('columnOrder');
-    if (defsMap && orderArr) {
-        return orderArr.toArray().map(id => defsMap.get(id)).filter(Boolean);
-    }
-    // Legacy: columns was a Y.Array<Y.Map>
-    const old = table.get('columns');
-    return old ? old.toArray() : [];
+    if (!defsMap || !orderArr) return [];
+    return orderArr.toArray().map(id => defsMap.get(id)).filter(Boolean);
 }
 
 function _getFormulaCols(table) {
@@ -143,23 +128,12 @@ export function createSheet(ydoc, name, opts = {}) {
     const id = opts.id ?? randomUUID();
 
     ydoc.transact(() => {
-        const sheet = new Y.Map();
-        sheet.set('id',            id);
-        sheet.set('name',          name);
-        sheet.set('rowCount',      opts.rowCount ?? 100);
-        sheet.set('colCount',      opts.colCount ?? 26);
-        sheet.set('frozenRows',    0);
-        sheet.set('frozenColumns', 0);
-        sheet.set('cells',              new Y.Map());
-        sheet.set('rowMeta',            new Y.Map());
-        sheet.set('colMeta',            new Y.Map());
-        sheet.set('tables',             new Y.Map());
-        sheet.set('borders',            new Y.Map());
-        sheet.set('repeaters',          new Y.Map());
-        sheet.set('merges',             new Y.Array());
-        sheet.set('conditionalFormats', new Y.Array());
-        sheet.set('dataValidations',    new Y.Array());
-        sheet.set('printSettings',      new Y.Map());
+        // createSheetYMap builds the canonical v4 schema (cellValues/cellStyles as
+        // Y.Array YKeyValue stores, rowMeta/colMeta/borders also as Y.Arrays).
+        const sheet = createSheetYMap(ydoc, id, name, {
+            rowCount: opts.rowCount ?? 100,
+            colCount: opts.colCount ?? 26,
+        });
         sheets.set(id, sheet);
 
         if (opts.insertAt != null) {
@@ -234,7 +208,6 @@ export function setCell(ydoc, sheetId, row, col, value, props = {}) {
     const cvKV  = cellValuesKV(sheet);
     const csKV  = cellStylesKV(sheet);
     const key   = `${row},${col}`;
-    const VALUE_KEYS = new Set(['v', 't']);
 
     ydoc.transact(() => {
         /** @type {Record<string,any>} */ const valData = { v: value };
@@ -309,7 +282,6 @@ export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}
     const sheet  = sheetById(ydoc, sheetId);
     const cvKV   = cellValuesKV(sheet);
     const csKV   = cellStylesKV(sheet);
-    const VALUE_KEYS = new Set(['v', 't']);
     /** @type {Record<string,any>} */ const sharedSty = {};
     for (const [k, v] of Object.entries(props)) {
         if (!VALUE_KEYS.has(k)) sharedSty[k] = v;
@@ -358,62 +330,39 @@ export function clearRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
 // ─── Tables ────────────────────────────────────────────────────────────────
 
 /**
- * List all tables in a sheet.
+ * List all source tables in the document (from root.tableData).
+ * The `id` in each result is usable directly with getTableRows(), insertTableRow(), etc.
+ *
  * @param {Y.Doc} ydoc
- * @param {string} sheetId
- * @returns {{ id: string, name: string, mode: string, columns: object[] }[]}
+ * @param {string} [_sheetId]  unused — tables are document-wide
+ * @returns {{ id: string, name: string, columns: object[] }[]}
  */
-export function listTables(ydoc, sheetId) {
-    const sheetTablesMap = sheetById(ydoc, sheetId).get('tables');
-    if (!sheetTablesMap) return [];
-
-    const globalTables = root(ydoc).get('tables');
+export function listTables(ydoc, _sheetId) {
+    const tableData = root(ydoc).get('tableData');
+    if (!tableData) return [];
     const result = [];
-    const seen = new Set();
-
-    sheetTablesMap.forEach((entry, id) => {
-        const sourceId = entry.get('sourceTableId');
-        if (sourceId) {
-            // View entry: expose via the source table's schema
-            if (seen.has(sourceId)) return;
-            seen.add(sourceId);
-            const src = globalTables?.get(sourceId) ?? entry;
-            const columns = _getOrderedColMaps(src).map(c => c.toJSON ? c.toJSON() : { ...c });
-            result.push({
-                id: sourceId,       // callers use the source ID for subsequent queries
-                viewId: id,
-                name:    src.get('name') ?? entry.get('name') ?? id,
-                mode:    entry.get('mode') ?? 'inline',
-                columns,
-            });
-        } else if (!entry.get('isSourceOnly')) {
-            // Legacy combined table (pre-migration)
-            if (seen.has(id)) return;
-            seen.add(id);
-            const columns = _getOrderedColMaps(entry).map(c => c.toJSON ? c.toJSON() : { ...c });
-            result.push({
-                id,
-                name:    entry.get('name') ?? id,
-                mode:    entry.get('mode') ?? 'inline',
-                columns,
-            });
-        }
-        // Skip isSourceOnly entries in sheet.tables (shouldn't exist after migration)
+    tableData.forEach((tableYMap, id) => {
+        const columns = _getOrderedColMaps(tableYMap).map(c => c.toJSON ? c.toJSON() : { ...c });
+        result.push({
+            id,
+            name:    tableYMap.get('name') ?? id,
+            columns,
+        });
     });
     return result;
 }
 
 /**
- * Find a table by name (case-sensitive). Returns the table ID or null.
+ * Find a source table by name (case-sensitive). Returns the table ID or null.
  * @param {Y.Doc} ydoc
- * @param {string} sheetId
+ * @param {string} [_sheetId]  unused — tables are document-wide
  * @param {string} name
  * @returns {string|null}
  */
-export function findTableByName(ydoc, sheetId, name) {
-    const tables = sheetById(ydoc, sheetId).get('tables');
-    if (!tables) return null;
-    for (const [id, t] of tables.entries()) {
+export function findTableByName(ydoc, _sheetId, name) {
+    const tableData = root(ydoc).get('tableData');
+    if (!tableData) return null;
+    for (const [id, t] of tableData.entries()) {
         if (t.get('name') === name) return id;
     }
     return null;

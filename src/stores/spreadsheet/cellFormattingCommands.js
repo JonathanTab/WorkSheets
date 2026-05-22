@@ -17,6 +17,7 @@ import {
 } from '../spreadsheetStore.svelte.js';
 import { editSessionState } from './index.js';
 import { CELL_TYPE } from './features/SheetRenderContext.svelte.js';
+import { YJS_ORIGIN } from './yjsOrigins.js';
 
 // ── Formatting property keys ──────────────────────────────────────────────────
 
@@ -286,7 +287,7 @@ export function applyFormatting(property, value) {
         spreadsheetSession.ydoc?.transact(() => {
             for (const r of rowSet) sheetStore.setRowFormatting?.(r, { [property]: value });
             sheetStore.clearCellStylePropertyInRows?.(rowSet, property);
-        });
+        }, YJS_ORIGIN.UI);
         return;
     }
 
@@ -300,7 +301,7 @@ export function applyFormatting(property, value) {
         spreadsheetSession.ydoc?.transact(() => {
             for (const c of colSet) sheetStore.setColFormatting?.(c, { [property]: value });
             sheetStore.clearCellStylePropertyInCols?.(colSet, property);
-        });
+        }, YJS_ORIGIN.UI);
         return;
     }
 
@@ -310,7 +311,7 @@ export function applyFormatting(property, value) {
                 sheetStore.setColFormatting?.(c, { [property]: value });
             }
             sheetStore.clearCellStylePropertyAll?.(property);
-        });
+        }, YJS_ORIGIN.UI);
         return;
     }
 
@@ -336,7 +337,7 @@ export function applyFormatting(property, value) {
                 }
             }
         }
-    });
+    }, YJS_ORIGIN.UI);
 }
 
 // ── handleBorderChange ────────────────────────────────────────────────────────
@@ -385,7 +386,7 @@ export function handleCellTypeChange(config) {
             for (const { start, end } of selectionState.allRowRanges) {
                 for (let r = start; r <= end; r++) sheetStore.setRowTypeConfig(r, config);
             }
-        });
+        }, YJS_ORIGIN.UI);
         return;
     }
 
@@ -394,7 +395,7 @@ export function handleCellTypeChange(config) {
             for (const { start, end } of selectionState.allColRanges) {
                 for (let c = start; c <= end; c++) sheetStore.setColTypeConfig(c, config);
             }
-        });
+        }, YJS_ORIGIN.UI);
         return;
     }
 
@@ -412,5 +413,5 @@ export function handleCellTypeChange(config) {
                 }
             }
         }
-    });
+    }, YJS_ORIGIN.UI);
 }

@@ -33,6 +33,7 @@
 
     let displayValue = $derived.by(() => {
         if (!selectedCell) return '';
+        void spreadsheetSession.activeSheetStore?.cellsVersion;
         const rc = spreadsheetSession.renderContext;
         if (rc?.getCellType(selectedCell.row, selectedCell.col) === CELL_TYPE.TABLE_DATA) {
             const info = rc.tableManager?.getCellInfo(selectedCell.row, selectedCell.col);

@@ -10,10 +10,13 @@
  * 3. UI components get display values through getDisplayValue()
  */
 
-import { extractCellRefs } from './parser.js';
+import { extractCellRefs, extractTableDeps } from './parser.js';
 import { evaluate, cachedParseFormula } from './evaluator.js';
 import { DependencyGraph, cellKey, parseCellKey } from './dependency-graph.js';
 import { FormulaError, isError } from './functions.js';
+
+// Re-export so callers don't need a separate import for the new CIRC error.
+export { FormulaError };
 
 /**
  * FormulaEngine class
@@ -83,6 +86,21 @@ export class FormulaEngine {
      * @type {Map<string, Set<string>>}
      */
     #crossSheetDepsByFormula = new Map();
+
+    /**
+     * Table dependency index: uppercase tableName -> Set<formulaCellKey>.
+     * The reserved key '*' holds formulas that depend on "any table" (their
+     * TABLE_* call had a dynamic first arg, so we can't resolve the table name
+     * at parse time).
+     * @type {Map<string, Set<string>>}
+     */
+    #tableDepsByTable = new Map();
+
+    /**
+     * Per-formula table names: formulaCellKey -> Set<tableName | '*'>.
+     * @type {Map<string, Set<string>>}
+     */
+    #tableDepsByFormula = new Map();
 
     // Reactive computed values - key: "row,col" -> value: computed result
     // This is Svelte 5 reactive state, so UI updates automatically
@@ -170,6 +188,70 @@ export class FormulaEngine {
             this.#graph.dirtyCells.add(key);
         }
         this.recalculateDirty();
+    }
+
+    /**
+     * Update the table-dependency index for a formula cell.
+     * Pass ast=null when the formula is being cleared.
+     * @param {string} key  formulaCellKey ("row,col")
+     * @param {Object|null} ast
+     */
+    #updateTableDeps(key, ast) {
+        const oldNames = this.#tableDepsByFormula.get(key);
+        if (oldNames) {
+            for (const name of oldNames) {
+                this.#tableDepsByTable.get(name)?.delete(key);
+            }
+            this.#tableDepsByFormula.delete(key);
+        }
+        if (!ast) return;
+        const { tableNames, wildcard } = extractTableDeps(ast);
+        if (!wildcard && tableNames.size === 0) return;
+        const names = wildcard ? new Set(['*']) : tableNames;
+        this.#tableDepsByFormula.set(key, names);
+        for (const name of names) {
+            if (!this.#tableDepsByTable.has(name)) this.#tableDepsByTable.set(name, new Set());
+            this.#tableDepsByTable.get(name).add(key);
+        }
+    }
+
+    /**
+     * Mark all formulas that reference the given table (via TABLE_* function calls)
+     * as dirty. Does not call recalculateDirty() — caller batches that.
+     * @param {string} tableNameUpper - uppercase table name
+     * @returns {boolean} true if any formula was marked dirty
+     */
+    markTableDependentsDirty(tableNameUpper) {
+        let any = false;
+        const direct = this.#tableDepsByTable.get(tableNameUpper);
+        if (direct) {
+            for (const key of direct) { this.#graph.dirtyCells.add(key); any = true; }
+        }
+        const wildcards = this.#tableDepsByTable.get('*');
+        if (wildcards) {
+            for (const key of wildcards) { this.#graph.dirtyCells.add(key); any = true; }
+        }
+        return any;
+    }
+
+    /**
+     * Batched cell-value-changed notification. Marks the dependents of every
+     * cell in `cells` dirty, then runs a single recalc.
+     *
+     * Use this when many cells change simultaneously (e.g. table row data
+     * updates) — avoids the per-cell `recalculateDirty()` of cellValueChanged().
+     *
+     * @param {Iterable<{row: number, col: number}>} cells
+     * @returns {Array<{row: number, col: number, value: any}>}
+     */
+    notifyCellsChanged(cells) {
+        let any = false;
+        for (const { row, col } of cells) {
+            if (this.#graph.hasFormula(row, col)) continue;
+            const dirty = this.#graph.cellChanged(row, col);
+            if (dirty.size > 0) any = true;
+        }
+        return any ? this.recalculateDirty() : [];
     }
 
     /**
@@ -281,7 +363,13 @@ export class FormulaEngine {
                 if (r === 0 && c === 0) continue;
                 const k = cellKey(anchorRow + r, anchorCol + c);
                 this.#spillSources.delete(k);
-                delete this.computedValues[k];
+                // The cell's previous computed value disappears — any formula
+                // referencing this cell must recompute. Without this dependents
+                // can keep stale spill values after the anchor formula shrinks.
+                if (k in this.computedValues) {
+                    delete this.computedValues[k];
+                    this.#graph.markDependentsDirty(k);
+                }
             }
         }
         this.#spillRanges.delete(anchorKey);
@@ -350,6 +438,7 @@ export class FormulaEngine {
             if (!ast) {
                 // Not a formula, clear from graph
                 this.#updateCrossSheetDeps(key, null);
+                this.#updateTableDeps(key, null);
                 this.#graph.setFormula(row, col, null, null, []);
                 delete this.computedValues[key];
                 return { value: null, error: null, refs: [] };
@@ -358,8 +447,9 @@ export class FormulaEngine {
             // Extract cell references
             const refs = extractCellRefs(ast);
 
-            // Track cross-sheet dependencies for this formula
+            // Track cross-sheet and table dependencies for this formula
             this.#updateCrossSheetDeps(key, ast);
+            this.#updateTableDeps(key, ast);
 
             // Update dependency graph
             this.#graph.setFormula(row, col, formula, ast, refs);
@@ -372,6 +462,7 @@ export class FormulaEngine {
         } catch (err) {
             console.error(`Error parsing formula at ${key}:`, err);
             this.#updateCrossSheetDeps(key, null);
+            this.#updateTableDeps(key, null);
             this.#graph.setFormula(row, col, null, null, []);
             const errorValue = FormulaError.ERROR;
             this.computedValues[key] = errorValue;
@@ -395,6 +486,7 @@ export class FormulaEngine {
             }
             const refs = extractCellRefs(ast);
             this.#updateCrossSheetDeps(key, ast);
+            this.#updateTableDeps(key, ast);
             this.#graph.setFormula(row, col, formula, ast, refs);
             this.#graph.dirtyCells.add(key);
         } catch (err) {
@@ -413,6 +505,7 @@ export class FormulaEngine {
         const key = cellKey(row, col);
         this.#clearSpill(key);
         this.#updateCrossSheetDeps(key, null);
+        this.#updateTableDeps(key, null);
         this.#graph.setFormula(row, col, null, null, []);
         delete this.computedValues[key];
     }
@@ -524,7 +617,16 @@ export class FormulaEngine {
                 const dirtyCells = this.#graph.getDirtyCellsOrdered();
                 this.#graph.clearDirty(); // Clear before eval so new dirty cells accumulate
 
+                // Mark circular-reference cells before evaluation so any formula
+                // that tries to read their value sees #CIRC! rather than a stale number.
+                for (const key of this.#graph.circularCells) {
+                    const { row, col } = parseCellKey(key);
+                    this.computedValues[key] = FormulaError.CIRC;
+                    allUpdated.push({ row, col, value: FormulaError.CIRC });
+                }
+
                 for (const key of dirtyCells) {
+                    if (this.#graph.circularCells.has(key)) continue; // already handled above
                     const { row, col } = parseCellKey(key);
 
                     // Re-evaluate and store (handles array/spill output)
@@ -556,25 +658,6 @@ export class FormulaEngine {
         }
 
         return this.recalculateDirty();
-    }
-
-    /**
-     * Mark only TABLE_*-dependent formula cells dirty and recalculate.
-     * Used when table row data changes: avoids a full recalc of unrelated
-     * formulas (IMPORTRANGE, cross-sheet refs, etc.).  recalculateDirty()
-     * still propagates through the graph, so any sheet cells that depend on
-     * TABLE_* results are picked up automatically.
-     * @returns {Array<{row: number, col: number, value: any}>}
-     */
-    recalculateTableDependents() {
-        let anyDirty = false;
-        for (const [key, info] of this.#graph.formulas) {
-            if (info.formula.toUpperCase().includes('TABLE_')) {
-                this.#graph.dirtyCells.add(key);
-                anyDirty = true;
-            }
-        }
-        return anyDirty ? this.recalculateDirty() : [];
     }
 
     /**
@@ -638,6 +721,8 @@ export class FormulaEngine {
         this.#spillSources.clear();
         this.#crossSheetDepsBySheet.clear();
         this.#crossSheetDepsByFormula.clear();
+        this.#tableDepsByTable.clear();
+        this.#tableDepsByFormula.clear();
     }
 
     /**

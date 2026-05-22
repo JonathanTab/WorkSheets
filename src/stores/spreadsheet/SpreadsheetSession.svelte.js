@@ -32,6 +32,47 @@ import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
 import { TableManager } from './features/TableManager.svelte.js';
 import { DocumentTableRegistry } from './features/DocumentTableRegistry.svelte.js';
 import { RepeaterEngine } from './features/RepeaterEngine.svelte.js';
+// NOTE: ./index.js re-imports from this file, but ES module live bindings
+// resolve the cycle — the binding is defined by the time the structural-op
+// wrappers below are actually called.
+import { selectionState } from './index.js';
+
+/**
+ * Walk the Y.YEvents fired on a table's row Y.Array and classify what changed.
+ * Returns:
+ *   structural  - rows were added/deleted, or a row's _pos (sort key) changed
+ *   cellChanges - per-cell value updates: (rawIndex, colId) pairs where
+ *                 rawIndex is the position in the source row Y.Array
+ * Formatting-only changes (_fmt, _rowFmt) are ignored — they don't affect formulas.
+ *
+ * The rawIndex comes from `event.path[0]`; we deliberately do NOT capture
+ * `event.target` (the row Y.Map) because TableStore.sortedFilteredRows stores
+ * plain-object snapshots (from `.toJSON()`), not the Y.Maps themselves —
+ * an identity-based lookup against the Y.Map would always miss.
+ *
+ * @param {import('yjs').YEvent<any>[]} events
+ * @param {import('yjs').Array<any>} rowArr
+ * @returns {{ structural: boolean, cellChanges: Array<{ rawIndex: number, colId: string }> }}
+ */
+function classifyTableRowEvents(events, rowArr) {
+    let structural = false;
+    const cellChanges = [];
+    for (const e of events) {
+        if (e.target === rowArr) {
+            if (e.changes?.added?.size > 0 || e.changes?.deleted?.size > 0) structural = true;
+            continue;
+        }
+        // Direct row Y.Map change has path = [rowIndex] (number); nested (_fmt, …) is deeper.
+        if (e.path?.length !== 1 || typeof e.path[0] !== 'number' || !e.changes?.keys) continue;
+        const rawIndex = e.path[0];
+        for (const [key] of e.changes.keys) {
+            if (key === '_fmt' || key === '_rowFmt') continue;
+            if (key === '_pos') { structural = true; continue; }
+            cellChanges.push({ rawIndex, colId: key });
+        }
+    }
+    return { structural, cellChanges };
+}
 
 /**
  * SpreadsheetSession class
@@ -77,6 +118,15 @@ export class SpreadsheetSession {
 
     /** @type {Function | null} Cleanup for Yjs observer */
     #cleanupObserver = null;
+
+    /**
+     * Per-view-store memo of the last seen data-row count.
+     * Lets the table change handler dirty cells that USED to be table data but
+     * are no longer (e.g. after a row delete) — we'd otherwise lose track of the
+     * old extent. WeakMap keyed by view store so entries die with the view.
+     * @type {WeakMap<import('./features/TableStore.svelte.js').TableStore, number>}
+     */
+    #lastTableDataExtent = new WeakMap();
 
     /** @type {Function | null} Cleanup for formula engine observer */
     #cleanupFormulaObserver = null;
@@ -236,25 +286,18 @@ export class SpreadsheetSession {
             // Create SheetStore for active sheet
             const activeSheet = sheets?.get(firstSheetId);
             if (activeSheet) {
+                // Bulk-initialise any missing sub-collections on EVERY sheet in
+                // a single MIGRATION-origin transaction. This both:
+                //   (a) avoids per-sheet untagged writes the first time each sheet
+                //       is activated, and
+                //   (b) lets the document-level UndoManager pre-register every
+                //       sheet's Y types at construction time.
+                this.#ensureSheetSubCollections(ydoc, sheets);
+
                 performance.mark('ss:sheetStore:start');
                 this.activeSheetStore = new SheetStore(activeSheet, ydoc);
                 performance.mark('ss:sheetStore:end');
                 performance.measure('ss:sheetStore', 'ss:sheetStore:start', 'ss:sheetStore:end');
-
-                // Initialize undo manager — track all mutable Y types for this sheet.
-                const cellValues = activeSheet.get('cellValues');
-                const cellStyles = activeSheet.get('cellStyles');
-                const borders    = activeSheet.get('borders');
-                let rowMeta0 = activeSheet.get('rowMeta');
-                if (!rowMeta0) { rowMeta0 = new Y.Array(); activeSheet.set('rowMeta', rowMeta0); }
-                let colMeta0 = activeSheet.get('colMeta');
-                if (!colMeta0) { colMeta0 = new Y.Array(); activeSheet.set('colMeta', colMeta0); }
-                let tables0 = activeSheet.get('tables');
-                if (!tables0) { tables0 = new Y.Map(); activeSheet.set('tables', tables0); }
-                let repeaters0 = activeSheet.get('repeaters');
-                if (!repeaters0) { repeaters0 = new Y.Map(); activeSheet.set('repeaters', repeaters0); }
-                let merges0 = activeSheet.get('merges');
-                if (!merges0) { merges0 = new Y.Array(); activeSheet.set('merges', merges0); }
                 // Create document-wide table registry before the undo manager so
                 // its migration (which creates root.tables) runs first, ensuring
                 // root.tables exists when we hand it to Y.UndoManager.
@@ -262,24 +305,68 @@ export class SpreadsheetSession {
                 this.tableRegistry = new DocumentTableRegistry(root, ydoc);
                 performance.mark('ss:tableRegistry:end');
                 performance.measure('ss:tableRegistry', 'ss:tableRegistry:start', 'ss:tableRegistry:end');
-                // When any table (any sheet) changes → recalculate TABLE_* formula cells.
-                this.tableRegistry.onTableChange = () => {
-                    this.formulaEngine?.recalculateTableDependents();
+                // When a table's row data changes, surgically dirty:
+                //   (a) formulas that name the table via TABLE_* (by-name index)
+                //   (b) formulas that reference the affected grid cells (by coordinate)
+                // Single recalc batch handles both.
+                this.tableRegistry.onTableChange = ({ sourceTableId, events, rowArr }) => {
+                    const engine = this.formulaEngine;
+                    if (!engine) return;
+
+                    // (a) Name-based: TABLE_GET / TABLE_SUM / … referencing this table.
+                    const sourceStore = this.tableRegistry.getById(sourceTableId);
+                    if (sourceStore?.name) {
+                        engine.markTableDependentsDirty(sourceStore.name.toUpperCase());
+                    }
+
+                    // (b) Coordinate-based: classify events, then map to grid cells per view.
+                    const { structural, cellChanges } = classifyTableRowEvents(events, rowArr);
+                    const dirtyCells = [];
+
+                    for (const { store: view } of this.tableRegistry.getViewsForTable(sourceTableId)) {
+                        if (view.mode !== 'inline') continue;
+                        const newExtent = view.sortedFilteredRows.length;
+                        const oldExtent = this.#lastTableDataExtent.get(view) ?? newExtent;
+                        this.#lastTableDataExtent.set(view, newExtent);
+
+                        if (structural) {
+                            // Cover both old and new extents so cells that used to be
+                            // table data (now empty after a delete) get dirtied too.
+                            const span = Math.max(oldExtent, newExtent);
+                            const dataStart = view.startRow + 2;
+                            for (let i = 0; i < span; i++) {
+                                const r = dataStart + i;
+                                for (let c = view.startCol; c <= view.endCol; c++) {
+                                    dirtyCells.push({ row: r, col: c });
+                                }
+                            }
+                        } else {
+                            for (const { rawIndex, colId } of cellChanges) {
+                                const di = view.displayIndexOfRawRow(rawIndex);
+                                if (di < 0) continue; // filtered out of this view
+                                const gc = view.gridColForColumnId(colId);
+                                if (gc < 0) continue; // column not visible in this view
+                                dirtyCells.push({ row: view.gridRowForDisplayIndex(di), col: gc });
+                            }
+                        }
+                    }
+
+                    if (dirtyCells.length > 0) {
+                        engine.notifyCellsChanged(dirtyCells);
+                    } else {
+                        // No grid cells changed, but name-based deps may be dirty.
+                        engine.recalculateDirty();
+                    }
                 };
 
-                if (cellValues) {
-                    // Also track root.tables so source-table row/column mutations
-                    // (insertRow, updateCell, insertColumn, …) are undoable.
-                    // Source tables live in root.tables, not in the per-sheet tables map.
-                    const rootTables = root.get('tables');
-                    this.undoManager = new Y.UndoManager(
-                        [activeSheet, cellValues, cellStyles, borders, rowMeta0, colMeta0, tables0, repeaters0, merges0, rootTables].filter(Boolean),
-                        { trackedOrigins: new Set([YJS_ORIGIN.UI]) }
-                    );
-
-                    // Set up observer to update reactive undo/redo state
-                    this.#setupUndoObserver();
-                }
+                // Single document-level UndoManager: tracks every sheet's Y types
+                // plus document-level state (rootTables, namedRanges, metadata,
+                // sheetOrder). Survives sheet switches.
+                this.undoManager = new Y.UndoManager(
+                    this.#collectAllTrackedTypes(),
+                    { trackedOrigins: new Set([YJS_ORIGIN.UI]) }
+                );
+                this.#setupUndoObserver();
 
                 // Create TableManager before formula engine so TABLE_* functions are
                 // registered before formulas are evaluated on first load.
@@ -397,6 +484,10 @@ export class SpreadsheetSession {
             this.#cleanupStorageListener = null;
         }
 
+        // Y.UndoManager.destroy() unobserves all tracked types so it stops
+        // accumulating stack items after teardown.
+        this.undoManager?.destroy?.();
+
         this.docId = null;
         this.ydoc = null;
         this.root = null;
@@ -444,7 +535,40 @@ export class SpreadsheetSession {
         let sheetsMap = this.root.get('sheets');
 
         sheetOrder?.observe(structureObserver);
-        sheetsMap?.observeDeep(structureObserver);
+
+        // Shallow observe on sheets map — fires only for add/remove/replace of
+        // a sheet, NOT for every cell mutation inside a sheet. Per-sheet name
+        // changes are picked up by individual sheet observers below.
+        sheetsMap?.observe(structureObserver);
+
+        // Per-sheet observers for name changes — keyed by sheetId so we can
+        // attach/detach when sheets are added/removed.
+        /** @type {Map<string, Function>} */
+        const perSheetCleanups = new Map();
+        const attachSheetNameObserver = (sheetId) => {
+            if (perSheetCleanups.has(sheetId)) return;
+            const sheet = sheetsMap?.get(sheetId);
+            if (!sheet) return;
+            const nameObs = (event) => {
+                if (event.keysChanged?.has('name')) this.#updateSheetsList();
+            };
+            sheet.observe(nameObs);
+            perSheetCleanups.set(sheetId, () => sheet.unobserve(nameObs));
+        };
+        const detachSheetNameObserver = (sheetId) => {
+            const fn = perSheetCleanups.get(sheetId);
+            if (fn) { fn(); perSheetCleanups.delete(sheetId); }
+        };
+        // Initial attach for existing sheets
+        sheetsMap?.forEach((_, sheetId) => attachSheetNameObserver(sheetId));
+        // Reconcile attachments when sheets are added/removed
+        const sheetsMapKeyObs = (event) => {
+            event.keysChanged?.forEach((sheetId) => {
+                if (sheetsMap.has(sheetId)) attachSheetNameObserver(sheetId);
+                else detachSheetNameObserver(sheetId);
+            });
+        };
+        sheetsMap?.observe(sheetsMapKeyObs);
 
         // Observe metadata map
         const metadataMap = this.root.get('metadata');
@@ -462,7 +586,9 @@ export class SpreadsheetSession {
             const newSheetOrder = this.root?.get('sheetOrder');
             if (!sheetsMap) {
                 sheetsMap = newSheets;
-                sheetsMap.observeDeep(structureObserver);
+                sheetsMap.observe(structureObserver);
+                sheetsMap.observe(sheetsMapKeyObs);
+                sheetsMap.forEach((_, sheetId) => attachSheetNameObserver(sheetId));
             }
             if (!sheetOrder && newSheetOrder) {
                 sheetOrder = newSheetOrder;
@@ -481,7 +607,10 @@ export class SpreadsheetSession {
 
         this.#cleanupObserver = () => {
             sheetOrder?.unobserve(structureObserver);
-            sheetsMap?.unobserveDeep(structureObserver);
+            sheetsMap?.unobserve(structureObserver);
+            sheetsMap?.unobserve(sheetsMapKeyObs);
+            for (const fn of perSheetCleanups.values()) fn();
+            perSheetCleanups.clear();
             metadataMap?.unobserve(metadataObserver);
             this.root?.unobserve(rootObserver);
         };
@@ -524,6 +653,61 @@ export class SpreadsheetSession {
         if (!this.docId) return;
         const file = storage.drive.getFile(this.docId);
         this.docTitle = file?.title || '';
+    }
+
+    /**
+     * Force every sheet to have rowMeta/colMeta/tableViews/repeaters/merges sub-
+     * collections. Run in a single MIGRATION-origin transaction so the writes
+     * are never undoable. Idempotent.
+     * @param {import('yjs').Doc} ydoc
+     * @param {import('yjs').Map<any> | undefined | null} sheetsMap
+     */
+    #ensureSheetSubCollections(ydoc, sheetsMap) {
+        if (!ydoc || !sheetsMap) return;
+        let needsTxn = false;
+        sheetsMap.forEach((sheet) => {
+            if (!sheet.get('rowMeta'))   needsTxn = true;
+            if (!sheet.get('colMeta'))   needsTxn = true;
+            if (!sheet.get('tableViews'))    needsTxn = true;
+            if (!sheet.get('repeaters')) needsTxn = true;
+            if (!sheet.get('merges'))    needsTxn = true;
+        });
+        if (!needsTxn) return;
+        ydoc.transact(() => {
+            sheetsMap.forEach((sheet) => {
+                if (!sheet.get('rowMeta'))   sheet.set('rowMeta',   new Y.Array());
+                if (!sheet.get('colMeta'))   sheet.set('colMeta',   new Y.Array());
+                if (!sheet.get('tableViews'))    sheet.set('tableViews',    new Y.Map());
+                if (!sheet.get('repeaters')) sheet.set('repeaters', new Y.Map());
+                if (!sheet.get('merges'))    sheet.set('merges',    new Y.Array());
+            });
+        }, YJS_ORIGIN.MIGRATION);
+    }
+
+    /**
+     * Build the array of every Y type that the single document-level UndoManager
+     * should track. Includes:
+     *   - per-sheet: the sheet Y.Map itself and each of its mutable sub-collections
+     *   - document-level: rootTables, namedRanges, metadata, sheetOrder
+     * @returns {Array<any>}
+     */
+    #collectAllTrackedTypes() {
+        const out = [];
+        const root = this.root;
+        if (!root) return out;
+        const sheetsMap = root.get('sheets');
+        sheetsMap?.forEach((sheet) => {
+            out.push(sheet);
+            for (const k of ['cellValues', 'cellStyles', 'borders', 'rowMeta', 'colMeta', 'tableViews', 'repeaters', 'merges']) {
+                const v = sheet.get(k);
+                if (v) out.push(v);
+            }
+        });
+        for (const k of ['tableData', 'namedRanges', 'metadata', 'sheetOrder']) {
+            const v = root.get(k);
+            if (v) out.push(v);
+        }
+        return out;
     }
 
     /**
@@ -726,12 +910,13 @@ export class SpreadsheetSession {
     #cacheCurrentSheet(sheetId) {
         if (!this.activeSheetStore) return;
 
+        // NOTE: undoManager is document-level and not cached per sheet — it
+        // stays alive on `this` across sheet switches.
         this.#sheetEngineCache.set(sheetId, {
             sheetStore: this.activeSheetStore,
             tableManager: this.tableManager,
             renderContext: this.renderContext,
             repeaterEngine: this.repeaterEngine,
-            undoManager: this.undoManager,
             formulaEngine: this.formulaEngine,
             // Keep the formula observer alive in the background so formula
             // results stay current even while this sheet is not active.
@@ -755,12 +940,12 @@ export class SpreadsheetSession {
             }
         }
 
-        // Null all references so destroy checks in setActiveSheet are no-ops
+        // Null all references so destroy checks in setActiveSheet are no-ops.
+        // NOTE: undoManager intentionally preserved — it is document-level.
         this.activeSheetStore = null;
         this.tableManager = null;
         this.renderContext = null;
         this.repeaterEngine = null;
-        this.undoManager = null;
         this.formulaEngine = null;
         this.#cleanupFormulaObserver = null;
     }
@@ -781,12 +966,9 @@ export class SpreadsheetSession {
         this.tableManager = cached.tableManager;
         this.renderContext = cached.renderContext;
         this.repeaterEngine = cached.repeaterEngine;
-        this.undoManager = cached.undoManager;
         this.formulaEngine = cached.formulaEngine;
         this.#cleanupFormulaObserver = cached.cleanupFormulaObserver;
-
-        // Re-attach undo observer so #canUndo/#canRedo stay reactive for this sheet
-        this.#setupUndoObserver();
+        // undoManager is document-level — already alive and tracking.
         return true;
     }
 
@@ -817,11 +999,8 @@ export class SpreadsheetSession {
 
         const _switchT = performance.now();
 
-        // Detach undo observer from UI reactive state (don't destroy the undo manager)
-        if (this.#cleanupUndoObserver) {
-            this.#cleanupUndoObserver();
-            this.#cleanupUndoObserver = null;
-        }
+        // NOTE: undoManager is document-level and survives sheet switches —
+        // no observer re-attachment needed here.
 
         // Save current sheet to LRU cache instead of destroying it.
         // #cacheCurrentSheet nulls all this.* refs so destroy-guards below are no-ops.
@@ -852,29 +1031,21 @@ export class SpreadsheetSession {
         if (sheet && this.ydoc) {
             this.activeSheetStore = new SheetStore(sheet, this.ydoc);
 
-            const cellValues = sheet.get('cellValues');
-            const cellStyles = sheet.get('cellStyles');
-            const borders    = sheet.get('borders');
-            let rowMeta = sheet.get('rowMeta');
-            if (!rowMeta) { rowMeta = new Y.Array(); sheet.set('rowMeta', rowMeta); }
-            let colMeta = sheet.get('colMeta');
-            if (!colMeta) { colMeta = new Y.Array(); sheet.set('colMeta', colMeta); }
-            let tables = sheet.get('tables');
-            if (!tables) { tables = new Y.Map(); sheet.set('tables', tables); }
-            let repeaters = sheet.get('repeaters');
-            if (!repeaters) { repeaters = new Y.Map(); sheet.set('repeaters', repeaters); }
-            let merges = sheet.get('merges');
-            if (!merges) { merges = new Y.Array(); sheet.set('merges', merges); }
-
-            if (cellValues) {
-                // Also track root.tables so source-table row/column mutations
-                // (insertRow, updateCell, insertColumn, …) are undoable.
-                const rootTables = this.root?.get('tables');
-                this.undoManager = new Y.UndoManager(
-                    [sheet, cellValues, cellStyles, borders, rowMeta, colMeta, tables, repeaters, merges, rootTables].filter(Boolean)
-                );
-
-                // Set up observer to update reactive undo/redo state
+            // Ensure missing sub-collections exist and the document-level
+            // UndoManager is tracking them. This is typically a no-op now
+            // because #ensureSheetSubCollections runs at doc load for every
+            // sheet, but #addSheet may have created a fresh sheet that needs
+            // its types added to the manager's scope.
+            this.#ensureSheetSubCollections(this.ydoc, this.root?.get('sheets'));
+            if (this.undoManager) {
+                const newTypes = [
+                    sheet, sheet.get('cellValues'), sheet.get('cellStyles'),
+                    sheet.get('borders'), sheet.get('rowMeta'), sheet.get('colMeta'),
+                    sheet.get('tableViews'), sheet.get('repeaters'), sheet.get('merges'),
+                ].filter(Boolean);
+                for (const t of newTypes) {
+                    try { this.undoManager.addToScope(t); } catch { /* already in scope */ }
+                }
                 this.#setupUndoObserver();
             }
 
@@ -1091,11 +1262,11 @@ export class SpreadsheetSession {
         /** @type {{ tableName: string, sheetId: string, sheetName: string, columns: { id: string, name: string }[] }[]} */
         const result = [];
 
-        const addFromYMap = (tableYMap, sheetId, sheetName) => {
+        const tableData = this.root.get('tableData');
+        tableData?.forEach((tableYMap) => {
             const tableName = tableYMap.get('name') ?? 'Table';
             const defsMap = tableYMap.get('columnDefs');
             const orderArr = tableYMap.get('columnOrder');
-            /** @type {{ id: string, name: string }[]} */
             const columns = [];
             if (defsMap && orderArr) {
                 for (const colId of orderArr.toArray()) {
@@ -1103,29 +1274,8 @@ export class SpreadsheetSession {
                     if (c) columns.push({ id: colId, name: c.get?.('name') ?? colId });
                 }
             }
-            result.push({ tableName, sheetId, sheetName, columns });
-        };
-
-        // Document-level source tables (post-migration storage)
-        const globalTables = this.root.get('tables');
-        if (globalTables) {
-            globalTables.forEach((tableYMap) => {
-                addFromYMap(tableYMap, '', '');
-            });
-        }
-
-        // Per-sheet legacy tables (pre-migration, or any that weren't migrated)
-        const sheetsMap = this.root.get('sheets');
-        for (const { id: sheetId, name: sheetName } of this.sheets) {
-            const sheetYMap = sheetsMap?.get(sheetId);
-            const tablesMap = sheetYMap?.get('tables');
-            if (!tablesMap) continue;
-            tablesMap.forEach((tableYMap) => {
-                // Skip views and isSourceOnly entries — only want standalone legacy tables
-                if (tableYMap.get('sourceTableId') || tableYMap.get('isSourceOnly')) return;
-                addFromYMap(tableYMap, sheetId, sheetName);
-            });
-        }
+            result.push({ tableName, sheetId: '', sheetName: '', columns });
+        });
 
         return result;
     }
@@ -1141,7 +1291,6 @@ export class SpreadsheetSession {
         const store = this.getCrossSheetTable(tableName);
         if (!store) return [];
         const colId = store.resolveColId(String(columnId));
-        // Use getColumn so formula columns are evaluated; deduplicate for dropdown use
         const seen = new Set();
         return store.getColumn(colId)
             .filter(v => v != null && v !== '')
@@ -1165,18 +1314,17 @@ export class SpreadsheetSession {
 
     /**
      * Create a view of a source table on a target sheet.
-     * The view is a new table entry that reads rows/columns from the source
-     * but can show a different column subset and lives at its own grid position.
+     * The view entry lives in sheet.tableViews and references the source via `tableId`.
      *
      * @param {{
-     *   sourceTableId: string,
+     *   tableId: string,
      *   targetSheetId: string,
      *   name?: string,
      *   startRow?: number,
      *   startCol?: number,
      *   visibleColumns?: string[]
      * }} opts
-     * @returns {string} new view tableId, or "" on failure
+     * @returns {string} new view ID, or "" on failure
      */
     createTableViewOnSheet(opts) {
         if (!this.root || !this.ydoc) return "";
@@ -1184,10 +1332,10 @@ export class SpreadsheetSession {
         const targetSheet = sheetsMap?.get(opts.targetSheetId);
         if (!targetSheet) return "";
 
-        let tablesMap = targetSheet.get('tables');
-        if (!tablesMap) {
-            tablesMap = new Y.Map();
-            targetSheet.set('tables', tablesMap);
+        let viewsMap = targetSheet.get('tableViews');
+        if (!viewsMap) {
+            viewsMap = new Y.Map();
+            targetSheet.set('tableViews', viewsMap);
         }
 
         const viewId = `view-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1200,13 +1348,13 @@ export class SpreadsheetSession {
             vm.set('startCol', opts.startCol ?? 0);
             vm.set('sortColId', null);
             vm.set('sortDir', 'asc');
-            vm.set('sourceTableId', opts.sourceTableId);
+            vm.set('tableId', opts.tableId);
             const visArr = new Y.Array();
             if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
             vm.set('visibleColumns', visArr);
             vm.set('persistedFilters', new Y.Map());
-            tablesMap.set(viewId, vm);
-        });
+            viewsMap.set(viewId, vm);
+        }, YJS_ORIGIN.UI);
         return viewId;
     }
 
@@ -1233,7 +1381,7 @@ export class SpreadsheetSession {
         const normalized = formula.startsWith('=') ? formula : '=' + formula;
         this.ydoc.transact(() => {
             cvKV.set(key, { ...(cvKV.get(key) ?? {}), v: normalized });
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -1261,7 +1409,7 @@ export class SpreadsheetSession {
             } else {
                 cvKV.set(key, { ...(cvKV.get(key) ?? {}), v: value });
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -1273,29 +1421,89 @@ export class SpreadsheetSession {
         this.activeSheetStore?.clearCell(row, col);
     }
 
+    /**
+     * Classify a sheet row against the active sheet's tables.
+     *   table-data   → row sits inside a table's data range (delete-row should
+     *                  delete the table row, not shift sheet rows)
+     *   table-fixed  → row is a table header or entry (delete should be blocked
+     *                  to avoid orphaning the table; user must delete the table)
+     *   sheet        → row isn't owned by any table; normal sheet behavior
+     * @param {number} row
+     * @returns {{ kind:'sheet'} | { kind:'table-data', table:any, dataIndex:number } | { kind:'table-fixed' }}
+     */
+    #classifyRowForStructuralOp(row) {
+        const owners = this.tableManager?.getRowOwners?.(row) ?? [];
+        for (const o of owners) {
+            if (o.rowType === 'header' || o.rowType === 'entry') return { kind: 'table-fixed' };
+            if (o.rowType === 'data') return { kind: 'table-data', table: o.table, dataIndex: o.dataIndex };
+        }
+        return { kind: 'sheet' };
+    }
+
     /** Insert a blank row before rowIndex */
     insertRowAt(rowIndex) {
+        // Inserting INSIDE a table's data range should be a no-op at the sheet
+        // level (table rows are managed via the table's entry form / pasteRows).
+        // Inserting at the table header/entry row would orphan the table, so
+        // also block. Inserting outside a table behaves normally.
+        const cls = this.#classifyRowForStructuralOp(rowIndex);
+        if (cls.kind !== 'sheet') return;
         this.activeSheetStore?.insertRowAt(rowIndex);
+        selectionState.shiftForStructuralOp('row', rowIndex, +1);
     }
 
     /** Delete the row at rowIndex */
     deleteRowAt(rowIndex) {
+        const cls = this.#classifyRowForStructuralOp(rowIndex);
+        if (cls.kind === 'table-fixed') return; // refuse: would orphan the table
+        if (cls.kind === 'table-data') {
+            // Delete the table row instead of touching the sheet's row grid.
+            // No sheet shift → no selection shift.
+            cls.table.deleteRow(cls.dataIndex);
+            return;
+        }
         this.activeSheetStore?.deleteRowAt(rowIndex);
+        selectionState.shiftForStructuralOp('row', rowIndex, -1);
     }
 
     /** Delete multiple rows in one transaction */
     deleteRowsAt(rowIndices) {
-        this.activeSheetStore?.deleteRowsAt(rowIndices);
+        // Partition into table-data rows (deleted from their tables) vs sheet
+        // rows (deleted via the sheet store). Skip table-fixed rows.
+        const tableTargets = new Map(); // table → number[] dataIndices
+        const sheetRows = [];
+        for (const r of rowIndices) {
+            const cls = this.#classifyRowForStructuralOp(r);
+            if (cls.kind === 'table-fixed') continue;
+            if (cls.kind === 'table-data') {
+                if (!tableTargets.has(cls.table)) tableTargets.set(cls.table, []);
+                tableTargets.get(cls.table).push(cls.dataIndex);
+            } else {
+                sheetRows.push(r);
+            }
+        }
+        // Delete table rows first — order independent because table.deleteRows
+        // handles dedupe + descending sort internally.
+        for (const [table, dataIndices] of tableTargets) {
+            table.deleteRows(dataIndices);
+        }
+        if (sheetRows.length > 0) {
+            this.activeSheetStore?.deleteRowsAt(sheetRows);
+            const sorted = [...new Set(sheetRows)].sort((a, b) => b - a);
+            for (const r of sorted) selectionState.shiftForStructuralOp('row', r, -1);
+        }
     }
 
     /** Insert a blank column before colIndex */
     insertColumnAt(colIndex) {
         this.activeSheetStore?.insertColumnAt(colIndex);
+        selectionState.shiftForStructuralOp('col', colIndex, +1);
     }
 
     /** Delete the column at colIndex */
     deleteColumnAt(colIndex) {
         this.activeSheetStore?.deleteColumnAt(colIndex);
+        selectionState.shiftForStructuralOp('col', colIndex, -1);
     }
 
     /**
@@ -1340,11 +1548,27 @@ export class SpreadsheetSession {
         // Generate unique ID
         const id = `sheet-${Date.now()}`;
 
+        let newSheet = null;
         this.ydoc.transact(() => {
-            const newSheet = createSheetYMap(this.ydoc, id, name);
+            newSheet = createSheetYMap(this.ydoc, id, name);
             sheets.set(id, newSheet);
             sheetOrder.push([id]);
-        });
+        }, YJS_ORIGIN.UI);
+
+        // Extend the document-level UndoManager's scope to include the new
+        // sheet's Y types so subsequent edits to this sheet are undoable.
+        if (this.undoManager && newSheet) {
+            const types = [
+                newSheet,
+                newSheet.get('cellValues'), newSheet.get('cellStyles'),
+                newSheet.get('borders'),    newSheet.get('rowMeta'),
+                newSheet.get('colMeta'),    newSheet.get('tableViews'),
+                newSheet.get('repeaters'),  newSheet.get('merges'),
+            ].filter(Boolean);
+            for (const t of types) {
+                try { this.undoManager.addToScope(t); } catch { /* already in scope */ }
+            }
+        }
 
         return id;
     }
@@ -1362,20 +1586,36 @@ export class SpreadsheetSession {
         // Don't delete the last sheet
         if (sheetOrder.length <= 1) return;
 
+        const wasActive = this.activeSheetId === sheetId;
+
+        // If deleting the active sheet, switch away FIRST so the engines/observers
+        // for the deleted sheet are torn down (or cached) cleanly. Otherwise the
+        // active SheetStore + formula engine would keep observing a detached Y.Map.
+        if (wasActive) {
+            const idx = sheetOrder.toArray().indexOf(sheetId);
+            const fallbackIdx = idx === 0 ? 1 : 0;
+            const fallbackId = sheetOrder.get(fallbackIdx);
+            if (fallbackId) this.setActiveSheet(fallbackId);
+        }
+
+        // Evict the deleted sheet from the engine cache so its dangling
+        // SheetStore/formulaEngine/etc. are destroyed.
+        const cached = this.#sheetEngineCache.get(sheetId);
+        if (cached) {
+            cached.cleanupFormulaObserver?.();
+            cached.sheetStore.destroy();
+            cached.tableManager?.destroy();
+            cached.renderContext?.destroy();
+            cached.repeaterEngine?.destroy();
+            this.#sheetEngineCache.delete(sheetId);
+            this.#sheetEngineCacheOrder = this.#sheetEngineCacheOrder.filter(id => id !== sheetId);
+        }
+
         this.ydoc.transact(() => {
             sheets.delete(sheetId);
-
-            // Remove from order
             const index = sheetOrder.toArray().indexOf(sheetId);
-            if (index !== -1) {
-                sheetOrder.delete(index, 1);
-            }
-        });
-
-        // Switch to first sheet if deleted active
-        if (this.activeSheetId === sheetId) {
-            this.activeSheetId = sheetOrder.get(0);
-        }
+            if (index !== -1) sheetOrder.delete(index, 1);
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -1398,7 +1638,7 @@ export class SpreadsheetSession {
         this.ydoc.transact(() => {
             sheetOrder.delete(fromIndex, 1);
             sheetOrder.insert(clampedTo, [sheetId]);
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -1415,7 +1655,7 @@ export class SpreadsheetSession {
         if (sheet) {
             this.ydoc.transact(() => {
                 sheet.set('name', name);
-            });
+            }, YJS_ORIGIN.UI);
         }
     }
 
@@ -1437,11 +1677,10 @@ export class SpreadsheetSession {
      * @param {any} value
      */
     setMetadata(key, value) {
-        if (!this.root) return;
+        if (!this.root || !this.ydoc) return;
         const metadata = this.root.get('metadata');
-        if (metadata) {
-            metadata.set(key, value);
-        }
+        if (!metadata) return;
+        this.ydoc.transact(() => metadata.set(key, value), YJS_ORIGIN.UI);
     }
 
     // ========================================================================
@@ -1466,7 +1705,8 @@ export class SpreadsheetSession {
     addNamedRange(name, range) {
         if (!this.root || !this.ydoc) return;
         const namedRanges = this.root.get('namedRanges');
-        if (namedRanges) {
+        if (!namedRanges) return;
+        this.ydoc.transact(() => {
             const rangeMap = new Y.Map();
             rangeMap.set('sheetId', range.sheetId);
             rangeMap.set('startRow', range.startRow);
@@ -1475,7 +1715,7 @@ export class SpreadsheetSession {
             rangeMap.set('endCol', range.endCol);
             if (range.comment) rangeMap.set('comment', range.comment);
             namedRanges.set(name, rangeMap);
-        }
+        }, YJS_ORIGIN.UI);
     }
 
     /**
@@ -1483,11 +1723,10 @@ export class SpreadsheetSession {
      * @param {string} name
      */
     deleteNamedRange(name) {
-        if (!this.root) return;
+        if (!this.root || !this.ydoc) return;
         const namedRanges = this.root.get('namedRanges');
-        if (namedRanges) {
-            namedRanges.delete(name);
-        }
+        if (!namedRanges) return;
+        this.ydoc.transact(() => namedRanges.delete(name), YJS_ORIGIN.UI);
     }
 
     /**

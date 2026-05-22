@@ -538,6 +538,121 @@ export class SelectionState {
         this.isSelecting = false;
     }
 
+    // ── Structural-op shifting ───────────────────────────────────────────────
+    // Called by SpreadsheetSession after insertRowAt / deleteRowAt / insertColumnAt
+    // / deleteColumnAt so the selection follows its data. Without this the
+    // anchor/focus/extras point at coordinates whose contents have shifted.
+
+    /**
+     * Shift a single 1D coordinate after an insert/delete at `at` with `delta`.
+     * Returns null when the coordinate was deleted (delta < 0 and coord === at).
+     * @param {number} coord
+     * @param {number} at
+     * @param {number} delta  +1 for insert, -1 for delete
+     * @returns {number | null}
+     */
+    #shiftCoord(coord, at, delta) {
+        if (coord == null) return coord;
+        if (delta > 0) {
+            // Insertion at `at`: coords >= at move forward
+            return coord >= at ? coord + delta : coord;
+        }
+        // Deletion at `at`: coord === at → killed; coord > at → move back
+        if (coord === at) return null;
+        if (coord > at) return coord + delta;
+        return coord;
+    }
+
+    /**
+     * Apply a 1D shift to {row,col}|null in place along the given axis.
+     * Returns the shifted point, or null if the row/col itself was deleted.
+     */
+    #shiftPoint(point, axis, at, delta) {
+        if (!point) return point;
+        const key = axis === 'row' ? 'row' : 'col';
+        const next = this.#shiftCoord(point[key], at, delta);
+        if (next === null) return null;
+        if (next === point[key]) return point;
+        return axis === 'row' ? { row: next, col: point.col } : { row: point.row, col: next };
+    }
+
+    /** @param {CellRange} r */
+    #shiftRange(r, axis, at, delta) {
+        if (!r) return r;
+        const startKey = axis === 'row' ? 'startRow' : 'startCol';
+        const endKey   = axis === 'row' ? 'endRow'   : 'endCol';
+        let start = r[startKey];
+        let end   = r[endKey];
+        if (delta > 0) {
+            if (start >= at) start += delta;
+            if (end   >= at) end   += delta;
+        } else {
+            // Deletion at `at`: collapse if fully erased.
+            if (start === at && end === at) return null;
+            if (start > at) start += delta;
+            if (end   >= at) end   += delta;
+            if (end < start) return null;
+        }
+        return axis === 'row'
+            ? { ...r, startRow: start, endRow: end }
+            : { ...r, startCol: start, endCol: end };
+    }
+
+    /** @param {AxisRange} r */
+    #shiftAxisRange(r, atOnAxis, delta) {
+        if (!r) return r;
+        let { start, end } = r;
+        if (delta > 0) {
+            if (start >= atOnAxis) start += delta;
+            if (end   >= atOnAxis) end   += delta;
+        } else {
+            if (start === atOnAxis && end === atOnAxis) return null;
+            if (start > atOnAxis) start += delta;
+            if (end   >= atOnAxis) end   += delta;
+            if (end < start) return null;
+        }
+        return { start, end };
+    }
+
+    /**
+     * Adjust selection after a structural op on `axis` at `at` with `delta`.
+     * @param {'row'|'col'} axis
+     * @param {number} at
+     * @param {number} delta  +1 inserted, -1 deleted
+     */
+    shiftForStructuralOp(axis, at, delta) {
+        // Active cell range
+        this.anchor      = this.#shiftPoint(this.anchor, axis, at, delta);
+        this.focus       = this.#shiftPoint(this.focus,  axis, at, delta);
+        this.primaryCell = this.#shiftPoint(this.primaryCell, axis, at, delta);
+
+        // Extras
+        this.extraRanges = this.extraRanges
+            .map(r => this.#shiftRange(r, axis, at, delta))
+            .filter(Boolean);
+
+        if (axis === 'row') {
+            this.selectedRows  = this.#shiftAxisRange(this.selectedRows, at, delta);
+            this.extraRowRanges = this.extraRowRanges
+                .map(r => this.#shiftAxisRange(r, at, delta))
+                .filter(Boolean);
+            this.#rowAnchor = this.#shiftCoord(this.#rowAnchor, at, delta);
+        } else {
+            this.selectedCols  = this.#shiftAxisRange(this.selectedCols, at, delta);
+            this.extraColRanges = this.extraColRanges
+                .map(r => this.#shiftAxisRange(r, at, delta))
+                .filter(Boolean);
+            this.#colAnchor = this.#shiftCoord(this.#colAnchor, at, delta);
+        }
+
+        // If anchor or focus got erased, clear so callers fall back to safe defaults.
+        if (!this.anchor || !this.focus) {
+            this.anchor = null;
+            this.focus = null;
+            this.primaryCell = null;
+        }
+    }
+
     /** Clear all selection state. */
     clear() {
         this.anchor = null;

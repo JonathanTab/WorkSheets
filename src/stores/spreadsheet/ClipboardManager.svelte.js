@@ -140,14 +140,32 @@ class ClipboardManager {
         this._pendingCopyPayload = { data: firstData, range: firstRange, ranges: rangeDataList, fingerprint };
         this.#writeAsyncClipboard(firstData, firstRange, fingerprint, rangeDataList).catch(() => {});
 
-        // Clear all source ranges immediately
+        // Clear all source ranges immediately. Excel-style cut clears value
+        // AND formatting AND borders AND merges within the cut range, so the
+        // source ends up indistinguishable from an empty rectangle.
+        const tableManager = session?.renderContext?.tableManager;
         ydoc?.transact(() => {
             for (const { range } of rangeDataList) {
-                for (let r = range.startRow; r <= range.endRow; r++) {
-                    for (let c = range.startCol; c <= range.endCol; c++) {
-                        sheetStore.clearCellValue(r, c);
+                const { startRow, endRow, startCol, endCol } = range;
+                for (let r = startRow; r <= endRow; r++) {
+                    for (let c = startCol; c <= endCol; c++) {
+                        const info = tableManager?.getCellInfo?.(r, c);
+                        if (info?.table && info.rowType === 'data' && info.colDef && !info.colDef.isNonEntry) {
+                            // Clear table-cell value via the table store; formatting
+                            // stays attached to the table row, not the sheet.
+                            info.table.updateCell(info.dataIndex, info.colDef.id, null);
+                            continue;
+                        }
+                        if (info?.table) {
+                            // Header/entry/non-entry cells: skip — can't safely clear.
+                            continue;
+                        }
+                        sheetStore.clearCell(r, c);
                     }
                 }
+                // Strip merges and borders entirely inside the cut range.
+                sheetStore.clearBordersInRange?.(startRow, endRow, startCol, endCol);
+                sheetStore.mergeEngine?.unmergeRange?.(startRow, endRow, startCol, endCol);
             }
         }, YJS_ORIGIN.UI);
     }
@@ -1674,6 +1692,17 @@ class ClipboardManager {
                 const cell   = cells[srcRow]?.[srcCol];
                 if (!cell) continue;
 
+                // Excel-style "full" paste: an empty source cell should CLEAR
+                // the corresponding destination cell rather than leaving stale
+                // content behind. Detect emptiness on the source side first.
+                const srcEmpty =
+                    (cell.v === null || cell.v === undefined || cell.v === '') &&
+                    !cell.isFormula && !cell.formula && !cell.tfr;
+                if (mode === 'full' && srcEmpty) {
+                    sheetStore.clearCell(r, c);
+                    continue;
+                }
+
                 // Formula adjustment offset = dest position minus the source cell's
                 // absolute sheet position.
                 // Internal paste: source cell was at (clipboardOriginRow + srcRow, ...).
@@ -1754,11 +1783,6 @@ class ClipboardManager {
             if (data.rowHeights) {
                 for (let i = 0; i < data.rowHeights.length; i++) {
                     if (data.rowHeights[i] != null) sheetStore.setRowHeight?.(destStartRow + i, data.rowHeights[i]);
-                }
-            }
-            if (data.colWidths) {
-                for (let i = 0; i < data.colWidths.length; i++) {
-                    if (data.colWidths[i] != null) sheetStore.setColWidth?.(destStartCol + i, data.colWidths[i]);
                 }
             }
         }

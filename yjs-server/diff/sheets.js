@@ -3,8 +3,9 @@ import * as Y from 'yjs';
 /**
  * Schema-aware diff for spreadsheet (sheets) Yjs documents.
  *
- * Reads the v4 schema: cellValues + cellStyles as YKeyValue-backed Y.Arrays,
- * rowMeta / colMeta, borders, merges, tables, and sheetOrder.
+ * Reads the current schema: cellValues + cellStyles as YKeyValue-backed Y.Arrays,
+ * rowMeta / colMeta, borders, merges, tableData (root-level source tables),
+ * tableViews (per-sheet view entries), and sheetOrder.
  *
  * Output shape (v: 2):
  * {
@@ -132,26 +133,14 @@ function parseCellKey(key) {
 // ─── Table helpers ────────────────────────────────────────────────────────────
 
 /**
- * Get ordered column names from a table Y.Map.
- * Supports both new layout (columnDefs/columnOrder) and legacy (cols/colOrder/columns).
+ * Get ordered column names from a source table Y.Map (columnDefs + columnOrder).
  */
 function getTableColNames(tableMap) {
     try {
-        // New layout: columnDefs (Y.Map) + columnOrder (Y.Array)
         const colDefs  = tableMap.get('columnDefs');
-        const colOrder = tableMap.get('columnOrder') ?? tableMap.get('colOrder');
-        if (colDefs && colOrder) {
-            return colOrder.toArray().map(id => colDefs.get?.(id)?.get?.('name') ?? id);
-        }
-        // Legacy: cols Y.Map or columns Y.Array
-        const cols = tableMap.get('cols') ?? tableMap.get('columns');
-        if (!cols) return [];
-        if (cols instanceof Y.Array) {
-            return cols.toArray().map(c => c.get?.('name') ?? c);
-        }
-        const names = [];
-        cols.forEach((c, id) => names.push(c.get?.('name') ?? id));
-        return names;
+        const colOrder = tableMap.get('columnOrder');
+        if (!colDefs || !colOrder) return [];
+        return colOrder.toArray().map(id => colDefs.get?.(id)?.get?.('name') ?? id);
     } catch { return []; }
 }
 
@@ -452,44 +441,22 @@ export function computeSheetsDiff(prevDoc, newDoc) {
                 if (n > 0) { structure.push({ field: 'Borders', from: '', to: `${n} cell${n !== 1 ? 's' : ''} changed` }); totals.structure++; }
             }
 
-            // ── 4. Tables ────────────────────────────────────────────────────
-            // Tables exist at two levels in v4:
-            //   root.get('tables')  → global source tables (id → Y.Map with rows/columnDefs/columnOrder)
-            //   sheet.get('tables') → view entries (id → Y.Map with sourceTableId, or legacy combined)
-            //
-            // We collect every distinct SOURCE table ID visible to this sheet in each doc,
-            // then compare the source Y.Maps directly (rows, columns, name).
+            // ── 4. Tables ─────────────────────────────────────────────────────
+            // Source tables live in root.tableData; views in sheet.tableViews.
+            // We diff source tables directly (rows, columns, name).
             const tables = [];
             {
-                const prevGlobal = prevDoc.getMap('spreadsheet').get('tables');
-                const newGlobal  = newDoc.getMap('spreadsheet').get('tables');
-                const prevSheetTbl = prevSheet.get?.('tables');
-                const newSheetTbl  = newSheet.get?.('tables');
+                const prevGlobal = prevDoc.getMap('spreadsheet').get('tableData');
+                const newGlobal  = newDoc.getMap('spreadsheet').get('tableData');
 
-                // Collect all source table IDs visible in this sheet
+                // Collect all source table IDs from root.tableData
                 const allSourceIds = new Set();
-
-                // From sheet view entries
-                for (const [id, entry] of (prevSheetTbl ? [...prevSheetTbl.entries()] : [])) {
-                    const src = entry.get?.('sourceTableId') ?? id;
-                    allSourceIds.add(src);
-                }
-                for (const [id, entry] of (newSheetTbl ? [...newSheetTbl.entries()] : [])) {
-                    const src = entry.get?.('sourceTableId') ?? id;
-                    allSourceIds.add(src);
-                }
-
-                // Directly from global tables (catches tables not yet tied to a view)
                 if (prevGlobal) for (const id of prevGlobal.keys()) allSourceIds.add(id);
                 if (newGlobal)  for (const id of newGlobal.keys())  allSourceIds.add(id);
 
                 for (const tid of allSourceIds) {
-                    // Resolve to the actual source Y.Map in each doc
-                    const pTable = prevGlobal?.get(tid) ?? prevSheetTbl?.get(tid) ?? null;
-                    const nTable = newGlobal?.get(tid)  ?? newSheetTbl?.get(tid)  ?? null;
-
-                    // Skip view-only entries (isSourceOnly=true, legacy migration artefacts)
-                    if (pTable?.get?.('isSourceOnly') && nTable?.get?.('isSourceOnly')) continue;
+                    const pTable = prevGlobal?.get(tid) ?? null;
+                    const nTable = newGlobal?.get(tid)  ?? null;
 
                     if (!pTable && nTable) {
                         tables.push({ id: tid, type: 'added', name: nTable.get?.('name') ?? tid });

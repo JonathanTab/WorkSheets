@@ -35,7 +35,7 @@ export const OVERSCAN_ROWS = OVERSCAN_PX_ROWS;
 export const OVERSCAN_COLS = OVERSCAN_PX_COLS;
 
 // Schema version
-export const SCHEMA_VERSION = '5';
+export const SCHEMA_VERSION = '6';
 
 // Default sheet dimensions
 export const DEFAULT_ROW_COUNT = 1000;

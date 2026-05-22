@@ -77,8 +77,8 @@
             const reg = session?.tableRegistry;
             if (!reg || !table || !session?.ydoc || !session?.root) return;
             const sheetId = reg.getSheetId(table.id);
-            const tablesMap = session.root.get('sheets')?.get(sheetId)?.get('tables');
-            if (tablesMap) session.ydoc.transact(() => tablesMap.delete(table.id));
+            const viewsMap = session.root.get('sheets')?.get(sheetId)?.get('tableViews');
+            if (viewsMap) session.ydoc.transact(() => viewsMap.delete(table.id));
         } else if (tableManager && table) {
             tableManager.deleteTable(table.id);
         }

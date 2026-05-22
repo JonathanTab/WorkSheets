@@ -541,11 +541,26 @@ export class Parser {
         const args = [];
 
         if (this.currentToken?.type !== TokenType.RPAREN) {
-            args.push(this.parseExpression());
+            // An empty arg (e.g. =IF(A1,1,) — trailing or double comma) is
+            // treated as an explicit null node so optional arguments are cleanly
+            // omitted rather than causing a parse error (Excel-compatible).
+            // We use a dedicated MISSING type so evaluator can return undefined
+            // (matching args.length behaviour that functions check with !== undefined).
+            const MISSING = { type: 'Missing' };
+            if (this.currentToken?.type === TokenType.COMMA) {
+                args.push(MISSING);
+            } else {
+                args.push(this.parseExpression());
+            }
 
             while (this.currentToken?.type === TokenType.COMMA) {
                 this.advance();
-                args.push(this.parseExpression());
+                if (this.currentToken?.type === TokenType.RPAREN ||
+                    this.currentToken?.type === TokenType.COMMA) {
+                    args.push(MISSING);
+                } else {
+                    args.push(this.parseExpression());
+                }
             }
         }
 
@@ -639,6 +654,49 @@ export function extractCellRefs(ast) {
 
     visit(ast);
     return refs;
+}
+
+/**
+ * Walk an AST and collect the table-name dependencies of any TABLE_* function calls.
+ * Returns { tableNames, wildcard }:
+ *   tableNames - Set of uppercase table names referenced via string-literal first arg
+ *   wildcard   - true when at least one TABLE_* call has a non-literal first arg
+ *                (e.g. `TABLE_GET(A1, ...)`) — caller must treat as "depends on any table"
+ *
+ * @param {Object} ast
+ * @returns {{ tableNames: Set<string>, wildcard: boolean }}
+ */
+export function extractTableDeps(ast) {
+    const tableNames = new Set();
+    let wildcard = false;
+
+    function visit(node) {
+        if (!node) return;
+        switch (node.type) {
+            case NodeType.FUNCTION_CALL: {
+                if (typeof node.name === 'string' && node.name.startsWith('TABLE_')) {
+                    const first = node.args?.[0];
+                    if (first?.type === NodeType.STRING) {
+                        tableNames.add(String(first.value).toUpperCase());
+                    } else {
+                        wildcard = true;
+                    }
+                }
+                node.args?.forEach(visit);
+                break;
+            }
+            case NodeType.BINARY_OP:
+                visit(node.left);
+                visit(node.right);
+                break;
+            case NodeType.UNARY_OP:
+                visit(node.operand);
+                break;
+        }
+    }
+
+    visit(ast);
+    return { tableNames, wildcard };
 }
 
 export default parseFormula;

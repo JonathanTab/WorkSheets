@@ -668,11 +668,14 @@ export function buildPaneData(params) {
 
             // Cell spillover: extend width into adjacent empty cells for plain text only.
             // Rich text cells always clip, and their HTML string would give wrong measurements.
+            // Bordered cells skip overflow: extending their x/width would drag the border
+            // into adjacent cells, drawing a top border on the wrong cell visually.
             if (
                 cellType === CELL_TYPE.REGULAR &&
                 item.renderType === 'text' &&
                 (!item.wrapText || item.wrapText === 'overflow') &&
                 !item.richTextRuns &&
+                !item.borders &&
                 item.displayValue &&
                 renderContext
             ) {
@@ -709,7 +712,8 @@ export function buildPaneData(params) {
             // wrapText and merged cells need clipping; so do table headers (complex layout).
             // Plain single-line text cells that don't overflow are left as clipContent:false.
             // "overflow" mode explicitly allows text to spill into adjacent cells — no clip.
-            if ((item.wrapText && item.wrapText !== 'overflow') || cellType === CELL_TYPE.MERGE_PRIMARY) {
+            // Bordered cells clip so their content stays inside the border boundary.
+            if ((item.wrapText && item.wrapText !== 'overflow') || cellType === CELL_TYPE.MERGE_PRIMARY || item.borders) {
                 item.clipContent = true;
             }
             // Non-text render types have their own internal layout that can overflow

@@ -12,6 +12,7 @@ import {
 import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
 import { clearFormatting as clearFormattingCmd } from "../../../stores/spreadsheet/formatCommands.js";
 import storage from "../../../stores/storage.js";
+import { YJS_ORIGIN } from "../../../stores/spreadsheet/yjsOrigins.js";
 
 /**
  * Owns the grid keyboard handler and dropdown-overlay state.
@@ -66,38 +67,47 @@ export class GridKeyboardController {
         const ranges = selectionState.allEffectiveRanges(this._rowCount(), this._colCount());
         if (ranges.length === 0) return;
 
+        // Batch every clear (table + sheet) into one Yjs transaction so the
+        // UndoManager records a single user op and observers fire once.
+        // Side-effect deletes (blob storage) stay outside the transact.
         let tableCleared = false;
-        for (const eff of ranges) {
-            for (let r = eff.startRow; r <= eff.endRow; r++) {
-                for (let c = eff.startCol; c <= eff.endCol; c++) {
-                    const ct = rc?.getCellType(r, c);
-                    if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
-                    const info = rc?.tableManager?.getCellInfo(r, c);
-                    if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
-                    if (ct === CELL_TYPE.TABLE_ENTRY) {
-                        info.table.setEntryValue(info.colDef.id, null);
-                    } else {
-                        info.table.updateCell(info.dataIndex, info.colDef.id, null);
+        const blobsToDelete = [];
+
+        spreadsheetSession.ydoc?.transact(() => {
+            for (const eff of ranges) {
+                for (let r = eff.startRow; r <= eff.endRow; r++) {
+                    for (let c = eff.startCol; c <= eff.endCol; c++) {
+                        const ct = rc?.getCellType(r, c);
+                        if (ct !== CELL_TYPE.TABLE_DATA && ct !== CELL_TYPE.TABLE_ENTRY) continue;
+                        const info = rc?.tableManager?.getCellInfo(r, c);
+                        if (!info?.table || !info.colDef || info.colDef.isNonEntry) continue;
+                        if (ct === CELL_TYPE.TABLE_ENTRY) {
+                            info.table.setEntryValue(info.colDef.id, null);
+                        } else {
+                            info.table.updateCell(info.dataIndex, info.colDef.id, null);
+                        }
+                        tableCleared = true;
                     }
-                    tableCleared = true;
                 }
             }
-        }
-        if (tableCleared) untrack(() => this.ctx?.renderScheduler?.invalidateAll());
 
-        ss.cells.forEach((_cell, key) => {
-            const [r, c] = key.split(",").map(Number);
-            if (!ranges.some(eff => r >= eff.startRow && r <= eff.endRow && c >= eff.startCol && c <= eff.endCol)) return;
-            const ct = rc?.getCellType(r, c);
-            if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
-                ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.VIEWPORT_OCCUPIED) return;
-            const ctConfig = ss.getCellTypeConfig(r, c);
-            if (ctConfig?.type === "file" || ctConfig?.type === "image") {
-                const blobId = ss.getCell(r, c)?.v;
-                if (blobId) storage.app.delete(blobId).catch(() => {});
-            }
-            ss.clearCellValue(r, c);
-        });
+            ss.cells.forEach((_cell, key) => {
+                const [r, c] = key.split(",").map(Number);
+                if (!ranges.some(eff => r >= eff.startRow && r <= eff.endRow && c >= eff.startCol && c <= eff.endCol)) return;
+                const ct = rc?.getCellType(r, c);
+                if (ct === CELL_TYPE.TABLE_HEADER || ct === CELL_TYPE.TABLE_ENTRY ||
+                    ct === CELL_TYPE.TABLE_DATA || ct === CELL_TYPE.VIEWPORT_OCCUPIED) return;
+                const ctConfig = ss.getCellTypeConfig(r, c);
+                if (ctConfig?.type === "file" || ctConfig?.type === "image") {
+                    const blobId = ss.getCell(r, c)?.v;
+                    if (blobId) blobsToDelete.push(blobId);
+                }
+                ss.clearCellValue(r, c);
+            });
+        }, YJS_ORIGIN.UI);
+
+        if (tableCleared) untrack(() => this.ctx?.renderScheduler?.invalidateAll());
+        for (const blobId of blobsToDelete) storage.app.delete(blobId).catch(() => {});
     }
 
     _clearFormatting() {
@@ -113,7 +123,7 @@ export class GridKeyboardController {
                 if (eff.startRow === eff.endRow) continue;
                 ss.fillDown(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     _fillRight() {
@@ -125,30 +135,29 @@ export class GridKeyboardController {
                 if (eff.startCol === eff.endCol) continue;
                 ss.fillRight(eff.startRow, eff.startCol, eff.endRow, eff.endCol);
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     _insertRowAbove() {
-        const ss = this._sheetStore();
-        if (!ss) return;
+        if (!this._sheetStore()) return;
         const eff = selectionState.effectiveRange(this._rowCount(), this._colCount());
         if (!eff) return;
+        // Route through SpreadsheetSession so selection shifts and table-aware
+        // routing (refusing inside a table) apply.
         const count = eff.endRow - eff.startRow + 1;
-        for (let i = 0; i < count; i++) ss.insertRowAt(eff.startRow);
+        for (let i = 0; i < count; i++) spreadsheetSession.insertRowAt(eff.startRow);
     }
 
     _insertColumnLeft() {
-        const ss = this._sheetStore();
-        if (!ss) return;
+        if (!this._sheetStore()) return;
         const eff = selectionState.effectiveRange(this._rowCount(), this._colCount());
         if (!eff) return;
         const count = eff.endCol - eff.startCol + 1;
-        for (let i = 0; i < count; i++) ss.insertColumnAt(eff.startCol);
+        for (let i = 0; i < count; i++) spreadsheetSession.insertColumnAt(eff.startCol);
     }
 
     _deleteSelectedRows() {
-        const ss = this._sheetStore();
-        if (!ss) return;
+        if (!this._sheetStore()) return;
         const mode = selectionState.selectionMode;
         const rows = new Set();
         if (mode === 'rows') {
@@ -159,12 +168,11 @@ export class GridKeyboardController {
             if (!eff) return;
             for (let i = eff.startRow; i <= eff.endRow; i++) rows.add(i);
         }
-        ss.deleteRowsAt([...rows]);
+        spreadsheetSession.deleteRowsAt([...rows]);
     }
 
     _deleteSelectedColumns() {
-        const ss = this._sheetStore();
-        if (!ss) return;
+        if (!this._sheetStore()) return;
         const mode = selectionState.selectionMode;
         const cols = new Set();
         if (mode === 'cols') {
@@ -175,8 +183,10 @@ export class GridKeyboardController {
             if (!eff) return;
             for (let i = eff.startCol; i <= eff.endCol; i++) cols.add(i);
         }
+        // Descending so each delete's at-index is valid in the pre-delete coord
+        // space at the time it runs.
         const sorted = [...cols].sort((a, b) => b - a);
-        for (const col of sorted) ss.deleteColumnAt(col);
+        for (const col of sorted) spreadsheetSession.deleteColumnAt(col);
     }
 
     _applyTypeToSelection(type, extraOptions = {}) {
@@ -197,7 +207,7 @@ export class GridKeyboardController {
                     }
                 }
             }
-        });
+        }, YJS_ORIGIN.UI);
     }
 
     _insertDate() {

@@ -199,7 +199,7 @@ All `TABLE_*` functions are built as `customFunctions` and passed to the sheet f
 - Tracks which sheet each table/view lives on (`getSheetId`).
 - Tracks view membership: `getViewsForTable(sourceId)` → `[{viewId, sheetId, store, isLegacy}]`.
 - `getSourceTables()` → all source tables (new-style `isSourceOnly` + legacy combined).
-- Fires `onTableChange()` when any table's row data changes → wired to `formulaEngine.recalculateTableDependents()`.
+- Fires `onTableChange({ sourceTableId, events, rowArr })` when any table's row data changes. `SpreadsheetSession` parses the Y.YEvents for surgical formula recalc (see §7).
 - Calls `store.setTableResolver(name => this.getByName(name))` on each new store so computed column formulas can reference other tables via `TABLE_*` functions.
 
 ### Ownership
@@ -256,7 +256,12 @@ Lookup order: active-sheet `TableManager.getTableByName(name)` first, then `sess
 
 ### Cross-sheet formula reactivity
 
-`DocumentTableRegistry.onTableChange` is wired to `formulaEngine.recalculateTableDependents()`. This covers all sheets — any table row change (on any sheet) triggers recalculation of all `TABLE_*` formula cells on the active sheet.
+`DocumentTableRegistry.onTableChange` fires with `{ sourceTableId, events, rowArr }`. `SpreadsheetSession` parses the Y.YEvents to surgically dirty:
+
+1. **Name-based deps** — formulas calling `TABLE_*` against the changed table. At parse time, the formula engine walks the AST (`extractTableDeps`) and indexes the formula under the table name (or `'*'` if the first arg is dynamic). On change, `engine.markTableDependentsDirty(name)` dirties only those formulas.
+2. **Grid-coordinate deps** — formulas like `=A5` that point at a cell rendered as table data. The events give the exact `(rowYMap, colId)` that changed; each inline view of the source maps that to grid `(row, col)` via `displayIndexOf` / `gridRowForDisplayIndex` / `gridColForColumnId`. Structural changes (rows added/deleted/reordered) dirty the union of old and new data extents.
+
+Both sets feed a single `engine.notifyCellsChanged()` batch → one `recalculateDirty()` pass.
 
 ---
 
@@ -267,7 +272,11 @@ Lookup order: active-sheet `TableManager.getTableByName(name)` first, then `sess
 ```js
 // On document load:
 this.tableRegistry = new DocumentTableRegistry(root, ydoc);
-this.tableRegistry.onTableChange = () => this.formulaEngine?.recalculateTableDependents();
+this.tableRegistry.onTableChange = ({ sourceTableId, events, rowArr }) => {
+    // 1. Dirty TABLE_*-by-name dependents
+    // 2. Classify Y.YEvents → cell/structural changes, map to grid cells per view
+    // 3. Single batched notifyCellsChanged()
+};
 
 // On each sheet switch:
 this.tableManager = new TableManager(sheet, ydoc, this.tableRegistry);
@@ -447,9 +456,12 @@ Yjs observer fires on rowArr (TableStore + TableManager + DocumentTableRegistry)
            │ TableManager: #rebuildRowIndex() → tableVersion++           │
            │   grid re-paints (reads tableVersion)                       │
            │                                                             │
-           │ DocumentTableRegistry: onTableChange() fires                │
-           │   → formulaEngine.recalculateTableDependents()              │
-           │     → TABLE_* formula cells on active sheet recalculate     │
+           │ DocumentTableRegistry: onTableChange({sourceTableId,        │
+           │                                        events, rowArr})     │
+           │   → SpreadsheetSession classifies events                    │
+           │     → engine.markTableDependentsDirty(name)  (by-name deps) │
+           │     → engine.notifyCellsChanged(cells)       (grid deps)    │
+           │       → one recalculateDirty() batch                        │
            └─────────────────────────────────────────────────────────────┘
 ```
 

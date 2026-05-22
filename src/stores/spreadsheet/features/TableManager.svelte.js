@@ -85,10 +85,9 @@ export class TableManager {
         this.#ydoc = ydoc;
         this.#registry = registry;
         this.#root = root;
-        this.#tablesYMap = sheet.get("tables");
+        this.#tablesYMap = sheet.get("tableViews");
 
         if (!this.#tablesYMap) {
-            // Older documents without tables support — no-op
             return;
         }
 
@@ -135,7 +134,7 @@ export class TableManager {
         // ensuring sortedFilteredRows is up-to-date when we rebuild the index.
         const rebuildOnChange = () => this.#rebuildRowIndex();
         // For views, rows/columns live on the SOURCE Y.Map (not tableYMap).
-        // sourceYMapForObservation returns the source for views, own map for source/legacy tables.
+        // sourceYMapForObservation returns the source Y.Map for views, own map for source tables.
         const obsYMap = store.sourceYMapForObservation;
         const rowArr = obsYMap.get("rows");
         if (rowArr) {
@@ -197,9 +196,7 @@ export class TableManager {
         const _perfT = perfMon.enabled ? performance.now() : 0;
         this.#rowIndex.clear();
         for (const table of this.stores.values()) {
-            // Source-only tables (isSourceOnly = true) hold data + schema but are not
-            // displayed on the grid — skip them in the row index.
-            if (table.isSourceOnly) continue;
+            if (table.isView) continue; // source tables are never rendered on the grid
             const headerRow = table.startRow;
             const entryRow = table.startRow + 1;
             const dataStart = table.startRow + 2;
@@ -320,6 +317,19 @@ export class TableManager {
     }
 
     /**
+     * Return all table-ownership entries for a sheet row. An entry is
+     * `{ table, rowType, dataIndex }` where rowType is 'header'|'entry'|'data'
+     * and dataIndex is the position in the table's sortedFilteredRows (or -1
+     * for non-data rows). Used by SpreadsheetSession to route row-delete /
+     * row-insert through the table when a structural op falls inside one.
+     * @param {number} row
+     * @returns {Array<{ table: TableStore, rowType: 'header'|'entry'|'data', dataIndex: number }>}
+     */
+    getRowOwners(row) {
+        return this.#rowIndex.get(row) ?? [];
+    }
+
+    /**
      * Returns true if the cell is in the buffer zone below a table's data rows —
      * visually part of the table but not an actual header/entry/data row.
      * Editing these cells should be blocked.
@@ -329,7 +339,7 @@ export class TableManager {
      */
     isTableShadowCell(row, col) {
         for (const table of this.stores.values()) {
-            if (table.isSourceOnly) continue;
+            if (table.isView) continue;
             if (col < table.startCol || col > table.endCol) continue;
             const lastDataRow = table.startRow + 1 + table.sortedFilteredRows.length;
             const bufferEnd = lastDataRow + BUFFER_ROWS;
@@ -344,7 +354,7 @@ export class TableManager {
     get maxInlineTableRow() {
         let max = 0;
         for (const table of this.stores.values()) {
-            if (table.isSourceOnly) continue;
+            if (table.isView) continue;
             const last = table.startRow + 2 + table.sortedFilteredRows.length + BUFFER_ROWS;
             if (last > max) max = last;
         }
@@ -354,9 +364,10 @@ export class TableManager {
     // ─── Table CRUD ───────────────────────────────────────────────────────────
 
     /**
-     * Create a new table: a source-only entity (schema + data) plus a default view
-     * positioned on the grid. The view has `visibleColumns = []` which means "show
-     * all source columns" — new columns added later automatically appear.
+     * Create a new table: a source entry (schema + data) in root.tableData, plus a
+     * default view entry in sheet.tableViews positioned on the grid.
+     * The view has `visibleColumns = []` which means "show all source columns" —
+     * new columns added later automatically appear.
      *
      * @param {{ name?: string, startRow: number, startCol: number,
      *           columns: Array<{id:string, name:string, type?:string, required?:boolean,
@@ -369,16 +380,13 @@ export class TableManager {
         const sourceId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const viewId   = `view-${Date.now() + 1}-${Math.random().toString(36).slice(2, 7)}`;
 
-        // Source tables live in root.tables (document-level, not tied to any sheet).
-        // Fall back to sheet.tables if root is unavailable (legacy/test contexts).
-        const globalTablesMap = this.#root?.get('tables') ?? this.#registry?.getGlobalTablesMap() ?? this.#tablesYMap;
+        const tableDataMap = this.#root?.get('tableData') ?? this.#registry?.getTableDataMap() ?? this.#tablesYMap;
 
         this.#ydoc.transact(() => {
-            // ── Source table (data + schema, not rendered on grid) ────────────────
+            // ── Source table in root.tableData (data + schema, not rendered on any grid) ──
             const src = new Y.Map();
             src.set("id", sourceId);
             src.set("name", opts.name ?? "Table");
-            src.set("isSourceOnly", true);
             src.set("sortColId", null);
             src.set("sortDir", "asc");
             src.set("insertSortColId", null);
@@ -392,8 +400,8 @@ export class TableManager {
                 cm.set("name", c.name);
                 cm.set("type", c.type ?? "text");
                 cm.set("required", c.required ?? false);
-                if (c.hAlign)      cm.set("hAlign", c.hAlign);
-                if (c.isNonEntry)  cm.set("isNonEntry", true);
+                if (c.hAlign)         cm.set("hAlign", c.hAlign);
+                if (c.isNonEntry)     cm.set("isNonEntry", true);
                 if (c.defaultFormula) cm.set("defaultFormula", c.defaultFormula);
                 defsMap.set(c.id, cm);
                 orderArr.push([c.id]);
@@ -402,9 +410,9 @@ export class TableManager {
             src.set("columnOrder", orderArr);
             src.set("rows", new Y.Array());
             src.set("filters", new Y.Map());
-            globalTablesMap.set(sourceId, src);
+            tableDataMap.set(sourceId, src);
 
-            // ── Default view (positioned on grid, shows all columns) ──────────────
+            // ── View entry in sheet.tableViews (position + column subset) ────────
             const vm = new Y.Map();
             vm.set("id", viewId);
             vm.set("name", opts.name ?? "Table");
@@ -413,7 +421,7 @@ export class TableManager {
             vm.set("startCol", opts.startCol);
             vm.set("sortColId", null);
             vm.set("sortDir", "asc");
-            vm.set("sourceTableId", sourceId);
+            vm.set("tableId", sourceId);
             vm.set("visibleColumns", new Y.Array()); // [] = show all columns
             vm.set("persistedFilters", new Y.Map());
             this.#tablesYMap.set(viewId, vm);
@@ -434,18 +442,18 @@ export class TableManager {
     }
 
     /**
-     * Create a view of an existing table on this sheet.
+     * Create a view of an existing source table on this sheet.
      * The view shares the source table's rows and column definitions but can show
      * a different subset/ordering of columns and sits at its own grid position.
      *
      * @param {{
-     *   sourceTableId: string,
+     *   tableId: string,
      *   name?: string,
      *   startRow: number,
      *   startCol: number,
      *   visibleColumns?: string[]  ordered subset of source column IDs; all if omitted
      * }} opts
-     * @returns {string} new view's tableId
+     * @returns {string} new view ID
      */
     createTableView(opts) {
         if (!this.#tablesYMap) return "";
@@ -460,7 +468,7 @@ export class TableManager {
             vm.set("startCol", opts.startCol);
             vm.set("sortColId", null);
             vm.set("sortDir", "asc");
-            vm.set("sourceTableId", opts.sourceTableId);
+            vm.set("tableId", opts.tableId);
             const visArr = new Y.Array();
             if (opts.visibleColumns?.length) visArr.push(opts.visibleColumns);
             vm.set("visibleColumns", visArr);
