@@ -196,7 +196,6 @@ export class TableManager {
         const _perfT = perfMon.enabled ? performance.now() : 0;
         this.#rowIndex.clear();
         for (const table of this.stores.values()) {
-            if (table.isView) continue; // source tables are never rendered on the grid
             const headerRow = table.startRow;
             const entryRow = table.startRow + 1;
             const dataStart = table.startRow + 2;
@@ -339,7 +338,7 @@ export class TableManager {
      */
     isTableShadowCell(row, col) {
         for (const table of this.stores.values()) {
-            if (table.isView) continue;
+
             if (col < table.startCol || col > table.endCol) continue;
             const lastDataRow = table.startRow + 1 + table.sortedFilteredRows.length;
             const bufferEnd = lastDataRow + BUFFER_ROWS;
@@ -354,7 +353,7 @@ export class TableManager {
     get maxInlineTableRow() {
         let max = 0;
         for (const table of this.stores.values()) {
-            if (table.isView) continue;
+
             const last = table.startRow + 2 + table.sortedFilteredRows.length + BUFFER_ROWS;
             if (last > max) max = last;
         }

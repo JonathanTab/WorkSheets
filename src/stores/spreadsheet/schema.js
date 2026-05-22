@@ -262,9 +262,48 @@ export const spreadsheetSchema = {
 
         if (!sheets) return;
 
-        // Add sub-fields missing from pre-v3 docs. Tag as MIGRATION so these
-        // writes never enter the UndoManager and aren't broadcast as separate
-        // user-origin transactions.
+        // v6: rename table storage keys — must run before v3 so the v3 "ensure
+        // sub-collections" pass doesn't create an empty tableViews first and
+        // cause the rename guard to short-circuit.
+        //   root.tables         → root.tableData
+        //   sheet.tables        → sheet.tableViews
+        //   view.sourceTableId  → view.tableId
+        //   source.isSourceOnly  (flag removed — location is identity)
+        // Y types cannot be re-parented in Yjs — setting an existing Y.Map under a
+        // new key corrupts the CRDT tree. We deep-copy into fresh Y types instead.
+        migrateTransact(ydoc, () => {
+            // root.tables → root.tableData
+            const oldTableData = root.get('tables');
+            if (oldTableData instanceof Y.Map && oldTableData.size > 0) {
+                let tableData = root.get('tableData');
+                if (!(tableData instanceof Y.Map)) {
+                    tableData = new Y.Map();
+                    root.set('tableData', tableData);
+                }
+                oldTableData.forEach((tbl, id) => {
+                    if (!tableData.has(id)) tableData.set(id, _v6CloneSourceTable(tbl));
+                });
+                root.delete('tables');
+            }
+
+            // sheet.tables → sheet.tableViews  +  sourceTableId → tableId
+            sheets.forEach((sheet) => {
+                const oldViews = sheet.get('tables');
+                if (oldViews instanceof Y.Map && oldViews.size > 0) {
+                    let tableViews = sheet.get('tableViews');
+                    if (!(tableViews instanceof Y.Map)) {
+                        tableViews = new Y.Map();
+                        sheet.set('tableViews', tableViews);
+                    }
+                    oldViews.forEach((entry, id) => {
+                        if (!tableViews.has(id)) tableViews.set(id, _v6CloneViewEntry(entry));
+                    });
+                    sheet.delete('tables');
+                }
+            });
+        });
+
+        // v3: ensure sub-collections exist on every sheet.
         migrateTransact(ydoc, () => {
             sheets.forEach((sheet) => {
                 if (!sheet.has('tableViews'))   sheet.set('tableViews',   new Y.Map());
@@ -412,6 +451,84 @@ function migrateLegacyCellTypes(ydoc, sheets) {
             }
         });
     });
+}
+
+// ── v6 helpers — deep-copy Y types for the table key rename migration ─────────
+// Yjs types cannot be re-parented (setting an existing Y type under a new key
+// corrupts the tree). These functions create structurally identical fresh types.
+
+function _v6CloneSourceTable(src) {
+    const t = new Y.Map();
+    for (const k of ['id', 'name', 'sortColId', 'sortDir', 'insertSortColId', 'insertSortDir']) {
+        const v = src.get(k);
+        if (v !== undefined) t.set(k, v);
+    }
+
+    const defsMap = new Y.Map();
+    src.get('columnDefs')?.forEach((col, colId) => {
+        const c = new Y.Map();
+        col?.forEach?.((v, k) => { if (!(v instanceof Y.Map) && !(v instanceof Y.Array)) c.set(k, v); });
+        defsMap.set(colId, c);
+    });
+    t.set('columnDefs', defsMap);
+
+    const order = new Y.Array();
+    const oa = src.get('columnOrder');
+    if (oa?.length) order.push(oa.toArray());
+    t.set('columnOrder', order);
+
+    const rows = new Y.Array();
+    const ra = src.get('rows');
+    if (ra?.length) rows.push(ra.toArray().map(_v6CloneRow));
+    t.set('rows', rows);
+
+    t.set('filters', new Y.Map());
+    return t;
+}
+
+function _v6CloneRow(src) {
+    const r = new Y.Map();
+    if (!src?.forEach) return r;
+    src.forEach((v, k) => {
+        if (v instanceof Y.Map) {
+            // _fmt / _rowFmt — one or two levels of nesting
+            const m = new Y.Map();
+            v.forEach((vv, kk) => {
+                if (vv instanceof Y.Map) {
+                    const m2 = new Y.Map();
+                    vv.forEach((vvv, kkk) => m2.set(kkk, vvv));
+                    m.set(kk, m2);
+                } else {
+                    m.set(kk, vv);
+                }
+            });
+            r.set(k, m);
+        } else {
+            r.set(k, v);
+        }
+    });
+    return r;
+}
+
+function _v6CloneViewEntry(src) {
+    const v = new Y.Map();
+    for (const k of ['id', 'name', 'mode', 'startRow', 'startCol', 'sortColId', 'sortDir']) {
+        const val = src.get(k);
+        if (val !== undefined) v.set(k, val);
+    }
+    // sourceTableId was the old name; tableId is the new name
+    const srcId = src.get('sourceTableId') ?? src.get('tableId');
+    if (srcId) v.set('tableId', srcId);
+
+    const vc = new Y.Array();
+    const vca = src.get('visibleColumns');
+    if (vca?.length) vc.push(vca.toArray());
+    v.set('visibleColumns', vc);
+
+    const pf = new Y.Map();
+    src.get('persistedFilters')?.forEach((val, key) => pf.set(key, val));
+    v.set('persistedFilters', pf);
+    return v;
 }
 
 export default spreadsheetSchema;
