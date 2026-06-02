@@ -18,6 +18,7 @@
         handleBorderChange,
         computeSelectedFormatting,
         computeBorderSelectionRange,
+        computeBordersSummary,
     } from "../../stores/spreadsheet/cellFormattingCommands.js";
 
     let { open = false, onClose = undefined } = $props();
@@ -36,6 +37,7 @@
 
     let selectedFormatting  = $derived.by(computeSelectedFormatting);
     let borderSelectionRange = $derived.by(computeBorderSelectionRange);
+    let bordersSummary       = $derived.by(computeBordersSummary);
 
     let currentFontSize   = $derived(typeof selectedFormatting?.fontSize   === 'number' ? selectedFormatting.fontSize   : 12);
     let currentFontFamily = $derived(typeof selectedFormatting?.fontFamily  === 'string' ? selectedFormatting.fontFamily  : 'Arial');
@@ -297,6 +299,7 @@
                     <BorderPicker
                         selectionRange={borderSelectionRange}
                         onchange={handleBorderChange}
+                        currentSummary={bordersSummary}
                     />
                 </div>
             {/if}

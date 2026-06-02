@@ -5,7 +5,7 @@
     import BottomSheet from "../ui/BottomSheet.svelte";
     import ContextMenu from "../ui/ContextMenu.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
-    import { edit as editIcon, trash as trashIcon } from "../../lib/icons/index.js";
+    import { edit as editIcon, trash as trashIcon, copy as copyIcon } from "../../lib/icons/index.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
 
     let {
@@ -16,12 +16,11 @@
         onDeleteSheet,
         onRenameSheet,
         onMoveSheet,
+        onDuplicateSheet,
     } = $props();
 
     let renamingSheetId = $state(null);
     let renameValue = $state("");
-    let clickTimer = null;
-
     // ─── Drag-to-reorder ──────────────────────────────────────────────────────
     let draggedSheetId = $state(null);
     /** Insert position: 0..sheets.length (before tab i, or after the last) */
@@ -79,6 +78,12 @@
                 isSvgIcon: true,
                 action: () => startRenaming(sheetId),
             },
+            {
+                label: "Duplicate",
+                icon: copyIcon,
+                isSvgIcon: true,
+                action: () => onDuplicateSheet?.(sheetId),
+            },
         ]);
         if (sheets.length > 1) {
             items.push({ divider: true });
@@ -100,18 +105,12 @@
     }
 
     function handleTabClick(sheetId) {
-        clearTimeout(clickTimer);
-        clickTimer = setTimeout(() => {
-            clickTimer = null;
-            if (sheetId !== activeSheetId) {
-                onSheetChange(sheetId);
-            }
-        }, 150);
+        if (sheetId !== activeSheetId) {
+            onSheetChange(sheetId);
+        }
     }
 
     function handleTabDoubleClick(sheetId) {
-        clearTimeout(clickTimer);
-        clickTimer = null;
         startRenaming(sheetId);
     }
 
@@ -284,6 +283,14 @@
         }}>
             <span class="tab-action-icon">{@html editIcon}</span>
             Rename
+        </button>
+        <button class="tab-action-item" onclick={() => {
+            const id = tabMenuSheetId;
+            tabMenuSheetId = null;
+            if (id) onDuplicateSheet?.(id);
+        }}>
+            <span class="tab-action-icon">{@html copyIcon}</span>
+            Duplicate
         </button>
         {#if sheets.length > 1}
             <button class="tab-action-item danger" onclick={() => {

@@ -18,6 +18,13 @@ import { CellTypeRegistry } from '../cellTypes/index.js';
 import { perfMon } from '../perf/PerfMonitor.js';
 import { buildWrappedLines } from './RichTextLayout.js';
 import { paintBordersCanvas } from './BorderGeometry.js';
+import { getOverflowBorderSpec, getShadowBorderSpec } from './OverflowGeometry.js';
+import { ptToPx, getFontMetrics, computeBaselineY, computeBaselineYForBlock } from './fontUnits.js';
+
+// Inner padding used by the cell text painters. Symmetric on all four sides so
+// 'top' / 'bottom' / 'middle' alignments share the same clamp math.
+const CELL_PAD = 2;
+const CELL_PAD_X = 4;
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 const DEFAULT_THEME = {
@@ -32,7 +39,7 @@ const DEFAULT_THEME = {
     entryPlaceholderText: '#94a3b8',
     filterIconColor: '#94a3b8',
     filterActiveColor: '#475569',
-    urlColor: '#1a73e8',
+    linkColor: '#1a73e8',
     zebraFill: 'rgba(0,0,0,0.018)',
     formulaColBg: 'rgba(0,0,0,0.015)',
 };
@@ -244,7 +251,9 @@ export class CanvasRenderer {
         ctx.scale(dpr, dpr); // from here on, all coords are in CSS pixels
 
         try {
-            // Set up clip region for this pane
+            // ── Pass 1: cell backgrounds, content, and gridlines ─────────────────
+            // Tight clip to the pane region.
+            ctx.save();
             ctx.beginPath();
             ctx.rect(clipX, clipY, clipW, clipH);
             ctx.clip();
@@ -269,32 +278,58 @@ export class CanvasRenderer {
                 const halfPx = 0.5 / dpr;
                 ctx.beginPath();
                 ctx.strokeStyle = this.#theme.gridline;
-                ctx.lineWidth = 1;
+                ctx.lineWidth = 1 / dpr;
                 for (const cell of cells) {
                     const { x, y, width, height, borders } = cell;
+                    const spec = getOverflowBorderSpec(cell);
+                    const gx = spec.boxX;
+                    const gw = spec.boxWidth;
                     // Skip bottom gridline when the cell has a custom bottom border — the
                     // border renders on top anyway, but suppressing avoids the gridline
                     // bleeding through thin or dashed custom borders.
                     if (!borders?.bottom) {
-                        ctx.moveTo(x, y + height - halfPx);
-                        ctx.lineTo(x + width, y + height - halfPx);
+                        ctx.moveTo(gx, y + height - halfPx);
+                        ctx.lineTo(gx + gw, y + height - halfPx);
                     }
                     // right edge — suppressed for overflow shadow cells (gridlineOnly) and
                     // when the cell has a custom right border.
-                    if (!cell.gridlineOnly && !borders?.right) {
-                        ctx.moveTo(x + width - halfPx, y);
-                        ctx.lineTo(x + width - halfPx, y + height);
+                    if (!cell.gridlineOnly && !borders?.right && !spec.suppressRightGridline) {
+                        ctx.moveTo(gx + gw - halfPx, y);
+                        ctx.lineTo(gx + gw - halfPx, y + height);
                     }
                 }
                 ctx.stroke();
             }
 
-            // Paint custom borders after gridlines so they always render on top.
+            ctx.restore(); // removes tight clip
+
+            // ── Pass 2: custom borders ────────────────────────────────────────────
+            // Strokes are inset half their width by paintBordersCanvas so they sit
+            // ON the cell boundary, but corner overlap can extend up to half a
+            // stroke past the cell edge — expand the clip by 4 CSS px (covers
+            // widths up to ~8) so thick borders aren't clipped at pane seams.
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(clipX - 4, clipY - 4, clipW + 8, clipH + 8);
+            ctx.clip();
+
+            // Save ctx state once for the whole pass — paintBordersCanvas resets
+            // lineDash/lineCap on exit but other state (strokeStyle, lineWidth)
+            // stays as the last cell's values; that's fine because every edge
+            // sets them fresh.
+            ctx.save();
             for (const cell of /** @type {import('./CellPaintData.js').CellPaintItem[]} */ (cells)) {
-                if (!cell.gridlineOnly && cell.borders) {
-                    this.#paintCustomBorders(ctx, cell.borders, cell.x, cell.y, cell.width, cell.height);
+                if (!cell.borders) continue;
+                const spec = cell.gridlineOnly
+                    ? getShadowBorderSpec(cell)
+                    : getOverflowBorderSpec(cell);
+                if (spec.paintBorders) {
+                    this.#paintCustomBorders(ctx, spec.paintBorders, spec.boxX, cell.y, spec.boxWidth, cell.height, dpr);
                 }
             }
+            ctx.restore();
+
+            ctx.restore(); // removes expanded clip
         } finally {
             ctx.restore(); // removes the DPR scale — back to physical pixel space
         }
@@ -416,7 +451,7 @@ export class CanvasRenderer {
 
         // Gridlines (bottom + right)
         ctx.strokeStyle = this.#theme.gridline;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1 / dpr;
         ctx.beginPath();
         ctx.moveTo(x,               y + height - halfPx);
         ctx.lineTo(x + width,       y + height - halfPx);
@@ -424,16 +459,15 @@ export class CanvasRenderer {
         ctx.lineTo(x + width - halfPx, y + height);
         ctx.stroke();
 
-        const textY = snap(y + height / 2);
-
         if (col?.isNonEntry) {
             // Formula column — show 'fx' hint
-            const fxFont = `600 ${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
+            const fxFont = `600 ${ptToPx(this.#theme.defaultFontSize)}px ${this.#theme.defaultFontFamily}`;
             if (fxFont !== this.#lastFont) { ctx.font = fxFont; this.#lastFont = fxFont; }
             ctx.fillStyle = 'rgba(100,116,139,0.35)';
-            ctx.textBaseline = 'middle';
+            ctx.textBaseline = 'alphabetic';
             ctx.textAlign = 'center';
-            ctx.fillText('fx', snap(x + width / 2), textY);
+            const fxY = snap(computeBaselineY(y, height, 'middle', getFontMetrics(fxFont), CELL_PAD));
+            ctx.fillText('fx', snap(x + width / 2), fxY);
             return;
         }
 
@@ -441,12 +475,13 @@ export class CanvasRenderer {
         const value = colId != null ? (entryBuffer?.[colId] ?? null) : null;
 
         if (value != null && value !== '') {
-            const font = `${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
+            const font = `${ptToPx(this.#theme.defaultFontSize)}px ${this.#theme.defaultFontFamily}`;
             if (font !== this.#lastFont) { ctx.font = font; this.#lastFont = font; }
             ctx.fillStyle = this.#theme.defaultText;
-            ctx.textBaseline = 'middle';
+            ctx.textBaseline = 'alphabetic';
             ctx.textAlign = 'left';
-            ctx.fillText(String(value), snap(x + 4), textY, width - 8);
+            const vY = snap(computeBaselineY(y, height, 'middle', getFontMetrics(font), CELL_PAD));
+            ctx.fillText(String(value), snap(x + CELL_PAD_X), vY, width - CELL_PAD_X * 2);
         }
     }
 
@@ -501,9 +536,11 @@ export class CanvasRenderer {
 
         // 5. Data validation invalid — red outline
         if (cell.dvInvalid) {
+            const _dpr = this.#dpr;
+            const _off = 0.75 / _dpr;
             ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = 1.5;
-            ctx.strokeRect(x + 0.75, y + 0.75, width - 1.5, height - 1.5);
+            ctx.lineWidth = 1.5 / _dpr;
+            ctx.strokeRect(x + _off, y + _off, width - 2 * _off, height - 2 * _off);
         }
 
         // 8. Content — clip to cell interior before drawing (only when needed).
@@ -552,7 +589,7 @@ export class CanvasRenderer {
         }
 
         // All typed cells with a paintCell descriptor are handled above.
-        // Remaining renderTypes (text, number, date, url, etc.) render as text.
+        // Remaining renderTypes (text, number, date, etc.) render as text.
         this.#paintTextContent(ctx, cell);
     }
 
@@ -572,13 +609,15 @@ export class CanvasRenderer {
 
         // Placeholder text for empty entry cells (shown in italic, muted style)
         if ((text === '' || text == null) && cell.placeholderText) {
-            const placeholderFont = `italic ${this.#theme.defaultFontSize * 4 / 3 * 0.9}px ${this.#theme.defaultFontFamily}`;
+            const placeholderFont = `italic ${ptToPx(this.#theme.defaultFontSize * 0.9)}px ${this.#theme.defaultFontFamily}`;
             if (placeholderFont !== this.#lastFont) { ctx.font = placeholderFont; this.#lastFont = placeholderFont; }
             ctx.fillStyle = this.#theme.entryPlaceholderText || 'rgba(100,116,139,0.5)';
-            ctx.textBaseline = 'middle';
+            ctx.textBaseline = 'alphabetic';
             ctx.textAlign = 'left';
             const _dpr = this.#dpr;
-            ctx.fillText(cell.placeholderText, cell.x + 4, Math.round((cell.y + cell.height / 2) * _dpr) / _dpr, cell.width - 8);
+            const phMetrics = getFontMetrics(placeholderFont);
+            const phY = computeBaselineY(cell.y, cell.height, 'middle', phMetrics, CELL_PAD);
+            ctx.fillText(cell.placeholderText, cell.x + CELL_PAD_X, Math.round(phY * _dpr) / _dpr, cell.width - CELL_PAD_X * 2);
             if (cell.tableHeaderInfo) this.#paintHeaderFilterIcon(ctx, cell);
             return;
         }
@@ -604,30 +643,16 @@ export class CanvasRenderer {
         ctx.fillStyle = cell.textColor || this.#theme.defaultText;
 
         const { x, y, width, height } = cell;
-        const pad = 4;
         const hAlign = cell.hAlign || 'left';
-        const vAlign = cell.vAlign || 'middle';
-        // fontSize is stored in pt; convert to CSS px for layout measurements.
-        const fontPx = (cell.fontSize || this.#theme.defaultFontSize) * 4 / 3;
+        const vAlign = cell.vAlign === 'center' ? 'middle' : (cell.vAlign || 'middle');
 
-        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'alphabetic';
 
-        // Snap to physical pixel boundaries: Math.round(v * dpr) / dpr ensures the
-        // canvas draws at an integer physical pixel, not a fractional one.
-        // Plain Math.round() only gives integer CSS pixels, which at DPR=1.5 can still
-        // land on a half physical pixel (e.g. CSS 11 → 16.5 phys px).
         const dpr = this.#dpr;
         const snap = (v) => Math.round(v * dpr) / dpr;
+        const metrics = getFontMetrics(font);
 
-        const minTextY = snap(y + 1 + fontPx / 2);
-        let textY;
-        if (vAlign === 'top') {
-            textY = snap(y + pad + fontPx / 2);
-        } else if (vAlign === 'bottom') {
-            textY = Math.max(snap(y + height - pad - fontPx / 2), minTextY);
-        } else {
-            textY = Math.max(snap(y + height / 2), minTextY);
-        }
+        const textY = snap(computeBaselineY(y, height, vAlign, metrics, CELL_PAD));
 
         let textX;
         if (hAlign === 'center') {
@@ -635,38 +660,40 @@ export class CanvasRenderer {
             textX = snap(x + width / 2);
         } else if (hAlign === 'right') {
             ctx.textAlign = 'right';
-            textX = snap(x + width - pad);
+            textX = snap(x + width - CELL_PAD_X);
         } else {
             ctx.textAlign = 'left';
-            textX = snap(x + pad);
+            textX = snap(x + CELL_PAD_X);
         }
 
         ctx.fillText(text, textX, textY);
 
-        // Decorations
+        // Decorations — positioned from font metrics, not fontPx/2.
         if (cell.underline || cell.strikethrough) {
             ctx.textAlign = 'left';
             const tw = ctx.measureText(text).width;
             const measuredX = hAlign === 'center'
                 ? x + width / 2 - tw / 2
                 : hAlign === 'right'
-                    ? x + width - pad - tw
-                    : x + pad;
+                    ? x + width - CELL_PAD_X - tw
+                    : x + CELL_PAD_X;
 
             if (cell.underline) {
                 ctx.strokeStyle = cell.textColor || this.#theme.defaultText;
-                ctx.lineWidth = 1;
+                ctx.lineWidth = 1 / dpr;
+                const uy = snap(textY + Math.max(1, metrics.descent * 0.6));
                 ctx.beginPath();
-                ctx.moveTo(measuredX, textY + fontPx / 2 + 1);
-                ctx.lineTo(measuredX + tw, textY + fontPx / 2 + 1);
+                ctx.moveTo(measuredX, uy);
+                ctx.lineTo(measuredX + tw, uy);
                 ctx.stroke();
             }
             if (cell.strikethrough) {
                 ctx.strokeStyle = cell.textColor || this.#theme.defaultText;
-                ctx.lineWidth = 1;
+                ctx.lineWidth = 1 / dpr;
+                const sy = snap(textY - metrics.ascent * 0.35);
                 ctx.beginPath();
-                ctx.moveTo(measuredX, textY);
-                ctx.lineTo(measuredX + tw, textY);
+                ctx.moveTo(measuredX, sy);
+                ctx.lineTo(measuredX + tw, sy);
                 ctx.stroke();
             }
         }
@@ -684,9 +711,8 @@ export class CanvasRenderer {
         if (!runs || runs.length === 0) return;
 
         const { x, y, width, height } = cell;
-        const pad = 4;
         const hAlign = cell.hAlign || 'left';
-        const vAlign = cell.vAlign || 'middle';
+        const vAlign = cell.vAlign === 'center' ? 'middle' : (cell.vAlign || 'middle');
         const defaultFontSize = cell.fontSize || this.#theme.defaultFontSize;
         const defaultFamily = cell.fontFamily || this.#theme.defaultFontFamily;
         const defaultColor = cell.textColor || this.#theme.defaultText;
@@ -695,9 +721,7 @@ export class CanvasRenderer {
         const defaultUnderline = cell.underline || false;
         const defaultStrikethrough = cell.strikethrough || false;
 
-        const maxWidth = width - 2 * pad;
-        // fontSize is stored in pt; convert to CSS px for layout.
-        const defaultFontPx = defaultFontSize * 4 / 3;
+        const maxWidth = width - 2 * CELL_PAD_X;
 
         // Split runs into logical lines (by explicit \n)
         const logicalLines = [[]];
@@ -739,45 +763,39 @@ export class CanvasRenderer {
             this.#wrapCache.set(wrapCacheKey, allLines);
         }
 
-        // lineHeight in CSS px, using the converted font size.
-        const lineHeight = defaultFontPx * 1.5;
+        // Use the default font's metrics for line-spacing math. Individual runs
+        // may override fontSize; the default acts as the canonical line cadence
+        // so mixed-size runs don't stagger vertically.
+        const defaultFont = this.#buildRunFont({}, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
+        const defaultMetrics = getFontMetrics(defaultFont);
+        const lineHeight = (defaultMetrics.ascent + defaultMetrics.descent) * 1.2;
         const totalTextH = allLines.length * lineHeight;
 
-        // Minimum startY so the first line's baseline never appears above the top pad
-        const minStartY = y + pad + defaultFontPx / 2;
-
-        let startY;
-        if (vAlign === 'top') {
-            startY = minStartY;
-        } else if (vAlign === 'bottom') {
-            // Last line center at y + height - pad - fontPx/2; solve for startY.
-            startY = y + height - pad - defaultFontPx / 2 - (totalTextH - lineHeight);
-        } else {
-            // Center — clamp so first line doesn't bleed above the cell when content overflows
-            startY = Math.max(y + (height - totalTextH) / 2 + lineHeight / 2, minStartY);
-        }
+        // Baseline Y of the *first* line. We center the block, then offset to
+        // the first baseline (which sits `ascent` below the top of the block).
+        const firstLineBaseline = computeBaselineYForBlock(y, height, vAlign, defaultMetrics, totalTextH, CELL_PAD);
 
         const dpr = this.#dpr;
         const snap = (v) => Math.round(v * dpr) / dpr;
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x + 1, y + 1, width - 2, height - 2);
+        ctx.rect(x, y, width, height);
         ctx.clip();
-        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'alphabetic';
         ctx.textAlign = 'left';
 
         for (let li = 0; li < allLines.length; li++) {
             const lineRuns = allLines[li];
-            const lineY = snap(startY + li * lineHeight);
+            const lineY = snap(firstLineBaseline + li * lineHeight);
 
             // Use pre-computed widths stored on each fragment during wrap layout
             let lineW = 0;
             for (const run of lineRuns) lineW += run._w;
 
             let runX;
-            if (hAlign === 'right') runX = snap(x + width - pad - lineW);
+            if (hAlign === 'right') runX = snap(x + width - CELL_PAD_X - lineW);
             else if (hAlign === 'center') runX = snap(x + (width - lineW) / 2);
-            else runX = snap(x + pad);
+            else runX = snap(x + CELL_PAD_X);
 
             for (const run of lineRuns) {
                 const font = this.#buildRunFont(run, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
@@ -792,21 +810,21 @@ export class CanvasRenderer {
                 const doStrike    = run.s !== undefined ? run.s : defaultStrikethrough;
 
                 if (doUnderline || doStrike) {
-                    // runFontSize is in pt; convert to px for the offset calculation.
-                    const runFontPx = (run.f || defaultFontSize) * 4 / 3;
+                    const runMetrics = getFontMetrics(font);
                     ctx.strokeStyle = color;
-                    ctx.lineWidth = 1;
+                    ctx.lineWidth = 1 / dpr;
                     if (doUnderline) {
-                        const underlineY = lineY + runFontPx / 2 + 1;
+                        const uy = snap(lineY + Math.max(1, runMetrics.descent * 0.6));
                         ctx.beginPath();
-                        ctx.moveTo(runX, underlineY);
-                        ctx.lineTo(runX + tw, underlineY);
+                        ctx.moveTo(runX, uy);
+                        ctx.lineTo(runX + tw, uy);
                         ctx.stroke();
                     }
                     if (doStrike) {
+                        const sy = snap(lineY - runMetrics.ascent * 0.35);
                         ctx.beginPath();
-                        ctx.moveTo(runX, lineY);
-                        ctx.lineTo(runX + tw, lineY);
+                        ctx.moveTo(runX, sy);
+                        ctx.lineTo(runX + tw, sy);
                         ctx.stroke();
                     }
                 }
@@ -835,14 +853,14 @@ export class CanvasRenderer {
 
     /**
      * Build a CSS font string for a single rich-text run, falling back to cell defaults.
-     * size values are in pt; multiply by 4/3 to get CSS px.
+     * size values are in pt; ptToPx rounds to integer CSS px for crisp rasterization.
      */
     #buildRunFont(run, defaultSize, defaultFamily, defaultBold, defaultItalic) {
         const bold = run.b !== undefined ? run.b : defaultBold;
         const italic = run.i !== undefined ? run.i : defaultItalic;
         const sizePt = run.f || defaultSize;
         const family = run.ff || defaultFamily;
-        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${sizePt * 4 / 3}px ${family}`;
+        return `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${ptToPx(sizePt)}px ${family}`;
     }
 
     /**
@@ -880,7 +898,7 @@ export class CanvasRenderer {
         ctx.save();
         ctx.globalAlpha = active ? 1 : 0.65;
         ctx.strokeStyle = active ? this.#theme.filterActiveColor : '#475569';
-        ctx.lineWidth = 2.25;
+        ctx.lineWidth = 2.25 / dpr;
         ctx.lineCap = 'round';
 
         ctx.beginPath();
@@ -914,12 +932,12 @@ export class CanvasRenderer {
 
         // Bottom border (slightly heavier to anchor the header)
         ctx.strokeStyle = this.#theme.tableHeaderBorder;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.5 / dpr;
         ctx.beginPath();
         ctx.moveTo(x, y + height - halfPx);
         ctx.lineTo(x + width, y + height - halfPx);
         ctx.stroke();
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1 / dpr;
 
         // Right border
         ctx.strokeStyle = this.#theme.gridline;
@@ -928,20 +946,20 @@ export class CanvasRenderer {
         ctx.lineTo(x + width - halfPx, y + height);
         ctx.stroke();
 
-        const pad = 4;
+        const pad = CELL_PAD_X;
         const filterAreaW = FILTER_BTN_WIDTH;
         const textAreaW = width - pad - filterAreaW - 2;
 
-        ctx.textBaseline = 'middle';
-        const textY = Math.round((y + height / 2) * dpr) / dpr;
+        ctx.textBaseline = 'alphabetic';
 
         // Column name — bold, same size as regular cells
-        const headerFont = `600 ${this.#theme.defaultFontSize * 4 / 3}px ${this.#theme.defaultFontFamily}`;
+        const headerFont = `600 ${ptToPx(this.#theme.defaultFontSize)}px ${this.#theme.defaultFontFamily}`;
         if (headerFont !== this.#lastFont) { ctx.font = headerFont; this.#lastFont = headerFont; }
         ctx.fillStyle = this.#theme.tableHeaderText;
         ctx.textAlign = 'left';
 
         const snap = (v) => Math.round(v * dpr) / dpr;
+        const textY = snap(computeBaselineY(y, height, 'middle', getFontMetrics(headerFont), CELL_PAD));
 
         ctx.save();
         ctx.beginPath();
@@ -963,15 +981,16 @@ export class CanvasRenderer {
     // ─── Private: border helpers ──────────────────────────────────────────────
 
     /** Delegates to the shared BorderGeometry module (single source of truth). */
-    #paintCustomBorders(ctx, borders, x, y, w, h) {
-        paintBordersCanvas(ctx, borders, x, y, w, h);
+    #paintCustomBorders(ctx, borders, x, y, w, h, dpr = 1) {
+        paintBordersCanvas(ctx, borders, x, y, w, h, dpr);
     }
 
     // ─── Private: font / text helpers ─────────────────────────────────────────
 
     /**
      * Build a CSS font string from cell style properties.
-     * fontSize is stored in pt; multiply by 4/3 to convert to CSS px (96dpi / 72pt-per-inch).
+     * fontSize is stored in pt; ptToPx converts to integer CSS px so glyphs rasterize
+     * on a whole-pixel grid (96dpi / 72pt-per-inch, rounded).
      * @param {import('./CellPaintData.js').CellPaintItem} cell
      * @returns {string}
      */
@@ -980,7 +999,7 @@ export class CanvasRenderer {
         const weight = cell.bold ? 'bold' : 'normal';
         const sizePt = cell.fontSize || this.#theme.defaultFontSize;
         const family = cell.fontFamily || this.#theme.defaultFontFamily;
-        return `${style} ${weight} ${sizePt * 4 / 3}px ${family}`;
+        return `${style} ${weight} ${ptToPx(sizePt)}px ${family}`;
     }
 }
 

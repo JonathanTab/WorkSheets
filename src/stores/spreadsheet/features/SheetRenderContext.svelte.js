@@ -23,6 +23,7 @@ import * as Y from 'yjs';
 import { MergeEngine } from './MergeEngine.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { perfMon } from '../perf/PerfMonitor.js';
+import { ptToPx } from '../rendering/fontUnits.js';
 
 // ─── Text measurement cache ──────────────────────────────────────────────────
 
@@ -40,11 +41,12 @@ const textMeasurementCache = new Map();
 function measureTextWidth(text, cell = {}) {
     if (!text) return 0;
 
-    // Build font string. fontSize is stored in pt; convert to CSS px (× 4/3).
-    const fontSizePt = cell.fontSize || 12;
+    // Build font string. fontSize is stored in pt; convert to integer CSS px so
+    // measurements match what CanvasRenderer actually paints (which also rounds).
+    const fontSizePt = cell.fontSize || 10;
     const fontFamily = cell.fontFamily || 'system-ui, -apple-system, sans-serif';
     const fontWeight = cell.bold ? 'bold' : 'normal';
-    const font = `${fontWeight} ${fontSizePt * 4 / 3}px ${fontFamily}`;
+    const font = `${fontWeight} ${ptToPx(fontSizePt)}px ${fontFamily}`;
 
     const cacheKey = `${text}|${font}`;
     if (textMeasurementCache.has(cacheKey)) {
@@ -272,16 +274,20 @@ export class SheetRenderContext {
      * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
      * @returns {number} extra pixels (0 = no overflow needed)
      */
-    getOverflowExtent(row, col, visibleColEnd, colMetrics, displayValue, sheetCell) {
+    getOverflowExtent(row, col, visibleColEnd, colMetrics, displayValue, sheetCell, resolvedStyle = null) {
         const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
-        if (cell.wrapText && cell.wrapText !== 'overflow') return 0;
+        const wrapMode = resolvedStyle?.wrapText ?? cell.wrapText;
+        if (wrapMode && wrapMode !== 'overflow') return 0;
         // Rich text cells always clip; HTML string width can't be measured as plain text
         if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
         // Get the display value and measure its width
         const dv = displayValue ?? this.getDisplayValue(row, col);
-        const textWidth = measureTextWidth(dv, cell);
+        const measureCell = resolvedStyle
+            ? { ...cell, fontSize: resolvedStyle.fontSize, fontFamily: resolvedStyle.fontFamily, bold: resolvedStyle.bold }
+            : cell;
+        const textWidth = measureTextWidth(dv, measureCell);
 
         // Get the column width (with padding)
         const colWidth = colMetrics.sizeOf(col);
@@ -326,14 +332,18 @@ export class SheetRenderContext {
      * @param {object} [sheetCell]
      * @returns {number} extra pixels (0 = no overflow needed)
      */
-    getLeftOverflowExtent(row, col, visibleColStart, colMetrics, displayValue, sheetCell) {
+    getLeftOverflowExtent(row, col, visibleColStart, colMetrics, displayValue, sheetCell, resolvedStyle = null) {
         const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
         if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return 0;
-        if (cell.wrapText && cell.wrapText !== 'overflow') return 0;
+        const wrapMode = resolvedStyle?.wrapText ?? cell.wrapText;
+        if (wrapMode && wrapMode !== 'overflow') return 0;
         if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return 0;
 
         const dv = displayValue ?? this.getDisplayValue(row, col);
-        const textWidth = measureTextWidth(dv, cell);
+        const measureCell = resolvedStyle
+            ? { ...cell, fontSize: resolvedStyle.fontSize, fontFamily: resolvedStyle.fontFamily, bold: resolvedStyle.bold }
+            : cell;
+        const textWidth = measureTextWidth(dv, measureCell);
 
         const colWidth = colMetrics.sizeOf(col);
         const padding = 8;
@@ -355,6 +365,88 @@ export class SheetRenderContext {
         }
 
         return availableExtra;
+    }
+
+    /**
+     * Center overflow extents: for center-aligned text, split the overflow
+     * equally left and right. If one side is blocked, the other absorbs the
+     * remainder; if both are blocked the cell is clipped on those sides.
+     *
+     * @param {number} row
+     * @param {number} col
+     * @param {number} visibleColStart
+     * @param {number} visibleColEnd
+     * @param {import('../virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
+     * @param {string} [displayValue]
+     * @param {object} [sheetCell]
+     * @param {object} [resolvedStyle]
+     * @returns {{leftExtra: number, rightExtra: number}}
+     */
+    getCenterOverflowExtents(row, col, visibleColStart, visibleColEnd, colMetrics, displayValue, sheetCell, resolvedStyle = null) {
+        const cell = sheetCell ?? this.#sheetStore.getCell(row, col);
+        if (!cell.exists || cell.v === undefined || cell.v === null || cell.v === '') return { leftExtra: 0, rightExtra: 0 };
+        const wrapMode = resolvedStyle?.wrapText ?? cell.wrapText;
+        if (wrapMode && wrapMode !== 'overflow') return { leftExtra: 0, rightExtra: 0 };
+        if (typeof cell.v === 'string' && /<(?:span|b|strong|i|em|u|s|strike|div|br)\b/i.test(cell.v)) return { leftExtra: 0, rightExtra: 0 };
+
+        const dv = displayValue ?? this.getDisplayValue(row, col);
+        const measureCell = resolvedStyle
+            ? { ...cell, fontSize: resolvedStyle.fontSize, fontFamily: resolvedStyle.fontFamily, bold: resolvedStyle.bold }
+            : cell;
+        const textWidth = measureTextWidth(dv, measureCell);
+
+        const colWidth = colMetrics.sizeOf(col);
+        const padding = 8;
+        const availableWidth = colWidth - padding;
+
+        if (textWidth <= availableWidth + 0.5) return { leftExtra: 0, rightExtra: 0 };
+
+        const neededExtra = textWidth - availableWidth;
+        const neededPerSide = neededExtra / 2;
+
+        // Scan left — collect cell widths until blocked
+        const leftWidths = [];
+        for (let c = col - 1; c >= visibleColStart; c--) {
+            const adjType = this.getCellType(row, c);
+            if (adjType !== CELL_TYPE.REGULAR) break;
+            const adj = this.#sheetStore.getCell(row, c);
+            if (adj.exists && adj.v !== undefined && adj.v !== null && adj.v !== '') break;
+            leftWidths.push(colMetrics.sizeOf(c));
+        }
+
+        // Scan right — collect cell widths until blocked
+        const rightWidths = [];
+        for (let c = col + 1; c <= visibleColEnd; c++) {
+            const adjType = this.getCellType(row, c);
+            if (adjType !== CELL_TYPE.REGULAR) break;
+            const adj = this.#sheetStore.getCell(row, c);
+            if (adj.exists && adj.v !== undefined && adj.v !== null && adj.v !== '') break;
+            rightWidths.push(colMetrics.sizeOf(c));
+        }
+
+        // Sum to total available on each side
+        const leftAvail = leftWidths.reduce((s, w) => s + w, 0);
+        const rightAvail = rightWidths.reduce((s, w) => s + w, 0);
+
+        // Each side independently takes up to its half — no cross-borrowing.
+        // If a side is blocked, the text is clipped there; the other side stays put.
+        const leftTarget = Math.min(leftAvail, neededPerSide);
+        const rightTarget = Math.min(rightAvail, neededPerSide);
+
+        // Snap each side to minimum whole-cell boundaries that cover the target
+        function cellSnap(widths, targetPx) {
+            let total = 0;
+            for (const w of widths) {
+                total += w;
+                if (total >= targetPx) break;
+            }
+            return total;
+        }
+
+        return {
+            leftExtra: leftTarget > 0 ? cellSnap(leftWidths, leftTarget) : 0,
+            rightExtra: rightTarget > 0 ? cellSnap(rightWidths, rightTarget) : 0,
+        };
     }
 
     /**

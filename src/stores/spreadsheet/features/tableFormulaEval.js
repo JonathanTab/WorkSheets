@@ -59,9 +59,81 @@
  *   - operations.js         (Node.js / server, evaluates formula columns from Yjs data)
  */
 
-import { parseFormula } from '../../../formulas/parser.js';
+import { parseFormula, NodeType } from '../../../formulas/parser.js';
 import { evaluate } from '../../../formulas/evaluator.js';
+import { FormulaError } from '../../../formulas/functions.js';
 import { parseLocalDate } from '../cellTypes/types/date.js';
+
+/**
+ * Cross-table recursion-depth counter. Used by buildTableFunctions() to bail
+ * out of runaway recursion (e.g. Table A → TABLE_SUM("B") → B's column
+ * formula → TABLE_SUM("A") → … ) with #CIRC! before blowing the JS stack.
+ *
+ * We can't simply forbid same-table re-entry: TABLE_GET("A", priorRow, "col")
+ * from inside a column on A is a legitimate running-total pattern. A depth
+ * cap is the lightest correct guard short of full per-(table,column) cycle
+ * tracking.
+ *
+ * JS is single-threaded; this module-level counter is safe.
+ * Always paired with try/finally so a throw unwinds the counter correctly.
+ */
+let _tableEvalDepth = 0;
+const _TABLE_EVAL_MAX_DEPTH = 64;
+
+/**
+ * Validate a column DSL formula. Column formulas are table-scoped: they may
+ * reference other columns via `{colName}`, call functions (including TABLE_*),
+ * and use the row-helper DSL (PREV/NEXT/ROWVAL/WINDOW), but they MAY NOT
+ * reference sheet cells (A1) or cross-sheet (Sheet2!A1) — those refs evaluate
+ * to null at insert time and silently produce wrong values.
+ *
+ * Returns `{ok: true}` for a valid formula, or
+ *        `{ok: false, error: 'human-readable reason'}`.
+ *
+ * Used by the column-config UI to refuse bad formulas at edit time. The
+ * evaluator also surfaces #REF! at runtime when it encounters a CellRef node.
+ *
+ * @param {string} formula
+ * @returns {{ ok: boolean, error?: string }}
+ */
+export function validateColumnFormula(formula) {
+    if (typeof formula !== 'string' || !formula.trim()) return { ok: true };
+    // Strip DSL markers ({col}, ROW, ROW1, COUNT) → placeholder so parseFormula
+    // doesn't choke on them.
+    let stripped = formula.trim();
+    if (stripped.startsWith('=')) stripped = stripped.slice(1);
+    stripped = stripped.replace(/\{[^}]+\}/g, '0');
+    stripped = stripped.replace(/\bROW1?\b\s*(?:\(\s*\))?/g, '0');
+    stripped = stripped.replace(/\bCOUNT\b(?!IF)/gi, '0');
+    let ast;
+    try { ast = parseFormula('=' + stripped); }
+    catch (e) { return { ok: false, error: `Syntax: ${e.message}` }; }
+    if (!ast) return { ok: true };
+    let badRef = null;
+    const visit = (node) => {
+        if (!node || badRef) return;
+        if (node.type === NodeType.CELL_REF) {
+            badRef = `Column formulas can't reference sheet cells (got ${node.ref}).`;
+            return;
+        }
+        if (node.type === NodeType.RANGE) {
+            badRef = 'Column formulas can\'t reference sheet ranges (e.g. A1:B5).';
+            return;
+        }
+        if (node.type === NodeType.SHEET_REF) {
+            badRef = `Column formulas can't reference other sheets (got ${node.sheet}!).`;
+            return;
+        }
+        if (node.left)    visit(node.left);
+        if (node.right)   visit(node.right);
+        if (node.operand) visit(node.operand);
+        if (node.args)    for (const a of node.args) visit(a);
+        if (node.ref)     visit(node.ref);
+    };
+    visit(ast);
+    if (badRef) return { ok: false, error: badRef };
+    return { ok: true };
+}
 
 // ─── Shared formula helpers ───────────────────────────────────────────────────
 
@@ -322,13 +394,55 @@ export function buildTableFunctions(resolveTableByName) {
         return count;
     });
 
-    return fns;
+    // Wrap every TABLE_* function with a recursion-depth guard so that
+    // cross-table cycles (A → B → A → …) surface as #CIRC! instead of blowing
+    // the JS stack. Same-table re-entry (e.g. TABLE_GET("A", prevRow, "x")
+    // inside a column on A) is intentionally allowed up to the depth cap.
+    const wrapped = new Map();
+    for (const [name, fn] of fns) {
+        wrapped.set(name, (...args) => {
+            if (_tableEvalDepth >= _TABLE_EVAL_MAX_DEPTH) return FormulaError.CIRC;
+            _tableEvalDepth++;
+            try { return fn(...args); }
+            finally { _tableEvalDepth--; }
+        });
+    }
+    return wrapped;
 }
 
 // ─── Dependency analysis ──────────────────────────────────────────────────────
 
 const CROSS_ROW_PATTERN = /\b(PREV|NEXT|ROWVAL|WINDOW)\s*\(/i;
 const COL_REF_PATTERN   = /\{([^}]+)\}/g;
+
+// Matches TABLE_<FUNC>(<firstArg>, ...) capturing the literal name (group 1/2) or
+// signalling a dynamic first arg via group 3. The name is intentionally permissive:
+// any quoted string or any token up to the first comma / closing paren.
+const TABLE_FN_PATTERN = /\bTABLE_[A-Z_]+\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^,)]+))/gi;
+
+/**
+ * Scan a column DSL formula string for TABLE_*("name", ...) references.
+ * Used by DocumentTableRegistry to know which stores must be invalidated when a
+ * given source table's rows change.
+ *
+ * @param {string} formula
+ * @returns {{ names: Set<string>, wildcard: boolean }}
+ *   names    - uppercased table names referenced with a literal first arg
+ *   wildcard - true if any TABLE_* call uses a non-literal (dynamic) first arg
+ */
+export function extractTableRefsFromColumnFormula(formula) {
+    const names = new Set();
+    let wildcard = false;
+    if (typeof formula !== 'string' || !formula) return { names, wildcard };
+    TABLE_FN_PATTERN.lastIndex = 0;
+    let m;
+    while ((m = TABLE_FN_PATTERN.exec(formula)) !== null) {
+        if (m[1] !== undefined)      names.add(m[1].toUpperCase());
+        else if (m[2] !== undefined) names.add(m[2].toUpperCase());
+        else                          wildcard = true;
+    }
+    return { names, wildcard };
+}
 
 
 // Module-level cache for evaluation plans.
@@ -868,7 +982,11 @@ export class TableFormulaEvaluator {
         if (Array.isArray(t)) return t;
         const num = Number(t);
         if (t !== '' && !isNaN(num)) return num;
-        try { return evaluate(parseFormula('=' + t), () => null, {}, this.#customFunctions); } catch { return null; }
+        // CellRef ('A1') and SheetRef ('Sheet1!A1') inside column DSL formulas
+        // are scoped errors — surface #REF! at runtime so the user sees an
+        // obvious problem instead of silent 0/null. validateColumnFormula
+        // catches these at edit time when the UI uses it.
+        try { return evaluate(parseFormula('=' + t), () => '#REF!', {}, this.#customFunctions); } catch { return null; }
     }
 
     // ─── Running / conditional aggregates ────────────────────────────────────

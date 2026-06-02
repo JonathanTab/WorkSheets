@@ -5,24 +5,30 @@
     let {
         onchange = undefined,
         selectionRange = null,
+        // { style, width, color } | { mixed: true } | null — surfaces current
+        // border state of the selection so the picker opens reflecting it.
+        currentSummary = null,
     } = $props();
 
-    // Current border settings
+    // Current border settings (mutated by user; seeded from currentSummary).
     let currentColor = $state("#000000");
     let currentWidth = $state(1);
-    let currentStyle = $state("solid"); // "solid" | "dashed" | "double"
+    let currentStyle = $state("solid"); // "solid" | "dashed" | "dotted" | "double"
     let clearMode = $state(false); // When true, clicking a position removes borders
 
-    // Style presets (shown as a row of icons)
-    const stylePresets = [
-        { id: "thin",   style: "solid",  width: 1, label: "Thin" },
-        { id: "medium", style: "solid",  width: 2, label: "Medium" },
-        { id: "thick",  style: "solid",  width: 3, label: "Thick" },
-        { id: "dashed", style: "dashed", width: 1, label: "Dashed" },
-        { id: "double", style: "double", width: 1, label: "Double" },
+    const styles = [
+        { id: "solid",  label: "Solid" },
+        { id: "dashed", label: "Dashed" },
+        { id: "dotted", label: "Dotted" },
+        { id: "double", label: "Double" },
     ];
 
-    let selectedPreset = $state("thin");
+    const widths = [
+        { id: 1,   label: "1" },
+        { id: 1.5, label: "1.5" },
+        { id: 2,   label: "2" },
+        { id: 3,   label: "3" },
+    ];
 
     // Border position definitions (9-button grid, no "none")
     const borderPositions = [
@@ -44,6 +50,21 @@
     let panelResizeObserver = null;
     let buttonResizeObserver = null;
 
+    // Seed picker state from selection summary when it opens (or when summary
+    // changes while open). Mixed state leaves the user's last choice in place.
+    let summaryAppliedFor = null;
+    $effect(() => {
+        if (!open) { summaryAppliedFor = null; return; }
+        if (summaryAppliedFor === currentSummary) return;
+        summaryAppliedFor = currentSummary;
+        if (currentSummary && !currentSummary.mixed) {
+            currentStyle = currentSummary.style ?? "solid";
+            currentWidth = currentSummary.width ?? 1;
+            currentColor = currentSummary.color ?? "#000000";
+            clearMode = false;
+        }
+    });
+
     function toggle() { open = !open; }
 
     function close({ restoreFocus = false } = {}) {
@@ -57,8 +78,8 @@
         const gap = 6;
         const br = buttonRef.getBoundingClientRect();
         const pr = panelRef?.getBoundingClientRect();
-        const panelWidth = pr?.width ?? 236;
-        const panelHeight = pr?.height ?? 320;
+        const panelWidth = pr?.width ?? 260;
+        const panelHeight = pr?.height ?? 340;
 
         let left = br.left;
         let top = br.bottom + gap;
@@ -81,12 +102,8 @@
         clearMode = !clearMode;
     }
 
-    function selectPreset(preset) {
-        selectedPreset = preset.id;
-        currentStyle = preset.style;
-        currentWidth = preset.width;
-        clearMode = false;
-    }
+    function selectStyle(s) { currentStyle = s; clearMode = false; }
+    function selectWidth(w) { currentWidth = w; clearMode = false; }
 
     function buildEdges(positionId) {
         if (!selectionRange) return [];
@@ -125,7 +142,6 @@
         const edges = buildEdges(positionId);
         const borderStyle = clearMode ? null : { style: currentStyle, width: currentWidth, color: currentColor };
         onchange?.(edges.map(edgeKey => ({ edgeKey, style: borderStyle })));
-        // Panel stays open — user may apply more positions
     }
 
     function handleClearAll() {
@@ -182,15 +198,22 @@
         window.visualViewport?.removeEventListener("resize", updatePanelPosition);
         window.visualViewport?.removeEventListener("scroll", updatePanelPosition);
     });
+
+    // Status line text describing the current selection's borders.
+    let statusText = $derived.by(() => {
+        if (currentSummary?.mixed) return "Selection: mixed borders";
+        if (currentSummary) {
+            return `Selection: ${currentSummary.style} ${currentSummary.width}px`;
+        }
+        return "Selection: no borders";
+    });
 </script>
 
 <div class="border-picker">
     <button bind:this={buttonRef} class="border-button" onclick={toggle} title="Borders">
         <div class="border-icon">
             <svg width="16" height="16" viewBox="0 0 16 16">
-                <!-- outer border -->
                 <rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.25"/>
-                <!-- inner cross -->
                 <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="1.25"/>
                 <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.25"/>
             </svg>
@@ -200,6 +223,8 @@
 
     {#if open}
         <div bind:this={panelRef} class="border-panel" style={panelStyle}>
+
+            <div class="status-line">{statusText}</div>
 
             <!-- Color row -->
             <div class="setting-row">
@@ -213,7 +238,6 @@
                         title="No border — click a position to erase those edges"
                     >
                         <svg width="14" height="14" viewBox="0 0 14 14">
-                            <!-- Eraser-style X through a small box -->
                             <rect x="1.5" y="1.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2,2" opacity="0.5"/>
                             <line x1="3" y1="3" x2="11" y2="11" stroke="currentColor" stroke-width="1.5"/>
                             <line x1="11" y1="3" x2="3" y2="11" stroke="currentColor" stroke-width="1.5"/>
@@ -227,23 +251,45 @@
             <div class="setting-row">
                 <span class="setting-label">Style</span>
                 <div class="setting-controls style-presets">
-                    {#each stylePresets as preset}
+                    {#each styles as s}
                         <button
                             class="style-preset-btn"
-                            class:selected={selectedPreset === preset.id && !clearMode}
-                            onclick={() => selectPreset(preset)}
-                            title={preset.label}
+                            class:selected={currentStyle === s.id && !clearMode}
+                            onclick={() => selectStyle(s.id)}
+                            title={s.label}
                         >
-                            <svg width="32" height="10" viewBox="0 0 32 10">
-                                {#if preset.style === "double"}
-                                    <line x1="2" y1="3.5" x2="30" y2="3.5" stroke="currentColor" stroke-width="1"/>
-                                    <line x1="2" y1="6.5" x2="30" y2="6.5" stroke="currentColor" stroke-width="1"/>
-                                {:else if preset.style === "dashed"}
-                                    <line x1="2" y1="5" x2="30" y2="5" stroke="currentColor" stroke-width="{preset.width}" stroke-dasharray="4,3"/>
+                            <svg width="34" height="10" viewBox="0 0 34 10">
+                                {#if s.id === "double"}
+                                    <line x1="2" y1="3.5" x2="32" y2="3.5" stroke="currentColor" stroke-width="1"/>
+                                    <line x1="2" y1="6.5" x2="32" y2="6.5" stroke="currentColor" stroke-width="1"/>
+                                {:else if s.id === "dashed"}
+                                    <line x1="2" y1="5" x2="32" y2="5" stroke="currentColor" stroke-width={currentWidth} stroke-dasharray="4,3"/>
+                                {:else if s.id === "dotted"}
+                                    <line x1="2" y1="5" x2="32" y2="5" stroke="currentColor" stroke-width={currentWidth} stroke-linecap="round" stroke-dasharray="0.01,3"/>
                                 {:else}
-                                    <line x1="2" y1="5" x2="30" y2="5" stroke="currentColor" stroke-width="{preset.width}"/>
+                                    <line x1="2" y1="5" x2="32" y2="5" stroke="currentColor" stroke-width={currentWidth}/>
                                 {/if}
                             </svg>
+                        </button>
+                    {/each}
+                </div>
+            </div>
+
+            <!-- Width row -->
+            <div class="setting-row">
+                <span class="setting-label">Width</span>
+                <div class="setting-controls width-presets">
+                    {#each widths as w}
+                        <button
+                            class="width-preset-btn"
+                            class:selected={currentWidth === w.id && !clearMode}
+                            onclick={() => selectWidth(w.id)}
+                            title={`${w.label} px`}
+                        >
+                            <svg width="34" height="10" viewBox="0 0 34 10">
+                                <line x1="2" y1="5" x2="32" y2="5" stroke="currentColor" stroke-width={w.id}/>
+                            </svg>
+                            <span class="width-label">{w.label}</span>
                         </button>
                     {/each}
                 </div>
@@ -256,7 +302,7 @@
                 {#each borderPositions as pos}
                     <button
                         class="position-btn"
-                            onclick={() => handlePositionClick(pos.id)}
+                        onclick={() => handlePositionClick(pos.id)}
                         title={pos.description}
                     >
                         <div class="pos-icon">
@@ -313,7 +359,6 @@
                 {/each}
             </div>
 
-            <!-- Clear all borders (full width) -->
             <button class="clear-all-btn" onclick={handleClearAll} title="Remove all borders from selection">
                 <svg width="14" height="14" viewBox="0 0 14 14">
                     <rect x="1.5" y="1.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2,2" opacity="0.6"/>
@@ -355,11 +400,19 @@
         border-radius: 8px;
         box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
         z-index: 1000;
-        min-width: 210px;
+        min-width: 240px;
         max-width: calc(100vw - 16px);
     }
 
-    /* ── Setting rows (color + style) ── */
+    .status-line {
+        font-size: 0.6875rem;
+        color: var(--color-text-muted);
+        margin-bottom: 8px;
+        padding: 2px 4px;
+        border-radius: 3px;
+        background: color-mix(in srgb, var(--color-text-muted) 8%, transparent);
+    }
+
     .setting-row {
         display: flex;
         align-items: center;
@@ -369,7 +422,7 @@
     .setting-label {
         font-size: 0.6875rem;
         color: var(--color-text-muted);
-        width: 32px;
+        width: 36px;
         flex-shrink: 0;
     }
     .setting-controls {
@@ -378,7 +431,6 @@
         gap: 4px;
     }
 
-    /* No-border toggle */
     .no-border-btn {
         display: flex;
         align-items: center;
@@ -400,9 +452,8 @@
     }
     .no-border-btn.active svg { color: #fff; }
 
-    /* Style presets row */
-    .style-presets { gap: 2px; }
-    .style-preset-btn {
+    .style-presets, .width-presets { gap: 2px; }
+    .style-preset-btn, .width-preset-btn {
         display: flex;
         align-items: center;
         justify-content: center;
@@ -414,15 +465,23 @@
         color: var(--color-text-secondary);
         transition: background 0.08s, border-color 0.08s;
     }
-    .style-preset-btn:hover { background: var(--color-fill); }
-    .style-preset-btn.selected {
+    .width-preset-btn {
+        flex-direction: column;
+        gap: 1px;
+        min-width: 38px;
+    }
+    .width-label {
+        font-size: 0.5625rem;
+        color: var(--color-text-muted);
+    }
+    .style-preset-btn:hover, .width-preset-btn:hover { background: var(--color-fill); }
+    .style-preset-btn.selected, .width-preset-btn.selected {
         border-color: var(--color-primary);
         background: color-mix(in srgb, var(--color-primary) 10%, transparent);
     }
 
     .divider { height: 1px; background: var(--color-border); margin: 8px 0; }
 
-    /* Position grid */
     .position-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -460,7 +519,6 @@
         letter-spacing: 0.02em;
     }
 
-    /* Clear all button */
     .clear-all-btn {
         display: flex;
         align-items: center;

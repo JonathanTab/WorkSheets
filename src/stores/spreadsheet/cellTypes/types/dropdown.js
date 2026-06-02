@@ -1,3 +1,5 @@
+import { getFontMetrics, computeBaselineY, ptToPx } from '../../rendering/fontUnits.js';
+
 /**
  * Dropdown cell type descriptor
  *
@@ -21,9 +23,11 @@ export const dropdownType = {
         if (inputString === '' || inputString === null) return null;
         if (config?.allowCustom === false && Array.isArray(config?.options)) {
             const match = config.options.find(
-                o => String(o).toLowerCase() === inputString.toLowerCase()
+                o => String(o).toLowerCase() === String(inputString).toLowerCase()
             );
-            return match !== undefined ? match : inputString;
+            // allowCustom:false means only listed options are valid — reject a
+            // non-matching value rather than silently storing it.
+            return match !== undefined ? match : null;
         }
         return inputString;
     },
@@ -53,19 +57,22 @@ export const dropdownType = {
         // Build font string directly — no CanvasRenderer internals needed
         const italic  = style.italic  ? 'italic'  : 'normal';
         const weight  = style.bold    ? 'bold'    : 'normal';
-        const sizePx  = (style.fontSize  || theme?.defaultFontSize  || 10) * 4 / 3;
+        const sizePx  = ptToPx(style.fontSize  || theme?.defaultFontSize  || 10);
         const family  = style.fontFamily || theme?.defaultFontFamily || 'system-ui, sans-serif';
-        ctx.font = `${italic} ${weight} ${sizePx}px ${family}`;
+        const font = `${italic} ${weight} ${sizePx}px ${family}`;
+        ctx.font = font;
         ctx.fillStyle    = style.textColor || theme?.defaultText || '#1e293b';
-        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'alphabetic';
         ctx.textAlign    = 'left';
+
+        const textY = computeBaselineY(y, height, 'middle', getFontMetrics(font), 2);
 
         // Clip text to leave room for the arrow
         ctx.save();
         ctx.beginPath();
         ctx.rect(x + PAD, y, width - ARROW_W - PAD * 2, height);
         ctx.clip();
-        if (text) ctx.fillText(text, x + PAD, y + height / 2);
+        if (text) ctx.fillText(text, x + PAD, textY);
         ctx.restore();
 
         // ▾ chevron

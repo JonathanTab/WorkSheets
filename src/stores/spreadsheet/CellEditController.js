@@ -1,6 +1,6 @@
 import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
 import { CELL_TYPE } from "./features/SheetRenderContext.svelte.js";
-import { CellTypeRegistry } from "./index.js";
+import { CellTypeRegistry, colParseConfig } from "./index.js";
 
 /**
  * Single entry point for committing a cell edit from any surface (Grid,
@@ -29,7 +29,7 @@ export function commitCellEdit(sheetId, row, col, value, tfr = null) {
         if (cellType === CELL_TYPE.TABLE_DATA) {
             const info = rc.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
-                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, plainValue);
+                const parsed = CellTypeRegistry.parseInput(colParseConfig(info.colDef), plainValue);
                 info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
             }
             return;
@@ -38,7 +38,7 @@ export function commitCellEdit(sheetId, row, col, value, tfr = null) {
         if (cellType === CELL_TYPE.TABLE_ENTRY) {
             const info = rc.tableManager?.getCellInfo(row, col);
             if (info?.table && info.colDef && !info.colDef.isNonEntry) {
-                const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, plainValue);
+                const parsed = CellTypeRegistry.parseInput(colParseConfig(info.colDef), plainValue);
                 info.table.setEntryValue(info.colDef.id, parsed);
                 spreadsheetSession.requestGridRepaint?.();
             }

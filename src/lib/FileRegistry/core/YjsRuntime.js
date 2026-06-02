@@ -2,6 +2,7 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { log } from '../../../util/log.js';
+import { trackYjsRoom, getLastOpenedRoom, recordOpenedRoom, forgetOpenedRoom } from '../offlineMode.js';
 
 // Message type for the server's file-meta sideband (matches server.js)
 const MESSAGE_FILE_META = 2;
@@ -32,10 +33,11 @@ export class YjsRuntime {
      * @param {object} [options]
      * @param {() => string|null} [options.getApiKey] - Returns Bearer token for WebSocket auth.
      * @param {() => {username: string, color: string}|null} [options.getUserInfo] - Returns user info for awareness.
+     * @param {boolean} [options.offlineMode=false] - When false, IndexedDB persistence is skipped entirely.
      */
     constructor(wsUrl, onDocUpdate, options = {}) {
         this.wsUrl = wsUrl;
-        /** @type {Map<string, {ydoc: Y.Doc, provider: WebsocketProvider, persistence: IndexeddbPersistence}>} */
+        /** @type {Map<string, {ydoc: Y.Doc, provider: WebsocketProvider, persistence: IndexeddbPersistence|null}>} */
         this.activeDocs = new Map();
         /** @type {Map<string, Promise<import('yjs').Doc>>} In-progress document loads */
         this.loadingDocs = new Map();
@@ -49,13 +51,29 @@ export class YjsRuntime {
          */
         this.onRoomRotated = options.onRoomRotated ?? null;
 
+        /**
+         * Called when load() detects that a doc's roomId has changed since
+         * the last time this device opened it (i.e. a snapshot restore
+         * happened while we were offline / not connected). Signature:
+         * (docId: string, oldRoomId: string, newRoomId: string) => void.
+         * Apps should surface a warning that offline edits made under the
+         * old room have been dropped — the restored snapshot is now the
+         * source of truth.
+         */
+        this.onMissedRotation = options.onMissedRotation ?? null;
+
         /** @type {() => string|null} */
         this.getApiKey = options.getApiKey ?? null;
         /** @type {() => {username: string, color: string}|null} */
         this.getUserInfo = options.getUserInfo ?? null;
 
+        /** When false, IndexedDB persistence is not created for any document. */
+        this._offlineMode = options.offlineMode ?? false;
+
         /** @type {Map<string, (meta: {last_edit_at: number, last_edit_by: string}) => void>} */
         this._fileMetaHandlers = new Map();
+        /** @type {Map<string, {last_edit_at: number, last_edit_by: string}>} */
+        this._fileMetaCache = new Map();
         /** Tracks WS instances we've already attached a fileMeta listener to (avoid duplicates on same instance). */
         this._patchedWs = new WeakSet();
 
@@ -67,6 +85,15 @@ export class YjsRuntime {
         // need to be queued for background flushing.
         /** @type {Map<string, boolean>} */
         this._wsLive = new Map();
+
+        /**
+         * Set of docIds whose initial structure was created by THIS runtime
+         * instance (via `initialize`). Used by `load()` callers to distinguish
+         * "expected to be empty" (we just made it) from "expected to have
+         * server state" (came from drive sync).
+         * @type {Set<string>}
+         */
+        this._locallyCreated = new Set();
 
         // Set up offline/online listeners
         this._setupNetworkListeners();
@@ -132,9 +159,14 @@ export class YjsRuntime {
      * @param {string} roomId - The physical room ID on the Yjs server.
      * @param {string|null} [appType] - App type ('sheets'|'docs'|'svg') sent to the server
      *   so snapshot diffs are correctly attributed even on fresh rooms.
+     * @param {{ expectExistingState?: boolean }} [opts]
+     *   expectExistingState: caller knows this doc was created elsewhere
+     *   (e.g. listed in the synced drive cache, never opened on this device)
+     *   so the runtime should bias toward waiting for server state rather
+     *   than returning as soon as IndexedDB resolves with no data.
      * @returns {Promise<import('yjs').Doc>}
      */
-    async load(docId, roomId, appType = null) {
+    async load(docId, roomId, appType = null, opts = {}) {
         // Check if already loaded
         if (this.activeDocs.has(docId)) {
             const active = this.activeDocs.get(docId);
@@ -154,7 +186,7 @@ export class YjsRuntime {
         }
 
         // Start a new load
-        const loadPromise = this._doLoad(docId, roomId, appType);
+        const loadPromise = this._doLoad(docId, roomId, appType, opts);
         this.loadingDocs.set(docId, loadPromise);
 
         try {
@@ -169,16 +201,40 @@ export class YjsRuntime {
      * @param {string} docId
      * @param {string} roomId
      * @param {string|null} appType
+     * @param {{ expectExistingState?: boolean }} [opts]
      */
-    async _doLoad(docId, roomId, appType = null) {
+    async _doLoad(docId, roomId, appType = null, opts = {}) {
         log.debug(`[YjsRuntime] Loading document ${docId} (room: ${roomId})...`);
         const startTime = performance.now();
 
+        // Detect a missed snapshot rotation: if we previously opened this
+        // doc under a different roomId, the server's room rotated while we
+        // weren't connected. Any IndexedDB edits queued under the OLD
+        // roomId are now orphaned — replaying them against the new room
+        // would overwrite the restored snapshot, which is exactly what the
+        // user did NOT want when they triggered the restore. Drop the old
+        // IDB data and notify the app so it can warn the user.
+        const previousRoomId = getLastOpenedRoom(docId);
+        if (previousRoomId && previousRoomId !== roomId) {
+            log.warn(`[YjsRuntime] Missed room rotation for ${docId}: ${previousRoomId} → ${roomId}`);
+            try {
+                await new Promise((resolve) => {
+                    const req = indexedDB.deleteDatabase(previousRoomId);
+                    req.onsuccess = req.onerror = req.onblocked = () => resolve();
+                });
+            } catch { /* ignore */ }
+            this.onMissedRotation?.(docId, previousRoomId, roomId);
+        }
+
         const ydoc = new Y.Doc();
 
-        // 1. Start IndexedDB persistence
-        log.debug(`[YjsRuntime] Initializing IndexedDB persistence for ${roomId}...`);
-        const persistence = new IndexeddbPersistence(roomId, ydoc);
+        // 1. Start IndexedDB persistence (only when offline mode is enabled)
+        let persistence = null;
+        if (this._offlineMode) {
+            log.debug(`[YjsRuntime] Initializing IndexedDB persistence for ${roomId}...`);
+            persistence = new IndexeddbPersistence(roomId, ydoc);
+            trackYjsRoom(roomId);
+        }
 
         // 2. Start WebSocket in parallel with IndexedDB — on slow devices (e.g. mobile Safari)
         //    IndexedDB can take seconds to sync. Starting the WebSocket immediately means
@@ -254,39 +310,58 @@ export class YjsRuntime {
         }
 
         // 3. Wait for IndexedDB OR WebSocket to deliver data, whichever is first.
-        await new Promise((resolve) => {
-            if (persistence.synced) {
-                log.debug(`[YjsRuntime] Persistence already synced for ${roomId}`);
-                resolve();
-                return;
-            }
+        //    Skipped when offline mode is off (no persistence).
+        //
+        // When `expectExistingState` is set, the caller knows this doc was
+        // created elsewhere — IndexedDB resolving with no data is not a
+        // legitimate end state, so we don't let it short-circuit the wait.
+        if (persistence) {
+            await new Promise((resolve) => {
+                let resolved = false;
+                const done = () => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeout);
+                    resolve();
+                };
 
-            let resolved = false;
-            const done = () => {
-                if (resolved) return;
-                resolved = true;
-                clearTimeout(timeout);
-                resolve();
-            };
-
-            const timeout = setTimeout(() => {
-                console.warn(`[YjsRuntime] Persistence sync timeout for ${roomId}, proceeding anyway`);
-                done();
-            }, PERSISTENCE_TIMEOUT);
-
-            persistence.once('synced', () => {
-                log.debug(`[YjsRuntime] Persistence synced for ${roomId}`);
-                done();
-            });
-
-            // Resolve early if WebSocket delivers server state first (speeds up slow-IndexedDB devices)
-            if (navigator.onLine) {
-                provider.once('sync', () => {
-                    log.debug(`[YjsRuntime] WebSocket synced before persistence for ${roomId}`);
+                // Register listeners BEFORE checking the synced flags. Either source
+                // can flip synced=true between the check and the listener registration;
+                // if we checked first, we'd miss the event and wait the full timeout.
+                persistence.once('synced', () => {
+                    log.debug(`[YjsRuntime] Persistence synced for ${roomId}`);
+                    // If we expect existing state and IDB came back empty, hold
+                    // out for the WS sync rather than returning a blank doc.
+                    if (opts.expectExistingState && ydoc.store.clients.size === 0) {
+                        log.debug(`[YjsRuntime] Persistence empty for ${roomId} but state expected — waiting for WS`);
+                        return;
+                    }
                     done();
                 });
-            }
-        });
+                if (navigator.onLine) {
+                    provider.once('sync', () => {
+                        log.debug(`[YjsRuntime] WebSocket synced before persistence for ${roomId}`);
+                        done();
+                    });
+                }
+
+                const timeout = setTimeout(() => {
+                    console.warn(`[YjsRuntime] Persistence sync timeout for ${roomId}, proceeding anyway`);
+                    done();
+                }, PERSISTENCE_TIMEOUT);
+
+                // Catch the case where either source already finished before we got here.
+                if (persistence.synced) {
+                    log.debug(`[YjsRuntime] Persistence already synced for ${roomId}`);
+                    if (!(opts.expectExistingState && ydoc.store.clients.size === 0)) {
+                        done();
+                    }
+                }
+                if (!resolved && navigator.onLine && provider.synced) {
+                    done();
+                }
+            });
+        }
 
         // 4. If no data arrived from either source yet, wait for WebSocket.
         //
@@ -300,22 +375,32 @@ export class YjsRuntime {
         const hasLocalData = ydoc.store.clients.size > 0;
         if (!hasLocalData && navigator.onLine) {
             await new Promise((resolve) => {
-                if (provider.synced) {
-                    resolve();
-                    return;
-                }
-                const timeout = setTimeout(() => {
-                    console.warn(`[YjsRuntime] WebSocket sync timeout for ${roomId}, proceeding with empty doc`);
-                    resolve();
-                }, WS_SYNC_TIMEOUT);
-                provider.once('sync', () => {
+                let settled = false;
+                const done = () => {
+                    if (settled) return;
+                    settled = true;
                     clearTimeout(timeout);
                     resolve();
-                });
+                };
+                // Register the listener BEFORE checking provider.synced. y-websocket
+                // can flip synced=true between the check and the listener registration;
+                // if we checked first, we'd miss the event and wait the full timeout.
+                provider.once('sync', done);
+                const timeout = setTimeout(() => {
+                    console.warn(`[YjsRuntime] WebSocket sync timeout for ${roomId}, proceeding with empty doc`);
+                    done();
+                }, WS_SYNC_TIMEOUT);
+                // Catch the case where sync already fired before we got here
+                // (e.g. persistence wait was long enough for WS to complete first).
+                if (provider.synced) done();
             });
         }
 
         log.debug(`[YjsRuntime] Document ${docId} loaded in ${Math.round(performance.now() - startTime)}ms`);
+
+        // Record the room we just opened so future loads can detect a
+        // rotation that happens while we're disconnected.
+        recordOpenedRoom(docId, roomId);
 
         return ydoc;
     }
@@ -372,10 +457,12 @@ export class YjsRuntime {
             if (active._watchdog != null) clearInterval(active._watchdog);
             active.provider.disconnect();
             active.provider.destroy();
-            active.persistence.destroy();
+            active.persistence?.destroy();
             active.ydoc.destroy();
             this.activeDocs.delete(docId);
             this._wsLive.delete(docId);
+            this._fileMetaCache.delete(docId);
+            this._locallyCreated.delete(docId);
         }
     }
 
@@ -388,6 +475,9 @@ export class YjsRuntime {
      */
     subscribeFileMeta(docId, callback) {
         this._fileMetaHandlers.set(docId, callback);
+        // Fire immediately if the server already sent fileMeta before this subscription was registered.
+        const cached = this._fileMetaCache.get(docId);
+        if (cached) callback(cached);
         return () => this._fileMetaHandlers.delete(docId);
     }
 
@@ -426,6 +516,7 @@ export class YjsRuntime {
                     }
                     const payload = JSON.parse(new TextDecoder().decode(buf.subarray(pos, pos + len)));
                     if (type === MESSAGE_FILE_META) {
+                        this._fileMetaCache.set(docId, payload);
                         this._fileMetaHandlers.get(docId)?.(payload);
                     } else if (type === MESSAGE_ROOM_ROTATED && this.onRoomRotated) {
                         const { newRoomId } = payload;
@@ -520,6 +611,9 @@ export class YjsRuntime {
             active.ydoc.destroy();
             this.activeDocs.delete(docId);
         }
+        // This is an intentional rotation; suppress the missed-rotation
+        // detection in the subsequent load by forgetting the previous room.
+        forgetOpenedRoom(docId);
         return this.load(docId, newRoomId);
     }
 
@@ -551,6 +645,10 @@ export class YjsRuntime {
      */
     async initialize(docId, roomId, initializer) {
         log.debug(`[YjsRuntime] Initializing document ${docId} (room: ${roomId})...`);
+
+        // Mark BEFORE loading so the load doesn't bias toward waiting for
+        // server state we're about to create ourselves.
+        this._locallyCreated.add(docId);
 
         // Load the document first
         const ydoc = await this.load(docId, roomId);

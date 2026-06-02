@@ -1,41 +1,33 @@
 /**
- * PDFOrchestrator.js — Shared PDF generation orchestration.
+ * PDFOrchestrator.js — PDF generation orchestration.
  *
- * Hosts the page-geometry setup, print-area detection, page-break computation,
- * page-list building, header/footer wiring, and page loop. The per-page cell
- * rendering is delegated to a PageRenderer backend so CanvasPrintEngine and
- * VectorPrintEngine can share the 200+ lines of identical orchestration code.
+ * Owns the page-geometry setup, print-area detection, page-break computation,
+ * page-list building, header/footer wiring, and page loop. Per-page rendering
+ * is delegated to a PageRenderer backend (currently only VectorPageRenderer).
  *
  * ## Usage
- *   const blob = await orchestratePDF(params, new CanvasPageRenderer());
  *   const blob = await orchestratePDF(params, new VectorPageRenderer());
  *
  * ## PageRenderer interface
  *   prepare(params, geo)            — async setup (e.g. preload images)
+ *   extendUsedArea?(bounds, ...)    — optional; may expand bounds for floating content
  *   renderCells(pdf, cells, pd)     — render cell data to the current PDF page
- *   renderExtras(pdf, pd)           — optional extras (e.g. floating images)
+ *   renderExtras?(pdf, pd)          — optional extras (e.g. floating images)
  *   cleanup()                       — free resources after all pages are done
- *
- * pd = { startRow, endRow, startCol, endCol, contentLeft, contentTop,
- *         contentW_css, contentH_css, pageNum, geo, s, showGridLines }
  */
 
 import { jsPDF } from 'jspdf';
 import { buildPaneData } from './CellPaintData.js';
-import { PrintEngine } from '../features/PrintEngine.js';
 import {
     PAPER_SIZES,
-    CSS_PX_PER_INCH,
-    MM_PER_INCH,
     DEFAULT_PRINT_MARGIN_MM,
-    computeUsedArea,
+    computePrintBounds,
+    computePageBreaks,
     substituteVars,
     drawHF,
     buildPageList,
     buildHFVarsBase,
 } from './PrintShared.js';
-
-const _printEngine = new PrintEngine();
 
 /**
  * Orchestrate PDF generation, delegating per-page rendering to `pageRenderer`.
@@ -76,54 +68,60 @@ export async function orchestratePDF(params, pageRenderer) {
     const geo = { pageW, pageH, marginTop, marginBottom, marginLeft, marginRight, printableW, printableH, s };
 
     // ── Print area ──────────────────────────────────────────────────────────────
+    // For 'usedArea' we compute cell+image bounds via the shared helper so the
+    // grid overlay, preview, and exported PDF all agree on what gets printed.
     let settingsForBreaks = { ...printSettings };
     const printArea = printSettings.printArea ?? 'usedArea';
+    let hadContent = printArea !== 'usedArea'; // selection / explicit area always counts as content
     if (printArea === 'usedArea') {
-        // Allow the renderer to extend the used-area bounds (e.g. to cover floating images)
-        const used = computeUsedArea(sheetStore);
-        if (used) {
-            const extended = pageRenderer.extendUsedArea?.(used, params, { rowMetrics, colMetrics }) ?? used;
-            if (extended) {
-                settingsForBreaks = {
-                    ...settingsForBreaks,
-                    areaStartRow: extended.startRow,
-                    areaStartCol: extended.startCol,
-                    areaEndRow:   extended.endRow,
-                    areaEndCol:   Math.max(extended.endCol, 0),
-                };
-            }
+        const bounds = computePrintBounds(sheetStore, rowMetrics, colMetrics);
+        if (bounds) {
+            hadContent = true;
+            settingsForBreaks = {
+                ...settingsForBreaks,
+                areaStartRow: bounds.startRow,
+                areaStartCol: bounds.startCol,
+                areaEndRow:   bounds.endRow,
+                areaEndCol:   bounds.endCol,
+            };
         }
     }
 
+    // ── Create PDF (always start with one page) ─────────────────────────────────
+    const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH] });
+
+    // Empty sheet — emit a single blank page so downstream callers always get
+    // a valid PDF. Without this guard, computePageBreaks would produce
+    // areaEndRow = totalRows-1 etc. and fill the file with blanks.
+    if (!hadContent) {
+        await pageRenderer.prepare?.(params, geo);
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, pageW, pageH, 'F');
+        pageRenderer.cleanup?.();
+        return pdf.output('blob');
+    }
+
     // ── Page breaks ─────────────────────────────────────────────────────────────
-    const { rowBreaks, colBreaks } = _printEngine.computePageBreaks(
+    const { rowBreaks, colBreaks } = computePageBreaks(
         settingsForBreaks, rowMetrics, colMetrics, totalRows, totalCols,
     );
 
     // ── Options ─────────────────────────────────────────────────────────────────
-    const showGridLines = printSettings.showGridLines ?? true;
+    const showGridLines = printSettings.showGridLines ?? false;
     const pageOrder     = printSettings.pageOrder ?? 'downThenOver';
 
     // ── Header / footer ─────────────────────────────────────────────────────────
     const hfVarsBase = buildHFVarsBase(sheetStore?.name ?? '', docName);
     const hasHeader  = printSettings.headerLeft || printSettings.headerCenter || printSettings.headerRight;
     const hasFooter  = printSettings.footerLeft || printSettings.footerCenter || printSettings.footerRight;
-    const totalPages = rowBreaks.length * colBreaks.length;
-
-    // ── Create PDF ───────────────────────────────────────────────────────────────
-    const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH] });
-    const pages = buildPageList(rowBreaks, colBreaks, pageOrder);
 
     // ── Renderer setup ───────────────────────────────────────────────────────────
     await pageRenderer.prepare?.(params, geo);
 
-    // ── Page loop ────────────────────────────────────────────────────────────────
-    let isFirstPage = true;
-    let pageNum = 0;
-
-    for (const { ri, ci } of pages) {
-        pageNum++;
-
+    // ── Pre-pass: filter out zero-size pages so totalPages is accurate ──────────
+    const allPages = buildPageList(rowBreaks, colBreaks, pageOrder);
+    const pagesToRender = [];
+    for (const { ri, ci } of allPages) {
         const startRow = rowBreaks[ri];
         const endRow   = ri + 1 < rowBreaks.length
             ? rowBreaks[ri + 1] - 1
@@ -133,15 +131,28 @@ export async function orchestratePDF(params, pageRenderer) {
             ? colBreaks[ci + 1] - 1
             : (settingsForBreaks.areaEndCol ?? totalCols - 1);
 
-        const contentLeft = colMetrics.offsetOf(startCol);
-        const contentTop  = rowMetrics.offsetOf(startRow);
+        const contentLeft  = colMetrics.offsetOf(startCol);
+        const contentTop   = rowMetrics.offsetOf(startRow);
         const contentW_css = colMetrics.offsetOf(endCol + 1) - contentLeft;
         const contentH_css = rowMetrics.offsetOf(endRow + 1) - contentTop;
-
         if (contentW_css <= 0 || contentH_css <= 0) continue;
 
-        const rowRange = { start: startRow, end: endRow,   count: endRow   - startRow + 1 };
-        const colRange = { start: startCol, end: endCol,   count: endCol   - startCol + 1 };
+        pagesToRender.push({
+            startRow, endRow, startCol, endCol,
+            contentLeft, contentTop, contentW_css, contentH_css,
+        });
+    }
+    const totalPages = Math.max(1, pagesToRender.length);
+
+    // ── Page loop ────────────────────────────────────────────────────────────────
+    let pageNum = 0;
+    for (const page of pagesToRender) {
+        pageNum++;
+        if (pageNum > 1) pdf.addPage([pageW, pageH], orientation);
+
+        const { startRow, endRow, startCol, endCol, contentLeft, contentTop, contentW_css, contentH_css } = page;
+        const rowRange = { start: startRow, end: endRow, count: endRow - startRow + 1 };
+        const colRange = { start: startCol, end: endCol, count: endCol - startCol + 1 };
 
         const cells = buildPaneData({
             rowRange, colRange, rowMetrics, colMetrics,
@@ -151,9 +162,6 @@ export async function orchestratePDF(params, pageRenderer) {
             scrollLeft: contentLeft,
             scrollTop:  contentTop,
         });
-
-        if (!isFirstPage) pdf.addPage([pageW, pageH], orientation);
-        isFirstPage = false;
 
         const pageData = {
             startRow, endRow, startCol, endCol,
@@ -165,7 +173,6 @@ export async function orchestratePDF(params, pageRenderer) {
         await pageRenderer.renderCells(pdf, cells, pageData, params);
         await pageRenderer.renderExtras?.(pdf, pageData, params);
 
-        // Header / footer
         const hfVars = { ...hfVarsBase, page: pageNum, pages: totalPages };
         if (hasHeader) drawHF(pdf, 'header', geo, {
             left:   substituteVars(printSettings.headerLeft,   hfVars),

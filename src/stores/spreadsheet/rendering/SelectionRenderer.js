@@ -16,6 +16,7 @@
 const SELECTION_FILL        = 'rgba(26, 115, 232, 0.12)';
 const SELECTION_BORDER      = 'rgba(26, 115, 232, 0.8)';
 const PRIMARY_CELL_BORDER   = '#1a73e8';
+const CUT_MARQUEE_COLOR     = '#1a73e8';
 
 export class SelectionRenderer {
     /** @type {HTMLCanvasElement | null} */
@@ -105,6 +106,7 @@ export class SelectionRenderer {
             frozenRows, frozenCols,
             scrollLeft, scrollTop,
             rowCount, colCount,
+            cutMarquee,
         } = params;
 
         if (!rowRange || rowRange.count <= 0 || !colRange || colRange.count <= 0) return;
@@ -242,6 +244,25 @@ export class SelectionRenderer {
                         ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
                     }
                 }
+            }
+
+            // ── 5. Cut marquee (marching ants) — dashed animated outline ──────
+            if (cutMarquee?.ranges?.length) {
+                ctx.strokeStyle = CUT_MARQUEE_COLOR;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 3]);
+                ctx.lineDashOffset = cutMarquee.dashOffset || 0;
+                for (const range of cutMarquee.ranges) {
+                    const rect = this.#rangePixelRect(
+                        range, rowMetrics, colMetrics,
+                        frozenRows, frozenCols, scrollTop, scrollLeft,
+                    );
+                    if (rect && rect.w > 0 && rect.h > 0) {
+                        ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+                    }
+                }
+                ctx.setLineDash([]);
+                ctx.lineDashOffset = 0;
             }
 
         } finally {

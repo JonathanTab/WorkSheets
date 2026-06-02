@@ -11,8 +11,11 @@
         applyFormatting,
         handleBorderChange,
         handleCellTypeChange,
+        applyNumberSubFormat,
+        adjustDecimals,
         computeSelectedFormatting,
         computeBorderSelectionRange,
+        computeBordersSummary,
         getTableColContext,
     } from "../../../stores/spreadsheet/cellFormattingCommands.js";
     import { cut, copy, paste, printer, undo as undoIcon, redo as redoIcon } from "../../../lib/icons/index.js";
@@ -33,6 +36,7 @@
     ];
 
     let borderSelectionRange = $derived.by(computeBorderSelectionRange);
+    let bordersSummary       = $derived.by(computeBordersSummary);
     let selectedFormatting   = $derived.by(computeSelectedFormatting);
 
     // ── Link button state ────────────────────────────────────────────────────
@@ -40,10 +44,14 @@
     let linkInputValue   = $state('');
     let linkInputEl      = $state(null);
 
+    // Reflects an existing hyperlink on the current inline selection so the
+    // button can show as active and the input can pre-fill for editing.
+    let selectionLink = $derived(editSessionState.isEditing ? editSessionState.inlineSelLink : null);
+
     function openLinkInput() {
-        linkInputValue   = '';
+        linkInputValue   = selectionLink ?? '';
         linkInputVisible = true;
-        setTimeout(() => linkInputEl?.focus(), 0);
+        setTimeout(() => { linkInputEl?.focus(); linkInputEl?.select(); }, 0);
     }
 
     function applyLink() {
@@ -121,26 +129,27 @@
         return tcc.colDef.typeConfig ?? (tcc.colDef.type ? { type: tcc.colDef.type } : null);
     });
 
-    function adjustDecimals(delta) {
-        const anchor = selectionState.anchor;
-        if (!anchor) return;
-        const tcc = getTableColContext();
-        if (tcc) {
-            const config = tcc.colDef.typeConfig ?? { type: 'number', decimals: 2 };
-            const current = config.decimals ?? 2;
-            handleCellTypeChange({ ...config, type: config.type || 'number', decimals: Math.max(0, current + delta) });
-            return;
-        }
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const cell = sheetStore.getCell(anchor.row, anchor.col);
-        const config = cell?.typeConfig ?? { type: 'number', decimals: 2 };
-        const current = config.decimals ?? 2;
-        handleCellTypeChange({ ...config, type: config.type || 'number', decimals: Math.max(0, current + delta) });
-    }
-
     function decreaseDecimals() { adjustDecimals(-1); }
     function increaseDecimals() { adjustDecimals(1); }
+
+    let isMergeActive = $derived.by(() => {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return false;
+        return !!sheetStore.mergeEngine?.getMergeAt(range.startRow, range.startCol);
+    });
+
+    function toggleMergeCells() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+        const { startRow, endRow, startCol, endCol } = range;
+        if (isMergeActive) {
+            sheetStore.mergeEngine.unmergeRange(startRow, endRow, startCol, endCol);
+        } else {
+            sheetStore.mergeCells(startRow, startCol, endRow, endCol);
+        }
+    }
 
     function handleCopy() {
         const sheetStore = spreadsheetSession.activeSheetStore;
@@ -198,7 +207,7 @@
     <div class="toolbar-group">
         <button
             class="toolbar-btn"
-            onclick={() => handleCellTypeChange({ type: "number", subFormat: "currency", decimals: 2, symbol: "$" })}
+            onclick={() => applyNumberSubFormat("currency", { decimals: 2, symbol: "$" })}
             disabled={!hasSelection}
             title="Format as currency"
         >
@@ -206,7 +215,7 @@
         </button>
         <button
             class="toolbar-btn"
-            onclick={() => handleCellTypeChange({ type: "number", subFormat: "percent", decimals: 1 })}
+            onclick={() => applyNumberSubFormat("percent", { decimals: 1 })}
             disabled={!hasSelection}
             title="Format as percent"
         >
@@ -345,8 +354,9 @@
         {#if editSessionState.isEditing && editSessionState.applyInlineFormat}
             <button
                 class="toolbar-btn"
+                class:active={selectionLink !== null}
                 onclick={openLinkInput}
-                title="Insert link"
+                title={selectionLink ? "Edit link" : "Insert link"}
             >
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                     <path d="M6.5 9.5a3.5 3.5 0 0 0 5 0l2-2a3.5 3.5 0 0 0-5-5l-1 1"/>
@@ -396,6 +406,7 @@
         <BorderPicker
             onchange={handleBorderChange}
             selectionRange={borderSelectionRange}
+            currentSummary={bordersSummary}
         />
     </div>
 
@@ -416,6 +427,24 @@
             onchange={(align) => applyFormatting('verticalAlign', align)}
             vertical={true}
         />
+    </div>
+
+    <!-- Merge Cells -->
+    <div class="toolbar-group">
+        <button
+            class="toolbar-btn"
+            class:active={isMergeActive}
+            onclick={toggleMergeCells}
+            disabled={!hasSelection}
+            title={isMergeActive ? "Unmerge cells" : "Merge cells"}
+        >
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="3" width="13" height="9" rx="1"/>
+                <line x1="7.5" y1="3" x2="7.5" y2="12" stroke-dasharray="1.5 1.5" stroke-width="1"/>
+                <path d="M5.5 7.5H3.5M4.5 6.5L3.5 7.5L4.5 8.5"/>
+                <path d="M9.5 7.5H11.5M10.5 6.5L11.5 7.5L10.5 8.5"/>
+            </svg>
+        </button>
     </div>
 
     <!-- Spacer -->

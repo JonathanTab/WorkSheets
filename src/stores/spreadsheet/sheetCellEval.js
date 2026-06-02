@@ -19,19 +19,38 @@ import { FormulaError } from '../../formulas/functions.js';
 /**
  * Build a cell evaluator pair for a cellValues YKeyValue store.
  *
+ * The returned `evalCell(r, c, visited)` recursively resolves a single cell,
+ * following formulas via `parseFormula`/`evaluate` and propagating the
+ * `visited` set across sub-evaluations. When `options.crossSheetResolver` is
+ * provided, cross-sheet refs (Sheet2!A1) recurse through it, sharing the
+ * same visited set so cross-sheet cycles surface as #CIRC! rather than
+ * looping or returning #REF.
+ *
  * @param {import('y-utility/y-keyvalue').YKeyValue<any>} cellValuesKV
  *   YKeyValue keyed by "row,col" → plain object { v, t }.
  * @param {Map<string,Function>|null} customFns
  *   Custom formula functions (e.g. IMPORTRANGE). Pass null when not needed.
+ * @param {{
+ *   sheetTag?: string,
+ *   crossSheetResolver?: ((sheetName: string, r: number, c: number, visited: Set<string>) => any) | null
+ * }} [options]
+ *   sheetTag           - distinguishing prefix for the visited set so the
+ *                        same (row,col) on different sheets aren't conflated.
+ *   crossSheetResolver - cross-sheet getter that forwards the visited set,
+ *                        enabling multi-hop cross-sheet evaluation with cycle
+ *                        protection. When omitted, SheetRef nodes return #REF.
  * @returns {{ evalCell: (r: number, c: number, visited: Set<string>) => any }}
  */
-export function makeSheetCellEvaluator(cellValuesKV, customFns) {
+export function makeSheetCellEvaluator(cellValuesKV, customFns, options = {}) {
+    const { sheetTag = '', crossSheetResolver = null } = options;
+    const visitedKey = (r, c) => `${sheetTag}|${r},${c}`;
+
     /** @param {number} r @param {number} c @param {Set<string>} visited */
     const evalCell = (r, c, visited) => {
-        const k = `${r},${c}`;
-        if (visited.has(k)) return FormulaError.REF;
+        const k = visitedKey(r, c);
+        if (visited.has(k)) return FormulaError.CIRC;
 
-        const data = cellValuesKV?.get(k);
+        const data = cellValuesKV?.get(`${r},${c}`);
         if (!data) {
             return findSpillValue(r, c, visited);
         }
@@ -45,12 +64,15 @@ export function makeSheetCellEvaluator(cellValuesKV, customFns) {
             try {
                 const ast = parseFormula(v);
                 if (!ast) return null;
+                const crossSheetGetter = crossSheetResolver
+                    ? (sheetName, gr, gc) => crossSheetResolver(sheetName, gr, gc, nextVisited)
+                    : null;
                 const result = evaluate(
                     ast,
                     /** @param {number} gr @param {number} gc */ (gr, gc) => evalCell(gr, gc, nextVisited),
                     {},
                     customFns,
-                    null,
+                    crossSheetGetter,
                 );
                 if (Array.isArray(result)) {
                     const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);
@@ -78,18 +100,22 @@ export function makeSheetCellEvaluator(cellValuesKV, customFns) {
             if (ar > r || ac > c) continue;
             const v = data?.v;
             if (typeof v !== 'string' || !v.startsWith('=')) continue;
-            if (visited.has(anchorKey)) continue;
+            const ak = visitedKey(ar, ac);
+            if (visited.has(ak)) continue;
             try {
                 const ast = parseFormula(v);
                 if (!ast) continue;
                 const nextVisited = new Set(visited);
-                nextVisited.add(anchorKey);
+                nextVisited.add(ak);
+                const crossSheetGetter = crossSheetResolver
+                    ? (sheetName, gr, gc) => crossSheetResolver(sheetName, gr, gc, nextVisited)
+                    : null;
                 const result = evaluate(
                     ast,
                     /** @param {number} gr @param {number} gc */ (gr, gc) => evalCell(gr, gc, nextVisited),
                     {},
                     customFns,
-                    null,
+                    crossSheetGetter,
                 );
                 if (!Array.isArray(result)) continue;
                 const arr2d = Array.isArray(result[0]) ? result : result.map(x => [x]);

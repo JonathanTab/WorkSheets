@@ -18,12 +18,15 @@ export class HistoryManager {
      *   appType: string,
      *   adapter?: { ViewerComponent: any } | null,
      *   onAfterRestore?: (() => Promise<void>) | null,
+     *   getSchemaVersion?: (() => number | null) | null,
      * }} opts
      */
-    constructor({ fileId, registry, appType, adapter = null, onAfterRestore = null }) {
+    constructor({ fileId, registry, appType, adapter = null, onAfterRestore = null, getSchemaVersion = null }) {
         this.fileId  = fileId;
         this.registry = registry;
         this.appType = appType;
+        /** Returns the integer schema version of the live doc, or null. @type {(() => number|null)|null} */
+        this.getSchemaVersion = getSchemaVersion;
 
         /**
          * App-specific adapter for visual rendering.
@@ -89,7 +92,8 @@ export class HistoryManager {
      */
     async createSnapshot(description = null) {
         try {
-            await this.registry.createSnapshot(this.fileId, description, this.appType);
+            const sv = this.getSchemaVersion?.() ?? null;
+            await this.registry.createSnapshot(this.fileId, description, this.appType, sv);
             await this.loadSnapshots();
         } catch (err) {
             this.error = `Failed to save version: ${err.message}`;

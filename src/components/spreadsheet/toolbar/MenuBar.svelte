@@ -25,6 +25,7 @@
     import { openModal } from "../../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../../modals/AlertModal.svelte";
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
+    import HoramConfigPanel from "../plugins/horam/HoramConfigPanel.svelte";
     import DataValidationPanel from "../DataValidationPanel.svelte";
     import FormulaDocsPanel from "../FormulaDocsPanel.svelte";
     import MakeCopyModal from "../../modals/MakeCopyModal.svelte";
@@ -44,6 +45,7 @@
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
     let showFormulaDocs = $state(false);
+    let showHoramPanel = $state(false);
 
     function openPdfExport() {
         document.dispatchEvent(new CustomEvent('openPdfExport'));
@@ -570,7 +572,28 @@
 
     // ─── FORMAT MENU ──────────────────────────────────────────────────────────
 
-    const formatItems = [
+    function isMergeActive() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return false;
+        return !!sheetStore.mergeEngine?.getMergeAt(range.startRow, range.startCol);
+    }
+
+    function toggleMergeCells() {
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        const range = selectionState.range;
+        if (!sheetStore || !range) return;
+        const { startRow, endRow, startCol, endCol } = range;
+        if (isMergeActive()) {
+            sheetStore.mergeEngine.unmergeRange(startRow, endRow, startCol, endCol);
+        } else {
+            sheetStore.mergeCells(startRow, startCol, endRow, endCol);
+        }
+    }
+
+    let formatItems = $derived.by(() => {
+        const mergeActive = isMergeActive();
+        return [
         {
             label: "Number",
             submenu: [
@@ -636,11 +659,18 @@
         },
         { divider: true },
         {
+            label: mergeActive ? "Unmerge cells" : "Merge cells",
+            action: toggleMergeCells,
+            disabled: !selectionState.range,
+        },
+        { divider: true },
+        {
             label: "Clear formatting",
             action: () => clearFormatting(),
             shortcut: "Ctrl+\\",
         },
-    ];
+        ];
+    });
 
     // ─── DATA MENU ────────────────────────────────────────────────────────────
     const dataItems = [
@@ -661,6 +691,14 @@
             icon: functionIcon,
             isSvgIcon: true,
             action: () => (showDVPanel = !showDVPanel),
+        },
+    ];
+
+    // ─── PLUGINS MENU ─────────────────────────────────────────────────────────
+    const pluginItems = [
+        {
+            label: "Horam Time Import…",
+            action: () => (showHoramPanel = !showHoramPanel),
         },
     ];
 
@@ -847,6 +885,14 @@ Ctrl+\` - Toggle formula view`;
         anyMenuOpen={openMenuId !== null}
         onOpenChange={handleMenuOpenChange}
     />
+    <MenuDropdown
+        label="Plugins"
+        items={pluginItems}
+        menuId="plugins"
+        isOpen={openMenuId === "plugins"}
+        anyMenuOpen={openMenuId !== null}
+        onOpenChange={handleMenuOpenChange}
+    />
 </div>
 
 {#if showCreateTableDialog}
@@ -867,6 +913,10 @@ Ctrl+\` - Toggle formula view`;
 
 {#if showFormulaDocs}
     <FormulaDocsPanel onclose={() => (showFormulaDocs = false)} />
+{/if}
+
+{#if showHoramPanel}
+    <HoramConfigPanel onclose={() => (showHoramPanel = false)} />
 {/if}
 
 

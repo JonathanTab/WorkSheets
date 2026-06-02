@@ -184,6 +184,9 @@
                     value={editValue}
                     readonly={hasRichText}
                     scrollable={true}
+                    selStart={editSessionState.cursorStart}
+                    selEnd={editSessionState.cursorEnd}
+                    caretSync={editSessionState.caretSync}
                     onInput={(val, s, e) => editSessionState.updateDraft(val, s, e)}
                     onSelect={(s, e) => editSessionState.setCursor(s, e)}
                     onKeydown={handleKeydown}

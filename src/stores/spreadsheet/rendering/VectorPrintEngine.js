@@ -16,22 +16,11 @@
  *   command merges with the clip path and corrupts the clip region.
  */
 
-import { jsPDF } from 'jspdf';
-import { buildPaneData } from './CellPaintData.js';
-import { PrintEngine } from '../features/PrintEngine.js';
 import { buildWrappedLines } from './RichTextLayout.js';
 import { orchestratePDF, downloadPDF as _downloadPDF } from './PDFOrchestrator.js';
-import {
-    PAPER_SIZES,
-    CSS_PX_PER_INCH,
-    MM_PER_INCH,
-    computeUsedArea,
-    substituteVars,
-    drawHF,
-    buildPageList,
-    buildHFVarsBase,
-} from './PrintShared.js';
+import { CSS_PX_PER_INCH, MM_PER_INCH, parseCssColor } from './PrintShared.js';
 import { paintBordersVec } from './BorderGeometry.js';
+import { getOverflowBorderSpec, getShadowBorderSpec } from './OverflowGeometry.js';
 import {
     checkboxLayout, ratingLayout, starVertices,
     CHECKBOX_MAX_SIZE, CHECKBOX_PADDING,
@@ -52,34 +41,8 @@ function pt2mm(pt, s) { return pt * s * MM_PER_INCH / PT_PER_INCH; }
 
 // ── Color helpers ──────────────────────────────────────────────────────────────
 
-function parseColor(color, fallback = [0, 0, 0]) {
-    if (!color || typeof color !== 'string') return fallback;
-    if (color.startsWith('#')) {
-        const h = color.slice(1);
-        if (h.length === 3) return [
-            parseInt(h[0] + h[0], 16), parseInt(h[1] + h[1], 16), parseInt(h[2] + h[2], 16),
-        ];
-        if (h.length === 6) return [
-            parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16),
-        ];
-    }
-    if (color.startsWith('rgba(')) {
-        const m = color.match(/rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)/);
-        if (m) {
-            const r = +m[1], g = +m[2], b = +m[3], a = +m[4];
-            return [
-                Math.round(255 * (1 - a) + r * a),
-                Math.round(255 * (1 - a) + g * a),
-                Math.round(255 * (1 - a) + b * a),
-            ];
-        }
-    }
-    if (color.startsWith('rgb(')) {
-        const m = color.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/);
-        if (m) return [+m[1], +m[2], +m[3]];
-    }
-    return fallback;
-}
+/** Thin wrapper to keep the local call sites short. */
+const parseColor = parseCssColor;
 
 function setFill(pdf, color, fallback = [255, 255, 255]) {
     pdf.setFillColor(...parseColor(color, fallback));
@@ -87,7 +50,8 @@ function setFill(pdf, color, fallback = [255, 255, 255]) {
 function setDraw(pdf, color, fallback = [0, 0, 0]) {
     pdf.setDrawColor(...parseColor(color, fallback));
 }
-function setTextCol(pdf, color, fallback = parseColor(DEFAULT_TEXT_COLOR)) {
+const _defaultTextRgb = parseColor(DEFAULT_TEXT_COLOR);
+function setTextCol(pdf, color, fallback = _defaultTextRgb) {
     pdf.setTextColor(...parseColor(color, fallback));
 }
 
@@ -127,13 +91,13 @@ function mapFontFamily(fontFamily) {
 
 /**
  * Set the jsPDF font from cell properties, with optional per-run overrides.
- * Returns the effective font size in CSS px.
+ * Returns the effective font size in points.
  *
  * @param {jsPDF} pdf
  * @param {Object} cell   CellPaintItem
  * @param {number} s      userScale
- * @param {Object} [run]  Rich-text run — may override b, i, f, fontFamily
- * @returns {number}      Effective font size in CSS px
+ * @param {Object} [run]  Rich-text run — may override b, i, f, ff
+ * @returns {number}      Effective font size in points
  */
 function applyFont(pdf, cell, s, run) {
     const bold   = run?.b !== undefined ? !!run.b : (cell.bold   || false);
@@ -142,10 +106,8 @@ function applyFont(pdf, cell, s, run) {
                  : bold           ? 'bold'
                  : italic         ? 'italic'
                  : 'normal';
-    const family = mapFontFamily(cell.fontFamily);
+    const family = mapFontFamily(run?.ff ?? cell.fontFamily);
     pdf.setFont(family, style);
-    // fontSize is stored in pt (matches UI picker / Google Sheets convention).
-    // Apply user scale only — no px→pt conversion needed.
     const sizePt = run?.f || cell.fontSize || DEFAULT_FONT_PT;
     pdf.setFontSize(sizePt * s);
     return sizePt;
@@ -230,7 +192,7 @@ function drawCheckboxVec(pdf, cx, cy, cw, ch, checked, s) {
     } else {
         pdf.setFillColor(255, 255, 255);
         setDraw(pdf, '#c0c0c0');
-        pdf.setLineWidth(0.2);
+        pdf.setLineWidth(Math.max(0.1, size * 0.05));
         pdf.roundedRect(bx, by, size, size, radius, radius, 'FD');
     }
 }
@@ -243,7 +205,7 @@ function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
         const segs  = verts.slice(1).map((v, i) => [v[0] - verts[i][0], v[1] - verts[i][1]]);
         setFill(pdf, filled ? '#fbbc04' : '#d1d5db');
         setDraw(pdf, filled ? '#fbbc04' : '#d1d5db');
-        pdf.setLineWidth(0.1);
+        pdf.setLineWidth(Math.max(0.05, outerR * 0.05));
         pdf.lines(segs, verts[0][0], verts[0][1], [1, 1], 'FD', true);
     }
 }
@@ -362,7 +324,7 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 
             if (doUnderline || doStrike) {
                 setDraw(pdf, color);
-                pdf.setLineWidth(0.2);
+                pdf.setLineWidth(Math.max(0.05, 0.2 * s));
                 if (doUnderline) pdf.line(runX, lineY + pt2mm(sizePt * 0.6, s),  runX + runW, lineY + pt2mm(sizePt * 0.6, s));
                 if (doStrike)    pdf.line(runX, lineY,                             runX + runW, lineY);
             }
@@ -453,7 +415,7 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         else                         decorX = cx + padMm;
         const midY = cy + ch / 2;
         setDraw(pdf, overrideColor || cell.textColor || DEFAULT_TEXT_COLOR);
-        pdf.setLineWidth(0.2);
+        pdf.setLineWidth(Math.max(0.05, 0.2 * s));
         if (cell.underline)     pdf.line(decorX, midY + pt2mm(sizePt * 0.55, s), decorX + clampedW, midY + pt2mm(sizePt * 0.55, s));
         if (cell.strikethrough) pdf.line(decorX, midY,                            decorX + clampedW, midY);
     }
@@ -462,8 +424,8 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 // ── Border painter ─────────────────────────────────────────────────────────────
 
 /** Delegates to the shared BorderGeometry module (single source of truth). */
-function drawBordersVec(pdf, borders, x, y, w, h) {
-    paintBordersVec(pdf, borders, x, y, w, h, parseColor);
+function drawBordersVec(pdf, borders, x, y, w, h, s = 1) {
+    paintBordersVec(pdf, borders, x, y, w, h, parseColor, s);
 }
 
 // ── Main cell painter ──────────────────────────────────────────────────────────
@@ -475,14 +437,28 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     const ch = px2mm(cell.height, s);
     if (cw <= 0 || ch <= 0) return;
 
-    // Overflow-shadow cell: skip content, only draw gridlines at natural boundary
+    // Overflow-shadow cell: skip content, draw gridlines and borders at natural boundary.
+    // Mirrors CanvasRenderer: right gridline suppressed, bottom suppressed when a custom
+    // bottom border exists, and borders rendered so horizontal run borders are continuous.
     if (cell.gridlineOnly) {
         if (showGridLines) {
             const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
             pdf.setDrawColor(r, g, b);
-            pdf.setLineWidth(0.13);
-            pdf.line(cx + cw, cy,      cx + cw, cy + ch);
-            pdf.line(cx,      cy + ch, cx + cw, cy + ch);
+            pdf.setLineWidth(0.13 * s);
+            if (!cell.borders?.bottom) {
+                pdf.line(cx, cy + ch, cx + cw, cy + ch);
+            }
+            // right gridline suppressed (overflow shadow — matches CanvasRenderer)
+        }
+        if (cell.borders) {
+            // Shadow cells use the shadow spec so inner edges of an overflow
+            // run don't draw vertical bars through the overflowing text.
+            const spec = getShadowBorderSpec(cell);
+            if (spec.paintBorders) {
+                const bx = pageX + px2mm(spec.boxX, s);
+                const bw = px2mm(spec.boxWidth, s);
+                drawBordersVec(pdf, spec.paintBorders, bx, cy, bw, ch, s);
+            }
         }
         return;
     }
@@ -519,8 +495,9 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     // ── 2. Data validation invalid — red outline (before content, matches CanvasRenderer) ──
     if (cell.dvInvalid) {
         setDraw(pdf, '#ef4444');
-        pdf.setLineWidth(0.4);
-        const inset = 0.2;
+        const dvW = Math.max(0.1, 0.4 * s);
+        const inset = dvW / 2;
+        pdf.setLineWidth(dvW);
         pdf.rect(cx + inset, cy + inset, cw - 2 * inset, ch - 2 * inset, 'S');
     }
 
@@ -567,15 +544,27 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     if (showGridLines) {
         const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
         pdf.setDrawColor(r, g, b);
-        pdf.setLineWidth(0.13);
-        // naturalWidth: for overflow cells right/bottom lines stay at original boundary
-        const gridCw = cell.naturalWidth ? px2mm(cell.naturalWidth, s) : cw;
-        if (!cell.borders?.right)  pdf.line(cx + gridCw, cy,      cx + gridCw, cy + ch);
-        if (!cell.borders?.bottom) pdf.line(cx,          cy + ch, cx + gridCw, cy + ch);
+        pdf.setLineWidth(0.13 * s);
+        const spec = getOverflowBorderSpec(cell);
+        const gridCx = pageX + px2mm(spec.boxX, s);
+        const gridCw = px2mm(spec.boxWidth, s);
+        if (!cell.borders?.right && !spec.suppressRightGridline) {
+            pdf.line(gridCx + gridCw, cy,      gridCx + gridCw, cy + ch);
+        }
+        if (!cell.borders?.bottom) {
+            pdf.line(gridCx,          cy + ch, gridCx + gridCw, cy + ch);
+        }
     }
 
     // ── 5. Custom borders (after gridlines so they render on top) ─────────────
-    if (cell.borders) drawBordersVec(pdf, cell.borders, cx, cy, cw, ch);
+    if (cell.borders) {
+        const spec = getOverflowBorderSpec(cell);
+        if (spec.paintBorders) {
+            const bx = pageX + px2mm(spec.boxX, s);
+            const bw = px2mm(spec.boxWidth, s);
+            drawBordersVec(pdf, spec.paintBorders, bx, cy, bw, ch, s);
+        }
+    }
 }
 
 // ── VectorPageRenderer — inline backend for PDFOrchestrator ──────────────────
@@ -584,26 +573,6 @@ class VectorPageRenderer {
     /** @type {Map<string, {dataUrl:string, naturalW:number, naturalH:number}>} */
     #imgAssets = new Map();
     #floatingImages = [];
-    #rowMetrics = null;
-    #colMetrics = null;
-
-    extendUsedArea(used, params, { rowMetrics, colMetrics }) {
-        // Extend bounds to include floating images, matching the original logic.
-        this.#rowMetrics = rowMetrics;
-        this.#colMetrics = colMetrics;
-        const sheetStore = params.sheetStore;
-        this.#floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
-        let { startRow, startCol, endRow, endCol } = used;
-        for (const img of this.#floatingImages) {
-            const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
-            const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
-            if (imgRight  > 0) { const c = colMetrics.indexAtOffset(Math.max(0, imgRight  - 1)); if (c > endCol)   endCol   = c; }
-            if (imgBottom > 0) { const r = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1)); if (r > endRow)   endRow   = r; }
-            if (img.anchorRow < startRow) startRow = img.anchorRow;
-            if (img.anchorCol < startCol) startCol = img.anchorCol;
-        }
-        return endRow >= 0 ? { startRow, startCol, endRow, endCol } : null;
-    }
 
     async prepare(params, _geo) {
         const { fetchBlobFn = null, sheetStore } = params;
@@ -625,11 +594,15 @@ class VectorPageRenderer {
         const { geo, s, showGridLines } = pd;
         const { marginLeft, marginTop, printableW, printableH } = geo;
 
-        // White background
         pdf.setFillColor(255, 255, 255);
         pdf.rect(0, 0, geo.pageW, geo.pageH, 'F');
 
-        beginClip(pdf, marginLeft, marginTop, printableW, printableH);
+        // Expand the clip by ~1mm beyond the printable area so the outermost
+        // custom borders (which sit centred on the cell boundary and overflow
+        // by half their stroke width — up to ~0.4mm for a 3px border at s=1)
+        // render fully instead of being half-clipped at the margin.
+        const pad = 1;
+        beginClip(pdf, marginLeft - pad, marginTop - pad, printableW + 2 * pad, printableH + 2 * pad);
         for (const cell of cells) {
             drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines);
         }
@@ -639,13 +612,16 @@ class VectorPageRenderer {
     renderExtras(pdf, pd, params) {
         const { geo, s, contentLeft, contentTop, contentW_css, contentH_css } = pd;
         const { marginLeft, marginTop, printableW, printableH } = geo;
-        const rowMetrics = this.#rowMetrics ?? params.rowMetrics;
-        const colMetrics = this.#colMetrics ?? params.colMetrics;
+        const { rowMetrics, colMetrics } = params;
         for (const img of this.#floatingImages) {
             const asset = this.#imgAssets.get(img.blobId);
             if (!asset) continue;
-            const imgX = colMetrics.offsetOf(img.anchorCol) + img.offsetX - contentLeft;
-            const imgY = rowMetrics.offsetOf(img.anchorRow) + img.offsetY - contentTop;
+            // Clamp anchors so corrupt negative indices can't drag the placement
+            // outside the page; offsetOf() can throw on negative inputs.
+            const ar = Math.max(0, img.anchorRow);
+            const ac = Math.max(0, img.anchorCol);
+            const imgX = colMetrics.offsetOf(ac) + img.offsetX - contentLeft;
+            const imgY = rowMetrics.offsetOf(ar) + img.offsetY - contentTop;
             if (imgX + img.width <= 0 || imgX >= contentW_css) continue;
             if (imgY + img.height <= 0 || imgY >= contentH_css) continue;
             const imgX_mm = marginLeft + px2mm(imgX, s);
@@ -667,8 +643,6 @@ class VectorPageRenderer {
     cleanup() {
         this.#imgAssets.clear();
         this.#floatingImages = [];
-        this.#rowMetrics = null;
-        this.#colMetrics = null;
     }
 }
 

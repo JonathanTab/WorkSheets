@@ -7,28 +7,51 @@ const CHECK_TIMEOUT_MS = 5000;
  * Fetches the server's minimum required schema version and compares it against
  * this client's bundled SCHEMA_VERSION. Returns false if the client is stale.
  *
- * Fails open: network errors or timeouts return true so the app isn't blocked
- * when the server is unreachable.
+ * Fail policy:
+ *   - Network errors, timeouts, non-2xx HTTP responses → fail OPEN (return true).
+ *     Server is genuinely unreachable; blocking would leave the user with no app.
+ *   - Successful response with malformed or missing payload → fail CLOSED
+ *     (return false). The deployment is misconfigured and we'd rather force a
+ *     reload than let an out-of-date client write to docs.
  */
 export async function checkSchemaVersion() {
+    let res;
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
 
-        const res = await fetch(VERSION_URL, {
+        res = await fetch(VERSION_URL, {
             cache: 'no-store',
             signal: controller.signal,
         });
         clearTimeout(timeout);
-
-        if (!res.ok) return true;
-        const { minSchemaVersion } = await res.json();
-        if (!minSchemaVersion) return true;
-
-        return parseInt(SCHEMA_VERSION) >= parseInt(minSchemaVersion);
     } catch {
-        return true;
+        return true; // network / timeout — fail open
     }
+
+    if (!res.ok) return true; // 4xx/5xx — fail open
+
+    // From here on we successfully reached the server; treat malformed payloads
+    // as a hard fail so misconfigured deployments don't silently let stale
+    // clients corrupt newer docs.
+    let payload;
+    try {
+        payload = await res.json();
+    } catch {
+        console.warn('[schemaVersionGuard] schema-version.json was not valid JSON — failing closed');
+        return false;
+    }
+
+    const minRaw = payload?.minSchemaVersion;
+    const min = typeof minRaw === 'number' ? minRaw
+              : typeof minRaw === 'string' && /^\d+$/.test(minRaw) ? parseInt(minRaw)
+              : null;
+    if (min == null) {
+        console.warn('[schemaVersionGuard] minSchemaVersion missing or unparseable — failing closed');
+        return false;
+    }
+
+    return parseInt(SCHEMA_VERSION) >= min;
 }
 
 /**

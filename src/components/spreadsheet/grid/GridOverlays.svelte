@@ -18,6 +18,7 @@
         toggleFormatInRange,
         getFormatAtIndex,
         queryFormatInRange,
+        queryLinkInRange,
         getCharOffset,
         restoreSelection,
     } from "../../../stores/spreadsheet/textFormatRuns.js";
@@ -26,6 +27,12 @@
     import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
     import FileEditor from "../cellTypes/FileEditor.svelte";
+    import { ptToPx } from "../../../stores/spreadsheet/rendering/fontUnits.js";
+
+    // Canvas default — kept in sync with CanvasRenderer DEFAULT_THEME.defaultFontSize.
+    // The editor uses the same pt → integer-px conversion as the canvas so the visible
+    // size and crispness match between the two render paths.
+    const DEFAULT_FONT_SIZE_PT = 10;
 
     let {
         editorBounds = null,
@@ -75,28 +82,41 @@
         return spreadsheetSession?.activeSheetStore?.getEffectiveCellStyle(row, col) ?? null;
     });
 
+    // Map cell vAlign → flex align-items / multi-line justify-content so the
+    // editor's text sits at the same Y the canvas painted.
+    function _vAlignToFlex(vAlign) {
+        if (vAlign === 'top') return 'flex-start';
+        if (vAlign === 'bottom') return 'flex-end';
+        return 'center';
+    }
+
     let richEditStyle = $derived.by(() => {
         const f = cellFormatting;
         if (!f) return null;
-        const parts = [];
+        const parts = [`font-size: ${ptToPx(f.fontSize || DEFAULT_FONT_SIZE_PT)}px`];
+        // .cell-rich-edit is a flex column: justify-content controls the vertical
+        // position of the text block (matches canvas vAlign), text-align the
+        // horizontal (matches canvas hAlign).
+        parts.push(`justify-content: ${_vAlignToFlex(f.verticalAlign)}`);
+        parts.push(`text-align: ${f.horizontalAlign || 'left'}`);
         if (f.fontFamily)      parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
-        if (f.fontSize)        parts.push(`font-size: ${f.fontSize * 4 / 3}px`);
         if (f.bold)            parts.push('font-weight: bold');
         if (f.italic)          parts.push('font-style: italic');
         if (f.color)           parts.push(`color: ${f.color}`);
         if (f.backgroundColor) parts.push(`background: ${f.backgroundColor}`);
-        return parts.length ? parts.join('; ') : null;
+        return parts.join('; ');
     });
 
     let plainEditStyle = $derived.by(() => {
         const f = cellFormatting;
         if (!f) return null;
-        const parts = [];
+        const parts = [`font-size: ${ptToPx(f.fontSize || DEFAULT_FONT_SIZE_PT)}px`];
+        // .formula-cell-wrap is a flex row: align-items is the vertical (cross) axis.
+        parts.push(`align-items: ${_vAlignToFlex(f.verticalAlign)}`);
         if (f.fontFamily) parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
-        if (f.fontSize)   parts.push(`font-size: ${f.fontSize * 4 / 3}px`);
         if (f.bold)       parts.push('font-weight: bold');
         if (f.italic)     parts.push('font-style: italic');
-        return parts.length ? parts.join('; ') : null;
+        return parts.join('; ');
     });
 
     let editorStyle = $derived.by(() => {
@@ -160,20 +180,26 @@
         const textLen   = plainText.length;
         if (!tfr || textLen === 0 || savedSelStart < 0) {
             editSessionState.inlineSelFontSize = null;
+            editSessionState.inlineSelLink     = null;
             return;
         }
         const start = Math.max(0, savedSelStart);
         const end   = savedSelEnd;
         let size;
+        const clampedEnd = Math.min(end, textLen);
         if (end <= start) {
             size = getFormatAtIndex(tfr, Math.min(start, textLen - 1))?.fontSize ?? null;
         } else {
-            const clampedEnd = Math.min(end, textLen);
-            if (start >= clampedEnd) { editSessionState.inlineSelFontSize = null; return; }
+            if (start >= clampedEnd) {
+                editSessionState.inlineSelFontSize = null;
+                editSessionState.inlineSelLink     = null;
+                return;
+            }
             const val = queryFormatInRange(tfr, start, clampedEnd, textLen, 'fontSize');
             size = (val === undefined) ? null : val;
         }
         editSessionState.inlineSelFontSize = size ?? null;
+        editSessionState.inlineSelLink     = queryLinkInRange(tfr, start, clampedEnd, textLen);
     }
 
     // ── Rich text commit helpers ──────────────────────────────────────────────
@@ -378,6 +404,9 @@
                         bind:this={formulaInputComponent}
                         value={editValue}
                         scrollable={false}
+                        selStart={editSessionState.cursorStart}
+                        selEnd={editSessionState.cursorEnd}
+                        caretSync={editSessionState.caretSync}
                         onInput={(val, s, e) => onEditInput?.(val, s, e)}
                         onSelect={(s, e) => onEditSelect?.(s, e)}
                         onKeydown={handleFormulaKeydown}
@@ -405,12 +434,14 @@
         overflow: visible;
     }
 
-    /* Wrapper that passes cell-level font/size styles to FormulaInput */
+    /* Wrapper that passes cell-level font/size styles to FormulaInput.
+       font-size matches CanvasRenderer's ptToPx(defaultFontSize=10pt) = 13px so the
+       editor and the grid render the same text size when no cell formatting is set. */
     .formula-cell-wrap {
         width: 100%;
         height: 100%;
         position: relative;
-        font-size: 12px;
+        font-size: 13px;
         font-family: system-ui, -apple-system, sans-serif;
         padding: 0 4px;
         box-sizing: border-box;
@@ -426,8 +457,10 @@
         height: auto;
         min-height: 100%;
         border: none;
+        /* Padding mirrors the canvas painter: CELL_PAD=2 vertical, CELL_PAD_X=4
+           horizontal, so text starts at the same offset whether painted or edited. */
         padding: 2px 4px;
-        font-size: 12px;
+        font-size: 13px;
         font-family: system-ui, -apple-system, sans-serif;
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
@@ -439,6 +472,14 @@
         white-space: pre-wrap;
         overflow-wrap: break-word;
         word-break: break-word;
-        line-height: 1.5;
+        /* Flex column lets justify-content (set per-cell vAlign in richEditStyle)
+           position the text block to match the canvas. The default 'center'
+           covers the common middle-aligned case. */
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        /* Matches the canvas line cadence ((ascent+descent)*1.2 ≈ 1.2em) so
+           multi-line text doesn't drift relative to the painted version. */
+        line-height: 1.2;
     }
 </style>

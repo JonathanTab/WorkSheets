@@ -26,6 +26,7 @@ const TokenType = {
     COLON: 'COLON',
     SHEET_REF: 'SHEET_REF',
     REP_VAR: 'REP_VAR',
+    ERROR_LITERAL: 'ERROR_LITERAL',
     EOF: 'EOF'
 };
 
@@ -39,8 +40,24 @@ export const NodeType = {
     UNARY_OP: 'UnaryOp',
     FUNCTION_CALL: 'FunctionCall',
     SHEET_REF: 'SheetRef',
-    REP_VAR: 'RepVar'
+    REP_VAR: 'RepVar',
+    ERROR_LITERAL: 'ErrorLiteral'
 };
+
+// Known error literal strings, recognized by the tokenizer when it sees a leading '#'.
+// Order matters only for documentation — the matcher checks each prefix.
+const ERROR_LITERAL_STRINGS = [
+    '#DIV/0!',
+    '#VALUE!',
+    '#REF!',
+    '#NAME?',
+    '#NUM!',
+    '#N/A',
+    '#NULL!',
+    '#ERROR!',
+    '#CIRC!',
+    '#SPILL!',
+];
 
 /**
  * Tokenizer class
@@ -263,6 +280,21 @@ export class Tokenizer {
             } else if (char === ':') {
                 tokens.push({ type: TokenType.COLON, value: ':', start: tokenStart, end: this.pos + 1 });
                 this.advance();
+            } else if (char === '#') {
+                // Error literal (#REF!, #N/A, #DIV/0!, …) — match longest known prefix.
+                const tail = this.input.slice(this.pos);
+                let matched = null;
+                for (const lit of ERROR_LITERAL_STRINGS) {
+                    if (tail.startsWith(lit) && (matched === null || lit.length > matched.length)) {
+                        matched = lit;
+                    }
+                }
+                if (matched) {
+                    for (let i = 0; i < matched.length; i++) this.advance();
+                    tokens.push({ type: TokenType.ERROR_LITERAL, value: matched, start: tokenStart, end: this.pos });
+                } else {
+                    throw new Error(`Unexpected character: ${char}`);
+                }
             } else {
                 throw new Error(`Unexpected character: ${char}`);
             }
@@ -472,6 +504,12 @@ export class Parser {
         if (token.type === TokenType.REP_VAR) {
             this.advance();
             return { type: NodeType.REP_VAR };
+        }
+
+        // Error literal (#REF!, #N/A, etc.)
+        if (token.type === TokenType.ERROR_LITERAL) {
+            this.advance();
+            return { type: NodeType.ERROR_LITERAL, value: token.value };
         }
 
         // Parenthesized expression

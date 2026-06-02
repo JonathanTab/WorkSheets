@@ -19,15 +19,20 @@ import { storage } from '../storage.js';
 import { authStore } from '../authStore.js';
 import { get } from 'svelte/store';
 import { SheetStore } from './SheetStore.svelte.js';
-import { spreadsheetSchema, createSheetYMap, initializeDocument } from './schema.js';
+import { spreadsheetSchema, spreadsheetAppSchema, createSheetYMap, initializeDocument } from './schema.js';
+import { prepareDocForUse } from '../../lib/FileRegistry/yjsDocLifecycle.js';
 import { SCHEMA_VERSION, META_KEYS, CELL_KEYS } from './constants.js';
 import { YKeyValue } from 'y-utility/y-keyvalue';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
-import { parseFormula } from '../../formulas/parser.js';
-import { evaluate } from '../../formulas/evaluator.js';
 import { FormulaError } from '../../formulas/functions.js';
 import { ExternalDocManager } from './ExternalDocManager.js';
 import { makeSheetCellEvaluator } from './sheetCellEval.js';
+import {
+    rewriteSheetRefsInFormula,
+    rewriteTableRefsInFormula,
+    rewriteSheetRefsInDslColumn,
+    rewriteTableRefsInDslColumn,
+} from '../../formulas/refRewriter.js';
 import { SheetRenderContext } from './features/SheetRenderContext.svelte.js';
 import { TableManager } from './features/TableManager.svelte.js';
 import { DocumentTableRegistry } from './features/DocumentTableRegistry.svelte.js';
@@ -98,6 +103,30 @@ export class SpreadsheetSession {
     /** @type {string | null} */
     error = $state(null);
 
+    /**
+     * True when the loaded doc was written under a schema version newer
+     * than this client's SCHEMA_VERSION. The UI surfaces a banner and
+     * mutation paths consult this to block writes.
+     * @type {boolean}
+     */
+    readOnly = $state(false);
+
+    /**
+     * Reason for read-only mode, suitable for displaying in the UI.
+     * @type {string | null}
+     */
+    readOnlyReason = $state(null);
+
+    /**
+     * Transient notices the UI should surface as a dismissible banner.
+     * Populated by lifecycle events (auto-init recovery, missed rotation).
+     * @type {Array<{ id: string, severity: 'info'|'warn', message: string }>}
+     */
+    notices = $state([]);
+
+    /** @type {Function | null} Cleanup for missed-rotation listener */
+    #cleanupMissedRotation = null;
+
     /** @type {Y.UndoManager | null} */
     undoManager = $state.raw(null);
 
@@ -155,6 +184,16 @@ export class SpreadsheetSession {
 
     /** @type {ExternalDocManager | null} Manages external doc loading for IMPORTRANGE */
     #externalDocManager = null;
+
+    /**
+     * Per-sheet YKeyValue cache for cross-sheet formula reads. Creating a
+     * fresh YKeyValue per cell read (which is what SUM(Sheet2!A1:A1000) would
+     * trigger) is expensive — y-utility's YKeyValue keeps internal state, and
+     * its construction walks the Y.Array. One stable wrapper per sheet
+     * lifetime is the right cost model.
+     * @type {Map<string, import('y-utility/y-keyvalue').YKeyValue<any>>}
+     */
+    #crossSheetKVCache = new Map();
 
     /** @type {Promise | null} Lock for preventing concurrent loads */
     #loadPromise = null;
@@ -253,23 +292,34 @@ export class SpreadsheetSession {
 
             const root = ydoc.getMap('spreadsheet');
 
-            if (!root.get('sheets')) {
-                const synced = await storage.drive.waitForServerSync(docId);
-                if (!root.get('sheets')) {
-                    if (!synced) {
-                        throw new Error(
-                            'Document is not available offline. Reconnect to load this spreadsheet.'
-                        );
-                    }
-                    throw new Error(
-                        'Document structure missing after server sync. The file may be corrupted.'
-                    );
-                }
+            // Generic lifecycle: handles missing-structure recovery, schema
+            // version check (read-only on newer-than-client), and migrations
+            // with skip-when-stamped-current. The actual app-specific shape
+            // is provided by spreadsheetAppSchema.
+            const prep = await prepareDocForUse({
+                ydoc,
+                waitForServerSync: () => storage.drive.waitForServerSync(docId),
+                schema: spreadsheetAppSchema,
+                log,
+            });
+            this.readOnly = prep.readOnly;
+            this.readOnlyReason = prep.readOnlyReason;
+            this.notices = [];
+            if (prep.recovery === 'auto-initialized') {
+                this.#pushNotice('warn',
+                    'This file was empty on the server and has been re-initialized with a blank spreadsheet.');
             }
 
-            // Run schema migrations on the existing structure. migrate() is a
-            // no-op when sheets are absent and never creates root structure.
-            spreadsheetSchema.migrate(ydoc);
+            // Surface missed-rotation events for the currently loaded doc.
+            this.#cleanupMissedRotation?.();
+            const handleMissedRotation = (payload) => {
+                if (payload?.fileId !== docId) return;
+                this.#pushNotice('warn',
+                    'This document was restored from a snapshot while you were offline. ' +
+                    'Any edits you made offline have been discarded — the restored version is now active.');
+            };
+            storage.on('missed-rotation', handleMissedRotation);
+            this.#cleanupMissedRotation = () => storage.off('missed-rotation', handleMissedRotation);
 
             this.docId = docId;
             this.ydoc = ydoc;
@@ -309,9 +359,37 @@ export class SpreadsheetSession {
                 //   (a) formulas that name the table via TABLE_* (by-name index)
                 //   (b) formulas that reference the affected grid cells (by coordinate)
                 // Single recalc batch handles both.
+                // When tables themselves are added/removed/renamed (structural),
+                // every engine's TABLE_* formulas may be stale: a deleted table no
+                // longer resolves, a freshly-added table now resolves, etc. Mark
+                // all formulas in every active+cached engine that depend on any
+                // table (or wildcard) dirty and recalc.
+                this.tableRegistry.onTableStructureChange = () => {
+                    const dirtyEngine = (engine) => {
+                        if (!engine) return;
+                        // markTableDependentsDirty('*') hits wildcard formulas; iterate
+                        // every known table name to also catch direct-name deps.
+                        engine.markTableDependentsDirty('*');
+                        const names = this.tableRegistry?.getAllTableNames?.() ?? [];
+                        for (const n of names) engine.markTableDependentsDirty(n);
+                        engine.recalculateDirty();
+                    };
+                    dirtyEngine(this.formulaEngine);
+                    for (const [, entry] of this.#sheetEngineCache) {
+                        dirtyEngine(entry.formulaEngine);
+                    }
+                };
+
                 this.tableRegistry.onTableChange = ({ sourceTableId, events, rowArr }) => {
                     const engine = this.formulaEngine;
                     if (!engine) return;
+
+                    // Classify events first so we know whether anything that
+                    // could affect formula results actually changed. _fmt /
+                    // _rowFmt changes are filtered out — they don't dirty
+                    // TABLE_* deps.
+                    const { structural, cellChanges } = classifyTableRowEvents(events, rowArr);
+                    if (!structural && cellChanges.length === 0) return;
 
                     // (a) Name-based: TABLE_GET / TABLE_SUM / … referencing this table.
                     const sourceStore = this.tableRegistry.getById(sourceTableId);
@@ -319,8 +397,7 @@ export class SpreadsheetSession {
                         engine.markTableDependentsDirty(sourceStore.name.toUpperCase());
                     }
 
-                    // (b) Coordinate-based: classify events, then map to grid cells per view.
-                    const { structural, cellChanges } = classifyTableRowEvents(events, rowArr);
+                    // (b) Coordinate-based: map to grid cells per view.
                     const dirtyCells = [];
 
                     for (const { store: view } of this.tableRegistry.getViewsForTable(sourceTableId)) {
@@ -353,10 +430,12 @@ export class SpreadsheetSession {
 
                     if (dirtyCells.length > 0) {
                         engine.notifyCellsChanged(dirtyCells);
-                    } else {
-                        // No grid cells changed, but name-based deps may be dirty.
-                        engine.recalculateDirty();
                     }
+                    // Always flush name-based deps (TABLE_* formulas): notifyCellsChanged
+                    // only calls recalculateDirty() when it finds coordinate-based dependents,
+                    // so name-based dirty cells can be left pending when no grid formula
+                    // references the table by coordinate.
+                    engine.recalculateDirty();
                 };
 
                 // Single document-level UndoManager: tracks every sheet's Y types
@@ -484,9 +563,16 @@ export class SpreadsheetSession {
             this.#cleanupStorageListener = null;
         }
 
+        if (this.#cleanupMissedRotation) {
+            this.#cleanupMissedRotation();
+            this.#cleanupMissedRotation = null;
+        }
+
         // Y.UndoManager.destroy() unobserves all tracked types so it stops
         // accumulating stack items after teardown.
         this.undoManager?.destroy?.();
+
+        this.#crossSheetKVCache.clear();
 
         this.docId = null;
         this.ydoc = null;
@@ -497,8 +583,31 @@ export class SpreadsheetSession {
         this.sheets = [];
         this.metadata = {};
         this.docTitle = '';
+        this.readOnly = false;
+        this.readOnlyReason = null;
+        this.notices = [];
         this.#canUndo = false;
         this.#canRedo = false;
+    }
+
+    /**
+     * Append a transient notice for the UI to surface as a banner.
+     * @param {'info'|'warn'} severity
+     * @param {string} message
+     */
+    #pushNotice(severity, message) {
+        this.notices = [
+            ...this.notices,
+            { id: `n-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, severity, message },
+        ];
+    }
+
+    /**
+     * Dismiss a notice by id. Public so banner components can call it.
+     * @param {string} id
+     */
+    dismissNotice(id) {
+        this.notices = this.notices.filter(n => n.id !== id);
     }
 
     /**
@@ -773,44 +882,39 @@ export class SpreadsheetSession {
             return extMgr.getRange(String(fileIdOrUrl), rangeStr);
         }]]) : null;
 
-        this.formulaEngine.setCrossSheetGetter((sheetName, row, col) => {
+        // Recursive cross-sheet resolver. Lookups follow the visited set across
+        // sheet hops so Sheet1→Sheet2→Sheet1 cycles surface as #CIRC! rather
+        // than infinite-looping or returning #REF.
+        const crossSheetResolver = (sheetName, row, col, visited) => {
             const targetSheet = this.sheets.find(s => s.name === sheetName);
             if (!targetSheet) return FormulaError.REF;
-
             const sheetsMap = this.root?.get('sheets');
             const sheetYMap = sheetsMap?.get(targetSheet.id);
             if (!sheetYMap) return FormulaError.REF;
-
             const cvArr = sheetYMap.get('cellValues');
             if (!cvArr) return null;
-            const { evalCell } = makeSheetCellEvaluator(new YKeyValue(cvArr), crossSheetCustomFns);
-            return evalCell(row, col, new Set());
-        });
+            const kv = this.#getOrCreateCrossSheetKV(targetSheet.id, cvArr);
+            const { evalCell } = makeSheetCellEvaluator(kv, crossSheetCustomFns, {
+                sheetTag: targetSheet.id,
+                crossSheetResolver,
+            });
+            return evalCell(row, col, visited);
+        };
+
+        this.formulaEngine.setCrossSheetGetter((sheetName, row, col) =>
+            crossSheetResolver(sheetName, row, col, new Set())
+        );
 
         // Wire formula evaluator into all table stores so that table cell values
         // like "=10*15" are evaluated on-demand through table.getValue().
-        // Must happen before the first recalculateDirty() so TABLE_* functions
-        // already get evaluated values during the initial formula pass.
+        // Delegates to the engine's evaluateString() so cross-sheet refs and
+        // TABLE_* / IMPORTRANGE all work inside table cells, identical to
+        // grid cells. Must happen before the first recalculateDirty() so
+        // TABLE_* functions already get evaluated values during the initial
+        // formula pass.
         if (tableManager) {
-            const evalFn = (formula) => {
-                try {
-                    const ast = parseFormula(formula);
-                    if (!ast) return null;
-                    return evaluate(ast, (r, c) => {
-                        const k = `${r},${c}`;
-                        if (this.formulaEngine && k in this.formulaEngine.computedValues) {
-                            return this.formulaEngine.computedValues[k];
-                        }
-                        const cell = this.activeSheetStore?.getCell(r, c);
-                        if (!cell?.exists) return null;
-                        const v = cell.v;
-                        if (typeof v === 'string' && v.startsWith('=')) return null;
-                        return v ?? null;
-                    }, {}, null, null);
-                } catch {
-                    return null;
-                }
-            };
+            const engineRef = this.formulaEngine;
+            const evalFn = (formula) => engineRef.evaluateString(formula);
             tableManager.setSheetFormulaEvaluator(evalFn);
         }
 
@@ -833,13 +937,21 @@ export class SpreadsheetSession {
             // Single evaluation pass in correct dependency order.
             this.formulaEngine.recalculateDirty();
 
-            // Capture the engine and sheet name at observer creation time so the
-            // observer works correctly even when this sheet is cached (i.e. when
-            // this.formulaEngine points to a different sheet's engine).
+            // Capture the engine and sheetId at observer creation. We
+            // intentionally do NOT capture the sheet name here — it can change
+            // via renameSheet, and a stale name would break cross-sheet
+            // invalidation. The name is resolved per-invocation below.
             const capturedEngine = this.formulaEngine;
-            const capturedSheetName = this.sheets.find(s => s.id === this.activeSheetId)?.name ?? '';
+            const capturedSheetId = this.activeSheetId;
+            const currentSheetName = () =>
+                this.sheets.find(s => s.id === capturedSheetId)?.name
+                ?? this.root?.get('sheets')?.get(capturedSheetId)?.get('name')
+                ?? '';
 
             // Observe cellValues YKeyValue for formula recalculation on changes.
+            // Batched: marks all dependents dirty in one pass, then runs ONE
+            // recalculateDirty(). Previously this looped cellValueChanged()
+            // per cell, each call doing a full recalc — N changes meant N×N.
             const formulaObserver = (changes) => {
                 const formulasToSet  = [];
                 const formulasToClear = [];
@@ -870,24 +982,24 @@ export class SpreadsheetSession {
                 for (const { row, col, formula } of formulasToSet) {
                     capturedEngine.setFormula(row, col, formula);
                 }
-                for (const { row, col } of valueChanges) {
-                    capturedEngine.cellValueChanged(row, col);
-                }
-                if (formulasToSet.length > 0) {
+                // Batched value-change notification — single recalc pass.
+                if (valueChanges.length > 0) {
+                    capturedEngine.notifyCellsChanged(valueChanges);
+                } else if (formulasToSet.length > 0 || formulasToClear.length > 0) {
                     capturedEngine.recalculateDirty();
                 }
 
                 // Propagate this sheet's changes to any other engine (active or cached)
                 // that has cross-sheet references pointing at this sheet.
-                if (capturedSheetName && (valueChanges.length > 0 || formulasToClear.length > 0 || formulasToSet.length > 0)) {
-                    // Active engine (when a different sheet is currently active)
+                if (valueChanges.length > 0 || formulasToClear.length > 0 || formulasToSet.length > 0) {
+                    const sheetName = currentSheetName();
+                    if (!sheetName) return;
                     if (this.formulaEngine && this.formulaEngine !== capturedEngine) {
-                        this.formulaEngine.invalidateCrossSheetDependencies(capturedSheetName);
+                        this.formulaEngine.invalidateCrossSheetDependencies(sheetName);
                     }
-                    // Cached engines
                     for (const [, entry] of this.#sheetEngineCache) {
                         if (entry.formulaEngine !== capturedEngine) {
-                            entry.formulaEngine.invalidateCrossSheetDependencies(capturedSheetName);
+                            entry.formulaEngine.invalidateCrossSheetDependencies(sheetName);
                         }
                     }
                 }
@@ -1137,8 +1249,27 @@ export class SpreadsheetSession {
             return extMgr.getRange(String(fileIdOrUrl), rangeStr);
         }]]) : null;
 
-        const { evalCell } = makeSheetCellEvaluator(new YKeyValue(cvArr), customFns);
+        const kv = this.#getOrCreateCrossSheetKV(targetSheet.id, cvArr);
+        const { evalCell } = makeSheetCellEvaluator(kv, customFns, { sheetTag: targetSheet.id });
         return evalCell(row, col, new Set());
+    }
+
+    /**
+     * Lazily build / return a cached YKeyValue wrapper for a sheet's
+     * cellValues Y.Array. Entries are invalidated only on sheet delete or
+     * doc teardown — the YKeyValue mirrors the Y.Array reactively so it
+     * stays current across edits.
+     * @param {string} sheetId
+     * @param {import('yjs').Array<any>} cvArr
+     * @returns {import('y-utility/y-keyvalue').YKeyValue<any>}
+     */
+    #getOrCreateCrossSheetKV(sheetId, cvArr) {
+        let kv = this.#crossSheetKVCache.get(sheetId);
+        if (!kv) {
+            kv = new YKeyValue(cvArr);
+            this.#crossSheetKVCache.set(sheetId, kv);
+        }
+        return kv;
     }
 
     /**
@@ -1165,7 +1296,7 @@ export class SpreadsheetSession {
         if (!sheetYMap) return [];
         const cvArr = sheetYMap.get('cellValues');
         if (!cvArr) return [];
-        const cvKV = new YKeyValue(cvArr);
+        const cvKV = this.#getOrCreateCrossSheetKV(sheetId, cvArr);
 
         const eng = new FormulaEngine();
         if (this.#externalDocManager) {
@@ -1176,6 +1307,14 @@ export class SpreadsheetSession {
                 return extMgr.getRange(String(fileIdOrUrl), rangeStr);
             });
         }
+        // Register TABLE_* functions so cross-sheet formulas in the target
+        // sheet that reference tables work as expected.
+        this.tableManager?.registerFunctions(eng, this);
+        // Cross-sheet getter — uses the same recursive resolver as the active
+        // engine, so multi-hop refs and cycle detection are consistent.
+        eng.setCrossSheetGetter((sheetName, row, col) =>
+            this.getCrossSheetValue(sheetName, row, col)
+        );
         eng.setCellValueGetter((r, c) => {
             const data = cvKV.get(`${r},${c}`);
             if (!data) return null;
@@ -1574,6 +1713,99 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Duplicate an existing sheet, inserting the copy immediately after the source.
+     * @param {string} sheetId
+     * @returns {string|null} New sheet ID
+     */
+    duplicateSheet(sheetId) {
+        if (!this.root || !this.ydoc) return null;
+
+        const sheets = this.root.get('sheets');
+        const sheetOrder = this.root.get('sheetOrder');
+        const srcSheet = sheets.get(sheetId);
+        if (!srcSheet) return null;
+
+        const srcName = srcSheet.get('name') ?? 'Sheet';
+        const newName = `${srcName} (copy)`;
+        const newId = `sheet-${Date.now()}`;
+
+        // Copy Y.Array-backed YKeyValue stores by cloning their raw entries
+        const copyArray = (srcKey) => {
+            const src = srcSheet.get(srcKey);
+            const dst = new (src.constructor)();
+            if (src instanceof Y.Array && src.length > 0) {
+                dst.insert(0, src.toArray());
+            }
+            return dst;
+        };
+
+        // Copy a Y.Map containing only primitive values (e.g. printSettings)
+        const copyPrimitiveMap = (srcKey) => {
+            const src = srcSheet.get(srcKey);
+            const dst = new Y.Map();
+            if (src instanceof Y.Map) {
+                for (const [k, v] of src.entries()) {
+                    if (typeof v !== 'object' || v === null) dst.set(k, v);
+                }
+            }
+            return dst;
+        };
+
+        let newSheet = null;
+        this.ydoc.transact(() => {
+            newSheet = new Y.Map();
+            newSheet.set('id',           newId);
+            newSheet.set('name',         newName);
+            newSheet.set('rowCount',     srcSheet.get('rowCount'));
+            newSheet.set('colCount',     srcSheet.get('colCount'));
+            newSheet.set('frozenRows',   srcSheet.get('frozenRows')   ?? 0);
+            newSheet.set('frozenColumns',srcSheet.get('frozenColumns') ?? 0);
+            newSheet.set('hidden',       srcSheet.get('hidden')        ?? false);
+
+            const defRowH = srcSheet.get('defaultRowHeight');
+            if (defRowH !== undefined) newSheet.set('defaultRowHeight', defRowH);
+            const defColW = srcSheet.get('defaultColWidth');
+            if (defColW !== undefined) newSheet.set('defaultColWidth', defColW);
+            const tabColor = srcSheet.get('tabColor');
+            if (tabColor !== undefined) newSheet.set('tabColor', tabColor);
+
+            newSheet.set('cellValues',        copyArray('cellValues'));
+            newSheet.set('cellStyles',        copyArray('cellStyles'));
+            newSheet.set('borders',           copyArray('borders'));
+            newSheet.set('rowMeta',           copyArray('rowMeta'));
+            newSheet.set('colMeta',           copyArray('colMeta'));
+            newSheet.set('merges',            copyArray('merges'));
+            newSheet.set('conditionalFormats',copyArray('conditionalFormats'));
+            newSheet.set('dataValidations',   copyArray('dataValidations'));
+            newSheet.set('printSettings',     copyPrimitiveMap('printSettings'));
+            newSheet.set('tableViews',        new Y.Map());
+            newSheet.set('repeaters',         new Y.Map());
+            newSheet.set('plugins',           new Y.Map());
+
+            sheets.set(newId, newSheet);
+
+            // Insert immediately after the source sheet
+            const srcIndex = sheetOrder.toArray().indexOf(sheetId);
+            sheetOrder.insert(srcIndex + 1, [newId]);
+        }, YJS_ORIGIN.UI);
+
+        if (this.undoManager && newSheet) {
+            const types = [
+                newSheet,
+                newSheet.get('cellValues'), newSheet.get('cellStyles'),
+                newSheet.get('borders'),    newSheet.get('rowMeta'),
+                newSheet.get('colMeta'),    newSheet.get('tableViews'),
+                newSheet.get('repeaters'),  newSheet.get('merges'),
+            ].filter(Boolean);
+            for (const t of types) {
+                try { this.undoManager.addToScope(t); } catch { /* already in scope */ }
+            }
+        }
+
+        return newId;
+    }
+
+    /**
      * Delete a sheet
      * @param {string} sheetId
      */
@@ -1597,6 +1829,10 @@ export class SpreadsheetSession {
             const fallbackId = sheetOrder.get(fallbackIdx);
             if (fallbackId) this.setActiveSheet(fallbackId);
         }
+
+        // Evict the deleted sheet's cross-sheet YKeyValue wrapper so a future
+        // sheet created with the same id (unlikely but harmless) starts fresh.
+        this.#crossSheetKVCache.delete(sheetId);
 
         // Evict the deleted sheet from the engine cache so its dangling
         // SheetStore/formulaEngine/etc. are destroyed.
@@ -1642,7 +1878,8 @@ export class SpreadsheetSession {
     }
 
     /**
-     * Rename a sheet
+     * Rename a sheet, atomically rewriting all formulas that reference it
+     * (cross-sheet refs in cell values AND in table column DSL formulas).
      * @param {string} sheetId
      * @param {string} name
      */
@@ -1651,12 +1888,70 @@ export class SpreadsheetSession {
 
         const sheets = this.root.get('sheets');
         const sheet = sheets?.get(sheetId);
+        if (!sheet) return;
 
-        if (sheet) {
-            this.ydoc.transact(() => {
-                sheet.set('name', name);
-            }, YJS_ORIGIN.UI);
-        }
+        const oldName = sheet.get('name');
+        if (oldName === name) return;
+
+        this.ydoc.transact(() => {
+            sheet.set('name', name);
+            if (!oldName) return;
+            this.#rewriteSheetRefsAcrossDoc(oldName, name);
+        }, YJS_ORIGIN.UI);
+    }
+
+    /**
+     * Walk every cellValues map on every sheet, and every table column's
+     * defaultFormula/formula, rewriting cross-sheet references that match
+     * `oldName`. Called inside a Yjs transaction by renameSheet so the entire
+     * rewrite is one atomic update.
+     * @param {string} oldName
+     * @param {string} newName
+     */
+    #rewriteSheetRefsAcrossDoc(oldName, newName) {
+        const sheetsMap = this.root?.get('sheets');
+        sheetsMap?.forEach((s) => {
+            const cvArr = s.get('cellValues');
+            if (!cvArr) return;
+            const cvKV = new YKeyValue(cvArr);
+            for (const [key, { val: data }] of cvKV.map) {
+                const v = data?.v;
+                if (typeof v !== 'string' || !v.startsWith('=')) continue;
+                const rewritten = rewriteSheetRefsInFormula(v, oldName, newName);
+                if (rewritten !== v) cvKV.set(key, { ...data, v: rewritten });
+            }
+        });
+
+        // Table column formulas (defaultFormula + formula): these are DSL strings
+        // that may embed sheet refs. Rewrite both source tables and the
+        // historical pre-tableData column defs on view tables.
+        const tableData = this.root?.get('tableData');
+        tableData?.forEach((tableYMap) => this.#rewriteTableColumnRefs(tableYMap, oldName, newName, 'sheet'));
+        sheetsMap?.forEach((s) => {
+            const views = s.get('tableViews');
+            views?.forEach((tableYMap) => this.#rewriteTableColumnRefs(tableYMap, oldName, newName, 'sheet'));
+        });
+    }
+
+    /**
+     * Rewrite column-level DSL formulas inside one table Y.Map.
+     * @param {import('yjs').Map<any>} tableYMap
+     * @param {string} oldName
+     * @param {string} newName
+     * @param {'sheet'|'table'} kind
+     */
+    #rewriteTableColumnRefs(tableYMap, oldName, newName, kind) {
+        const defsMap = tableYMap.get('columnDefs');
+        if (!defsMap) return;
+        const rewriteFn = kind === 'sheet' ? rewriteSheetRefsInDslColumn : rewriteTableRefsInDslColumn;
+        defsMap.forEach((colYMap) => {
+            for (const field of ['defaultFormula', 'formula']) {
+                const cur = colYMap.get(field);
+                if (typeof cur !== 'string' || !cur) continue;
+                const next = rewriteFn(cur, oldName, newName);
+                if (next !== cur) colYMap.set(field, next);
+            }
+        });
     }
 
     // ========================================================================

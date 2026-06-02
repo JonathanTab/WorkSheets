@@ -24,7 +24,13 @@
 
 import * as Y from 'yjs';
 import { TableStore } from './TableStore.svelte.js';
+import { extractTableRefsFromColumnFormula } from './tableFormulaEval.js';
 import { YJS_ORIGIN } from '../yjsOrigins.js';
+import { YKeyValue } from 'y-utility/y-keyvalue';
+import {
+    rewriteTableRefsInFormula,
+    rewriteTableRefsInDslColumn,
+} from '../../../formulas/refRewriter.js';
 
 export class DocumentTableRegistry {
     /** @type {import('yjs').Doc} */
@@ -58,6 +64,22 @@ export class DocumentTableRegistry {
      */
     #viewsOf = new Map();
 
+    /**
+     * Cross-table reference index for column formulas.
+     * upperName → Set<storeId>  (stores whose column formulas reference that table)
+     * Also a wildcard set for dynamic-first-arg TABLE_* calls.
+     * @type {Map<string, Set<string>>}
+     */
+    #storesByTableRef = new Map();
+    /** @type {Set<string>} */
+    #wildcardRefStores = new Set();
+    /**
+     * Per-store snapshot of the table refs we last indexed, so we can remove
+     * stale entries cleanly when a store's columns change.
+     * @type {Map<string, { names: Set<string>, wildcard: boolean }>}
+     */
+    #refsByStore = new Map();
+
     /** WeakSets to guard against double-registering */
     #watchedTableDataMap = new WeakSet();
     #watchedSheets       = new WeakSet();
@@ -86,6 +108,14 @@ export class DocumentTableRegistry {
      * @type {((info: { sourceTableId: string, events: import('yjs').YEvent<any>[], rowArr: import('yjs').Array<import('yjs').Map<any>> }) => void) | null}
      */
     onTableChange = null;
+
+    /**
+     * Fired when the set of tables (source or view) changes — i.e. a table is
+     * added or removed. SpreadsheetSession uses this to dirty grid formulas
+     * that reference tables by name and to recalculate.
+     * @type {(() => void) | null}
+     */
+    onTableStructureChange = null;
 
     /**
      * @param {import('yjs').Map<any>} root  ydoc.getMap('spreadsheet')
@@ -217,6 +247,11 @@ export class DocumentTableRegistry {
 
         const tableResolver = (name) => this.getByName(name);
         const store = new TableStore(tableYMap, this.#ydoc, sourceTableYMap, sourceStore, tableResolver);
+        // Atomic-rename rewriter: when this table is renamed via store.rename(),
+        // walk every cell formula + column DSL formula in the doc and rewrite
+        // TABLE_*("OldName", …) → TABLE_*("NewName", …), inside the same Yjs
+        // transaction as the name set.
+        store.setRenameRewriter((oldName, newName) => this.#rewriteTableRefsAcrossDoc(oldName, newName));
         this.#stores.set(tableId, store);
         this.#sheetOf.set(tableId, sheetId ?? '');
         this.#nameIndexAdd((store.name ?? '').toUpperCase(), tableId);
@@ -239,6 +274,18 @@ export class DocumentTableRegistry {
         tableYMap.observe(nameObs);
         this.#observers.push(() => tableYMap.unobserve(nameObs));
 
+        // Build / refresh the cross-table ref index for this store. Index is
+        // refreshed whenever the store's columns change (defaultFormula or
+        // formula edits) so cross-table dirty propagation stays accurate.
+        this.#rebuildRefIndex(tableId, store);
+        const colSrc = sourceTableYMap ?? tableYMap;
+        const defsMap = colSrc.get('columnDefs');
+        if (defsMap) {
+            const colsObs = () => this.#rebuildRefIndex(tableId, store);
+            defsMap.observeDeep(colsObs);
+            this.#observers.push(() => defsMap.unobserveDeep(colsObs));
+        }
+
         // Row-change → formula recalc. One observer per unique rowArr.
         // For views, effectiveSourceId points at the shared source table.
         const rowArr = (sourceTableYMap ?? tableYMap).get('rows');
@@ -254,6 +301,7 @@ export class DocumentTableRegistry {
         }
 
         this.tableVersion++;
+        this.onTableStructureChange?.();
     }
 
     #removeStore(tableId) {
@@ -265,7 +313,54 @@ export class DocumentTableRegistry {
         this.#nameIndexRemove((store.name ?? '').toUpperCase(), tableId);
         for (const views of this.#viewsOf.values()) views.delete(tableId);
         this.#viewsOf.delete(tableId);
+        this.#removeRefIndex(tableId);
         this.tableVersion++;
+        this.onTableStructureChange?.();
+    }
+
+    /**
+     * Refresh the cross-table ref index for one store. Walks every column's
+     * defaultFormula and formula strings, extracts TABLE_* references, and
+     * updates #storesByTableRef + #wildcardRefStores.
+     * @param {string} tableId
+     * @param {TableStore} store
+     */
+    #rebuildRefIndex(tableId, store) {
+        this.#removeRefIndex(tableId);
+        const names = new Set();
+        let wildcard = false;
+        for (const col of store.columns ?? []) {
+            for (const formula of [col.defaultFormula, col.formula]) {
+                if (!formula) continue;
+                const refs = extractTableRefsFromColumnFormula(formula);
+                for (const n of refs.names) names.add(n);
+                if (refs.wildcard) wildcard = true;
+            }
+        }
+        this.#refsByStore.set(tableId, { names, wildcard });
+        for (const n of names) {
+            if (!this.#storesByTableRef.has(n)) this.#storesByTableRef.set(n, new Set());
+            this.#storesByTableRef.get(n).add(tableId);
+        }
+        if (wildcard) this.#wildcardRefStores.add(tableId);
+    }
+
+    /**
+     * Remove this store's entries from the cross-table ref index.
+     * @param {string} tableId
+     */
+    #removeRefIndex(tableId) {
+        const prev = this.#refsByStore.get(tableId);
+        if (!prev) return;
+        for (const n of prev.names) {
+            const set = this.#storesByTableRef.get(n);
+            if (set) {
+                set.delete(tableId);
+                if (set.size === 0) this.#storesByTableRef.delete(n);
+            }
+        }
+        if (prev.wildcard) this.#wildcardRefStores.delete(tableId);
+        this.#refsByStore.delete(tableId);
     }
 
     /**
@@ -349,6 +444,16 @@ export class DocumentTableRegistry {
     }
 
     /**
+     * Every known table name (uppercased) currently registered. Used by
+     * SpreadsheetSession to mark all by-name formula deps dirty on
+     * structural change.
+     * @returns {string[]}
+     */
+    getAllTableNames() {
+        return Array.from(this.#nameIndex.keys());
+    }
+
+    /**
      * sheetId for a given tableId (source or view).
      * Returns '' for document-level source tables.
      * @param {string} tableId
@@ -367,10 +472,60 @@ export class DocumentTableRegistry {
         return this.#tableDataMap ?? this.#getOrCreateTableData();
     }
 
+    /**
+     * Walk every formula in every sheet (cell values + table column DSL
+     * formulas) and rewrite TABLE_*("oldName", …) → TABLE_*("newName", …).
+     * Must be called inside a Yjs transaction (TableStore.rename does that
+     * via #transact, so all writes — including the name set — coalesce into
+     * one atomic update).
+     * @param {string} oldName
+     * @param {string} newName
+     */
+    #rewriteTableRefsAcrossDoc(oldName, newName) {
+        if (!oldName || !newName || oldName === newName) return;
+
+        const sheetsMap = this.#root?.get('sheets');
+        sheetsMap?.forEach((s) => {
+            const cvArr = s.get('cellValues');
+            if (!cvArr) return;
+            const cvKV = new YKeyValue(cvArr);
+            for (const [key, { val: data }] of cvKV.map) {
+                const v = data?.v;
+                if (typeof v !== 'string' || !v.startsWith('=')) continue;
+                const rewritten = rewriteTableRefsInFormula(v, oldName, newName);
+                if (rewritten !== v) cvKV.set(key, { ...data, v: rewritten });
+            }
+        });
+
+        // Column DSL formulas: source tables (root.tableData) own the column defs.
+        const tableData = this.#root?.get('tableData');
+        tableData?.forEach((tableYMap) => {
+            const defsMap = tableYMap.get('columnDefs');
+            if (!defsMap) return;
+            defsMap.forEach((colYMap) => {
+                for (const field of ['defaultFormula', 'formula']) {
+                    const cur = colYMap.get(field);
+                    if (typeof cur !== 'string' || !cur) continue;
+                    const next = rewriteTableRefsInDslColumn(cur, oldName, newName);
+                    if (next !== cur) colYMap.set(field, next);
+                }
+            });
+        });
+    }
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     /**
-     * Rebuild formula evaluators for tables affected by row changes in `sourceTableId`.
+     * Rebuild formula evaluators for stores affected by row changes in
+     * `sourceTableId`. Includes:
+     *   (a) the source table itself
+     *   (b) any view of the source table
+     *   (c) any OTHER store whose column formulas reference the source table
+     *       by name via TABLE_*(...)  — these have a stale computed cache
+     *       until their #rebuildView fires
+     *   (d) any store with at least one TABLE_*(<dynamic>, …) column formula
+     *       (wildcard — we can't know if it references this table without
+     *       evaluating, so be safe and invalidate)
      * @param {string} sourceTableId
      */
     #invalidateNonEntryEvals(sourceTableId) {
@@ -384,8 +539,29 @@ export class DocumentTableRegistry {
                 if (s) affected.add(s);
             }
         }
+
+        // Cross-table dependents: stores whose column formulas mention this
+        // source table by name (or use a dynamic name we can't resolve).
+        if (src) {
+            const upperName = (src.name ?? '').toUpperCase();
+            const byName = this.#storesByTableRef.get(upperName);
+            if (byName) {
+                for (const id of byName) {
+                    const s = this.#stores.get(id);
+                    if (s) affected.add(s);
+                }
+            }
+        }
+        for (const id of this.#wildcardRefStores) {
+            const s = this.#stores.get(id);
+            if (s) affected.add(s);
+        }
+
         for (const store of affected) {
-            if (store.columns.some(c => c.isNonEntry && c.defaultFormula)) {
+            // Any column whose value can change with row data: isNonEntry
+            // formulas (never stored), or defaultFormulas (computed value is
+            // shown when the stored cell is empty).
+            if (store.columns.some(c => (c.isNonEntry && (c.defaultFormula || c.formula)) || c.defaultFormula)) {
                 store.invalidate();
             }
         }
@@ -399,6 +575,9 @@ export class DocumentTableRegistry {
         this.#nameIndex.clear();
         this.#sheetOf.clear();
         this.#viewsOf.clear();
+        this.#storesByTableRef.clear();
+        this.#wildcardRefStores.clear();
+        this.#refsByStore.clear();
     }
 }
 

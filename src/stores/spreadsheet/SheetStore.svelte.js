@@ -36,6 +36,26 @@ import { YJS_ORIGIN } from './yjsOrigins.js';
 // Frozen empty object for non-existent cells (prevents allocation churn)
 const EMPTY_CELL = Object.freeze({ v: undefined, exists: false });
 
+// Style keys whose default is `false`. Storing `false` is redundant — readers
+// treat missing keys as false — so we strip them on write to keep the document
+// from accumulating zero-information entries.
+const STRIP_FALSE_STYLE_KEYS = new Set(['bold', 'italic', 'underline', 'strikethrough', 'wrapText']);
+
+/**
+ * Strip default style/width from a border descriptor. Readers fall back to
+ * style:'solid' and width:1 via normalizeBorderStyle, so storing them is
+ * redundant. Color is always preserved — without it the entry would degrade
+ * to a default-black border on read, which is a different look.
+ * @param {{ style?: string, width?: number, color?: string } | null | undefined} style
+ */
+function compactBorderStyle(style) {
+    if (!style || typeof style !== 'object') return style ?? null;
+    const out = { ...style };
+    if (out.style === 'solid') delete out.style;
+    if (out.width === 1) delete out.width;
+    return out;
+}
+
 export class SheetStore {
     /** @type {Y.Map} */
     #sheet;
@@ -103,6 +123,10 @@ export class SheetStore {
     // --- Print Settings Version ---
     // Incremented when print settings change (triggers page break re-computation)
     printSettingsVersion = $state(0);
+
+    // --- Plugins Version ---
+    // Incremented when the plugins Y.Map changes (triggers PluginOverlay reposition)
+    pluginsVersion = $state(0);
 
     // --- Floating Images ---
     // Key: imageId (string) -> Value: { id, blobId, anchorRow, anchorCol, offsetX, offsetY, width, height, fit }
@@ -218,14 +242,18 @@ export class SheetStore {
         return { ...(sty ?? {}), ...(val ?? {}) };
     }
 
-    /** Split a plain data object and write its parts to cellValues / cellStyles. */
+    /** Split a plain data object and write its parts to cellValues / cellStyles.
+     *  Strips style keys whose value equals the render default (false booleans,
+     *  null/undefined). Without this, bulk ops (paste, fill, copy-sheet, insert)
+     *  propagate default-only entries and bloat the document. */
     #setCellData(key, data) {
         if (!data) { this.#deleteCellData(key); return; }
         const valData = {};
         const styData = {};
         for (const [k, v] of Object.entries(data)) {
-            if (v === undefined) continue;
+            if (v === undefined || v === null) continue;
             if (CELL_VALUE_KEYS.has(k)) valData[k] = v;
+            else if (STRIP_FALSE_STYLE_KEYS.has(k) && v === false) continue;
             else styData[k] = v;
         }
         if (Object.keys(valData).length > 0) this.#cellValuesKV?.set(key, valData);
@@ -330,6 +358,10 @@ export class SheetStore {
                 tryAttachCF();
                 this.cfVersion++;
             }
+            if (event.keysChanged.has('plugins')) {
+                tryAttachPlugins();
+                this.pluginsVersion++;
+            }
         };
         this.#sheet.observe(sheetObserver);
 
@@ -363,10 +395,33 @@ export class SheetStore {
         };
         this.#cellStylesKV?.on('change', cellStyleObserver);
 
-        // 4. Observe borders YKeyValue for reactivity
-        const bordersObserver = () => {
+        // 4. Observe borders YKeyValue for reactivity.
+        // Granular cache invalidation: each edge key (h,r,c / v,r,c) affects at
+        // most two cells in the per-cell border cache, so we walk only the
+        // changed keys instead of flushing the whole cache.
+        const bordersObserver = (changes) => {
+            if (changes && typeof changes.forEach === 'function') {
+                changes.forEach((_change, key) => {
+                    const parts = key.split(',');
+                    if (parts.length !== 3) return;
+                    const type = parts[0];
+                    const r = Number(parts[1]);
+                    const c = Number(parts[2]);
+                    if (type === 'h') {
+                        // h,r,c → bottom of (r,c), top of (r+1,c)
+                        this.#cellBorderCache.delete(`${r},${c}`);
+                        this.#cellBorderCache.delete(`${r + 1},${c}`);
+                    } else if (type === 'v') {
+                        // v,r,c → right of (r,c), left of (r,c+1)
+                        this.#cellBorderCache.delete(`${r},${c}`);
+                        this.#cellBorderCache.delete(`${r},${c + 1}`);
+                    }
+                });
+            } else {
+                // No usable change set — fall back to a full clear.
+                this.#cellBorderCache.clear();
+            }
             this.bordersVersion++;
-            this.#cellBorderCache.clear();
         };
         this.#bordersKV?.on('change', bordersObserver);
 
@@ -383,7 +438,20 @@ export class SheetStore {
         };
         tryAttachPrintSettings();
 
-        // 6. Observe floatingImages Y.Map changes
+        // 6. Observe plugins Y.Map changes
+        let pluginsMap = null;
+        const pluginsHandler = () => { this.pluginsVersion++; };
+        const tryAttachPlugins = () => {
+            const map = this.#sheet.get('plugins');
+            if (map && map !== pluginsMap) {
+                if (pluginsMap) pluginsMap.unobserve(pluginsHandler);
+                pluginsMap = map;
+                pluginsMap.observe(pluginsHandler);
+            }
+        };
+        tryAttachPlugins();
+
+        // 7. Observe floatingImages Y.Map changes
         let floatingImagesMap = null;
         const floatingImagesHandler = () => {
             this.#syncFloatingImages();
@@ -407,6 +475,7 @@ export class SheetStore {
             this.#rowMetaKV?.off('change', rowMetaHandler);
             this.#colMetaKV?.off('change', colMetaHandler);
             if (printSettingsMap) printSettingsMap.unobserve(printSettingsHandler);
+            if (pluginsMap) pluginsMap.unobserve(pluginsHandler);
             if (floatingImagesMap) floatingImagesMap.unobserveDeep(floatingImagesHandler);
         };
     }
@@ -625,8 +694,12 @@ export class SheetStore {
             if (Object.keys(styUpdates).length > 0) {
                 const cur = this.#cellStylesKV?.get(key) ?? {};
                 const upd = { ...cur };
+                // Treat null/undefined as "delete" everywhere; for strict-boolean style
+                // keys, also delete on false (false is the default, no need to store it).
                 for (const [k, v] of Object.entries(styUpdates)) {
-                    if (v === undefined) delete upd[k]; else upd[k] = v;
+                    if (v === undefined || v === null) delete upd[k];
+                    else if (STRIP_FALSE_STYLE_KEYS.has(k) && v === false) delete upd[k];
+                    else upd[k] = v;
                 }
                 if (Object.keys(upd).length > 0) this.#cellStylesKV?.set(key, upd);
                 else this.#cellStylesKV?.delete(key);
@@ -826,15 +899,15 @@ export class SheetStore {
             if (!src) return;
             if (src.fontSize != null)         out.fontSize        = src.fontSize;
             if (src.fontFamily != null)        out.fontFamily       = src.fontFamily;
-            if (src.bold)                      out.bold             = true;
-            if (src.italic)                    out.italic           = true;
-            if (src.underline)                 out.underline        = true;
-            if (src.strikethrough)             out.strikethrough    = true;
+            if (src.bold != null)              out.bold             = !!src.bold;
+            if (src.italic != null)            out.italic           = !!src.italic;
+            if (src.underline != null)         out.underline        = !!src.underline;
+            if (src.strikethrough != null)     out.strikethrough    = !!src.strikethrough;
             if (src.color != null)             out.color            = src.color;
             if (src.backgroundColor != null)   out.backgroundColor  = src.backgroundColor;
             if (src.horizontalAlign != null)   out.horizontalAlign  = src.horizontalAlign;
             if (src.verticalAlign != null)     out.verticalAlign    = src.verticalAlign;
-            if (src.wrapText)                  out.wrapText         = true;
+            if (src.wrapText != null)          out.wrapText         = src.wrapText;
         };
         apply(this.getColFormatting(col));
         apply(this.getRowFormatting(row));
@@ -1108,6 +1181,12 @@ export class SheetStore {
             }
 
             // ── 2. Borders ─────────────────────────────────────────────────────
+            // Collision rule: when a "bottom-of-deleted-block" border shifts onto
+            // the same key as a surviving border above the block, the bottom-of-
+            // deleted wins (it's the edge that becomes the new shared boundary
+            // between the row above the deletion and the row below). We sort
+            // moves with bottom-boundary entries last so YKeyValue.set overwrites
+            // the survivor's entry deterministically.
             if (this.#bordersKV) {
                 const bToDelete = [];
                 const bToMove   = [];
@@ -1122,21 +1201,23 @@ export class SheetStore {
                         } else if (deletedSet.has(row)) {
                             // Bottom boundary of deleted block: shift to sit between the two surviving rows
                             const newRow = row - shiftFor(row + 1);
-                            bToMove.push({ key, newKey: `h,${newRow},${col}`, value });
+                            bToMove.push({ key, newKey: `h,${newRow},${col}`, value, priority: 1 });
                         } else {
                             const shift = shiftFor(row);
-                            if (shift > 0) bToMove.push({ key, newKey: `h,${row - shift},${col}`, value });
+                            if (shift > 0) bToMove.push({ key, newKey: `h,${row - shift},${col}`, value, priority: 0 });
                         }
                     } else if (type === 'v') {
                         if (deletedSet.has(row)) { bToDelete.push(key); }
                         else {
                             const shift = shiftFor(row);
-                            if (shift > 0) bToMove.push({ key, newKey: `v,${row - shift},${col}`, value });
+                            if (shift > 0) bToMove.push({ key, newKey: `v,${row - shift},${col}`, value, priority: 0 });
                         }
                     }
                 }
                 for (const key of bToDelete) this.#bordersKV.delete(key);
-                bToMove.sort((a, b) => a.newKey.localeCompare(b.newKey));
+                // Apply low-priority (regular shifts) before high-priority
+                // (bottom-of-deleted) so the latter wins on collision.
+                bToMove.sort((a, b) => (a.priority - b.priority) || a.newKey.localeCompare(b.newKey));
                 for (const { key, newKey, value } of bToMove) {
                     this.#bordersKV.delete(key);
                     this.#bordersKV.set(newKey, value);
@@ -1312,9 +1393,18 @@ export class SheetStore {
     #adjustFormulaForColDelete(f, i) { return adjustForColDelete(f, i); }
 
     /**
-     * Shift borders when a row is inserted
-     * All borders (horizontal and vertical) with row >= rowIndex must have their row increased by 1.
-     * No borders need to be deleted (the new row is empty).
+     * Shift borders when a row is inserted.
+     *
+     * Horizontal borders (h,r,c = bottom of row r / top of row r+1):
+     *   - When inserting at rowIndex=0, the special "h,-1,c" key represents the
+     *     top edge of original row 0. After insertion that edge should still
+     *     sit at the top of what is now row 1 — which is the bottom of the
+     *     new row 0, i.e. the new key is "h,0,c". So we include the boundary
+     *     case `row >= rowIndex - 1` when rowIndex === 0 to catch h,-1.
+     *   - For interior inserts (rowIndex > 0), only `row >= rowIndex` shifts.
+     *
+     * Vertical borders (v,r,c = right of col c on row r): rows shift unchanged.
+     *
      * @param {number} rowIndex
      */
     #shiftBordersForRowInsert(rowIndex) {
@@ -1325,7 +1415,11 @@ export class SheetStore {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
-            if (row >= rowIndex) bordersToShift.push({ key, row, col, type, value });
+            // Include the boundary "top of original row 0" key when inserting at row 0.
+            const shouldShift = type === 'h' && rowIndex === 0
+                ? row >= -1
+                : row >= rowIndex;
+            if (shouldShift) bordersToShift.push({ key, row, col, type, value });
         }
 
         bordersToShift.sort((a, b) => b.row - a.row);
@@ -1336,9 +1430,15 @@ export class SheetStore {
     }
 
     /**
-     * Shift borders when a column is inserted
-     * All borders (horizontal and vertical) with col >= colIndex must have their col increased by 1.
-     * No borders need to be deleted (the new column is empty).
+     * Shift borders when a column is inserted.
+     *
+     * Vertical borders (v,r,c = right of col c / left of col c+1):
+     *   - When inserting at colIndex=0, the "v,r,-1" key represents the left
+     *     edge of original col 0. After insertion it should sit at the left of
+     *     what is now col 1 — i.e. the right of new col 0 = "v,r,0".
+     *
+     * Horizontal borders (h,r,c): cols shift unchanged.
+     *
      * @param {number} colIndex
      */
     #shiftBordersForColInsert(colIndex) {
@@ -1349,7 +1449,10 @@ export class SheetStore {
             const [type, rowStr, colStr] = key.split(',');
             const row = Number(rowStr);
             const col = Number(colStr);
-            if (col >= colIndex) bordersToShift.push({ key, row, col, type, value });
+            const shouldShift = type === 'v' && colIndex === 0
+                ? col >= -1
+                : col >= colIndex;
+            if (shouldShift) bordersToShift.push({ key, row, col, type, value });
         }
 
         bordersToShift.sort((a, b) => b.col - a.col);
@@ -1673,8 +1776,19 @@ export class SheetStore {
     setRowHeight(rowIndex, height) {
         if (!this.#rowMetaKV) return;
         this.#transact(() => {
-            const cur = this.#rowMetaKV.get(String(rowIndex)) ?? {};
-            this.#rowMetaKV.set(String(rowIndex), { ...cur, height });
+            const key = String(rowIndex);
+            const cur = this.#rowMetaKV.get(key) ?? {};
+            // If the new height equals the effective default, drop the height key.
+            // Without this, every row touched accumulates a no-op entry — that pattern
+            // accounts for most rowMeta entries in real docs (e.g. 5157/5173 in one audit).
+            const effectiveDefault = this.defaultRowHeight ?? 24;
+            const { height: _h, ...rest } = cur;
+            if (height === effectiveDefault) {
+                if (Object.keys(rest).length > 0) this.#rowMetaKV.set(key, rest);
+                else this.#rowMetaKV.delete(key);
+            } else {
+                this.#rowMetaKV.set(key, { ...rest, height });
+            }
         });
     }
 
@@ -1695,8 +1809,16 @@ export class SheetStore {
     setColWidth(colIndex, width) {
         if (!this.#colMetaKV) return;
         this.#transact(() => {
-            const cur = this.#colMetaKV.get(String(colIndex)) ?? {};
-            this.#colMetaKV.set(String(colIndex), { ...cur, width });
+            const key = String(colIndex);
+            const cur = this.#colMetaKV.get(key) ?? {};
+            const effectiveDefault = this.defaultColWidth ?? 100;
+            const { width: _w, ...rest } = cur;
+            if (width === effectiveDefault) {
+                if (Object.keys(rest).length > 0) this.#colMetaKV.set(key, rest);
+                else this.#colMetaKV.delete(key);
+            } else {
+                this.#colMetaKV.set(key, { ...rest, width });
+            }
         });
     }
 
@@ -1795,7 +1917,7 @@ export class SheetStore {
             if (style === null) {
                 this.#bordersKV.delete(edgeKey);
             } else {
-                this.#bordersKV.set(edgeKey, style);
+                this.#bordersKV.set(edgeKey, compactBorderStyle(style));
             }
         });
     }
@@ -1811,7 +1933,7 @@ export class SheetStore {
                 if (style === null) {
                     this.#bordersKV.delete(edgeKey);
                 } else {
-                    this.#bordersKV.set(edgeKey, style);
+                    this.#bordersKV.set(edgeKey, compactBorderStyle(style));
                 }
             }
         });
@@ -2052,6 +2174,39 @@ export class SheetStore {
     }
 
     // --- Print Settings ---
+
+    // ─── Plugin config accessors ──────────────────────────────────────────────
+
+    /**
+     * Return the plugins Y.Map for this sheet (may be null for legacy docs pre-migration).
+     * @returns {import('yjs').Map|null}
+     */
+    getPluginsMap() {
+        return this.#sheet.get('plugins') ?? null;
+    }
+
+    /**
+     * Persist a plugin config (JSON-serialisable object) under pluginId.
+     * @param {string} pluginId
+     * @param {Object} config
+     */
+    setPlugin(pluginId, config) {
+        this.#transact(() => {
+            let map = this.#sheet.get('plugins');
+            if (!map) {
+                map = new Y.Map();
+                this.#sheet.set('plugins', map);
+            }
+            map.set(pluginId, JSON.stringify(config));
+        });
+    }
+
+    /** Remove a plugin config by id. */
+    deletePlugin(pluginId) {
+        this.#transact(() => {
+            this.#sheet.get('plugins')?.delete(pluginId);
+        });
+    }
 
     /**
      * Get all print settings as a plain object.

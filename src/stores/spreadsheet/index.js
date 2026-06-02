@@ -16,7 +16,7 @@ export { SheetStore } from './SheetStore.svelte.js';
 export { SelectionState } from './SelectionState.svelte.js';
 export { EditSessionState, editSessionState } from './EditSessionState.svelte.js';
 export { clipboardManager } from './ClipboardManager.svelte.js';
-export { CellTypeRegistry } from './cellTypes/index.js';
+export { CellTypeRegistry, colParseConfig } from './cellTypes/index.js';
 
 // Feature engines
 export { MergeEngine } from './features/MergeEngine.svelte.js';
@@ -24,7 +24,6 @@ export { SheetRenderContext, CELL_TYPE } from './features/SheetRenderContext.sve
 export { TableStore, createTableStore } from './features/TableStore.svelte.js';
 export { TableManager } from './features/TableManager.svelte.js';
 export { RepeaterStore, RepeaterEngine } from './features/RepeaterEngine.svelte.js';
-export { PrintEngine } from './features/PrintEngine.js';
 
 // Virtualization (new architecture)
 export { AxisMetrics } from './virtualization/AxisMetrics.svelte.js';

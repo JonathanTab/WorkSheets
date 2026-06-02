@@ -54,6 +54,7 @@
         icons,
     } from "../lib/icons/index.js";
     import { router } from "../lib/router.svelte.js";
+    import { getOfflineMode, setOfflineMode } from "../lib/FileRegistry/offlineMode.js";
     import { initializeDocument as initializeSpreadsheet } from "../stores/spreadsheet/schema.js";
     import {
         APP_SHEETS,
@@ -114,6 +115,7 @@
     $effect(() => {
         localStorage.setItem("drive-view-mode", viewMode);
     });
+    let offlineMode = $state(getOfflineMode());
     let contextMenu = $state(null); // { x, y, item, type: 'file'|'folder' }
     let renamingFolderId = $state(null);
     let renameFolderValue = $state("");
@@ -1571,6 +1573,13 @@
             }
         }
     }
+
+    function handleToggleOfflineMode() {
+        const next = !offlineMode;
+        setOfflineMode(next);
+        offlineMode = next;
+        window.location.reload();
+    }
 </script>
 
 <svelte:window
@@ -1777,6 +1786,18 @@
                         Sync
                     {/if}
                 </span>
+            </button>
+            <button
+                class="offline-mode-btn"
+                class:active={offlineMode}
+                onclick={handleToggleOfflineMode}
+                title={offlineMode
+                    ? "Offline mode enabled — documents cached locally. Click to disable."
+                    : "Offline mode disabled — no local Yjs copies. Click to enable."}
+            >
+                <span class="offline-mode-indicator" class:on={offlineMode}></span>
+                <span class="offline-mode-label">Offline mode</span>
+                <span class="offline-mode-status">{offlineMode ? "On" : "Off"}</span>
             </button>
         </div>
     </aside>
@@ -3156,6 +3177,50 @@
     .sync-label {
         flex: 1;
         text-align: left;
+    }
+
+    .offline-mode-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+        padding: 0.4rem 0.75rem;
+        border: none;
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: 0.75rem;
+        cursor: pointer;
+        border-radius: 6px;
+        transition: all 0.15s;
+        margin-top: 0.125rem;
+    }
+
+    .offline-mode-btn:hover {
+        background: var(--color-fill);
+        color: var(--color-text);
+    }
+
+    .offline-mode-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--color-border);
+        flex-shrink: 0;
+        transition: background 0.15s;
+    }
+
+    .offline-mode-indicator.on {
+        background: var(--color-success, #2ecc71);
+    }
+
+    .offline-mode-label {
+        flex: 1;
+        text-align: left;
+    }
+
+    .offline-mode-status {
+        font-size: 0.6875rem;
+        opacity: 0.7;
     }
 
     @keyframes spin {

@@ -42,6 +42,7 @@
         clipboardManager,
         editSessionState,
         CellTypeRegistry,
+        colParseConfig,
     } from "../../stores/spreadsheet/index.js";
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { clearFormatting as clearFormattingCmd } from "../../stores/spreadsheet/formatCommands.js";
@@ -65,7 +66,7 @@
     import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
     import ViewPlacementOverlay from "./features/ViewPlacementOverlay.svelte";
     import { viewPlacementStore } from "../../stores/spreadsheet/viewPlacementStore.svelte.js";
-    import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
+    import { computePrintBounds, computePageBreaks } from "../../stores/spreadsheet/rendering/PrintShared.js";
     import FloatingImages from "./FloatingImages.svelte";
     import ImageEditor from "./cellTypes/ImageEditor.svelte";
     import DatePickerEditor from "./cellTypes/DatePickerEditor.svelte";
@@ -75,6 +76,8 @@
     import AlertModal from "../modals/AlertModal.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import SelectionHandles from "./grid/SelectionHandles.svelte";
+    import PluginOverlay from "./plugins/PluginOverlay.svelte";
+    import "../../stores/spreadsheet/plugins/horam/registerHoramPlugin.js";
 
     // ─── Props ─────────────────────────────────────────────────────────────────
     let {
@@ -118,6 +121,33 @@
     // Expose to child components (e.g. SelectionHandles) without prop drilling
     setContext("hitTestEngine", hitTestEngine);
 
+    // ─── Cut marquee (marching ants) ──────────────────────────────────────────
+    // Animate the dashed cut outline by repainting the selection canvas each frame
+    // while a cut is pending. The effect re-runs (and tears down) when the marquee
+    // is set/cleared, so the rAF loop only runs while there's something to animate.
+    $effect(() => {
+        const marquee = clipboardManager.cutMarquee;
+        // Repaint once on any change so the outline appears/erases immediately.
+        paintCoord.performSelectionPaint();
+        if (!marquee) return;
+        let raf = requestAnimationFrame(function tick() {
+            paintCoord.performSelectionPaint();
+            raf = requestAnimationFrame(tick);
+        });
+        return () => cancelAnimationFrame(raf);
+    });
+
+    // Cancel a pending cut when the user starts editing or switches sheets. The
+    // clipboard contents survive; the cut simply downgrades to a copy.
+    $effect(() => {
+        const editing = editSessionState.isEditing;
+        const sid = spreadsheetSession.activeSheetId;
+        const marquee = clipboardManager.cutMarquee;
+        if (marquee && (editing || marquee.sheetId !== sid)) {
+            untrack(() => clipboardManager.cancelCut());
+        }
+    });
+
     // ─── Grid virtualizer ─────────────────────────────────────────────────────
     let virtualizer = $state(null);
     let overlaysRef = $state(null);
@@ -129,8 +159,6 @@
     const sheetScrollPositions = new Map();
 
     // ─── Page break overlay ───────────────────────────────────────────────────
-    const _printEngine = new PrintEngine();
-
     /**
      * Compute page break lines for the overlay.
      * Returns arrays of pixel positions (in grid-root container space).
@@ -140,13 +168,25 @@
         if (!showPageBreaks || !virtualizer || !printSettings) return null;
 
         const sheetStore = spreadsheetSession.activeSheetStore;
-        // Track printSettingsVersion so overlay updates when settings are saved
-        const _psv = sheetStore?.printSettingsVersion;
         const totalRows = sheetStore?.rowCount ?? 100;
         const totalCols = sheetStore?.colCount ?? 26;
 
-        const { rowBreaks, colBreaks } = _printEngine.computePageBreaks(
-            printSettings,
+        // For usedArea mode, compute actual content bounds so page breaks and
+        // shading match what the PDF engine will produce.
+        let effectiveSettings = printSettings;
+        const printArea = printSettings.printArea ?? 'usedArea';
+        if (printArea === 'usedArea' && sheetStore) {
+            const bounds = computePrintBounds(sheetStore, virtualizer.rowMetrics, virtualizer.colMetrics);
+            if (bounds) {
+                effectiveSettings = { ...printSettings,
+                    areaStartRow: bounds.startRow, areaStartCol: bounds.startCol,
+                    areaEndRow:   bounds.endRow,   areaEndCol:   bounds.endCol,
+                };
+            }
+        }
+
+        const { rowBreaks, colBreaks } = computePageBreaks(
+            effectiveSettings,
             virtualizer.rowMetrics,
             virtualizer.colMetrics,
             totalRows,
@@ -157,25 +197,19 @@
         const scrollTop = virtualizer.scrollTop;
 
         // Convert row breaks to Y positions in grid-root container coords.
-        // Row break at rowIndex R means a new page starts at R.
-        // The horizontal line goes just before row R.
+        // Row break at rowIndex R means a new page starts at R; line goes just before R.
         const rowLines = rowBreaks.slice(1).map((r) => {
-            const rowY =
-                HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(r) - scrollTop;
-            return rowY;
+            return HEADER_HEIGHT + virtualizer.rowMetrics.offsetOf(r) - scrollTop;
         });
 
         // Convert col breaks to X positions
         const colLines = colBreaks.slice(1).map((c) => {
-            const colX =
-                HEADER_WIDTH + virtualizer.colMetrics.offsetOf(c) - scrollLeft;
-            return colX;
+            return HEADER_WIDTH + virtualizer.colMetrics.offsetOf(c) - scrollLeft;
         });
 
-        // Compute printable area end in container coords (for shading)
-        const ps = printSettings;
-        const areaEndRow = ps.areaEndRow ?? totalRows - 1;
-        const areaEndCol = ps.areaEndCol ?? totalCols - 1;
+        // Shading: dim everything outside the print area.
+        const areaEndRow = effectiveSettings.areaEndRow ?? totalRows - 1;
+        const areaEndCol = effectiveSettings.areaEndCol ?? totalCols - 1;
         const printEndY =
             HEADER_HEIGHT +
             virtualizer.rowMetrics.offsetOf(areaEndRow + 1) -
@@ -487,7 +521,6 @@
     $effect(() => { paintCoord.canvasEl = canvasEl; });
     $effect(() => { paintCoord.selectCanvasEl = selectCanvasEl; });
     $effect(() => { paintCoord.virtualizer = virtualizer; });
-    $effect(() => { paintCoord.renderPlan = renderPlan; });
     $effect(() => { paintCoord.renderContext = renderContext; });
     $effect(() => { paintCoord.sheetStore = sheetStore; });
     $effect(() => { paintCoord.showGridlines = showGridlines; });
@@ -1651,7 +1684,7 @@
         if (!info?.table || !info.colDef || info.colDef.isNonEntry) return;
         const parsed = typeof value === 'string' && value.startsWith('=')
             ? value
-            : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+            : CellTypeRegistry.parseInput(colParseConfig(info.colDef), value);
         info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
         spreadsheetSession.formulaEngine?.cellValueChanged(row, col);
         spreadsheetSession.formulaEngine?.recalculateDirty();
@@ -1665,7 +1698,7 @@
      */
     function commitTableEntryCell(info, value) {
         if (!info?.table || !info.colDef || info.colDef.isNonEntry) return;
-        const parsed = CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+        const parsed = CellTypeRegistry.parseInput(colParseConfig(info.colDef), value);
         info.table.setEntryValue(info.colDef.id, parsed);
         untrack(() => renderScheduler?.invalidateAll());
     }
@@ -1997,13 +2030,22 @@
                 endRow:   Math.max(rangeStartCell.row, endCell.row),
                 endCol:   Math.max(rangeStartCell.col, endCell.col),
             };
-            const expandedRange = expandRangeForMerges(rawRange, renderContext?.mergeEngine) ?? rawRange;
+            // A single-cell pick references the merge's primary cell directly
+            // (rangeStartCell is already snapped to primary), e.g. "A1" — not the
+            // expanded "A1:B2" range, which would turn =A1+1 into a range expr.
+            // Only multi-cell drags expand to fully cover straddled merges.
+            const isSingleCellPick =
+                rawRange.startRow === rawRange.endRow &&
+                rawRange.startCol === rawRange.endCol;
+            const refRange = isSingleCellPick
+                ? rawRange
+                : (expandRangeForMerges(rawRange, renderContext?.mergeEngine) ?? rawRange);
 
             let ref = toRangeRef(
-                expandedRange.startRow,
-                expandedRange.startCol,
-                expandedRange.endRow,
-                expandedRange.endCol,
+                refRange.startRow,
+                refRange.startCol,
+                refRange.endRow,
+                refRange.endCol,
             );
 
             // Prefix with sheet name when picking from a different sheet
@@ -2222,6 +2264,17 @@
     // ─── Editing ──────────────────────────────────────────────────────────────
     function beginCellEdit(row, col, options = {}) {
         const { seedText = null, surface = "grid" } = options;
+
+        // Snap any shadow cell of a merge to its primary (top-left) cell so the
+        // editor renders over — and the commit writes to — the merged region's
+        // primary cell, never a hidden shadow cell. The keyboard typing path and
+        // some navigation jumps can land the anchor on a shadow cell; this is the
+        // single choke point that guarantees correct merged-cell editing.
+        const editMerge = renderContext?.mergeEngine?.getMergeAt(row, col);
+        if (editMerge && (editMerge.startRow !== row || editMerge.startCol !== col)) {
+            row = editMerge.startRow;
+            col = editMerge.startCol;
+        }
 
         // ── Table cell editing ──────────────────────────────────────────────────
         const tblCellType = renderContext?.getCellType(row, col);
@@ -3203,7 +3256,6 @@
             class="grid-canvas"
             width="0"
             height="0"
-            style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none;"
         ></canvas>
 
         <!-- ── 1b. Selection canvas (selection fills + formula highlights) ── -->
@@ -3214,7 +3266,6 @@
             class="select-canvas"
             width="0"
             height="0"
-            style="position:absolute; left:{HEADER_WIDTH}px; top:{HEADER_HEIGHT}px; pointer-events:none; z-index:3;"
         ></canvas>
 
         <!-- ── 2. DOM overlay layer ── -->
@@ -3595,6 +3646,11 @@
             {/if}
 
 
+            <!-- Plugin action buttons (positioned over their anchor cells) -->
+            {#if virtualizer}
+                <PluginOverlay {virtualizer} />
+            {/if}
+
             <!-- (Viewport mode removed — all tables/repeaters are inline) -->
         </div>
         <!-- end dom-overlay-layer -->
@@ -3838,13 +3894,22 @@
 
     /* ── Data canvas (z:2 — below selection and DOM overlays) ── */
     .grid-canvas {
+        position: absolute;
+        left: 50px; /* HEADER_WIDTH */
+        top: 28px;  /* HEADER_HEIGHT */
+        pointer-events: none;
         z-index: 2;
         display: block; /* prevent inline baseline gap */
     }
 
     /* ── Selection canvas (z:3 — above data canvas, below DOM overlays) ── */
     .select-canvas {
+        position: absolute;
+        left: 50px; /* HEADER_WIDTH */
+        top: 28px;  /* HEADER_HEIGHT */
+        pointer-events: none;
         display: block;
+        z-index: 3;
     }
 
     /* ── DOM overlay layer (z:5) ── */
@@ -3865,15 +3930,15 @@
         /* Allow touch pan gestures — the browser will natively scroll this element */
         touch-action: pan-x pan-y;
         pointer-events: auto;
-        /* Firefox thin scrollbar */
-        scrollbar-width: thin;
+        /* Slightly larger scrollbar for easier grabbing */
+        scrollbar-width: auto;
         scrollbar-color: rgba(0, 0, 0, 0.3) transparent;
     }
 
     /* WebKit/Chrome/Safari scrollbars on the event layer */
     .event-layer::-webkit-scrollbar {
-        width: 10px;
-        height: 10px;
+        width: 20px;
+        height: 20px;
     }
     .event-layer::-webkit-scrollbar-thumb {
         background: rgba(0, 0, 0, 0.3);

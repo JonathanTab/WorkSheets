@@ -1,5 +1,5 @@
 import { selectionState, spreadsheetSession } from "../../../stores/spreadsheetStore.svelte.js";
-import { clipboardManager, CellTypeRegistry } from "../../../stores/spreadsheet/index.js";
+import { clipboardManager, CellTypeRegistry, colParseConfig } from "../../../stores/spreadsheet/index.js";
 import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
 
 // ─── Series detection constants ──────────────────────────────────────────────
@@ -159,7 +159,7 @@ export class GridFillHandle {
                 if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
                     const parsed = typeof value === 'string' && value.startsWith('=')
                         ? value
-                        : CellTypeRegistry.parseInput({ type: info.colDef.type }, value);
+                        : CellTypeRegistry.parseInput(colParseConfig(info.colDef), value);
                     info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
                 }
                 return;

@@ -119,7 +119,6 @@ import ratingType   from './types/rating.js';
 import dropdownType from './types/dropdown.js';
 import imageType    from './types/image.js';
 import fileType     from './types/file.js';
-import urlType      from './types/url.js';
 
 CellTypeRegistry.register(textType);     // default — must be registered before anything else relies on the fallback
 CellTypeRegistry.register(numberType);
@@ -129,6 +128,21 @@ CellTypeRegistry.register(ratingType);
 CellTypeRegistry.register(dropdownType);
 CellTypeRegistry.register(imageType);
 CellTypeRegistry.register(fileType);
-CellTypeRegistry.register(urlType);
+
+/**
+ * Resolve a table column definition into the cell-type config that
+ * CellTypeRegistry.parseInput/formatValue expect. The full `typeConfig`
+ * (subFormat, decimals, dropdown options, date subFormat, …) wins; a bare
+ * `{ type }` is the fallback so parsing a table cell matches how it's displayed
+ * and how regular sheet cells parse.
+ *
+ * @param {{ type?: string, typeConfig?: object|null } | null | undefined} colDef
+ * @returns {{ type: string, [key: string]: any } | null}
+ */
+export function colParseConfig(colDef) {
+    if (!colDef) return null;
+    if (colDef.typeConfig) return colDef.typeConfig;
+    return colDef.type ? { type: colDef.type } : null;
+}
 
 export default CellTypeRegistry;

@@ -26,17 +26,35 @@ export function parseCellKey(key) {
     return { row, col };
 }
 
-/** Ranges spanning more than this many rows skip the row index and use a linear scan. */
+/**
+ * Two-tier range-index thresholds:
+ *   - Ranges with span ≤ MAX_RANGE_INDEX_ROWS register every covered row in the
+ *     per-row #rangeRowIndex (precise — one entry per row in the range).
+ *   - Larger ranges register in #rangeSuperBucketIndex, where each entry covers
+ *     SUPER_BUCKET_ROWS contiguous rows. A SUM(A1:A100000) range that would
+ *     once fall back to a doc-wide linear scan now lands in ~400 super-buckets.
+ *
+ * markDependentsDirty consults both indices; the precise-range filter inside
+ * the loop discards super-bucket false positives.
+ */
 const MAX_RANGE_INDEX_ROWS = 256;
+const SUPER_BUCKET_ROWS = 256;
+const superBucket = (row) => Math.floor(row / SUPER_BUCKET_ROWS);
 
 /**
  * DependencyGraph class
  */
 export class DependencyGraph {
+    /** Per-row buckets for ranges spanning ≤ MAX_RANGE_INDEX_ROWS rows. */
     /** @type {Map<number, Set<string>>} */
     #rangeRowIndex = new Map();
-    /** @type {Set<string>} */
-    #largeRangeFormulas = new Set();
+    /**
+     * Super-buckets (SUPER_BUCKET_ROWS rows each) for ranges spanning more than
+     * MAX_RANGE_INDEX_ROWS rows. Lets SUM(A:A) over 100K+ rows still be O(1)
+     * per changed cell instead of degenerating to a linear scan.
+     * @type {Map<number, Set<string>>}
+     */
+    #rangeSuperBucketIndex = new Map();
 
     constructor() {
         // Map from cell key -> Set of cell keys it depends on (individual cells)
@@ -53,7 +71,7 @@ export class DependencyGraph {
         /** @type {Map<string, Array<{startRow:number,endRow:number,startCol:number,endCol:number}>>} */
         this.rangeDependencies = new Map();
 
-        // #rangeRowIndex and #largeRangeFormulas are initialised by class field declarations.
+        // #rangeRowIndex and #rangeSuperBucketIndex are initialised by class field declarations.
 
         // Map from cell key -> parsed AST (for re-evaluation)
         /** @type {Map<string, Object>} */
@@ -77,7 +95,12 @@ export class DependencyGraph {
     #addRangeToRowIndex(formulaKey, range) {
         const span = range.endRow - range.startRow;
         if (span > MAX_RANGE_INDEX_ROWS) {
-            this.#largeRangeFormulas.add(formulaKey);
+            const lo = superBucket(range.startRow);
+            const hi = superBucket(range.endRow);
+            for (let b = lo; b <= hi; b++) {
+                if (!this.#rangeSuperBucketIndex.has(b)) this.#rangeSuperBucketIndex.set(b, new Set());
+                this.#rangeSuperBucketIndex.get(b).add(formulaKey);
+            }
             return;
         }
         for (let r = range.startRow; r <= range.endRow; r++) {
@@ -89,7 +112,15 @@ export class DependencyGraph {
     #removeRangeFromRowIndex(formulaKey, range) {
         const span = range.endRow - range.startRow;
         if (span > MAX_RANGE_INDEX_ROWS) {
-            // Managed via #largeRangeFormulas — remove only if no remaining large ranges.
+            const lo = superBucket(range.startRow);
+            const hi = superBucket(range.endRow);
+            for (let b = lo; b <= hi; b++) {
+                const set = this.#rangeSuperBucketIndex.get(b);
+                if (set) {
+                    set.delete(formulaKey);
+                    if (set.size === 0) this.#rangeSuperBucketIndex.delete(b);
+                }
+            }
             return;
         }
         for (let r = range.startRow; r <= range.endRow; r++) {
@@ -176,9 +207,6 @@ export class DependencyGraph {
             for (const r of oldRanges) this.#removeRangeFromRowIndex(key, r);
             this.rangeDependencies.delete(key);
         }
-        // Remove from large-range set (may be stale if all large ranges are gone —
-        // #addRangeToRowIndex will re-add if a new large range is registered).
-        this.#largeRangeFormulas.delete(key);
     }
 
     /**
@@ -206,12 +234,10 @@ export class DependencyGraph {
         const initial = new Set(this.dependents.get(key) ?? []);
         const { row, col } = parseCellKey(key);
 
-        // Fast path: row-indexed lookup for small ranges.
+        // Tier 1: precise per-row index (ranges spanning ≤ MAX_RANGE_INDEX_ROWS).
         const rowCandidates = this.#rangeRowIndex.get(row);
         if (rowCandidates) {
             for (const formulaKey of rowCandidates) {
-                // Precise column check — the row index is a necessary but not
-                // sufficient filter (it only covers the row dimension).
                 const ranges = this.rangeDependencies.get(formulaKey);
                 if (!ranges) continue;
                 for (const r of ranges) {
@@ -225,16 +251,22 @@ export class DependencyGraph {
             }
         }
 
-        // Linear scan only for formulas with "large" range deps (spans > MAX_RANGE_INDEX_ROWS).
-        for (const formulaKey of this.#largeRangeFormulas) {
-            if (initial.has(formulaKey)) continue;
-            const ranges = this.rangeDependencies.get(formulaKey);
-            if (!ranges) continue;
-            for (const r of ranges) {
-                if (row >= r.startRow && row <= r.endRow &&
-                    col >= r.startCol && col <= r.endCol) {
-                    initial.add(formulaKey);
-                    break;
+        // Tier 2: super-bucket index for large ranges. The bucket is a row
+        // filter only; the precise (row, col) check inside the range descriptor
+        // discards false positives.
+        const bucket = this.#rangeSuperBucketIndex.get(superBucket(row));
+        if (bucket) {
+            for (const formulaKey of bucket) {
+                if (initial.has(formulaKey)) continue;
+                const ranges = this.rangeDependencies.get(formulaKey);
+                if (!ranges) continue;
+                for (const r of ranges) {
+                    if (r.endRow - r.startRow > MAX_RANGE_INDEX_ROWS &&
+                        row >= r.startRow && row <= r.endRow &&
+                        col >= r.startCol && col <= r.endCol) {
+                        initial.add(formulaKey);
+                        break;
+                    }
                 }
             }
         }
@@ -403,7 +435,7 @@ export class DependencyGraph {
         this.dependents.clear();
         this.rangeDependencies.clear();
         this.#rangeRowIndex.clear();
-        this.#largeRangeFormulas.clear();
+        this.#rangeSuperBucketIndex.clear();
         this.formulas.clear();
         this.dirtyCells.clear();
         this.circularCells.clear();

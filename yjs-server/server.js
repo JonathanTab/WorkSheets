@@ -357,7 +357,55 @@ const closeConn = (doc, conn) => {
  */
 const setupWSConnection = async (conn, name, fileId, username, appType) => {
     conn.binaryType = 'arraybuffer';
+
+    // Buffer messages that arrive before LevelDB state has loaded. The client
+    // sends its SyncStep1 immediately on socket open; if we attached the
+    // message handler only after `await doc.ready`, that first message would
+    // be dropped by the ws EventEmitter (no listener attached yet), the
+    // server would never reply with SyncStep2, and the client would wait the
+    // full WS_SYNC_TIMEOUT before giving up. This deterministically affects
+    // cold docs (those not already in memory) where bindDocState takes more
+    // than ~0 ms — the slow-doc symptom users hit.
+    /** @type {ArrayBuffer[]} */
+    const pendingMessages = [];
+    let docReady = false;
+    /** @type {WSSharedDoc | null} */
+    let docRef = null;
+
+    const handleMessage = (/** @type {ArrayBuffer} */ message) => {
+        try {
+            const encoder = encoding.createEncoder();
+            const decoder = decoding.createDecoder(new Uint8Array(message));
+            const messageType = decoding.readVarUint(decoder);
+            switch (messageType) {
+                case messageSync:
+                    encoding.writeVarUint(encoder, messageSync);
+                    syncProtocol.readSyncMessage(decoder, encoder, docRef, conn);
+                    if (encoding.length(encoder) > 1) {
+                        send(docRef, conn, encoding.toUint8Array(encoder));
+                    }
+                    break;
+                case messageAwareness:
+                    awarenessProtocol.applyAwarenessUpdate(
+                        docRef.awareness,
+                        decoding.readVarUint8Array(decoder),
+                        conn
+                    );
+                    break;
+            }
+        } catch (err) {
+            console.error('[ws] Message error:', err.message);
+            docRef?.emit('error', [err]);
+        }
+    };
+
+    conn.on('message', (message) => {
+        if (!docReady) { pendingMessages.push(message); return; }
+        handleMessage(message);
+    });
+
     const doc = await getDoc(name, fileId, appType);
+    docRef = doc;
     doc.conns.set(conn, new Set());
     doc.connUsers.set(conn, username);
 
@@ -375,32 +423,13 @@ const setupWSConnection = async (conn, name, fileId, username, appType) => {
     // Guard: the connection may have been closed while we were awaiting LevelDB.
     if (!doc.conns.has(conn)) return;
 
-    conn.on('message', /** @param {ArrayBuffer} message */ message => {
-        try {
-            const encoder = encoding.createEncoder();
-            const decoder = decoding.createDecoder(new Uint8Array(message));
-            const messageType = decoding.readVarUint(decoder);
-            switch (messageType) {
-                case messageSync:
-                    encoding.writeVarUint(encoder, messageSync);
-                    syncProtocol.readSyncMessage(decoder, encoder, doc, conn);
-                    if (encoding.length(encoder) > 1) {
-                        send(doc, conn, encoding.toUint8Array(encoder));
-                    }
-                    break;
-                case messageAwareness:
-                    awarenessProtocol.applyAwarenessUpdate(
-                        doc.awareness,
-                        decoding.readVarUint8Array(decoder),
-                        conn
-                    );
-                    break;
-            }
-        } catch (err) {
-            console.error('[ws] Message error:', err.message);
-            doc.emit('error', [err]);
-        }
-    });
+    docReady = true;
+    // Drain any messages that arrived during getDoc/doc.ready. These include
+    // the client's initial SyncStep1; processing it now (before we send our
+    // own SyncStep1 below) means our reply travels in the same network burst.
+    while (pendingMessages.length > 0) {
+        handleMessage(pendingMessages.shift());
+    }
 
     // Ping/pong keepalive — matches reference pingTimeout = 30000
     let pongReceived = true;
@@ -539,17 +568,20 @@ async function handleHttp(req, res, url) {
         return _json(res, 200, { snapshots });
     }
 
-    // POST /api/snapshots { roomId, description?, appType? }
+    // POST /api/snapshots { roomId, description?, appType?, schemaVersion? }
     if (pathname === '/api/snapshots' && req.method === 'POST') {
         const body = await _readBody(req);
-        const { roomId, description, appType } = body;
+        const { roomId, description, appType, schemaVersion } = body;
         if (!roomId) return _json(res, 400, { error: 'roomId required' });
         const doc = docs.get(roomId);
         if (!doc) return _json(res, 404, { error: 'Room not active (no connected clients)' });
         // appType from body (PHP-provided) takes precedence over doc's stored value
         const resolvedAppType = appType ?? doc.appType ?? null;
         if (resolvedAppType && !doc.appType) doc.appType = resolvedAppType;
-        const id = await saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null, resolvedAppType);
+        const sv = typeof schemaVersion === 'number' ? schemaVersion
+                 : typeof schemaVersion === 'string' && /^\d+$/.test(schemaVersion) ? parseInt(schemaVersion)
+                 : null;
+        const id = await saveSnapshot(roomId, doc.fileId, doc, 'manual', auth.username, null, description ?? null, resolvedAppType, sv);
         return _json(res, 200, { id });
     }
 

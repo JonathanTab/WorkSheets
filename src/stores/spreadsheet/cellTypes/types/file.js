@@ -10,6 +10,7 @@
  */
 
 import storage from '../../../storage.js';
+import { getFontMetrics, computeBaselineY } from '../../rendering/fontUnits.js';
 
 // ─── File category helpers ─────────────────────────────────────────────────
 
@@ -102,10 +103,12 @@ function _drawFileCell(ctx, x, y, w, h, filename, theme) {
     const maxW  = w - (textX - x) - pad;
 
     ctx.save();
-    ctx.font = `12px system-ui, -apple-system, sans-serif`;
+    const font = `12px system-ui, -apple-system, sans-serif`;
+    ctx.font = font;
     ctx.fillStyle     = theme?.textColor ?? '#1e293b';
     ctx.textAlign     = 'left';
-    ctx.textBaseline  = 'middle';
+    ctx.textBaseline  = 'alphabetic';
+    const textY = computeBaselineY(y, h, 'middle', getFontMetrics(font), 2);
 
     if (filename && maxW > 10) {
         let text = filename;
@@ -113,10 +116,10 @@ function _drawFileCell(ctx, x, y, w, h, filename, theme) {
             text = text.slice(0, -1);
         }
         if (text !== filename) text += '…';
-        ctx.fillText(text, textX, y + h / 2);
+        ctx.fillText(text, textX, textY);
     } else if (!filename) {
         ctx.fillStyle = '#94a3b8';
-        ctx.fillText('File attached', textX, y + h / 2);
+        ctx.fillText('File attached', textX, textY);
     }
     ctx.restore();
 }

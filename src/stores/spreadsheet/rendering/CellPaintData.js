@@ -52,7 +52,7 @@ const TABLE_HEADER_BORDER_WIDTH = 1.5; // px — default bottom border on table 
  * @property {{colName?:string,sortIcon?:string,hasFilter?:boolean,filterActive?:boolean,typeIcon?:string,isFormula?:boolean,isFirstCol?:boolean,isLastCol?:boolean}} [tableHeaderInfo]
  * @property {string} [placeholderText] For entry cells or empty typed cells — shown in placeholder style
  * @property {boolean} [isNonEntryCol]  For table entry cells — formula columns
- * @property {{top?,right?,bottom?,left?}} [borders]
+ * @property {{top?: {style?: string, width?: number, color?: string}|null, right?: {style?: string, width?: number, color?: string}|null, bottom?: {style?: string, width?: number, color?: string}|null, left?: {style?: string, width?: number, color?: string}|null}|null} [borders]
  * @property {string} [formulaHighlight] Formula edit mode reference highlight color
  * @property {boolean} [isFirstTableCol] True for the leftmost column in a table
  * @property {boolean} [isFormulaCol]   True for computed/formula columns
@@ -64,6 +64,8 @@ const TABLE_HEADER_BORDER_WIDTH = 1.5; // px — default bottom border on table 
  * @property {any} [_descriptor]        Pre-resolved CellTypeRegistry descriptor for paint
  * @property {boolean} [gridlineOnly]   True for overflow-shadow cells (gridlines only, no content)
  * @property {number} [naturalWidth]    Original column width before overflow extension
+ * @property {number} [naturalX]        Original X before left-overflow extension
+ * @property {'left'|'right'|'both'} [overflowSide] Which side(s) text overflowed across
  * @property {boolean} [dvInvalid]      True when cell value fails data validation
  */
 
@@ -264,14 +266,26 @@ export function buildPaneData(params) {
             // Check for overflow-shadowed cells: left edge is within a prior cell's overflow
             const isOverflowShadow = x < rowOverflowRightX;
 
-            // Overflow-shadow cells: skip content but include for gridlines only
+            // Overflow-shadow cells: skip content but include for gridlines only.
+            // Still look up border data so horizontal run borders (top/bottom) render
+            // continuously through columns that happen to be overflow-shadowed.
             if (isOverflowShadow && cellType === CELL_TYPE.REGULAR) {
-                cells.push({
+                const shadowItem = {
                     row: r, col: c,
                     x, y, width, height,
                     renderType: 'text',
                     gridlineOnly: true,
-                });
+                    // Provisional shadowPos — finalized below when we know whether
+                    // this shadow is the last one in the overflow run.
+                    shadowPos: 'inner-right',
+                };
+                if (effectiveSheetStore) {
+                    const b = effectiveSheetStore.getCellBorders(r, c);
+                    if (b.top || b.bottom || b.left || b.right) {
+                        shadowItem.borders = { top: b.top, right: b.right, bottom: b.bottom, left: b.left };
+                    }
+                }
+                cells.push(shadowItem);
                 continue;
             }
 
@@ -415,7 +429,7 @@ export function buildPaneData(params) {
                 item.ctConfig = ct;
                 item.clipContent = true;
             } else {
-                // Plain text rendering path — applies to text, number, date, url, and
+                // Plain text rendering path — applies to text, number, date, and
                 // any future text-rendered type.
                 let formattedValue = dispV;
                 if (dispV != null && dispV !== '') {
@@ -425,9 +439,26 @@ export function buildPaneData(params) {
                 const cellTfr = sheetCell?.tfr;
                 if (cellTfr?.length) {
                     const plainText = formattedValue != null ? String(formattedValue) : '';
-                    item.richTextRuns = buildRenderRuns(plainText, cellTfr);
+                    const runs = buildRenderRuns(plainText, cellTfr);
+                    const isPlainRuns = runs.length === 1 &&
+                        runs[0]?.t === plainText &&
+                        runs[0]?.b === undefined &&
+                        runs[0]?.i === undefined &&
+                        runs[0]?.u === undefined &&
+                        runs[0]?.s === undefined &&
+                        runs[0]?.c === undefined &&
+                        runs[0]?.f === undefined &&
+                        runs[0]?.ff === undefined &&
+                        runs[0]?.link === undefined;
                     item.displayValue = plainText;
-                    item.clipContent  = true;
+                    if (isPlainRuns) {
+                        // Legacy/clipboard paths can leave a no-op tfr on the cell.
+                        // Treat as plain text so overflow can work normally.
+                        item.richTextRuns = null;
+                    } else {
+                        item.richTextRuns = runs;
+                        item.clipContent  = true;
+                    }
                 } else {
                     item.displayValue = formattedValue != null ? String(formattedValue) : '';
                 }
@@ -555,17 +586,17 @@ export function buildPaneData(params) {
             // Col-level formatting (lowest priority) — use pre-built cache (populated above)
             const colFmt = applySheetFmt ? (colFmtCache[mappedCol] ?? null) : null;
             if (colFmt) {
-                if (colFmt.backgroundColor) item.bgColor = colFmt.backgroundColor;
-                if (colFmt.color) item.textColor = colFmt.color;
-                if (colFmt.bold) item.bold = true;
-                if (colFmt.italic) item.italic = true;
-                if (colFmt.underline) item.underline = true;
-                if (colFmt.strikethrough) item.strikethrough = true;
-                if (colFmt.fontSize) item.fontSize = colFmt.fontSize;
-                if (colFmt.fontFamily) item.fontFamily = colFmt.fontFamily;
+                if (colFmt.backgroundColor != null) item.bgColor = colFmt.backgroundColor;
+                if (colFmt.color != null) item.textColor = colFmt.color;
+                if (colFmt.bold != null) item.bold = !!colFmt.bold;
+                if (colFmt.italic != null) item.italic = !!colFmt.italic;
+                if (colFmt.underline != null) item.underline = !!colFmt.underline;
+                if (colFmt.strikethrough != null) item.strikethrough = !!colFmt.strikethrough;
+                if (colFmt.fontSize != null) item.fontSize = colFmt.fontSize;
+                if (colFmt.fontFamily != null) item.fontFamily = colFmt.fontFamily;
                 if (colFmt.horizontalAlign) item.hAlign = colFmt.horizontalAlign;
                 if (colFmt.verticalAlign) item.vAlign = colFmt.verticalAlign;
-                if (colFmt.wrapText) item.wrapText = colFmt.wrapText;
+                if (colFmt.wrapText != null) item.wrapText = colFmt.wrapText;
             }
             // Row-level formatting (overrides col)
             // Use pre-cached value for non-repeater cells; re-fetch for repeater rows
@@ -573,31 +604,31 @@ export function buildPaneData(params) {
                 ? ((mappedRow === r) ? rowFmtCache : effectiveSheetStore?.getRowFormatting?.(mappedRow))
                 : null;
             if (rowFmt) {
-                if (rowFmt.backgroundColor) item.bgColor = rowFmt.backgroundColor;
-                if (rowFmt.color) item.textColor = rowFmt.color;
-                if (rowFmt.bold) item.bold = true;
-                if (rowFmt.italic) item.italic = true;
-                if (rowFmt.underline) item.underline = true;
-                if (rowFmt.strikethrough) item.strikethrough = true;
-                if (rowFmt.fontSize) item.fontSize = rowFmt.fontSize;
-                if (rowFmt.fontFamily) item.fontFamily = rowFmt.fontFamily;
+                if (rowFmt.backgroundColor != null) item.bgColor = rowFmt.backgroundColor;
+                if (rowFmt.color != null) item.textColor = rowFmt.color;
+                if (rowFmt.bold != null) item.bold = !!rowFmt.bold;
+                if (rowFmt.italic != null) item.italic = !!rowFmt.italic;
+                if (rowFmt.underline != null) item.underline = !!rowFmt.underline;
+                if (rowFmt.strikethrough != null) item.strikethrough = !!rowFmt.strikethrough;
+                if (rowFmt.fontSize != null) item.fontSize = rowFmt.fontSize;
+                if (rowFmt.fontFamily != null) item.fontFamily = rowFmt.fontFamily;
                 if (rowFmt.horizontalAlign) item.hAlign = rowFmt.horizontalAlign;
                 if (rowFmt.verticalAlign) item.vAlign = rowFmt.verticalAlign;
-                if (rowFmt.wrapText) item.wrapText = rowFmt.wrapText;
+                if (rowFmt.wrapText != null) item.wrapText = rowFmt.wrapText;
             }
             // Cell-level formatting (highest priority, overrides row/col)
             if (applySheetFmt && sheetCell?.exists) {
-                if (sheetCell.backgroundColor) item.bgColor = sheetCell.backgroundColor;
-                if (sheetCell.color) item.textColor = sheetCell.color;
-                if (sheetCell.bold) item.bold = true;
-                if (sheetCell.italic) item.italic = true;
-                if (sheetCell.underline) item.underline = true;
-                if (sheetCell.strikethrough) item.strikethrough = true;
-                if (sheetCell.fontSize) item.fontSize = sheetCell.fontSize;
-                if (sheetCell.fontFamily) item.fontFamily = sheetCell.fontFamily;
+                if (sheetCell.backgroundColor != null) item.bgColor = sheetCell.backgroundColor;
+                if (sheetCell.color != null) item.textColor = sheetCell.color;
+                if (sheetCell.bold != null) item.bold = !!sheetCell.bold;
+                if (sheetCell.italic != null) item.italic = !!sheetCell.italic;
+                if (sheetCell.underline != null) item.underline = !!sheetCell.underline;
+                if (sheetCell.strikethrough != null) item.strikethrough = !!sheetCell.strikethrough;
+                if (sheetCell.fontSize != null) item.fontSize = sheetCell.fontSize;
+                if (sheetCell.fontFamily != null) item.fontFamily = sheetCell.fontFamily;
                 if (sheetCell.horizontalAlign) item.hAlign = sheetCell.horizontalAlign;
                 if (sheetCell.verticalAlign) item.vAlign = sheetCell.verticalAlign;
-                if (sheetCell.wrapText) item.wrapText = sheetCell.wrapText;
+                if (sheetCell.wrapText != null) item.wrapText = sheetCell.wrapText;
             }
 
             // Custom borders (sparse)
@@ -618,17 +649,31 @@ export function buildPaneData(params) {
                     }
                 }
 
-                // Get borders from exterior edges — cache the top-left lookup to avoid double call
-                const tlBorders = effectiveSheetStore.getCellBorders(borderRow, borderCol);
-                const borders = {
-                    top: tlBorders.top,
-                    left: tlBorders.left,
-                    bottom: effectiveSheetStore.getCellBorders(endBorderRow, borderCol).bottom,
-                    right: effectiveSheetStore.getCellBorders(borderRow, endBorderCol).right,
-                };
+                // Get borders from exterior edges.
+                // For merged cells the top/bottom edges span multiple columns and
+                // left/right edges span multiple rows — scan the full extent so a
+                // border set on any column/row of the exterior is found.
+                let topBorder = null, bottomBorder = null, leftBorder = null, rightBorder = null;
+                for (let sc = borderCol; sc <= endBorderCol; sc++) {
+                    if (!topBorder)    topBorder    = effectiveSheetStore.getCellBorders(borderRow,    sc).top;
+                    if (!bottomBorder) bottomBorder = effectiveSheetStore.getCellBorders(endBorderRow, sc).bottom;
+                }
+                for (let sr = borderRow; sr <= endBorderRow; sr++) {
+                    if (!leftBorder)  leftBorder  = effectiveSheetStore.getCellBorders(sr, borderCol).left;
+                    if (!rightBorder) rightBorder = effectiveSheetStore.getCellBorders(sr, endBorderCol).right;
+                }
+                const borders = { top: topBorder, left: leftBorder, bottom: bottomBorder, right: rightBorder };
 
                 if (borders.top || borders.right || borders.bottom || borders.left) {
-                    item.borders = borders;
+                    // Merge with any pre-existing default borders (e.g. TABLE_HEADER bottom)
+                    // so user-set edges override defaults without wiping the unset defaults.
+                    const prev = item.borders;
+                    item.borders = prev ? {
+                        top:    borders.top    ?? prev.top,
+                        right:  borders.right  ?? prev.right,
+                        bottom: borders.bottom ?? prev.bottom,
+                        left:   borders.left   ?? prev.left,
+                    } : borders;
                 }
             }
 
@@ -668,38 +713,84 @@ export function buildPaneData(params) {
 
             // Cell spillover: extend width into adjacent empty cells for plain text only.
             // Rich text cells always clip, and their HTML string would give wrong measurements.
-            // Bordered cells skip overflow: extending their x/width would drag the border
-            // into adjacent cells, drawing a top border on the wrong cell visually.
             if (
                 cellType === CELL_TYPE.REGULAR &&
                 item.renderType === 'text' &&
                 (!item.wrapText || item.wrapText === 'overflow') &&
                 !item.richTextRuns &&
-                !item.borders &&
                 item.displayValue &&
                 renderContext
             ) {
                 if (item.hAlign === 'right') {
                     // Right-aligned: spill LEFT into preceding empty cells.
-                    const leftOverflow = renderContext.getLeftOverflowExtent(r, c, colRange.start, colMetrics, item.displayValue, sheetCell);
+                    const leftOverflow = renderContext.getLeftOverflowExtent(
+                        r, c, colRange.start, colMetrics, item.displayValue, sheetCell, item,
+                    );
                     if (leftOverflow > 0) {
                         const originalX = x;
+                        item.naturalX = originalX;
+                        item.naturalWidth = width;
+                        item.overflowSide = 'left';
                         item.x -= leftOverflow;
                         item.width += leftOverflow;
                         // Retroactively mark already-processed cells in this row as overflow
                         // shadows so they suppress their content and intermediate gridlines.
+                        // The leftmost newly-tagged shadow becomes 'first-left'; the rest are 'inner-left'.
+                        const leftShadows = [];
                         for (let si = rowStartCellIdx; si < cells.length; si++) {
                             const prev = cells[si];
                             if (!prev.gridlineOnly && prev.x >= item.x && prev.x < originalX) {
                                 prev.gridlineOnly = true;
+                                prev.shadowPos = 'inner-left';
+                                leftShadows.push(prev);
                             }
+                        }
+                        if (leftShadows.length) {
+                            leftShadows.sort((a, b) => a.x - b.x)[0].shadowPos = 'first-left';
+                        }
+                    }
+                } else if (item.hAlign === 'center') {
+                    // Center-aligned: spill equally left and right; clip on blocked sides.
+                    const { leftExtra, rightExtra } = renderContext.getCenterOverflowExtents(
+                        r, c, colRange.start, colRange.end, colMetrics, item.displayValue, sheetCell, item,
+                    );
+                    if (leftExtra > 0 || rightExtra > 0) {
+                        const originalX = x;
+                        item.naturalX = originalX;
+                        item.naturalWidth = width;
+                        item.overflowSide = 'both';
+                        item.x -= leftExtra;
+                        item.width += leftExtra + rightExtra;
+                        // Retroactively mark left-side cells as overflow shadows
+                        if (leftExtra > 0) {
+                            const leftShadows = [];
+                            for (let si = rowStartCellIdx; si < cells.length; si++) {
+                                const prev = cells[si];
+                                if (!prev.gridlineOnly && prev.x >= item.x && prev.x < originalX) {
+                                    prev.gridlineOnly = true;
+                                    prev.shadowPos = 'inner-left';
+                                    leftShadows.push(prev);
+                                }
+                            }
+                            if (leftShadows.length) {
+                                leftShadows.sort((a, b) => a.x - b.x)[0].shadowPos = 'first-left';
+                            }
+                        }
+                        // Track the furthest overflow edge so subsequent cells can detect shadows
+                        if (rightExtra > 0) {
+                            const overflowRightX = item.x + item.width;
+                            if (overflowRightX > rowOverflowRightX) rowOverflowRightX = overflowRightX;
                         }
                     }
                 } else {
-                    // Left/center-aligned: spill RIGHT into following empty cells.
-                    const overflowExtent = renderContext.getOverflowExtent(r, c, colRange.end, colMetrics, item.displayValue, sheetCell);
+                    // Left-aligned: spill RIGHT into following empty cells.
+                    const overflowExtent = renderContext.getOverflowExtent(
+                        r, c, colRange.end, colMetrics, item.displayValue, sheetCell, item,
+                    );
                     if (overflowExtent > 0) {
+                        item.naturalX = x;
                         item.naturalWidth = width;
+                        item.overflowSide = 'right';
                         item.width += overflowExtent;
                         // Track the furthest overflow edge so subsequent cells can detect shadows
                         const overflowRightX = item.x + item.width;
@@ -712,8 +803,7 @@ export function buildPaneData(params) {
             // wrapText and merged cells need clipping; so do table headers (complex layout).
             // Plain single-line text cells that don't overflow are left as clipContent:false.
             // "overflow" mode explicitly allows text to spill into adjacent cells — no clip.
-            // Bordered cells clip so their content stays inside the border boundary.
-            if ((item.wrapText && item.wrapText !== 'overflow') || cellType === CELL_TYPE.MERGE_PRIMARY || item.borders) {
+            if ((item.wrapText && item.wrapText !== 'overflow') || cellType === CELL_TYPE.MERGE_PRIMARY) {
                 item.clipContent = true;
             }
             // Non-text render types have their own internal layout that can overflow
@@ -722,6 +812,22 @@ export function buildPaneData(params) {
             }
 
             cells.push(item);
+        }
+
+        // ── Finalize right-shadow positions for this row ──────────────────
+        // Any shadow whose right boundary touches the furthest overflow edge
+        // becomes 'last-right'; the rest stay as 'inner-right'. We do this
+        // after the row loop so we can also detect shadows that ended up
+        // adjacent to the final overflow extent.
+        if (rowOverflowRightX > -Infinity) {
+            const epsilon = 0.5;
+            for (let si = rowStartCellIdx; si < cells.length; si++) {
+                const cell = cells[si];
+                if (cell.shadowPos === 'inner-right' &&
+                    cell.x + cell.width >= rowOverflowRightX - epsilon) {
+                    cell.shadowPos = 'last-right';
+                }
+            }
         }
     }
 
@@ -772,6 +878,8 @@ export function buildPaneData(params) {
             fontSize: null,
             fontFamily: null,
             hAlign: 'left',
+            // Merged primaries default to top alignment (supports paragraph-style text).
+            // Explicit cell/row/col vAlign below can still override.
             vAlign: 'top',
             wrapText: false,
             borders: null,
@@ -833,9 +941,24 @@ export function buildPaneData(params) {
             if (sheetCell.wrapText) item.wrapText = sheetCell.wrapText;
         }
 
-        // Merged cells always default to top alignment when vAlign not explicitly set
-        if (!sheetCell?.verticalAlign && !raRowFmt?.verticalAlign && !raColFmt?.verticalAlign) {
-            item.vAlign = 'top';
+        // Custom borders — scan the exterior of the merged region (same logic as
+        // the main loop). Without this the merge loses its custom borders when
+        // its primary scrolls outside the visible range.
+        if (effectiveSheetStore) {
+            const endBorderRow = merge.endRow;
+            const endBorderCol = merge.endCol;
+            let topBorder = null, bottomBorder = null, leftBorder = null, rightBorder = null;
+            for (let sc = pc; sc <= endBorderCol; sc++) {
+                if (!topBorder)    topBorder    = effectiveSheetStore.getCellBorders(pr,           sc).top;
+                if (!bottomBorder) bottomBorder = effectiveSheetStore.getCellBorders(endBorderRow, sc).bottom;
+            }
+            for (let sr = pr; sr <= endBorderRow; sr++) {
+                if (!leftBorder)  leftBorder  = effectiveSheetStore.getCellBorders(sr, pc).left;
+                if (!rightBorder) rightBorder = effectiveSheetStore.getCellBorders(sr, endBorderCol).right;
+            }
+            if (topBorder || bottomBorder || leftBorder || rightBorder) {
+                item.borders = { top: topBorder, right: rightBorder, bottom: bottomBorder, left: leftBorder };
+            }
         }
 
         cells.push(item);

@@ -30,17 +30,18 @@ export function initDb(levelDbPath, sqlitePath) {
 
     sqliteDb.exec(`
         CREATE TABLE IF NOT EXISTS snapshots (
-            id           TEXT PRIMARY KEY,
-            file_id      TEXT NOT NULL,
-            room_id      TEXT NOT NULL,
-            state        BLOB NOT NULL,
-            created_at   INTEGER NOT NULL,
-            trigger      TEXT NOT NULL DEFAULT 'auto',
-            created_by   TEXT,
-            description  TEXT,
-            change_count INTEGER,
-            diff_json    TEXT,
-            app_type     TEXT
+            id             TEXT PRIMARY KEY,
+            file_id        TEXT NOT NULL,
+            room_id        TEXT NOT NULL,
+            state          BLOB NOT NULL,
+            created_at     INTEGER NOT NULL,
+            trigger        TEXT NOT NULL DEFAULT 'auto',
+            created_by     TEXT,
+            description    TEXT,
+            change_count   INTEGER,
+            diff_json      TEXT,
+            app_type       TEXT,
+            schema_version INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_snap_file      ON snapshots(file_id);
@@ -61,6 +62,7 @@ export function initDb(levelDbPath, sqlitePath) {
         `ALTER TABLE snapshots ADD COLUMN diff_json TEXT`,
         `ALTER TABLE snapshots ADD COLUMN app_type TEXT`,
         `ALTER TABLE snapshots ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
+        `ALTER TABLE snapshots ADD COLUMN schema_version INTEGER`,
     ];
     for (const sql of migrations) {
         try { sqliteDb.exec(sql); } catch { /* column already exists */ }
@@ -162,9 +164,10 @@ export async function writeDocState(roomId, ydoc) {
  * @param {number} _sessionChanges - legacy SV-advance count (unused, kept for signature compat)
  * @param {string|null} [description] - optional user-provided label
  * @param {string|null} [appType] - 'sheets' | 'docs' | 'svg'
+ * @param {number|null} [schemaVersion] - integer schema version the client wrote this state under
  * @returns {string|null} snapshot id, or null if aborted (no changes)
  */
-export async function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionChanges, description = null, appType = null) {
+export async function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _sessionChanges, description = null, appType = null, schemaVersion = null) {
     const effectiveFileId = fileId ?? roomId;
     const newStateBytes = Y.encodeStateAsUpdate(ydoc);
 
@@ -226,8 +229,8 @@ export async function saveSnapshot(roomId, fileId, ydoc, trigger, createdBy, _se
 
     const id = `snap_${randomBytes(8).toString('hex')}`;
     sqliteDb.prepare(
-        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description, app_type, diff_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, effectiveFileId, roomId, Buffer.from(newStateBytes), Date.now(), trigger, cleanCreatedBy, realChangeCount, description ?? null, appType ?? null, diffJson);
+        'INSERT INTO snapshots (id, file_id, room_id, state, created_at, trigger, created_by, change_count, description, app_type, diff_json, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, effectiveFileId, roomId, Buffer.from(newStateBytes), Date.now(), trigger, cleanCreatedBy, realChangeCount, description ?? null, appType ?? null, diffJson, schemaVersion ?? null);
 
     console.log(`[snapshot] Saved ${id} room=${roomId} trigger=${trigger} changes=${realChangeCount}`);
     return id;
@@ -358,7 +361,7 @@ export function backfillAllDiffs(force = false) {
 }
 
 // Columns for list endpoints — omits diff_json (can be 100s of KB per row)
-const SNAP_LIST_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, app_type, pinned';
+const SNAP_LIST_COLS = 'id, file_id, room_id, created_at, trigger, created_by, change_count, description, app_type, pinned, schema_version';
 // Full columns for single-snapshot fetches (metadata + diff)
 const SNAP_COLS = SNAP_LIST_COLS + ', diff_json';
 

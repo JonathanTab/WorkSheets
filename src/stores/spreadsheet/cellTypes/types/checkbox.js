@@ -11,9 +11,13 @@ export const checkboxType = {
     },
     parseInput(inputString) {
         if (typeof inputString === 'boolean') return inputString;
-        if (inputString === 'true' || inputString === '1') return true;
-        if (inputString === 'false' || inputString === '0') return false;
-        return !!inputString;
+        if (inputString == null) return false;
+        const s = String(inputString).trim().toLowerCase();
+        if (s === '') return false;
+        if (['true', 'yes', '1', 'x', '✓', 'on', 'y'].includes(s)) return true;
+        if (['false', 'no', '0', 'off', 'n', '-'].includes(s)) return false;
+        // Unknown non-empty token → truthy (matches "any value means checked").
+        return true;
     },
     defaultStyle() {
         return { horizontalAlign: 'center' };

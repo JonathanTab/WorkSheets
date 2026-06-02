@@ -13,6 +13,7 @@
     import PdfExportView from "./PdfExportView.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { HistoryManager } from "../../lib/history/HistoryManager.svelte.js";
+    import { readSchemaVersion } from "../../stores/spreadsheet/schema.js";
     import {
         spreadsheetSession,
         selectionState,
@@ -57,14 +58,21 @@
 
     // ── PDF export view ────────────────────────────────────────────────────────
     let showPdfExport = $state(false);
+    // Live settings from PdfExportView; null when the panel is closed.
+    let liveExportSettings = $state(null);
 
     // Page breaks are visible when either the menu toggle is on or PDF export is open.
     let showPageBreaks = $derived(showPageBreaksUser || showPdfExport);
-    let pageBreakPrintSettings = $derived(
-        showPageBreaks
-            ? (spreadsheetSession.activeSheetStore?.getPrintSettings?.() ?? {})
-            : null
-    );
+    let pageBreakPrintSettings = $derived.by(() => {
+        if (!showPageBreaks) return null;
+        // While the export panel is open, reflect its live (unsaved) settings so the
+        // overlay tracks scale and margin changes in real time.
+        if (showPdfExport && liveExportSettings) return liveExportSettings;
+        const sheetStore = spreadsheetSession.activeSheetStore;
+        if (!sheetStore) return {};
+        void sheetStore.printSettingsVersion; // re-derive when settings are saved
+        return sheetStore.getPrintSettings?.() ?? {};
+    });
 
     // ── View state (formula bar, gridlines, formula text mode) ─────────────────
     let viewFormulaBar = $state(true);
@@ -179,6 +187,10 @@
             appType: 'sheets',
             adapter: sheetsAdapter,
             onAfterRestore: () => spreadsheetSession.reload(),
+            getSchemaVersion: () => {
+                const live = spreadsheetSession.ydoc;
+                return live ? readSchemaVersion(live) : null;
+            },
         });
         historyManager = hm;
 
@@ -248,6 +260,10 @@
 
     function handleRenameSheet(sheetId, name) {
         spreadsheetSession.renameSheet(sheetId, name);
+    }
+
+    function handleDuplicateSheet(sheetId) {
+        spreadsheetSession.duplicateSheet(sheetId);
     }
 
     function handleMoveSheet(sheetId, toIndex) {
@@ -413,6 +429,7 @@
                     onDeleteSheet={handleDeleteSheet}
                     onRenameSheet={handleRenameSheet}
                     onMoveSheet={handleMoveSheet}
+                    onDuplicateSheet={handleDuplicateSheet}
                 />
             </div>
         </div>
@@ -420,7 +437,10 @@
 </div>
 
 {#if showPdfExport}
-    <PdfExportView onclose={() => (showPdfExport = false)} />
+    <PdfExportView
+        onclose={() => { showPdfExport = false; liveExportSettings = null; }}
+        onlivesettings={(s) => { liveExportSettings = s; }}
+    />
 {/if}
 
 {#if historyManager?.viewerOpen}

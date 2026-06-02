@@ -16,9 +16,17 @@ export const FormulaError = {
     NAME:     '#NAME?',
     NUM:      '#NUM!',
     NA:       '#N/A',
+    NULL:     '#NULL!',
     ERROR:    '#ERROR!',
     CIRC:     '#CIRC!',
+    SPILL:    '#SPILL!',
 };
+
+/**
+ * Map from an error literal string (#REF!, #N/A, …) to its FormulaError constant.
+ * Used by the parser to convert literal error tokens to runtime error values.
+ */
+export const ERROR_LITERALS = new Set(Object.values(FormulaError));
 
 export function isError(value) {
     return typeof value === 'string' && value.startsWith('#');

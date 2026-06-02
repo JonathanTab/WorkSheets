@@ -6,13 +6,20 @@
     import { VectorPrintEngine } from "../../stores/spreadsheet/rendering/VectorPrintEngine.js";
     import { CanvasRenderer } from "../../stores/spreadsheet/rendering/CanvasRenderer.js";
     import { buildPaneData } from "../../stores/spreadsheet/rendering/CellPaintData.js";
-    import { PrintEngine } from "../../stores/spreadsheet/features/PrintEngine.js";
+    import {
+        PAPER_SIZES as PAPER_SIZE_MAP,
+        CSS_PX_PER_INCH,
+        MM_PER_INCH,
+        DEFAULT_PRINT_MARGIN_MM,
+        computePrintBounds,
+        computePageBreaks,
+    } from "../../stores/spreadsheet/rendering/PrintShared.js";
     import { AxisMetrics } from "../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js";
     import { ROW_HEIGHT, COL_WIDTH } from "../../stores/spreadsheetStore.svelte.js";
 
-    let { onclose } = $props();
+    let { onclose, onlivesettings = null } = $props();
 
-    // ── Paper sizes & constants ────────────────────────────────────────────────
+    // ── Paper sizes (display labels) ────────────────────────────────────────────
     const PAPER_SIZES = [
         { key: 'A4',     label: 'A4' },
         { key: 'letter', label: 'Letter' },
@@ -21,23 +28,12 @@
         { key: 'A5',     label: 'A5' },
     ];
 
-    const PAPER_DIMS = {
-        A4:     { w: 210,   h: 297   },
-        letter: { w: 215.9, h: 279.4 },
-        legal:  { w: 215.9, h: 355.6 },
-        A3:     { w: 297,   h: 420   },
-        A5:     { w: 148,   h: 210   },
-    };
-
     // Margin presets stored in mm; displayed in inches to the user.
     const MARGIN_PRESETS = {
-        normal:  { top: 19.05, bottom: 19.05, left: 19.05, right: 19.05 }, // 0.75 in
+        normal:  { top: DEFAULT_PRINT_MARGIN_MM, bottom: DEFAULT_PRINT_MARGIN_MM, left: DEFAULT_PRINT_MARGIN_MM, right: DEFAULT_PRINT_MARGIN_MM }, // 0.75 in
         wide:    { top: 38.1,  bottom: 38.1,  left: 38.1,  right: 38.1  }, // 1.5 in
         narrow:  { top: 12.7,  bottom: 12.7,  left: 12.7,  right: 12.7  }, // 0.5 in
     };
-
-    const CSS_PX_PER_INCH = 96;
-    const MM_PER_INCH = 25.4;
 
     /** Display a mm value as rounded inches. */
     const mmToIn = (mm) => +(mm / MM_PER_INCH).toFixed(2);
@@ -61,15 +57,14 @@
 
     let paperSize    = $state(saved.paperSize    ?? 'letter');
     let orientation  = $state(saved.orientation  ?? 'portrait');
-    let marginTop    = $state(saved.marginTop    ?? 19.05); // 0.75 in
-    let marginBottom = $state(saved.marginBottom ?? 19.05);
-    let marginLeft   = $state(saved.marginLeft   ?? 19.05);
-    let marginRight  = $state(saved.marginRight  ?? 19.05);
+    let marginTop    = $state(saved.marginTop    ?? DEFAULT_PRINT_MARGIN_MM);
+    let marginBottom = $state(saved.marginBottom ?? DEFAULT_PRINT_MARGIN_MM);
+    let marginLeft   = $state(saved.marginLeft   ?? DEFAULT_PRINT_MARGIN_MM);
+    let marginRight  = $state(saved.marginRight  ?? DEFAULT_PRINT_MARGIN_MM);
     let scale        = $state(saved.scale        ?? 1.0);
     /** When true, scale is re-fitted to page width whenever margins/paper/orientation change. */
     let autoFitWidth = $state(saved.autoFitWidth ?? false);
-    let showGridLines = $state(saved.showGridLines ?? true);
-    let printDPI     = $state(saved.printDPI     ?? 300);
+    let showGridLines = $state(saved.showGridLines ?? false);
     let printArea    = $state(saved.printArea    ?? 'usedArea');
     let pageOrder    = $state(saved.pageOrder    ?? 'downThenOver');
     let headerLeft   = $state(saved.headerLeft   ?? '');
@@ -84,9 +79,9 @@
 
     // ── Page geometry ──────────────────────────────────────────────────────────
     let pageInfo = $derived.by(() => {
-        const dims = PAPER_DIMS[paperSize] ?? PAPER_DIMS.A4;
-        const pw = orientation === 'landscape' ? dims.h : dims.w;
-        const ph = orientation === 'landscape' ? dims.w : dims.h;
+        const dims = PAPER_SIZE_MAP[paperSize] ?? PAPER_SIZE_MAP.A4;
+        const pw = orientation === 'landscape' ? dims.height : dims.width;
+        const ph = orientation === 'landscape' ? dims.width  : dims.height;
         return {
             pageW: pw,
             pageH: ph,
@@ -94,66 +89,6 @@
             printH: Math.max(1, ph - marginTop  - marginBottom),
         };
     });
-
-    // ── Used area ─────────────────────────────────────────────────────────────
-    function computeUsedArea(sheetStore) {
-        let minRow = Infinity, maxRow = -Infinity;
-        let minCol = Infinity, maxCol = -Infinity;
-        sheetStore.cells.forEach((cell, key) => {
-            if (!cell || !cell.exists) return;
-            const comma = key.indexOf(',');
-            const row = parseInt(key.slice(0, comma), 10);
-            const col = parseInt(key.slice(comma + 1), 10);
-            if (row < minRow) minRow = row;
-            if (row > maxRow) maxRow = row;
-            if (col < minCol) minCol = col;
-            if (col > maxCol) maxCol = col;
-        });
-        if (!isFinite(maxRow)) return null;
-        return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
-    }
-
-    /**
-     * Like computeUsedArea but also extends bounds to cover floating images.
-     * Returns row/col index bounds (for page-break computation) AND pixel extents
-     * (for scale computation) as a unified object.
-     * @param {import('../../stores/spreadsheet/SheetStore.svelte.js').SheetStore} sheetStore
-     * @param {import('../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js').AxisMetrics} rowMetrics
-     * @param {import('../../stores/spreadsheet/virtualization/AxisMetrics.svelte.js').AxisMetrics} colMetrics
-     */
-    function computeContentBounds(sheetStore, rowMetrics, colMetrics) {
-        const cellBounds = computeUsedArea(sheetStore);
-        let endRow = cellBounds?.endRow ?? -1;
-        let endCol = cellBounds?.endCol ?? -1;
-        let startRow = cellBounds?.startRow ?? 0;
-        let startCol = cellBounds?.startCol ?? 0;
-        // Pixel extents (may exceed the last cell's right/bottom edge)
-        let maxW = endCol >= 0 ? colMetrics.offsetOf(endCol + 1) : 0;
-        let maxH = endRow >= 0 ? rowMetrics.offsetOf(endRow + 1) : 0;
-
-        for (const img of (sheetStore.floatingImages?.values() ?? [])) {
-            const imgRight  = colMetrics.offsetOf(img.anchorCol) + img.offsetX + img.width;
-            const imgBottom = rowMetrics.offsetOf(img.anchorRow) + img.offsetY + img.height;
-            if (imgRight  > maxW) maxW = imgRight;
-            if (imgBottom > maxH) maxH = imgBottom;
-            // Convert pixel extents back to row/col indices for page-break engine
-            if (imgRight  > 0) {
-                const imgEndCol = colMetrics.indexAtOffset(Math.max(0, imgRight - 1));
-                if (imgEndCol > endCol) endCol = imgEndCol;
-            }
-            if (imgBottom > 0) {
-                const imgEndRow = rowMetrics.indexAtOffset(Math.max(0, imgBottom - 1));
-                if (imgEndRow > endRow) endRow = imgEndRow;
-            }
-            if (img.anchorCol < startCol) startCol = img.anchorCol;
-            if (img.anchorRow < startRow) startRow = img.anchorRow;
-        }
-
-        if (endRow < 0 && endCol < 0) return null;
-        endRow = Math.max(endRow, 0);
-        endCol = Math.max(endCol, 0);
-        return { startRow, startCol, endRow, endCol, maxW, maxH };
-    }
 
     // ── Metrics builder ────────────────────────────────────────────────────────
     function buildMetrics(sheetStore) {
@@ -168,12 +103,26 @@
         return { rowMetrics: rowM, colMetrics: colM };
     }
 
+    // ── Live settings (for grid overlay) ──────────────────────────────────────
+    // Reactive snapshot of all layout-relevant settings; parent reads this for
+    // the page-break overlay so it tracks scale/margin changes in real time.
+    let liveSettings = $derived.by(() => {
+        const s = {
+            paperSize, orientation,
+            marginTop, marginBottom, marginLeft, marginRight,
+            scale, showGridLines, printArea, pageOrder,
+        };
+        if (printArea === 'selection' && selectionRange) Object.assign(s, selectionRange);
+        return s;
+    });
+    $effect(() => { onlivesettings?.(liveSettings); });
+
     // ── Current settings snapshot ──────────────────────────────────────────────
     function currentSettings() {
         const s = {
             paperSize, orientation,
             marginTop, marginBottom, marginLeft, marginRight,
-            scale, autoFitWidth, showGridLines, printDPI,
+            scale, autoFitWidth, showGridLines,
             printArea, pageOrder,
             headerLeft, headerCenter, headerRight,
             footerLeft, footerCenter, footerRight,
@@ -190,8 +139,6 @@
     });
 
     // ── Page data (breaks + metrics) ───────────────────────────────────────────
-    const _printEngine = new PrintEngine();
-
     let pageData = $derived.by(() => {
         const sheetStore = spreadsheetSession.activeSheetStore;
         const empty = { pages: 0, rows: 0, cols: 0, rowBreaks: [], colBreaks: [], rowMetrics: null, colMetrics: null, areaStartRow: 0, areaStartCol: 0, areaEndRow: 0, areaEndCol: 0 };
@@ -203,13 +150,21 @@
 
         const ps = { ...currentSettings() };
         if (ps.printArea === 'usedArea') {
-            const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
-            if (bounds) Object.assign(ps, { areaStartRow: bounds.startRow, areaStartCol: bounds.startCol, areaEndRow: bounds.endRow, areaEndCol: bounds.endCol });
+            const bounds = computePrintBounds(sheetStore, rowMetrics, colMetrics);
+            if (bounds) {
+                Object.assign(ps, {
+                    areaStartRow: bounds.startRow, areaStartCol: bounds.startCol,
+                    areaEndRow:   bounds.endRow,   areaEndCol:   bounds.endCol,
+                });
+            } else {
+                // Empty sheet — preview shows nothing.
+                return empty;
+            }
         } else if (ps.printArea === 'selection' && selectionRange) {
             Object.assign(ps, selectionRange);
         }
 
-        const { rowBreaks, colBreaks } = _printEngine.computePageBreaks(ps, rowMetrics, colMetrics, totalRows, totalCols);
+        const { rowBreaks, colBreaks } = computePageBreaks(ps, rowMetrics, colMetrics, totalRows, totalCols);
 
         return {
             pages: rowBreaks.length * colBreaks.length,
@@ -396,30 +351,41 @@
 
     /** Cache of loaded HTMLImageElements for the preview (blobId → {element, url}) */
     const _blobCache = new Map();
+    /** In-flight loads (blobId → Promise) so concurrent callers share one fetch. */
+    const _blobLoading = new Map();
 
     /**
-     * Load a blob as an HTMLImageElement, caching by blobId.
-     * Uses fetch + createObjectURL so the result is safe for canvas drawImage.
+     * Load a blob as an HTMLImageElement, caching by blobId. Concurrent calls
+     * for the same blobId share the in-flight promise to avoid duplicate fetches
+     * (and the corresponding leaked object URLs).
      * @returns {Promise<{element:HTMLImageElement,url:string}|null>}
      */
-    async function loadImgElement(blobId) {
-        if (_blobCache.has(blobId)) return _blobCache.get(blobId);
-        try {
-            const resp = await fetch(storage.app.getBlobUrl(blobId));
-            if (!resp.ok) return null;
-            const blob = await resp.blob();
-            const objectUrl = URL.createObjectURL(blob);
-            const element = await new Promise((resolve) => {
-                const img = new Image();
-                img.onload = () => resolve(img);
-                img.onerror = () => resolve(null);
-                img.src = objectUrl;
-            });
-            if (!element) { URL.revokeObjectURL(objectUrl); return null; }
-            const entry = { element, url: objectUrl };
-            _blobCache.set(blobId, entry);
-            return entry;
-        } catch { return null; }
+    function loadImgElement(blobId) {
+        if (_blobCache.has(blobId)) return Promise.resolve(_blobCache.get(blobId));
+        const inFlight = _blobLoading.get(blobId);
+        if (inFlight) return inFlight;
+
+        const p = (async () => {
+            try {
+                const resp = await fetch(storage.app.getBlobUrl(blobId));
+                if (!resp.ok) return null;
+                const blob = await resp.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                const element = await new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = () => resolve(null);
+                    img.src = objectUrl;
+                });
+                if (!element) { URL.revokeObjectURL(objectUrl); return null; }
+                const entry = { element, url: objectUrl };
+                _blobCache.set(blobId, entry);
+                return entry;
+            } catch { return null; }
+            finally { _blobLoading.delete(blobId); }
+        })();
+        _blobLoading.set(blobId, p);
+        return p;
     }
 
     /**
@@ -461,26 +427,19 @@
         const sheetStore = spreadsheetSession.activeSheetStore;
         if (!sheetStore) return;
         const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
-        const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
-        const contentW_css = Math.max(1, bounds?.maxW ?? colMetrics.offsetOf(bounds?.endCol ?? sheetStore.colCount - 1 + 1));
-        const printW_css   = (pageInfo.printW / MM_PER_INCH) * CSS_PX_PER_INCH;
-        scale = Math.max(0.1, Math.min(4.0, Math.round((printW_css / contentW_css) * 100) / 100));
-        autoFitWidth = true;
-    }
-
-    function fitToPage() {
-        const sheetStore = spreadsheetSession.activeSheetStore;
-        if (!sheetStore) return;
-        const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
-        const bounds = computeContentBounds(sheetStore, rowMetrics, colMetrics);
-        const contentW_css = Math.max(1, bounds?.maxW ?? colMetrics.offsetOf(sheetStore.colCount));
-        const contentH_css = Math.max(1, bounds?.maxH ?? rowMetrics.offsetOf(sheetStore.rowCount));
+        const bounds = computePrintBounds(sheetStore, rowMetrics, colMetrics);
+        if (!bounds) return;
+        // Pixel extent: max of (last cell's right edge, any floating image's right edge).
+        let contentW_css = colMetrics.offsetOf(bounds.endCol + 1);
+        for (const img of (sheetStore.floatingImages?.values() ?? [])) {
+            const ac = Math.max(0, img.anchorCol);
+            const imgRight = colMetrics.offsetOf(ac) + img.offsetX + img.width;
+            if (imgRight > contentW_css) contentW_css = imgRight;
+        }
+        contentW_css = Math.max(1, contentW_css);
         const printW_css = (pageInfo.printW / MM_PER_INCH) * CSS_PX_PER_INCH;
-        const printH_css = (pageInfo.printH / MM_PER_INCH) * CSS_PX_PER_INCH;
-        const scaleW = printW_css / contentW_css;
-        const scaleH = printH_css / contentH_css;
-        scale = Math.max(0.1, Math.min(4.0, Math.round(Math.min(scaleW, scaleH) * 100) / 100));
-        autoFitWidth = false; // fit page is a one-shot, not a persistent mode
+        scale = Math.max(0.1, Math.min(4.0, printW_css / contentW_css));
+        autoFitWidth = true;
     }
 
     function clampScale(v) {
@@ -658,17 +617,14 @@
                 <section class="section">
                     <div class="section-title-row">
                         <span class="section-title">Scale</span>
-                        <span class="scale-pct">{Math.round(scale * 100)}%</span>
+                        <span class="scale-pct" class:scale-pct-auto={autoFitWidth}>{Math.round(scale * 100)}%</span>
                     </div>
                     <input type="range" class="scale-slider" min="0.25" max="2" step="0.05"
                         bind:value={scale}
+                        class:scale-slider-auto={autoFitWidth}
                         oninput={() => { autoFitWidth = false; scale = clampScale(scale); }}
                     />
-                    <div class="fit-btns">
-                        <button class="preset-btn" class:active={autoFitWidth} onclick={fitToWidth}>Fit width</button>
-                        <button class="preset-btn" onclick={fitToPage}>Fit page</button>
-                        <button class="preset-btn" onclick={() => { autoFitWidth = false; scale = 1.0; }}>Reset</button>
-                    </div>
+                    <button class="preset-btn" class:active={autoFitWidth} onclick={fitToWidth}>Fit to width</button>
                 </section>
 
                 <!-- Content Options -->
@@ -703,15 +659,6 @@
                     <label class="checkbox-label" style="margin-top:8px;">
                         <input type="checkbox" bind:checked={showGridLines} />
                         Show gridlines
-                    </label>
-                    <label class="checkbox-label" style="margin-top:4px; font-size:0.775rem;">
-                        <span style="color:var(--color-text-secondary);">Quality</span>
-                        <select class="select-sm" bind:value={printDPI}>
-                            <option value={150}>150 dpi</option>
-                            <option value={200}>200 dpi</option>
-                            <option value={300}>300 dpi</option>
-                            <option value={400}>400 dpi</option>
-                        </select>
                     </label>
                 </section>
 
@@ -1031,16 +978,17 @@
         font-weight: 600;
         color: var(--color-text, #1e293b);
     }
+    .scale-pct-auto {
+        color: var(--color-primary, #3b82f6);
+    }
 
     .scale-slider {
         width: 100%;
         accent-color: var(--color-primary, #3b82f6);
         cursor: pointer;
     }
-
-    .fit-btns {
-        display: flex;
-        gap: 4px;
+    .scale-slider-auto {
+        opacity: 0.45;
     }
 
     /* Field rows */

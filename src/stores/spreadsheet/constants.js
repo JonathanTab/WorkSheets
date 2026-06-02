@@ -35,7 +35,7 @@ export const OVERSCAN_ROWS = OVERSCAN_PX_ROWS;
 export const OVERSCAN_COLS = OVERSCAN_PX_COLS;
 
 // Schema version
-export const SCHEMA_VERSION = '6';
+export const SCHEMA_VERSION = '8';
 
 // Default sheet dimensions
 export const DEFAULT_ROW_COUNT = 1000;
@@ -110,7 +110,11 @@ export const META_KEYS = {
     LAST_MODIFIED_BY: 'lastModifiedBy',
     LOCALE: 'locale',
     TIMEZONE: 'timezone',
-    DEFAULT_CURRENCY: 'defaultCurrency'
+    DEFAULT_CURRENCY: 'defaultCurrency',
+    // Integer version of the schema this doc was last written under.
+    // Set by initializeDocument and bumped by spreadsheetSchema.migrate after
+    // it finishes. Used to refuse writes from clients older than the doc.
+    SCHEMA_VERSION: 'schemaVersion',
 };
 
 // Row/Column meta keys

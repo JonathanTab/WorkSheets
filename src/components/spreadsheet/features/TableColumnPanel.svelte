@@ -18,6 +18,7 @@
     import { onMount } from "svelte";
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
+    import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
 
     let {
         table,
@@ -28,6 +29,17 @@
     let panelEl = $state(null);
 
     let col = $derived(table?.columns?.find((c) => c.id === colId) ?? null);
+
+    // Column data-type config for the embedded CellTypeConfigurator (controlled
+    // mode). Mirrors the grid toolbar's TABLE_HEADER path — both write through
+    // table.updateColumnTypeConfig so the two entry points stay consistent.
+    let colTypeConfig = $derived(
+        col?.typeConfig ?? (col && col.type && col.type !== "text" ? { type: col.type } : null)
+    );
+
+    function handleColTypeChange(config) {
+        if (table && colId) table.updateColumnTypeConfig(colId, config);
+    }
 
     let localFormula = $state("");
     let localIsNonEntry = $state(false);
@@ -173,6 +185,18 @@
 
 {#snippet colPanelContent()}
     <div class="panel-body">
+        <!-- Column data type -->
+        <section class="section">
+            <div class="section-label">Type</div>
+            <div class="section-sublabel" style="margin-bottom:6px;">
+                How values in this column are parsed, displayed, and edited.
+            </div>
+            <CellTypeConfigurator
+                controlledConfig={colTypeConfig}
+                onControlledChange={handleColTypeChange}
+            />
+        </section>
+
         <!-- Default formula section -->
         <section class="section">
             <div class="section-label">Default Formula</div>

@@ -5,7 +5,7 @@ import {
     HEADER_WIDTH,
     HEADER_HEIGHT,
 } from "../../../stores/spreadsheetStore.svelte.js";
-import { editSessionState } from "../../../stores/spreadsheet/index.js";
+import { editSessionState, clipboardManager } from "../../../stores/spreadsheet/index.js";
 import { CanvasRenderer } from "../../../stores/spreadsheet/rendering/CanvasRenderer.js";
 import { SelectionRenderer } from "../../../stores/spreadsheet/rendering/SelectionRenderer.js";
 import { RenderScheduler } from "../../../stores/spreadsheet/rendering/RenderScheduler.js";
@@ -32,7 +32,6 @@ export class GridPaintCoordinator {
     canvasEl = $state(null);
     selectCanvasEl = $state(null);
     virtualizer = $state(null);
-    renderPlan = $state(null);
     renderContext = $state(null);
     sheetStore = $state(null);
     showGridlines = $state(true);
@@ -45,6 +44,10 @@ export class GridPaintCoordinator {
     selectionScheduler = $state(null);
     canvasRenderer = $state(null);
     selectionRenderer = $state(null);
+
+    // Read directly from virtualizer so paint methods always see the current plan
+    // without waiting for the async effect that would otherwise propagate it.
+    get renderPlan() { return this.virtualizer?.renderPlan ?? null; }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
     paintInvalidator = new PaintInvalidator();
@@ -440,6 +443,12 @@ export class GridPaintCoordinator {
         const rowCount = this.sheetStore?.rowCount ?? 0;
         const colCount = this.sheetStore?.colCount ?? 0;
 
+        // Cut marquee (marching ants) — only on the sheet the cut originated from.
+        const cm = clipboardManager.cutMarquee;
+        const cutMarquee = (cm && cm.sheetId === spreadsheetSession.activeSheetId)
+            ? { ranges: cm.ranges, dashOffset: -(performance.now() / 40) % 8 }
+            : null;
+
         const commonSelParams = {
             rowMetrics: virtualizer.rowMetrics,
             colMetrics: virtualizer.colMetrics,
@@ -448,6 +457,7 @@ export class GridPaintCoordinator {
             frozenRows, frozenCols, frozenHeight, frozenWidth,
             rowCount, colCount,
             mergeEngine: renderContext?.mergeEngine ?? null,
+            cutMarquee,
         };
 
         selectionRenderer.clear();

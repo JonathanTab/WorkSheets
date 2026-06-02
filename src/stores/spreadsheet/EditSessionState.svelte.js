@@ -28,6 +28,15 @@ export class EditSessionState {
     /** @type {number} */
     sessionId = $state(0);
 
+    /**
+     * Bumped whenever the caret is moved programmatically (e.g. a formula ref is
+     * inserted via click/drag). Lets the active input/textarea reconcile its DOM
+     * selection to cursorStart/cursorEnd exactly once per move, without fighting
+     * the user's caret on ordinary typing.
+     * @type {number}
+     */
+    caretSync = $state(0);
+
     /** @type {'date' | 'time' | 'datetime-local' | null} */
     pickerMode = $state(null);
 
@@ -42,6 +51,14 @@ export class EditSessionState {
 
     /** @type {number | 'mixed' | null} */
     inlineSelFontSize = $state(null);
+
+    /**
+     * URI of the link covering the current inline selection, or null when the
+     * selection has no link / spans differing links. Lets the toolbar reflect
+     * and pre-fill an existing hyperlink.
+     * @type {string | null}
+     */
+    inlineSelLink = $state(null);
 
     /** @type {Function|null} */
     applyInlineFormat = null;
@@ -136,6 +153,7 @@ export class EditSessionState {
         const next   = this.draft.slice(0, rStart) + prefix + ref + this.draft.slice(rEnd);
         const cursor = rStart + prefix.length + ref.length;
         this.updateDraft(next, cursor, cursor);
+        this.caretSync++;
         this.requestFocus(this.surface);
     }
 
@@ -154,6 +172,7 @@ export class EditSessionState {
         const next   = before + prefix + ref + after;
         const cursor = pos + prefix.length + ref.length;
         this.updateDraft(next, cursor, cursor);
+        this.caretSync++;
         this.requestFocus(this.surface);
     }
 
@@ -186,6 +205,7 @@ export class EditSessionState {
         this.livePlainText     = null;
         this.liveTfr           = null;
         this.inlineSelFontSize = null;
+        this.inlineSelLink     = null;
         this.applyInlineFormat = null;
         this.cursorStart       = 0;
         this.cursorEnd         = 0;

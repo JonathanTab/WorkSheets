@@ -31,7 +31,8 @@
       "Bash($content = *)",
       "Bash($kept = *)",
       "Bash(node --input-type=module *)",
-      "Bash(cd * && node *)"
+      "Bash(cd * && node *)",
+      "Bash(npx eslint *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Jon\\code\\instrumenta\\instrumenta",

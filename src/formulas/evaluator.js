@@ -8,6 +8,7 @@
 import { NodeType, parseFormula } from './parser.js';
 import { getFunction, isError, FormulaError, parseNumericString } from './functions.js';
 import { coerceToSerial } from './dateCore.js';
+import { log } from '../util/log.js';
 
 /**
  * If value is a non-numeric string that looks like a date, return its serial.
@@ -43,14 +44,21 @@ function resolveNumeric(v) {
 }
 
 // Formula string → AST cache. Parsing is expensive; the AST is a pure function
-// of the formula string so caching is safe. Limited to 1 000 entries (LRU-style eviction).
+// of the formula string so caching is safe. True LRU: on a hit we delete+set
+// the entry to move it to the most-recently-used end of the Map's insertion
+// order, so a hot small set isn't evicted by churn through cold formulas.
 const _parseCache = new Map();
 const _PARSE_CACHE_MAX = 1000;
 
 export function cachedParseFormula(formula) {
-    let ast = _parseCache.get(formula);
-    if (ast !== undefined) return ast;
-    ast = parseFormula(formula) ?? null;
+    if (_parseCache.has(formula)) {
+        const ast = _parseCache.get(formula);
+        // Touch — move to MRU end.
+        _parseCache.delete(formula);
+        _parseCache.set(formula, ast);
+        return ast;
+    }
+    const ast = parseFormula(formula) ?? null;
     _parseCache.set(formula, ast);
     if (_parseCache.size > _PARSE_CACHE_MAX) {
         const firstKey = _parseCache.keys().next().value;
@@ -99,6 +107,10 @@ export function evaluate(ast, getCellValue, context = {}, customFunctions = null
         case NodeType.REP_VAR:
             // $rep variable – returns the current repetition index (0-based)
             return context?.rep ?? 0;
+
+        case NodeType.ERROR_LITERAL:
+            // Literal error token (e.g. =#REF! from a delete-row rewrite) — emit as runtime error.
+            return ast.value;
 
         case 'Missing':
             // Missing optional argument (e.g. trailing comma in IF(A1,1,))
@@ -287,27 +299,36 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
         case '>':
         case '<=':
         case '>=': {
+            // Excel type ordering for cross-type compare: numbers < text < booleans
+            // (FALSE before TRUE within the boolean group). Same-type compares
+            // use their natural ordering. resolveNumeric coerces numeric strings
+            // and date strings to numbers so "5" and a real 5 compare as numbers.
             const lv = resolveNumeric(left);
             const rv = resolveNumeric(right);
-            // Both numeric (or coerced to numeric): compare numerically.
-            if (typeof lv === 'number' && typeof rv === 'number') {
-                if (ast.op === '<')  return lv <  rv;
-                if (ast.op === '>')  return lv >  rv;
-                if (ast.op === '<=') return lv <= rv;
-                return lv >= rv;
+            const rank = (v) => {
+                if (typeof v === 'number')  return 0;
+                if (typeof v === 'string')  return 1;
+                if (typeof v === 'boolean') return 2;
+                if (v == null)              return 1; // treat null as empty string
+                return 1;
+            };
+            const lr = rank(lv);
+            const rr = rank(rv);
+            let cmp;
+            if (lr !== rr) {
+                cmp = lr - rr;
+            } else if (typeof lv === 'number') {
+                cmp = lv - rv;
+            } else if (typeof lv === 'boolean') {
+                cmp = Number(lv) - Number(rv);
+            } else {
+                // Both strings (or null/undefined → '')
+                const ls = String(left ?? '');
+                const rs = String(right ?? '');
+                cmp = ls.toLowerCase().localeCompare(rs.toLowerCase());
             }
-            // Excel type-ordering: numbers < text < booleans.
-            // When types differ, numbers always win (less-than) over strings.
-            const lIsNum = typeof lv === 'number';
-            const rIsNum = typeof rv === 'number';
-            if (lIsNum && !rIsNum) { return ast.op === '<' || ast.op === '<='; }
-            if (!lIsNum && rIsNum) { return ast.op === '>' || ast.op === '>='; }
-            // Both strings
-            const ls = String(left ?? '');
-            const rs = String(right ?? '');
-            const cmp = ls.toLowerCase().localeCompare(rs.toLowerCase());
-            if (ast.op === '<')  return cmp < 0;
-            if (ast.op === '>')  return cmp > 0;
+            if (ast.op === '<')  return cmp <  0;
+            if (ast.op === '>')  return cmp >  0;
             if (ast.op === '<=') return cmp <= 0;
             return cmp >= 0;
         }
@@ -370,7 +391,7 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCr
         try {
             return customFn(...evaluatedArgs);
         } catch (err) {
-            console.error(`Error evaluating custom function ${ast.name}:`, err);
+            log.debug(`Error evaluating custom function ${ast.name}:`, err);
             return FormulaError.ERROR;
         }
     }
@@ -399,7 +420,7 @@ function evaluateFunctionCall(ast, getCellValue, context, customFunctions, getCr
     try {
         return funcDef.call(evaluatedArgs, { getCellValue, ...context });
     } catch (err) {
-        console.error(`Error evaluating function ${ast.name}:`, err);
+        log.debug(`Error evaluating function ${ast.name}:`, err);
         return FormulaError.ERROR;
     }
 }
@@ -419,7 +440,7 @@ export function evaluateFormula(formula, getCellValue, context = {}, customFunct
         if (!ast) return null;
         return evaluate(ast, getCellValue, context, customFunctions, getCrossSheetValue);
     } catch (err) {
-        console.error('Error parsing/evaluating formula:', err);
+        log.debug('Error parsing/evaluating formula:', err);
         return FormulaError.ERROR;
     }
 }

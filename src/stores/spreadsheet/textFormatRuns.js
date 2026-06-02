@@ -22,6 +22,8 @@
  * Properties absent in a run's format are inherited from the cell level.
  */
 
+import { ptToPx, getFontMetrics } from './rendering/fontUnits.js';
+
 // ─── Build render runs (for CanvasRenderer) ───────────────────────────────────
 
 /**
@@ -406,6 +408,41 @@ export function queryFormatInRange(tfr, start, end, textLen, property) {
 }
 
 /**
+ * Return the link URI that uniformly covers [start, end), or null when the
+ * range has no link or spans differing links. Unlike queryFormatInRange this
+ * compares by URI string rather than object identity (each run carries its own
+ * { uri } object, so identity comparison would wrongly report 'mixed').
+ *
+ * @param {Array|null} tfr
+ * @param {number} start
+ * @param {number} end
+ * @param {number} textLen
+ * @returns {string|null}
+ */
+export function queryLinkInRange(tfr, start, end, textLen) {
+    if (end <= start) {
+        return getFormatAtIndex(tfr, Math.min(start, Math.max(0, textLen - 1)))?.link?.uri ?? null;
+    }
+    const sorted = _sorted(tfr, textLen);
+    const boundarySet = new Set([start, end]);
+    for (const run of sorted) {
+        if (run.startIndex > start && run.startIndex < end) boundarySet.add(run.startIndex);
+    }
+    const boundaries = [...boundarySet].sort((a, b) => a - b);
+
+    const uris = new Set();
+    for (const segStart of boundaries.slice(0, -1)) {
+        let fmt = {};
+        for (const run of sorted) {
+            if (run.startIndex <= segStart) fmt = run.format || {};
+            else break;
+        }
+        uris.add(fmt.link?.uri ?? null);
+    }
+    return uris.size === 1 ? [...uris][0] : null;
+}
+
+/**
  * Normalize tfr: sort, merge adjacent identical formats, strip out-of-range runs.
  * Returns null when there are no meaningful runs (no inline formatting).
  *
@@ -473,11 +510,17 @@ export function hitTestLink(mouseXInCell, mouseYInCell, renderRuns, cellWidth, c
     const ctx            = _measureCtx();
     const pad            = 4;
     const hAlign         = cellStyle?.hAlign    || 'left';
-    const defaultSize    = cellStyle?.fontSize  || theme?.defaultFontSize  || 10;
+    // fontSize is stored in pt; the canvas painter renders at ptToPx(size). Match
+    // that here so link hit boxes line up with the painted glyphs (a raw-px
+    // measurement was ~33% too narrow and mis-hit every link).
+    const defaultSizePx  = ptToPx(cellStyle?.fontSize || theme?.defaultFontSize || 10);
     const defaultFamily  = cellStyle?.fontFamily|| theme?.defaultFontFamily|| 'system-ui';
     const defaultBold    = cellStyle?.bold   || false;
     const defaultItalic  = cellStyle?.italic || false;
-    const lineHeight     = defaultSize * 1.5;
+    // Mirror the painter's line cadence: (ascent+descent)*1.2 of the default font.
+    const defaultFont    = `${defaultItalic ? 'italic' : 'normal'} ${defaultBold ? 'bold' : 'normal'} ${defaultSizePx}px ${defaultFamily}`;
+    const dm             = getFontMetrics(defaultFont);
+    const lineHeight     = (dm.ascent + dm.descent) * 1.2;
 
     // Split runs into logical lines
     const logicalLines = [[]];
@@ -505,9 +548,9 @@ export function hitTestLink(mouseXInCell, mouseYInCell, renderRuns, cellWidth, c
         const widths = lineRuns.map(run => {
             const bold    = run.b !== undefined ? run.b : defaultBold;
             const italic  = run.i !== undefined ? run.i : defaultItalic;
-            const size    = run.f  || defaultSize;
+            const sizePx  = run.f ? ptToPx(run.f) : defaultSizePx;
             const family  = run.ff || defaultFamily;
-            ctx.font      = `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${size}px ${family}`;
+            ctx.font      = `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'} ${sizePx}px ${family}`;
             const w = ctx.measureText(run.t).width;
             lineW += w;
             return w;

@@ -87,13 +87,15 @@ export class YjsServerAPI {
      * @param {string} roomId
      * @param {string} [description]
      * @param {string|null} [appType]  'sheets' | 'docs' | 'svg'
+     * @param {number|null} [schemaVersion] integer schema version this snapshot was written under
      * @returns {Promise<{ id: string }>}
      */
-    async createSnapshot(roomId, description, appType) {
+    async createSnapshot(roomId, description, appType, schemaVersion = null) {
         const res = await this._post('api/snapshots', {
             roomId,
             description: description ?? null,
             appType: appType ?? null,
+            schemaVersion: schemaVersion ?? null,
         });
         return res.json();
     }

@@ -8,6 +8,7 @@ import {
     clipboardManager,
     editSessionState,
     CellTypeRegistry,
+    colParseConfig,
 } from "../../../stores/spreadsheet/index.js";
 import { CELL_TYPE } from "../../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
 import { clearFormatting as clearFormattingCmd } from "../../../stores/spreadsheet/formatCommands.js";
@@ -210,13 +211,44 @@ export class GridKeyboardController {
         }, YJS_ORIGIN.UI);
     }
 
-    _insertDate() {
+    _setCellOrTableValue(value) {
         const ss = this._sheetStore();
         const anchor = this._anchor();
+        const rc = this._rc();
         if (!ss || !anchor) return;
+        const ct = rc?.getCellType(anchor.row, anchor.col);
+        if (ct === CELL_TYPE.TABLE_ENTRY || ct === CELL_TYPE.TABLE_DATA) {
+            const info = rc?.tableManager?.getCellInfo(anchor.row, anchor.col);
+            if (info?.table && info.colDef && !info.colDef.isNonEntry) {
+                const parsed = CellTypeRegistry.parseInput(colParseConfig(info.colDef), value);
+                if (ct === CELL_TYPE.TABLE_ENTRY) {
+                    info.table.setEntryValue(info.colDef.id, parsed);
+                } else {
+                    info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                    spreadsheetSession.formulaEngine?.cellValueChanged(anchor.row, anchor.col);
+                    spreadsheetSession.formulaEngine?.recalculateDirty();
+                }
+                // The entry buffer / table data aren't reactive paint inputs — the
+                // canvas only repaints on explicit invalidation, so request one
+                // here (otherwise the inserted value stays invisible until the
+                // next edit elsewhere triggers a repaint).
+                untrack(() => this.ctx?.renderScheduler?.invalidateAll());
+                return;
+            }
+        }
+        ss.setCellValue(anchor.row, anchor.col, value);
+    }
+
+    _insertDate() {
         const today = new Date();
         const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-        ss.setCellValue(anchor.row, anchor.col, iso);
+        this._setCellOrTableValue(iso);
+    }
+
+    _insertTime() {
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        this._setCellOrTableValue(timeStr);
     }
 
     // ─── Main handler ─────────────────────────────────────────────────────────
@@ -234,6 +266,13 @@ export class GridKeyboardController {
             if (e.key === "Enter") { ctx.commitEditAndMove(1, 0); e.preventDefault(); }
             else if (e.key === "Escape") { ctx.cancelEdit(); e.preventDefault(); }
             else if (e.key === "Tab") { ctx.commitEditAndMove(0, e.shiftKey ? -1 : 1); e.preventDefault(); }
+            return;
+        }
+
+        // ── Escape: cancel a pending cut marquee (clipboard contents survive) ──
+        if (e.key === "Escape" && clipboardManager.cutMarquee) {
+            clipboardManager.cancelCut();
+            e.preventDefault();
             return;
         }
 
@@ -499,7 +538,8 @@ export class GridKeyboardController {
                 }
                 break;
             case ";":
-                if (e.ctrlKey || e.metaKey) { this._insertDate(); e.preventDefault(); }
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey) { this._insertTime(); e.preventDefault(); }
+                else if (e.ctrlKey || e.metaKey) { this._insertDate(); e.preventDefault(); }
                 break;
             case "\\":
                 if ((e.ctrlKey || e.metaKey) && !e.shiftKey) { this._clearFormatting(); e.preventDefault(); }

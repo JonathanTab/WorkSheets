@@ -33,6 +33,7 @@ import { BlobCache } from './core/BlobCache.js';
 import { OfflineSyncStore } from './core/OfflineSyncStore.js';
 import { OfflineMutationQueue } from './core/OfflineMutationQueue.js';
 import { YjsSyncCoordinator } from './core/YjsSyncCoordinator.js';
+import { getOfflineMode, clearYjsPersistenceData } from './offlineMode.js';
 
 // Deterministic color from username so presence color is consistent
 const _PRESENCE_COLORS = [
@@ -577,7 +578,17 @@ class DriveView {
             });
             // Initialize doc locally; will sync to server when online
             if (initializer && file.roomId) {
-                await this._r._runtime.initialize(file.id, file.roomId, initializer);
+                try {
+                    await this._r._runtime.initialize(file.id, file.roomId, initializer);
+                    await this._r._assertInitializerWroteContent(file.id);
+                } catch (err) {
+                    // Offline creates are local-only with a queued create_file
+                    // mutation; roll back both so the user can retry cleanly
+                    // instead of being left with a phantom file that will
+                    // sync as empty and trigger the "structure missing" path.
+                    await this._r._rollbackOfflineCreate(file.id).catch(() => {});
+                    throw new Error(`Document initialization failed: ${err.message}`);
+                }
             }
             this._r._recordOpen(file.id);
             return file;
@@ -595,7 +606,18 @@ class DriveView {
         });
 
         if (initializer && file.roomId) {
-            await this._r._runtime.initialize(file.id, file.roomId, initializer);
+            try {
+                await this._r._runtime.initialize(file.id, file.roomId, initializer);
+                await this._r._assertInitializerWroteContent(file.id);
+            } catch (err) {
+                // Server already created the file row. Delete it so the user
+                // doesn't end up with a phantom file whose initial structure
+                // never persisted; otherwise next-open will fail the
+                // "structure missing after server sync" check.
+                this._r._api.deleteFile(file.id).catch(() => {});
+                this._r._runtime.unload(file.id);
+                throw new Error(`Document initialization failed: ${err.message}`);
+            }
         }
 
         this._r._upsertFile(file);
@@ -654,7 +676,12 @@ class DriveView {
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
         if (opts.recordOpen !== false) this._r._recordOpen(id);
-        return this._r._runtime.load(id, file.roomId, file.app ?? null);
+        // If this runtime instance didn't create the doc itself, the server
+        // is the authoritative source of its initial state. Hint to the
+        // runtime so it doesn't return early with an empty doc when
+        // IndexedDB resolves with nothing.
+        const expectExistingState = !this._r._runtime._locallyCreated.has(id);
+        return this._r._runtime.load(id, file.roomId, file.app ?? null, { expectExistingState });
     }
 
     /** @param {string} id @returns {import('yjs').Doc|null} */
@@ -962,6 +989,7 @@ export class FileRegistry extends EventEmitter {
         this._yjsApi = new YjsServerAPI(options.wsUrl, options.getApiKey);
         this._localStore = null;    // per-app IDB (app-scoped files only)
         this._sharedStore = null;   // cross-app IDB (drive cache, mutations, recents)
+        this._offlineMode = getOfflineMode();
         this._runtime = new YjsRuntime(options.wsUrl, (docId, { offline }) => {
             this._onYjsDocUpdated(docId, offline);
         }, {
@@ -973,6 +1001,12 @@ export class FileRegistry extends EventEmitter {
             onRoomRotated: (docId, newRoomId) => {
                 this._handleRoomRotated(docId, newRoomId);
             },
+            onMissedRotation: (docId, oldRoomId, newRoomId) => {
+                // Surface to app code so it can warn the user that local
+                // edits queued under the old room have been dropped.
+                this.emit('missed-rotation', { fileId: docId, oldRoomId, newRoomId });
+            },
+            offlineMode: this._offlineMode,
         });
         this._blobCache = new BlobCache();
         this._coordinator = null;
@@ -1057,7 +1091,9 @@ export class FileRegistry extends EventEmitter {
             onFolderUpdate: (folder) => this._upsertFolder(folder),
         });
 
-        // Yjs sync coordinator (handles Yjs offline edits and touch queue)
+        // Yjs sync coordinator (handles Yjs offline edits and touch queue).
+        // Only started when offline mode is enabled; background Yjs sync serves
+        // no purpose without IndexedDB persistence.
         this._coordinator = new YjsSyncCoordinator({
             username: this._username,
             pendingStore: this._sharedStore,
@@ -1068,7 +1104,12 @@ export class FileRegistry extends EventEmitter {
         this._coordinator.onError = (scope, err) => {
             console.warn(`[YjsSyncCoordinator:${scope}]`, err?.message ?? err);
         };
-        this._coordinator.start();
+        if (this._offlineMode) {
+            this._coordinator.start();
+        } else {
+            // Clean up any Yjs IndexedDB databases left from a previous offline-mode session.
+            clearYjsPersistenceData().catch(() => {});
+        }
 
         // Network + background sync
         this._setupNetworkListeners();
@@ -1218,12 +1259,13 @@ export class FileRegistry extends EventEmitter {
      * @param {string} fileId
      * @param {string} [description]
      * @param {string|null} [appType]  'sheets' | 'docs' | 'svg'
+     * @param {number|null} [schemaVersion] integer schema version the doc was written under
      * @returns {Promise<{ id: string }>}
      */
-    async createSnapshot(fileId, description, appType) {
+    async createSnapshot(fileId, description, appType, schemaVersion = null) {
         const file = this._files.get(fileId);
         if (!file?.roomId) throw new Error('No active room for file');
-        return this._yjsApi.createSnapshot(file.roomId, description, appType ?? null);
+        return this._yjsApi.createSnapshot(file.roomId, description, appType ?? null, schemaVersion ?? null);
     }
 
     /**
@@ -1304,6 +1346,52 @@ export class FileRegistry extends EventEmitter {
         this._folders.clear();
         this._recents = [];
         this._initPromise = null;
+    }
+
+    // -------------------------------------------------------
+    // Internal: post-initialize sanity check
+    // -------------------------------------------------------
+
+    /**
+     * Verifies that a freshly-initialized Yjs doc has at least some persisted
+     * content. Without this, an initializer that throws or silently writes
+     * nothing would leave a phantom file that fails to load on next open.
+     * Throws on failure; callers decide whether to roll back the file row.
+     * @param {string} fileId
+     */
+    async _assertInitializerWroteContent(fileId) {
+        const ydoc = this._runtime.get(fileId);
+        if (!ydoc) throw new Error('Document not loaded after initialize');
+        // A Y.Doc has no client entries until something is written.
+        if (ydoc.store.clients.size === 0) {
+            throw new Error('Initializer wrote no content');
+        }
+    }
+
+    /**
+     * Roll back an offline-only file create: remove the queued mutation, the
+     * in-memory descriptor, and the persisted IDB row. Used by
+     * createAndInitializeFile when the initializer fails offline.
+     * @param {string} fileId
+     */
+    async _rollbackOfflineCreate(fileId) {
+        this._files.delete(fileId);
+        this._runtime.unload(fileId);
+
+        // Drop the queued create_file so we don't sync a phantom file later.
+        try {
+            const muts = (await this._sharedStore?.getAllMutations?.()) ?? [];
+            for (const m of muts) {
+                if (m.type === 'create_file' && m.payload?.id === fileId) {
+                    await this._sharedStore.removeMutation(m.id);
+                }
+            }
+        } catch { /* best effort */ }
+
+        try { await this._sharedStore?.removeDriveFile?.(fileId); } catch { /* ignore */ }
+
+        this._broadcastDriveFile({ id: fileId, deleted: true });
+        this.emit('change');
     }
 
     // -------------------------------------------------------

@@ -14,6 +14,7 @@ import { extractCellRefs, extractTableDeps } from './parser.js';
 import { evaluate, cachedParseFormula } from './evaluator.js';
 import { DependencyGraph, cellKey, parseCellKey } from './dependency-graph.js';
 import { FormulaError, isError } from './functions.js';
+import { log } from '../util/log.js';
 
 // Re-export so callers don't need a separate import for the new CIRC error.
 export { FormulaError };
@@ -238,6 +239,10 @@ export class FormulaEngine {
      * Batched cell-value-changed notification. Marks the dependents of every
      * cell in `cells` dirty, then runs a single recalc.
      *
+     * Also marks the spill-anchor dirty when a cell happens to lie inside an
+     * existing spill area — typing into someone else's spill must trigger
+     * re-evaluation so the anchor surfaces #SPILL!.
+     *
      * Use this when many cells change simultaneously (e.g. table row data
      * updates) — avoids the per-cell `recalculateDirty()` of cellValueChanged().
      *
@@ -247,6 +252,14 @@ export class FormulaEngine {
     notifyCellsChanged(cells) {
         let any = false;
         for (const { row, col } of cells) {
+            const k = cellKey(row, col);
+            // Spill-anchor re-eval: if (row,col) is in someone else's spill,
+            // mark that anchor dirty so it re-runs (and emits #SPILL!).
+            const anchorKey = this.#spillSources.get(k);
+            if (anchorKey) {
+                this.#graph.dirtyCells.add(anchorKey);
+                any = true;
+            }
             if (this.#graph.hasFormula(row, col)) continue;
             const dirty = this.#graph.cellChanged(row, col);
             if (dirty.size > 0) any = true;
@@ -276,10 +289,39 @@ export class FormulaEngine {
     // =========================================================================
 
     /**
+     * Is a would-be spill target cell occupied by something the spill must
+     * not overwrite? Matches Excel semantics — any non-null value, any other
+     * formula anchor, or any other formula's spill counts as a collision.
+     * The anchor cell itself does not count.
+     * @param {number} row
+     * @param {number} col
+     * @param {string} anchorKey
+     * @returns {boolean}
+     */
+    #isSpillTargetOccupied(row, col, anchorKey) {
+        const k = cellKey(row, col);
+        if (k === anchorKey) return false; // the anchor itself
+        // Another formula anchor lives here
+        if (this.#graph.hasFormula(row, col)) return true;
+        // A different formula's spill cell lives here
+        const src = this.#spillSources.get(k);
+        if (src && src !== anchorKey) return true;
+        // Raw user-typed value
+        const raw = this.#getCellValue?.(row, col);
+        if (raw !== null && raw !== undefined) return true;
+        return false;
+    }
+
+    /**
      * Store a formula result, handling array/spill output.
      * If result is a 2D (or 1D) array the values are distributed into
      * neighbouring cells (spill range) and stored in computedValues.
      * The anchor cell always gets the top-left scalar value.
+     *
+     * Collision detection: if any cell in the would-be spill area is already
+     * occupied (raw value, other formula anchor, or another formula's spill),
+     * the anchor gets #SPILL! instead and no spill cells are written. This
+     * matches Excel — silent overwrite would hide the user's data.
      *
      * When spill cell values change, dependent formula cells are marked dirty
      * so that formulas referencing spill cells (e.g. concat formulas next to
@@ -320,6 +362,20 @@ export class FormulaEngine {
                 this.#graph.markDependentsDirty(anchorKey);
             }
             return null;
+        }
+
+        // Collision check: scan the would-be spill area for occupied cells.
+        // If any are occupied, emit #SPILL! at the anchor and write nothing else.
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                if (r === 0 && c === 0) continue;
+                if (this.#isSpillTargetOccupied(row + r, col + c, anchorKey)) {
+                    const oldAnchor = this.computedValues[anchorKey];
+                    this.computedValues[anchorKey] = FormulaError.SPILL;
+                    if (oldAnchor !== FormulaError.SPILL) this.#graph.markDependentsDirty(anchorKey);
+                    return FormulaError.SPILL;
+                }
+            }
         }
 
         // Record the spill range for cleanup later
@@ -421,6 +477,27 @@ export class FormulaEngine {
     }
 
     /**
+     * Evaluate an arbitrary formula string in this engine's context.
+     * Uses the engine's cell resolver, custom functions (TABLE_*, IMPORTRANGE),
+     * and cross-sheet getter so the result matches what the same formula would
+     * compute if it lived in a grid cell. Used by TableStore to evaluate table
+     * cells that contain "=..." formulas with full sheet-formula power.
+     *
+     * @param {string} formula  - Including or excluding leading '='
+     * @param {Object} [context] - Evaluation context
+     * @returns {any}
+     */
+    evaluateString(formula, context = {}) {
+        try {
+            const ast = cachedParseFormula(formula);
+            if (!ast) return null;
+            return evaluate(ast, this.#cellResolver, context, this.#customFunctions, this.#getCrossSheetValue);
+        } catch {
+            return FormulaError.ERROR;
+        }
+    }
+
+    /**
      * Process a cell formula
      * Parses the formula, updates dependency graph, and computes the value
      * @param {number} row
@@ -460,7 +537,7 @@ export class FormulaEngine {
 
             return { value, error: isError(value) ? value : null, refs };
         } catch (err) {
-            console.error(`Error parsing formula at ${key}:`, err);
+            log.debug(`[FormulaEngine] parse failed at ${key}:`, err);
             this.#updateCrossSheetDeps(key, null);
             this.#updateTableDeps(key, null);
             this.#graph.setFormula(row, col, null, null, []);
@@ -490,7 +567,7 @@ export class FormulaEngine {
             this.#graph.setFormula(row, col, formula, ast, refs);
             this.#graph.dirtyCells.add(key);
         } catch (err) {
-            console.error(`Error registering formula at ${key}:`, err);
+            log.debug(`[FormulaEngine] register failed at ${key}:`, err);
             this.#graph.setFormula(row, col, null, null, []);
             this.computedValues[key] = FormulaError.ERROR;
         }
@@ -578,16 +655,23 @@ export class FormulaEngine {
     cellValueChanged(row, col) {
         const key = cellKey(row, col);
 
+        // If a different anchor's spill lives here, mark that anchor dirty
+        // so it re-runs and emits #SPILL! against the new user data.
+        const anchorKey = this.#spillSources.get(key);
+        if (anchorKey) {
+            this.#graph.dirtyCells.add(anchorKey);
+        }
+
         // If this cell has a formula, its value was computed, not changed
         // The formula should have been set via setFormula
         if (this.#graph.hasFormula(row, col)) {
-            return [];
+            return anchorKey ? this.recalculateDirty() : [];
         }
 
         // Mark dependents as dirty
         const dirtyCells = this.#graph.cellChanged(row, col);
 
-        if (dirtyCells.size === 0) {
+        if (dirtyCells.size === 0 && !anchorKey) {
             return [];
         }
 
@@ -612,7 +696,8 @@ export class FormulaEngine {
             // dirty during evaluation. Clear dirty BEFORE evaluating so those newly
             // dirtied cells are picked up in the next iteration rather than lost.
             let iterations = 0;
-            while (this.#graph.dirtyCells.size > 0 && iterations < 100) {
+            const MAX_ITERATIONS = 100;
+            while (this.#graph.dirtyCells.size > 0 && iterations < MAX_ITERATIONS) {
                 iterations++;
                 const dirtyCells = this.#graph.getDirtyCellsOrdered();
                 this.#graph.clearDirty(); // Clear before eval so new dirty cells accumulate
@@ -635,6 +720,15 @@ export class FormulaEngine {
 
                     allUpdated.push({ row, col, value });
                 }
+            }
+            if (iterations >= MAX_ITERATIONS && this.#graph.dirtyCells.size > 0) {
+                // Defensive: a cascade that never settles probably hides a real
+                // bug (e.g. a spill that constantly invalidates itself). Surface
+                // it so it's investigatable rather than silently truncated.
+                log.warn(
+                    `[FormulaEngine] recalculateDirty hit iteration cap (${MAX_ITERATIONS}); ` +
+                    `${this.#graph.dirtyCells.size} cells still dirty.`
+                );
             }
         } finally {
             this.#isRecalculating = false;

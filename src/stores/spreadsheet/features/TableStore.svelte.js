@@ -71,6 +71,7 @@ import * as Y from "yjs";
 import { TableFormulaEvaluator, matchCondition } from './tableFormulaEval.js';
 import { cmpValues, initPos, computeInsertPos } from './tableRowHelpers.js';
 import { YJS_ORIGIN } from '../yjsOrigins.js';
+import { CellTypeRegistry, colParseConfig } from '../cellTypes/index.js';
 
 /**
  * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
@@ -93,7 +94,6 @@ export const COLUMN_TYPE_ICONS = {
     date: 'D',
     checkbox: '✓',
     rating: '★',
-    url: '↗',
     dropdown: '▾',
 };
 
@@ -246,11 +246,24 @@ export class TableStore {
         const plainRows = result.map(r => ({ ...r }));
         this.#eval = new TableFormulaEvaluator(plainRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
 
-        // Views delegate getFullValue/getFullRowCount to the source store — no #allRowsEval needed.
-        if (!this.#sourceStore && (rebuildAllRowsEval || !this.#allRowsEval)) {
-            const plainAllRows = this.rows.map(r => ({ ...r }));
-            this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+        // #allRowsEval is lazily built on the first getFullValue() call so
+        // tables that no sheet/cross-table formula references never pay for
+        // its O(rows × cols) construction. We invalidate it on every rebuild;
+        // views don't have their own (they delegate to the source store).
+        if (!this.#sourceStore && rebuildAllRowsEval) {
+            this.#allRowsEval = null;
         }
+    }
+
+    /**
+     * Lazily construct the unfiltered formula evaluator for getFullValue() etc.
+     * Source-only — views delegate.
+     */
+    #ensureAllRowsEval() {
+        if (this.#sourceStore || this.#allRowsEval) return;
+        const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
+        const plainAllRows = this.rows.map(r => ({ ...r }));
+        this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
     }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
@@ -267,6 +280,15 @@ export class TableStore {
 
     /** @type {((name: string) => import('./TableStore.svelte.js').TableStore|null)|null} */
     #tableResolver = null;
+
+    /**
+     * Optional callback invoked by rename() inside the same Yjs transaction
+     * as the name write, so callers can atomically rewrite all formulas that
+     * reference the old name. DocumentTableRegistry wires this on every store.
+     * Signature: (oldName: string, newName: string) => void
+     * @type {((oldName: string, newName: string) => void) | null}
+     */
+    #renameRewriter = null;
 
     // ── Formula evaluators (recreated on every #rebuildView) ─────────────────
     /** @type {TableFormulaEvaluator|null} Evaluator for sortedFilteredRows (display API). */
@@ -1121,13 +1143,26 @@ export class TableStore {
     }
 
     /**
-     * Rename the table itself.
+     * Rename the table itself. If a rename rewriter has been installed
+     * (DocumentTableRegistry does this), all formulas referencing the old name
+     * are rewritten inside the same Yjs transaction so the change is atomic.
      * @param {string} newName
      */
     rename(newName) {
+        const oldName = this.name;
+        if (oldName === newName) return;
         this.#transact(() => {
             this.#tableYMap.set("name", newName);
+            if (oldName) this.#renameRewriter?.(oldName, newName);
         });
+    }
+
+    /**
+     * Install a rename-rewriter callback. See #renameRewriter docstring.
+     * @param {((oldName: string, newName: string) => void) | null} fn
+     */
+    setRenameRewriter(fn) {
+        this.#renameRewriter = fn;
     }
 
     // ─── Sort / filter ────────────────────────────────────────────────────────
@@ -1349,7 +1384,7 @@ export class TableStore {
                     if (!colDef) continue;
                     const raw = String(srcRow[i] ?? '').trim();
                     if (!raw) continue;
-                    yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                    yRow.set(colDef.id, this.#parseValueForType(raw, colDef));
                 }
                 // First pasted row gets the highest _pos (top of pasted group).
                 yRow.set('_pos', basePos + (n - ri) * 1000);
@@ -1363,26 +1398,15 @@ export class TableStore {
 
     /**
      * Parse a raw string to a typed value suitable for storing in this column.
+     * Delegates to CellTypeRegistry with the column's full type config so CSV /
+     * paste import parses identically to interactive typing (respects subFormat,
+     * dropdown options, date sub-formats, etc.).
      * @param {string} raw
-     * @param {string} type
+     * @param {{ type?: string, typeConfig?: object|null }} colDef
      * @returns {any}
      */
-    #parseValueForType(raw, type) {
-        switch (type) {
-            case 'number':
-            case 'currency': {
-                const n = parseFloat(raw.replace(/[$,\s]/g, ''));
-                return isNaN(n) ? raw : n;
-            }
-            case 'checkbox':
-                return ['true', 'yes', '1', 'x', '✓', 'on'].includes(raw.toLowerCase());
-            case 'date': {
-                const d = new Date(raw);
-                return isNaN(d.getTime()) ? raw : d.toISOString().split('T')[0];
-            }
-            default:
-                return raw;
-        }
+    #parseValueForType(raw, colDef) {
+        return CellTypeRegistry.parseInput(colParseConfig(colDef), raw);
     }
 
     /**
@@ -1449,7 +1473,7 @@ export class TableStore {
                         if (!colDef) continue;
                         const raw = String(t.srcRow[j] ?? '').trim();
                         if (!raw) continue;
-                        yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                        yRow.set(colDef.id, this.#parseValueForType(raw, colDef));
                     }
                     rowArr.push([yRow]);
                 } else if (t.yRow) {
@@ -1458,7 +1482,7 @@ export class TableStore {
                         if (!colDef || colDef.isNonEntry) continue;
                         const raw = String(t.srcRow[j] ?? '').trim();
                         if (!raw) continue;
-                        t.yRow.set(colDef.id, this.#parseValueForType(raw, colDef.type));
+                        t.yRow.set(colDef.id, this.#parseValueForType(raw, colDef));
                     }
                 }
             }
@@ -1514,6 +1538,7 @@ export class TableStore {
 
     getFullValue(rawIndex, colId) {
         if (this.#sourceStore) return this.#sourceStore.getFullValue(rawIndex, colId);
+        this.#ensureAllRowsEval();
         const raw = this.#allRowsEval
             ? this.#allRowsEval.getValue(rawIndex, colId)
             : this.rows[rawIndex]?.[colId];
@@ -1531,6 +1556,7 @@ export class TableStore {
 
     getFullColumn(colId) {
         if (this.#sourceStore) return this.#sourceStore.getFullColumn(colId);
+        this.#ensureAllRowsEval();
         return this.rows.map((_, i) => this.getFullValue(i, colId));
     }
 

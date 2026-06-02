@@ -18,6 +18,7 @@ import {
 import { editSessionState } from './index.js';
 import { CELL_TYPE } from './features/SheetRenderContext.svelte.js';
 import { YJS_ORIGIN } from './yjsOrigins.js';
+import { bordersStylesEqual, normalizeBorderStyle } from './rendering/BorderGeometry.js';
 
 // ── Formatting property keys ──────────────────────────────────────────────────
 
@@ -221,6 +222,56 @@ export function computeBorderSelectionRange() {
     return { startRow, endRow, startCol, endCol };
 }
 
+// ── Border selection summary ─────────────────────────────────────────────────
+
+/**
+ * Summarize the borders currently set on the selection so the BorderPicker
+ * can reflect "current state" when opened.
+ *
+ * Walks every edge inside (and on the boundary of) the effective border
+ * selection range. If every set border has the same { style, width, color },
+ * returns that. If any borders are set but differ, returns { mixed: true }.
+ * Returns null when no borders are set in the selection.
+ *
+ * @returns {{ style: string, width: number, color: string } | { mixed: true } | null}
+ */
+export function computeBordersSummary() {
+    const range = computeBorderSelectionRange();
+    if (!range) return null;
+    const sheetStore = spreadsheetSession.activeSheetStore;
+    if (!sheetStore) return null;
+
+    const { startRow, endRow, startCol, endCol } = range;
+    let first = null;
+    let mixed = false;
+    let anySet = false;
+
+    const visit = (edge) => {
+        if (!edge) return;
+        anySet = true;
+        const norm = normalizeBorderStyle(edge);
+        if (!first) { first = norm; return; }
+        if (!bordersStylesEqual(first, norm)) mixed = true;
+    };
+
+    for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+            const b = sheetStore.getCellBorders(r, c);
+            // Only count edges that lie inside or on the perimeter of the range.
+            visit(b.top);
+            visit(b.bottom);
+            visit(b.left);
+            visit(b.right);
+            if (mixed) break;
+        }
+        if (mixed) break;
+    }
+
+    if (!anySet) return null;
+    if (mixed) return { mixed: true };
+    return first;
+}
+
 // ── applyFormatting ──────────────────────────────────────────────────────────
 
 const _TFR_PROP_MAP = {
@@ -356,7 +407,134 @@ export function handleBorderChange(borderInstructions) {
         sheetStore.clearBordersInRange(startRow, endRow, startCol, endCol);
         return;
     }
-    sheetStore.applyBorders(borderInstructions);
+    // Expand any instruction touching a merge so every exterior segment of the
+    // merge gets the same style — this keeps merged cells visually uniform and
+    // lets the renderer's "first non-null wins" merge scan stay safe.
+    const expanded = expandInstructionsForMerges(borderInstructions, sheetStore);
+    sheetStore.applyBorders(expanded);
+}
+
+/**
+ * For each border instruction targeting an edge that lies on a merge's
+ * exterior, emit additional instructions covering every column (for h-edges)
+ * or row (for v-edges) of that exterior so the merge gets a uniform border
+ * on that side. Interior edges of a merge are skipped (they're invisible
+ * anyway).
+ *
+ * @param {Array<{edgeKey: string, style: any}>} instructions
+ * @param {any} sheetStore
+ * @returns {Array<{edgeKey: string, style: any}>}
+ */
+function expandInstructionsForMerges(instructions, sheetStore) {
+    const mergeEngine = sheetStore.mergeEngine;
+    if (!mergeEngine || mergeEngine.merges.length === 0) return instructions;
+
+    const seen = new Set();
+    const out = [];
+    const pushUnique = (edgeKey, style) => {
+        if (seen.has(edgeKey)) return;
+        seen.add(edgeKey);
+        out.push({ edgeKey, style });
+    };
+
+    for (const inst of instructions) {
+        if (!inst || !inst.edgeKey) { out.push(inst); continue; }
+        const parts = inst.edgeKey.split(',');
+        if (parts.length !== 3) { pushUnique(inst.edgeKey, inst.style); continue; }
+        const type = parts[0];
+        const r = Number(parts[1]);
+        const c = Number(parts[2]);
+
+        // h,r,c is the edge between row r and row r+1 in column c. It lies on
+        // a merge's exterior iff the merge's top edge is at row r+1 OR its
+        // bottom edge is at row r, AND the column c is inside the merge.
+        // v,r,c is between col c and col c+1 in row r — left exterior at c+1,
+        // right exterior at c, with r inside the merge.
+        let expandedAny = false;
+        for (const m of mergeEngine.merges) {
+            if (type === 'h') {
+                if (c < m.startCol || c > m.endCol) continue;
+                if (r + 1 === m.startRow || r === m.endRow) {
+                    // Replicate across every column of the merge's top/bottom run.
+                    for (let cc = m.startCol; cc <= m.endCol; cc++) {
+                        pushUnique(`h,${r},${cc}`, inst.style);
+                    }
+                    expandedAny = true;
+                }
+            } else if (type === 'v') {
+                if (r < m.startRow || r > m.endRow) continue;
+                if (c + 1 === m.startCol || c === m.endCol) {
+                    for (let rr = m.startRow; rr <= m.endRow; rr++) {
+                        pushUnique(`v,${rr},${c}`, inst.style);
+                    }
+                    expandedAny = true;
+                }
+            }
+        }
+        if (!expandedAny) pushUnique(inst.edgeKey, inst.style);
+    }
+    return out;
+}
+
+// ── Number format toolbar helpers ─────────────────────────────────────────────
+
+/**
+ * Read the cell-type config that the number-format toolbar buttons should
+ * build upon. Prefers the table-column config when the anchor is a table
+ * header; otherwise the anchor cell's effective config. Returns null when there
+ * is no usable context.
+ * @returns {{ type: string, [key: string]: any } | null}
+ */
+function _anchorTypeConfig() {
+    const tcc = getTableColContext();
+    if (tcc) return tcc.colDef.typeConfig ?? (tcc.colDef.type ? { type: tcc.colDef.type } : null);
+    const anchor = selectionState.anchor;
+    const sheetStore = spreadsheetSession.activeSheetStore;
+    if (!anchor || !sheetStore) return null;
+    return sheetStore.getCellTypeConfig(anchor.row, anchor.col) ?? null;
+}
+
+/**
+ * Apply a number sub-format ($/%) without discarding the user's other number
+ * options. If the anchor is already a number cell, only `subFormat` changes and
+ * existing decimals/symbol/etc. are preserved. If the cell is already in the
+ * requested sub-format, it toggles back to a plain 'default' number (Sheets
+ * behaviour). For non-number cells, `presetDefaults` seed a fresh config.
+ *
+ * @param {'currency'|'percent'} subFormat
+ * @param {Object} presetDefaults  e.g. { decimals: 2, symbol: '$' }
+ */
+export function applyNumberSubFormat(subFormat, presetDefaults = {}) {
+    const current = _anchorTypeConfig();
+    const isNumber = current?.type === 'number';
+
+    if (isNumber && current.subFormat === subFormat) {
+        // Toggle the sub-format off → plain number, keeping the rest.
+        const { symbol: _s, symbolAfter: _sa, ...rest } = current;
+        handleCellTypeChange({ ...rest, type: 'number', subFormat: 'default' });
+        return;
+    }
+
+    const base = isNumber ? current : { type: 'number', ...presetDefaults };
+    handleCellTypeChange({ ...base, type: 'number', subFormat });
+}
+
+/**
+ * Increase/decrease the decimal places of the anchor's number config without
+ * altering its other options. A non-number cell is promoted to a plain number
+ * with the adjusted decimal count.
+ * @param {number} delta  +1 or -1
+ */
+export function adjustDecimals(delta) {
+    const current = _anchorTypeConfig();
+    const isNumber = current?.type === 'number';
+    const base = isNumber ? current : { type: 'number' };
+    const currentDecimals = base.decimals ?? 2;
+    handleCellTypeChange({
+        ...base,
+        type: 'number',
+        decimals: Math.max(0, Math.min(10, currentDecimals + delta)),
+    });
 }
 
 // ── handleCellTypeChange ──────────────────────────────────────────────────────

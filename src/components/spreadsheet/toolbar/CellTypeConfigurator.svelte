@@ -63,7 +63,9 @@
     }
 
     function setType(type) {
-        if (!selection || !sheetStore) return;
+        // In controlled mode (e.g. table column panel) there is no grid selection;
+        // applyToSelection routes through onControlledChange instead.
+        if (!onControlledChange && (!selection || !sheetStore)) return;
         const newOptions = getDefaultOptionsForType(type);
         const config = { type, ...newOptions };
         currentType = type;

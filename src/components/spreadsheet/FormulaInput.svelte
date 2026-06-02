@@ -34,10 +34,45 @@
         onBlur    = null,
         scrollable = true,
         inputClass = '',
+        // Desired caret position to apply when `caretSync` bumps (e.g. after a
+        // formula ref is inserted by clicking the grid). Left untouched on normal
+        // typing so the user's caret is never hijacked.
+        selStart  = null,
+        selEnd    = null,
+        caretSync = 0,
     } = $props();
 
     let inputEl      = $state(null);
     let overlayEl    = $state(null);
+
+    // Apply a programmatic caret move exactly once per `caretSync` change. The
+    // controlled `value` resets the DOM caret to the end, so after a ref insert
+    // we must restore the intended position; reading caretSync keeps this from
+    // re-running on every keystroke. Seeded from the initial prop so mounting
+    // (e.g. a surface switch) doesn't yank the caret to the end of the text.
+    let _lastCaretSync = caretSync;
+    $effect(() => {
+        const sync = caretSync;
+        if (sync === _lastCaretSync) return;
+        _lastCaretSync = sync;
+        if (!inputEl || selStart == null) return;
+        const s = selStart;
+        const e = selEnd ?? selStart;
+        // Defer past the value-driven DOM update, then focus + set the caret in one
+        // step. Doing the focus here makes the result independent of any external
+        // requestFocus() timing (the in-cell editor focuses via a nested timeout,
+        // which would otherwise fire after this and reset the caret to the end).
+        // Use a double rAF-equivalent (two timeouts) so we win that ordering.
+        setTimeout(() => {
+            if (!inputEl) return;
+            try { inputEl.focus({ preventScroll: true }); } catch { inputEl.focus(); }
+            try { inputEl.setSelectionRange(s, e); } catch { /* not focusable yet */ }
+            setTimeout(() => {
+                if (!inputEl || document.activeElement !== inputEl) return;
+                try { inputEl.setSelectionRange(s, e); } catch { /* ignore */ }
+            }, 0);
+        }, 0);
+    });
 
     const isFormula   = $derived(typeof value === 'string' && value.startsWith('='));
     const segments    = $derived(isFormula ? segmentFormula(value) : []);
