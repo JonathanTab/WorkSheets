@@ -394,7 +394,7 @@
         <ColorPicker
             label="Background Color"
             variant="fill"
-            value={selectedFormatting?.backgroundColor || "#ffffff"}
+            value={selectedFormatting?.backgroundColor ?? null}
             onchange={(color) => applyFormatting('backgroundColor', color)}
         />
     </div>

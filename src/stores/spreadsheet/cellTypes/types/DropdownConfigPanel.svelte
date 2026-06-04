@@ -146,18 +146,6 @@
             onchange={(e) => onUpdate({ type: 'dropdown', ...options, allowCustom: /** @type {HTMLInputElement} */(e.target).checked })}
         />
     </div>
-
-    <div class="option-row">
-        <label>Validation</label>
-        <select
-            value={options.validation ?? 'none'}
-            onchange={(e) => onUpdate({ type: 'dropdown', ...options, validation: /** @type {HTMLSelectElement} */(e.target).value })}
-        >
-            <option value="none">None</option>
-            <option value="soft">Warn</option>
-            <option value="hard">Reject</option>
-        </select>
-    </div>
 </div>
 
 <style>

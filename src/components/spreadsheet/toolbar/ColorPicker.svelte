@@ -43,7 +43,17 @@
         try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch {}
     }
 
-    function toggle() { open = !open; }
+    // When the picker opens, surface the current value in recents if it's a
+    // custom color (not in the fixed palette) so it doesn't get lost.
+    const PALETTE_FLAT = PALETTE.flat().map(c => c.toLowerCase());
+
+    function toggle() {
+        if (!open && value && value !== 'mixed') {
+            const norm = value.toLowerCase();
+            if (!PALETTE_FLAT.includes(norm)) addToRecents(value);
+        }
+        open = !open;
+    }
 
     function close({ restoreFocus = false } = {}) {
         open = false;

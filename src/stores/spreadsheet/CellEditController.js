@@ -31,6 +31,10 @@ export function commitCellEdit(sheetId, row, col, value, tfr = null) {
             if (info?.table && info.colDef && !info.colDef.isNonEntry && info.dataIndex >= 0) {
                 const parsed = CellTypeRegistry.parseInput(colParseConfig(info.colDef), plainValue);
                 info.table.updateCell(info.dataIndex, info.colDef.id, parsed);
+                spreadsheetSession.formulaEngine?.cellValueChanged(row, col);
+                spreadsheetSession.formulaEngine?.recalculateDirty();
+                spreadsheetSession.requestGridRepaint?.();
+                return { tableInfo: info, row, col };
             }
             return;
         }

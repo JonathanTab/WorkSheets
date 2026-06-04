@@ -21,7 +21,14 @@ export const dropdownType = {
 
     parseInput(inputString, config) {
         if (inputString === '' || inputString === null) return null;
-        if (config?.allowCustom === false && Array.isArray(config?.options)) {
+        // Only the static "list" source carries its valid values in config.options.
+        // For range/table sources the options are resolved dynamically (at the grid
+        // layer) and aren't available here, so we can't validate against them —
+        // accept the value as-is. Guarding on a non-empty options array also avoids
+        // rejecting every value when source!=='list' leaves options as [].
+        const isListSource = !config?.source || config.source === 'list';
+        if (config?.allowCustom === false && isListSource &&
+            Array.isArray(config?.options) && config.options.length > 0) {
             const match = config.options.find(
                 o => String(o).toLowerCase() === String(inputString).toLowerCase()
             );

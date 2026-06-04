@@ -239,12 +239,18 @@ export class TableStore {
         // contribute first. Canonical order is always newest-first, so this never changes.
         const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
 
-        // Snapshot Svelte proxy rows to plain objects before handing to the formula
-        // evaluator. Without this, every this.#rows[i][colId] access inside
-        // #buildComputedCache fires the Svelte proxy get handler, adding ~60ms of
-        // overhead per evaluation on tables with formula columns.
-        const plainRows = result.map(r => ({ ...r }));
-        this.#eval = new TableFormulaEvaluator(plainRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+        // Build the formula evaluator from ALL rows in canonical _pos-desc order so
+        // that computed formulas (RUNNINGIF, SUM, CUMSUM, etc.) are never affected by
+        // display filters — filters are a display-only concept.
+        const allSorted = [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0));
+        const plainAllSorted = allSorted.map(r => ({ ...r }));
+        this.#eval = new TableFormulaEvaluator(plainAllSorted, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+
+        // Build display→full index map so getValue(displayIndex) can translate to
+        // the correct index in the all-rows evaluator. Uses object identity since
+        // allSorted and result both hold references to the same this.rows objects.
+        const refToFullIndex = new Map(allSorted.map((r, i) => [r, i]));
+        this.#displayToFullIndex = result.map(r => refToFullIndex.get(r) ?? -1);
 
         // #allRowsEval is lazily built on the first getFullValue() call so
         // tables that no sheet/cross-table formula references never pay for
@@ -291,8 +297,10 @@ export class TableStore {
     #renameRewriter = null;
 
     // ── Formula evaluators (recreated on every #rebuildView) ─────────────────
-    /** @type {TableFormulaEvaluator|null} Evaluator for sortedFilteredRows (display API). */
+    /** @type {TableFormulaEvaluator|null} Evaluator built from all rows in _pos-desc order (display API). */
     #eval = null;
+    /** @type {number[]} Maps displayIndex → index in #eval's row array (all rows, _pos-desc). */
+    #displayToFullIndex = [];
     /** @type {TableFormulaEvaluator|null} Evaluator for all rows (sheet formula API). */
     #allRowsEval = null;
 
@@ -1496,12 +1504,13 @@ export class TableStore {
     }
 
     getValue(displayIndex, colId) {
+        const fullIndex = this.#displayToFullIndex[displayIndex] ?? displayIndex;
         const raw = this.#eval
-            ? this.#eval.getValue(displayIndex, colId)
+            ? this.#eval.getValue(fullIndex, colId)
             : this.sortedFilteredRows[displayIndex]?.[colId];
         if (typeof raw === 'string' && raw.startsWith('=')) {
             if (this.#isTableDslFormula(raw) && this.#eval) {
-                const result = this.#eval.evaluateFormula(raw, displayIndex);
+                const result = this.#eval.evaluateFormula(raw, fullIndex);
                 return result ?? raw;
             }
             if (this.#sheetFormulaEval) {
@@ -1561,11 +1570,15 @@ export class TableStore {
     }
 
     getCumulativeSum(colId, upToDisplayIndex) {
-        return this.#eval ? this.#eval.getCumulativeSum(colId, upToDisplayIndex) : 0;
+        if (!this.#eval) return 0;
+        const fullIndex = this.#displayToFullIndex[upToDisplayIndex] ?? upToDisplayIndex;
+        return this.#eval.getCumulativeSum(colId, fullIndex);
     }
 
     evaluateFormula(formula, rowIndex) {
-        return this.#eval ? this.#eval.evaluateFormula(formula, rowIndex) : null;
+        if (!this.#eval) return null;
+        const fullIndex = this.#displayToFullIndex[rowIndex] ?? rowIndex;
+        return this.#eval.evaluateFormula(formula, fullIndex);
     }
 
     /**

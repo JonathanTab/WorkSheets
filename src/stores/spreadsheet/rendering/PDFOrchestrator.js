@@ -88,7 +88,10 @@ export async function orchestratePDF(params, pageRenderer) {
     }
 
     // ── Create PDF (always start with one page) ─────────────────────────────────
-    const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH] });
+    // compress: true wraps content streams in Flate (zlib) — vector text/shapes
+    // shrink dramatically with no visual change. Images are compressed separately
+    // by the renderer (see VectorPrintEngine image embedding).
+    const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH], compress: true });
 
     // Empty sheet — emit a single blank page so downstream callers always get
     // a valid PDF. Without this guard, computePageBreaks would produce

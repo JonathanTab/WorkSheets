@@ -30,16 +30,19 @@
         { id: 3,   label: "3" },
     ];
 
-    // Border position definitions (9-button grid, no "none")
+    // Border position definitions — 3×3 grid arranged to mirror the cell visually.
+    // Row 1: scope presets (all, outside box, inner lines)
+    // Row 2: top/bottom edges + horizontal inner lines (all "horizontal" in nature)
+    // Row 3: left/right edges + vertical inner lines (all "vertical" in nature)
     const borderPositions = [
         { id: "all",        label: "All",     description: "All borders" },
         { id: "outside",    label: "Outside", description: "Border around selection" },
         { id: "inside",     label: "Inside",  description: "Borders inside selection" },
         { id: "top",        label: "Top",     description: "Top border" },
         { id: "bottom",     label: "Bottom",  description: "Bottom border" },
+        { id: "horizontal", label: "Horiz",   description: "Horizontal inner borders" },
         { id: "left",       label: "Left",    description: "Left border" },
         { id: "right",      label: "Right",   description: "Right border" },
-        { id: "horizontal", label: "Horiz",   description: "Horizontal inner borders" },
         { id: "vertical",   label: "Vert",    description: "Vertical inner borders" },
     ];
 

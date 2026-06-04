@@ -2532,7 +2532,8 @@
         const editingSheetId = editSessionState.editingSheetId;
         const payload = editSessionState.commit();
         if (!payload) return;
-        commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        const result = commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        if (result?.tableInfo) checkOrderAfterUpdate(result.tableInfo, result.row);
         if (editingSheetId && editingSheetId !== spreadsheetSession.activeSheetId)
             spreadsheetSession.setActiveSheet(editingSheetId);
     }
@@ -2545,7 +2546,8 @@
         const payload = editSessionState.commit();
         if (!payload) return;
 
-        commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        const commitResult = commitCellEdit(editingSheetId, payload.row, payload.col, payload.value, payload.tfr);
+        if (commitResult?.tableInfo) checkOrderAfterUpdate(commitResult.tableInfo, commitResult.row);
 
         if (editCellType === CELL_TYPE.TABLE_ENTRY) {
             const info = renderContext?.tableManager?.getCellInfo(payload.row, payload.col);
@@ -2578,7 +2580,8 @@
                 ? value.value : value;
             const tfr = (value !== null && typeof value === 'object' && 'tfr' in value)
                 ? value.tfr : null;
-            commitCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
+            const editResult = commitCellEdit(editingSheetId, editRow, editCol, plainValue, tfr);
+            if (editResult?.tableInfo) checkOrderAfterUpdate(editResult.tableInfo, editResult.row);
             lastTableEntryEditInfo = entryInfo?.table
                 ? { row: editRow, col: editCol, table: entryInfo.table }
                 : null;

@@ -57,7 +57,7 @@
             checkbox: {},
             image:    { fit: 'contain' },
             file:     {},
-            dropdown: { source: 'list', options: [], allowCustom: false, validation: 'none' },
+            dropdown: { source: 'list', options: [], allowCustom: false },
         };
         return defaults[type] || {};
     }

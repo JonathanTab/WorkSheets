@@ -153,32 +153,40 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
         // gridline on hi-DPI displays.
         const physPx = Math.max(1, Math.round(edge.width));
         const lineWidth = physPx / dpr;
-        const half = lineWidth / 2;
         // Snap odd-physical-pixel strokes onto a half-physical-pixel position
         // so they render as a single crisp row/column instead of antialiasing
         // across two. Even widths already sit on the physical-pixel grid.
         const snap = (physPx % 2 === 1) ? 0.5 / dpr : 0;
-        // Each edge sits centred on the cell boundary (with snap), so the same
-        // horizontal edge painted from cell N (as its bottom) and from cell N+1
-        // (as its top) lands on the same physical pixels and merges into one
-        // border — no gap, no doubling. The outermost edges (first row's top,
-        // last row's bottom, etc.) overflow by half a stroke, which the pane
-        // clip in CanvasRenderer is expanded to accommodate.
-        const overlap = half;
+
+        // Each endpoint extends to meet the far edge of the PERPENDICULAR border
+        // at that corner — i.e. by the perpendicular edge's half-width, not this
+        // edge's. This fills the corner square exactly: no gap (the old butt-cap
+        // notch) and no stub (which a same-width extension leaves when this edge
+        // is thicker than the border it terminates into). Returns 0 where the
+        // perpendicular edge is absent, so a lone border keeps clean butt ends.
+        const perpHalf = (rawPerp) => {
+            const pe = normalizeBorderStyle(rawPerp);
+            if (!pe) return 0;
+            return (Math.max(1, Math.round(pe.width)) / dpr) / 2;
+        };
 
         let x1, y1, x2, y2;
         if (position === 'top') {
             const py = y + snap;
-            x1 = x - overlap; y1 = py; x2 = x + w + overlap; y2 = py;
+            x1 = x - perpHalf(borders.left);  y1 = py;
+            x2 = x + w + perpHalf(borders.right); y2 = py;
         } else if (position === 'bottom') {
             const py = y + h + snap;
-            x1 = x - overlap; y1 = py; x2 = x + w + overlap; y2 = py;
+            x1 = x - perpHalf(borders.left);  y1 = py;
+            x2 = x + w + perpHalf(borders.right); y2 = py;
         } else if (position === 'left') {
             const px = x + snap;
-            x1 = px; y1 = y - overlap; x2 = px; y2 = y + h + overlap;
+            x1 = px; y1 = y - perpHalf(borders.top);
+            x2 = px; y2 = y + h + perpHalf(borders.bottom);
         } else { // right
             const px = x + w + snap;
-            x1 = px; y1 = y - overlap; x2 = px; y2 = y + h + overlap;
+            x1 = px; y1 = y - perpHalf(borders.top);
+            x2 = px; y2 = y + h + perpHalf(borders.bottom);
         }
 
         ctx.strokeStyle = edge.color;
@@ -188,7 +196,7 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
             const gap = doubleGapCss(lineWidth);
             const halfGap = gap / 2;
             ctx.lineWidth = lineWidth;
-            ctx.lineCap = 'square';
+            ctx.lineCap = 'butt'; // endpoints already extended by overlap; butt avoids double-extension
             ctx.setLineDash([]);
             const isH = (y1 === y2);
             ctx.beginPath();
@@ -211,7 +219,7 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
             ctx.lineCap = 'round';
             ctx.setLineDash(dottedPatternCss(lineWidth));
         } else {
-            ctx.lineCap = 'square';
+            ctx.lineCap = 'butt'; // endpoints already extended by overlap; butt avoids double-extension
             ctx.setLineDash([]);
         }
 
@@ -252,7 +260,7 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
 export function paintBordersVec(pdf, borders, cx, cy, cw, ch, parseColorFn, s = 1) {
     if (!borders) return;
 
-    pdf.setLineCap(2); // projecting square — extends stroke past endpoints to fill corners
+    pdf.setLineCap(0); // butt — endpoints are explicitly extended to fill corners; a projecting cap would double-extend
 
     const edge = (rawEdge, position) => {
         const e = normalizeBorderStyle(rawEdge);
@@ -262,16 +270,27 @@ export function paintBordersVec(pdf, borders, cx, cy, cw, ch, parseColorFn, s = 
 
         const lineWidthCss = Math.max(0.5, e.width);
         const lineW = Math.max(0.05, lineWidthCss * PX_TO_MM * s);
-        const halfW = lineW / 2;
 
         // Centre the stroke on the cell boundary so adjacent cells' shared
         // edge (e.g. cell N's bottom + cell N+1's top) paints to exactly the
         // same line and merges, matching the canvas convention.
+        //
+        // Extend each endpoint to the far edge of the PERPENDICULAR border at
+        // that corner — by the perpendicular edge's half-width, not this edge's.
+        // This fills the corner exactly with no gap and no stub when the two
+        // edges differ in width. Returns 0 where the perpendicular edge is absent
+        // (lone border keeps clean butt ends). Mirrors the canvas painter.
+        const perpHalf = (rawPerp) => {
+            const pe = normalizeBorderStyle(rawPerp);
+            if (!pe) return 0;
+            return Math.max(0.05, Math.max(0.5, pe.width) * PX_TO_MM * s) / 2;
+        };
+
         let x1, y1, x2, y2;
-        if (position === 'top')         { const py = cy;            x1 = cx - halfW;      y1 = py; x2 = cx + cw + halfW; y2 = py; }
-        else if (position === 'bottom') { const py = cy + ch;       x1 = cx - halfW;      y1 = py; x2 = cx + cw + halfW; y2 = py; }
-        else if (position === 'left')   { const px = cx;            y1 = cy - halfW;      x1 = px; y2 = cy + ch + halfW; x2 = px; }
-        else                            { const px = cx + cw;       y1 = cy - halfW;      x1 = px; y2 = cy + ch + halfW; x2 = px; }
+        if (position === 'top')         { const py = cy;       x1 = cx - perpHalf(borders.left); y1 = py; x2 = cx + cw + perpHalf(borders.right); y2 = py; }
+        else if (position === 'bottom') { const py = cy + ch;  x1 = cx - perpHalf(borders.left); y1 = py; x2 = cx + cw + perpHalf(borders.right); y2 = py; }
+        else if (position === 'left')   { const px = cx;       x1 = px; y1 = cy - perpHalf(borders.top); x2 = px; y2 = cy + ch + perpHalf(borders.bottom); }
+        else                            { const px = cx + cw;  x1 = px; y1 = cy - perpHalf(borders.top); x2 = px; y2 = cy + ch + perpHalf(borders.bottom); }
 
         if (e.style === 'double') {
             const gapCss = doubleGapCss(lineWidthCss);
@@ -309,7 +328,7 @@ export function paintBordersVec(pdf, borders, cx, cy, cw, ch, parseColorFn, s = 
             pdf.setLineDashPattern([0.01 * PX_TO_MM * s, stepMm], 0);
             pdf.line(x1, y1, x2, y2);
             pdf.setLineDashPattern([], 0);
-            pdf.setLineCap(2); // restore projecting square for the next edges
+            pdf.setLineCap(0); // restore butt for subsequent edges
             return;
         }
 

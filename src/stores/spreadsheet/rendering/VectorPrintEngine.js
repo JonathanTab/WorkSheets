@@ -44,11 +44,44 @@ function pt2mm(pt, s) { return pt * s * MM_PER_INCH / PT_PER_INCH; }
 /** Thin wrapper to keep the local call sites short. */
 const parseColor = parseCssColor;
 
+// State-dedup cache for the STROKING color and line width only. jsPDF re-emits a
+// state operator on every set*() call even when unchanged, bloating the content
+// stream (and slowing viewers, which re-apply state on each repaint); skipping the
+// redundant sets is a meaningful win for the thousands of gridline/border strokes.
+//
+// IMPORTANT: this only covers stroke color + line width. The *fill* (non-stroking)
+// color is deliberately NOT cached, because jsPDF paints text glyphs with the fill
+// color — so every pdf.text() silently changes the PDF's current fill register
+// behind our back. A fill-color cache would then wrongly skip a needed
+// setFillColor and later cells would inherit the dark text color as their
+// background (green header cells rendered black). Always emitting fill is cheap
+// (≤1–2 fills per cell) and correct.
+//
+// Invalidated on every save/restoreGraphicsState (clip boundary), where the PDF
+// graphics state resets — see resetStateCache(), called by beginClip/endClip.
+let _lastDraw = null, _lastLineW = null;
+function resetStateCache() { _lastDraw = _lastLineW = null; }
+
+function setFillRgb(pdf, r, g, b) {
+    pdf.setFillColor(r, g, b);
+}
+function setDrawRgb(pdf, r, g, b) {
+    const key = (r << 16) | (g << 8) | b;
+    if (key === _lastDraw) return;
+    _lastDraw = key;
+    pdf.setDrawColor(r, g, b);
+}
+function setLineW(pdf, w) {
+    if (w === _lastLineW) return;
+    _lastLineW = w;
+    pdf.setLineWidth(w);
+}
+
 function setFill(pdf, color, fallback = [255, 255, 255]) {
     pdf.setFillColor(...parseColor(color, fallback));
 }
 function setDraw(pdf, color, fallback = [0, 0, 0]) {
-    pdf.setDrawColor(...parseColor(color, fallback));
+    setDrawRgb(pdf, ...parseColor(color, fallback));
 }
 const _defaultTextRgb = parseColor(DEFAULT_TEXT_COLOR);
 function setTextCol(pdf, color, fallback = _defaultTextRgb) {
@@ -66,6 +99,7 @@ function setTextCol(pdf, color, fallback = _defaultTextRgb) {
  */
 function beginClip(pdf, x, y, w, h) {
     pdf.saveGraphicsState();
+    resetStateCache(); // graphics state is pushed — cached color/lineW no longer valid
     pdf.rect(x, y, w, h, null); // add rect to current path without painting
     pdf.clip();                  // "W" — mark current path as clip
     pdf.discardPath();           // "n" — terminate path (required after W)
@@ -73,6 +107,7 @@ function beginClip(pdf, x, y, w, h) {
 
 function endClip(pdf) {
     pdf.restoreGraphicsState();
+    resetStateCache(); // graphics state is popped — restores prior (unknown to us) values
 }
 
 // ── Font helpers ───────────────────────────────────────────────────────────────
@@ -134,14 +169,61 @@ function blobToDataUrl(blob) {
     });
 }
 
-/** Load a data URL into an Image element and return its natural dimensions. */
-function getImgNaturalSize(dataUrl) {
+/** Load a data URL into an Image element (resolves null on error). */
+function loadImage(dataUrl) {
     return new Promise((resolve) => {
         const img = new Image();
-        img.onload  = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-        img.onerror = () => resolve({ w: 0, h: 0 });
+        img.onload  = () => resolve(img);
+        img.onerror = () => resolve(null);
         img.src = dataUrl;
     });
+}
+
+// Target resolution for embedded raster images. 150 DPI is visually crisp for
+// print/screen while keeping file size low; full-res source photos (often 300+
+// DPI at display size) are downsampled to this before embedding.
+const IMAGE_TARGET_DPI = 150;
+// Above this JPEG quality we keep the original PNG only when it has alpha.
+const JPEG_QUALITY = 0.82;
+
+/**
+ * Downscale a source image to at most (maxW × maxH) device pixels and re-encode.
+ * Photographic content → JPEG (much smaller); images with alpha → PNG to keep
+ * transparency. Returns a data URL plus the image's natural aspect dimensions.
+ *
+ * @param {HTMLImageElement} img    Loaded source image
+ * @param {number} maxW maxH        Target pixel budget (the largest the image is
+ *                                  drawn anywhere in the document, at target DPI)
+ * @param {boolean} hasAlpha        Whether the source may contain transparency
+ * @returns {{ dataUrl:string, naturalW:number, naturalH:number }}
+ */
+function encodeScaledImage(img, maxW, maxH, hasAlpha) {
+    const srcW = img.naturalWidth, srcH = img.naturalHeight;
+    if (!srcW || !srcH) return { dataUrl: img.src, naturalW: srcW, naturalH: srcH };
+
+    // Never upscale — cap the target at the source resolution.
+    const scale = Math.min(1, maxW / srcW, maxH / srcH);
+    const outW = Math.max(1, Math.round(srcW * scale));
+    const outH = Math.max(1, Math.round(srcH * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return { dataUrl: img.src, naturalW: srcW, naturalH: srcH };
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    if (!hasAlpha) {
+        // Flatten onto white so JPEG (no alpha) matches the canvas composite.
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+    }
+    ctx.drawImage(img, 0, 0, outW, outH);
+
+    const dataUrl = hasAlpha
+        ? canvas.toDataURL('image/png')
+        : canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    return { dataUrl, naturalW: srcW, naturalH: srcH };
 }
 
 /**
@@ -180,8 +262,8 @@ function drawCheckboxVec(pdf, cx, cy, cw, ch, checked, s) {
     if (checked) {
         setFill(pdf, '#1a73e8');
         pdf.roundedRect(bx, by, size, size, radius, radius, 'F');
-        pdf.setDrawColor(255, 255, 255);
-        pdf.setLineWidth(Math.max(0.3, size * 0.12));
+        setDrawRgb(pdf, 255, 255, 255);
+        setLineW(pdf, Math.max(0.3, size * 0.12));
         pdf.setLineCap('round');
         pdf.setLineJoin('round');
         pdf.lines(
@@ -190,9 +272,9 @@ function drawCheckboxVec(pdf, cx, cy, cw, ch, checked, s) {
             [1, 1], 'S', false
         );
     } else {
-        pdf.setFillColor(255, 255, 255);
+        setFillRgb(pdf, 255, 255, 255);
         setDraw(pdf, '#c0c0c0');
-        pdf.setLineWidth(Math.max(0.1, size * 0.05));
+        setLineW(pdf, Math.max(0.1, size * 0.05));
         pdf.roundedRect(bx, by, size, size, radius, radius, 'FD');
     }
 }
@@ -205,7 +287,7 @@ function drawRatingVec(pdf, cx, cy, cw, ch, value, max, s) {
         const segs  = verts.slice(1).map((v, i) => [v[0] - verts[i][0], v[1] - verts[i][1]]);
         setFill(pdf, filled ? '#fbbc04' : '#d1d5db');
         setDraw(pdf, filled ? '#fbbc04' : '#d1d5db');
-        pdf.setLineWidth(Math.max(0.05, outerR * 0.05));
+        setLineW(pdf, Math.max(0.05, outerR * 0.05));
         pdf.lines(segs, verts[0][0], verts[0][1], [1, 1], 'FD', true);
     }
 }
@@ -324,7 +406,7 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
 
             if (doUnderline || doStrike) {
                 setDraw(pdf, color);
-                pdf.setLineWidth(Math.max(0.05, 0.2 * s));
+                setLineW(pdf, Math.max(0.05, 0.2 * s));
                 if (doUnderline) pdf.line(runX, lineY + pt2mm(sizePt * 0.6, s),  runX + runW, lineY + pt2mm(sizePt * 0.6, s));
                 if (doStrike)    pdf.line(runX, lineY,                             runX + runW, lineY);
             }
@@ -415,7 +497,7 @@ function drawTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         else                         decorX = cx + padMm;
         const midY = cy + ch / 2;
         setDraw(pdf, overrideColor || cell.textColor || DEFAULT_TEXT_COLOR);
-        pdf.setLineWidth(Math.max(0.05, 0.2 * s));
+        setLineW(pdf, Math.max(0.05, 0.2 * s));
         if (cell.underline)     pdf.line(decorX, midY + pt2mm(sizePt * 0.55, s), decorX + clampedW, midY + pt2mm(sizePt * 0.55, s));
         if (cell.strikethrough) pdf.line(decorX, midY,                            decorX + clampedW, midY);
     }
@@ -428,9 +510,54 @@ function drawBordersVec(pdf, borders, x, y, w, h, s = 1) {
     paintBordersVec(pdf, borders, x, y, w, h, parseColor, s);
 }
 
+// ── In-cell image painter ───────────────────────────────────────────────────────
+
+/**
+ * Render an `image` cell type by embedding its preloaded raster. Mirrors
+ * CanvasRenderer's imageType.paintCell: a 3px inset, clip to the padded box,
+ * and the same contain/cover/fill/none fit modes. Coordinates are in mm.
+ *
+ * If the asset failed to preload, draws nothing (the white cell background plus
+ * grid/borders still render) rather than leaking the blobId as text.
+ */
+function drawCellImage(pdf, cell, cx, cy, cw, ch, imgAssets) {
+    const blobId = cell.rawValue;
+    const asset  = blobId && imgAssets?.get(blobId);
+    if (!asset || !asset.naturalW || !asset.naturalH) return;
+
+    const pad = px2mm(3, 1); // 3 CSS px inset, scale-independent like canvas pad
+    const bx = cx + pad, by = cy + pad;
+    const bw = cw - 2 * pad, bh = ch - 2 * pad;
+    if (bw <= 0 || bh <= 0) return;
+
+    const fit = cell.ctConfig?.fit ?? 'contain';
+    const sa  = asset.naturalW / asset.naturalH;
+    const da  = bw / bh;
+
+    let dx = bx, dy = by, dw = bw, dh = bh;
+    if (fit === 'fill') {
+        // stretch — already set
+    } else if (fit === 'none') {
+        // Natural size (in CSS px → mm), centered; clip handles overflow.
+        dw = px2mm(asset.naturalW, 1); dh = px2mm(asset.naturalH, 1);
+        dx = bx + (bw - dw) / 2;       dy = by + (bh - dh) / 2;
+    } else if (fit === 'cover') {
+        if (sa > da) { dw = bh * sa; dx = bx + (bw - dw) / 2; }
+        else         { dh = bw / sa; dy = by + (bh - dh) / 2; }
+    } else { // 'contain' (default) — center, fit within box
+        if (sa > da) { dh = bw / sa; dy = by + (bh - dh) / 2; }
+        else         { dw = bh * sa; dx = bx + (bw - dw) / 2; }
+    }
+
+    const fmt = asset.dataUrl.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+    beginClip(pdf, bx, by, bw, bh);
+    pdf.addImage(asset.dataUrl, fmt, dx, dy, dw, dh, undefined, 'FAST');
+    endClip(pdf);
+}
+
 // ── Main cell painter ──────────────────────────────────────────────────────────
 
-function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
+function drawCell(pdf, cell, pageX, pageY, s, showGridLines, imgAssets, gridSegs) {
     const cx = pageX + px2mm(cell.x, s);
     const cy = pageY + px2mm(cell.y, s);
     const cw = px2mm(cell.width,  s);
@@ -441,54 +568,38 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
     // Mirrors CanvasRenderer: right gridline suppressed, bottom suppressed when a custom
     // bottom border exists, and borders rendered so horizontal run borders are continuous.
     if (cell.gridlineOnly) {
-        if (showGridLines) {
-            const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
-            pdf.setDrawColor(r, g, b);
-            pdf.setLineWidth(0.13 * s);
-            if (!cell.borders?.bottom) {
-                pdf.line(cx, cy + ch, cx + cw, cy + ch);
-            }
-            // right gridline suppressed (overflow shadow — matches CanvasRenderer)
+        if (showGridLines && !cell.borders?.bottom) {
+            // Bottom gridline only; right suppressed (overflow shadow — matches
+            // CanvasRenderer). Collected for batched stroking by renderCells.
+            gridSegs.push([cx, cy + ch, cx + cw, cy + ch]);
         }
-        if (cell.borders) {
-            // Shadow cells use the shadow spec so inner edges of an overflow
-            // run don't draw vertical bars through the overflowing text.
-            const spec = getShadowBorderSpec(cell);
-            if (spec.paintBorders) {
-                const bx = pageX + px2mm(spec.boxX, s);
-                const bw = px2mm(spec.boxWidth, s);
-                drawBordersVec(pdf, spec.paintBorders, bx, cy, bw, ch, s);
-            }
-        }
+        // Borders for shadow cells are drawn in the separate border pass.
         return;
     }
 
     // ── 1. Background ─────────────────────────────────────────────────────────
-    // Always paint a white base so transparent overlays below blend correctly.
-    pdf.setFillColor(255, 255, 255);
-    pdf.rect(cx, cy, cw, ch, 'F');
-
+    // The page is already painted white by renderCells, so no per-cell white base
+    // is needed. The tint overlays below are pre-blended-on-white opaque constants,
+    // so each cell emits at most one fill rect (and most emit none).
     const bg = cell.bgColor;
     if (bg && !bg.startsWith('rgba(0,0,0,0')) {
         setFill(pdf, bg);
         pdf.rect(cx, cy, cw, ch, 'F');
-    }
-
-    // Zebra striping — rgba(0,0,0,0.018) over white ≈ (250,250,250)
-    if (cell.zebraRow && !cell.bgColor) {
-        pdf.setFillColor(250, 250, 250);
+    } else if (cell.zebraRow) {
+        // Zebra striping — rgba(0,0,0,0.018) over white ≈ (250,250,250)
+        setFillRgb(pdf, 250, 250, 250);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
 
     // Formula column tint — rgba(0,0,0,0.015) over white ≈ (251,251,251)
     if (cell.isFormulaCol) {
-        pdf.setFillColor(251, 251, 251);
+        setFillRgb(pdf, 251, 251, 251);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
 
     // Repeater copy overlay — rgba(124,58,237,0.028) over white ≈ (251,250,255)
     if (cell.isRepeaterCopy) {
-        pdf.setFillColor(251, 250, 255);
+        setFillRgb(pdf, 251, 250, 255);
         pdf.rect(cx, cy, cw, ch, 'F');
     }
 
@@ -497,7 +608,7 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
         setDraw(pdf, '#ef4444');
         const dvW = Math.max(0.1, 0.4 * s);
         const inset = dvW / 2;
-        pdf.setLineWidth(dvW);
+        setLineW(pdf, dvW);
         pdf.rect(cx + inset, cy + inset, cw - 2 * inset, ch - 2 * inset, 'S');
     }
 
@@ -514,7 +625,7 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
                 const arrowY  = cy + ch / 2;
                 setFill(pdf, '#64748b');
                 setDraw(pdf, '#64748b');
-                pdf.setLineWidth(0.1);
+                setLineW(pdf, 0.1);
                 pdf.lines(
                     [[arrowSz * 2, 0], [-arrowSz, arrowSz]],
                     arrowX - arrowSz, arrowY - arrowSz / 2,
@@ -531,40 +642,104 @@ function drawCell(pdf, cell, pageX, pageY, s, showGridLines) {
             drawRatingVec(pdf, cx, cy, cw, ch, cell.rawValue ?? 0, cell.ratingMax ?? 5, s);
             break;
 
+        case 'image':
+            // In-cell image: embed the scaled raster if it preloaded, matching
+            // CanvasRenderer's imageType.paintCell (3px pad, same fit modes).
+            drawCellImage(pdf, cell, cx, cy, cw, ch, imgAssets);
+            break;
+
         default:
-            // image / file / custom types: fall back to text representation
+            // file / custom types: fall back to text representation
             drawTextContent(pdf, cell, cx, cy, cw, ch, s);
             break;
     }
 
     // ── 4. Grid lines ─────────────────────────────────────────────────────────
-    // Drawn before custom borders so borders render on top, matching CanvasRenderer.
-    // Suppress each edge where a custom border exists so the gridline can't bleed
+    // Collected here and stroked in one batch by renderCells before the border
+    // pass, so borders still render on top (matching CanvasRenderer). Each edge
+    // is suppressed where a custom border exists so the gridline can't bleed
     // through thin or dashed borders.
     if (showGridLines) {
-        const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
-        pdf.setDrawColor(r, g, b);
-        pdf.setLineWidth(0.13 * s);
-        const spec = getOverflowBorderSpec(cell);
+        const spec   = getOverflowBorderSpec(cell);
         const gridCx = pageX + px2mm(spec.boxX, s);
         const gridCw = px2mm(spec.boxWidth, s);
         if (!cell.borders?.right && !spec.suppressRightGridline) {
-            pdf.line(gridCx + gridCw, cy,      gridCx + gridCw, cy + ch);
+            gridSegs.push([gridCx + gridCw, cy, gridCx + gridCw, cy + ch]);
         }
         if (!cell.borders?.bottom) {
-            pdf.line(gridCx,          cy + ch, gridCx + gridCw, cy + ch);
+            gridSegs.push([gridCx, cy + ch, gridCx + gridCw, cy + ch]);
+        }
+    }
+}
+
+/**
+ * Draw a cell's custom borders. Run as a separate pass after gridlines so
+ * borders render on top (matching CanvasRenderer). Handles both normal cells
+ * (overflow spec) and overflow-shadow cells (shadow spec, which suppresses inner
+ * vertical bars through overflowing text).
+ */
+function drawCellBorders(pdf, cell, pageX, pageY, s) {
+    if (!cell.borders) return;
+    const cy = pageY + px2mm(cell.y, s);
+    const ch = px2mm(cell.height, s);
+    if (ch <= 0) return;
+
+    const spec = cell.gridlineOnly ? getShadowBorderSpec(cell) : getOverflowBorderSpec(cell);
+    if (spec.paintBorders) {
+        const bx = pageX + px2mm(spec.boxX, s);
+        const bw = px2mm(spec.boxWidth, s);
+        drawBordersVec(pdf, spec.paintBorders, bx, cy, bw, ch, s);
+    }
+}
+
+/**
+ * Stroke a batch of axis-aligned gridline segments, merging collinear/contiguous
+ * ones into long runs first. A row of per-cell bottom edges collapses into one
+ * line; a column of right edges likewise. Color and line width are set once.
+ *
+ * @param {jsPDF}  pdf
+ * @param {Array<[number,number,number,number]>} segs  [x1,y1,x2,y2] each
+ * @param {number} s  userScale (gridline width tracks scale, as before)
+ */
+function strokeGridSegments(pdf, segs, s) {
+    const EPS = 1e-4;
+    const horiz = new Map(); // y → [[x1,x2], ...]
+    const vert  = new Map(); // x → [[y1,y2], ...]
+    const keyOf = (v) => Math.round(v / EPS); // quantize to dedupe float noise
+
+    const pushRange = (map, k, range) => {
+        let arr = map.get(k);
+        if (!arr) map.set(k, arr = []);
+        arr.push(range);
+    };
+    for (const [x1, y1, x2, y2] of segs) {
+        if (Math.abs(y1 - y2) < EPS) {           // horizontal
+            pushRange(horiz, keyOf(y1), [Math.min(x1, x2), Math.max(x1, x2), y1]);
+        } else if (Math.abs(x1 - x2) < EPS) {    // vertical
+            pushRange(vert, keyOf(x1), [Math.min(y1, y2), Math.max(y1, y2), x1]);
         }
     }
 
-    // ── 5. Custom borders (after gridlines so they render on top) ─────────────
-    if (cell.borders) {
-        const spec = getOverflowBorderSpec(cell);
-        if (spec.paintBorders) {
-            const bx = pageX + px2mm(spec.boxX, s);
-            const bw = px2mm(spec.boxWidth, s);
-            drawBordersVec(pdf, spec.paintBorders, bx, cy, bw, ch, s);
+    const [r, g, b] = parseColor(DEFAULT_GRID_COLOR, [226, 232, 240]);
+    setDrawRgb(pdf, r, g, b);
+    setLineW(pdf, 0.13 * s);
+
+    // Merge contiguous runs along an axis, then emit one line per merged run.
+    const emitRuns = (groups, makeLine) => {
+        for (const ranges of groups.values()) {
+            ranges.sort((a, b) => a[0] - b[0]);
+            let [lo, hi, fixed] = ranges[0];
+            for (let i = 1; i < ranges.length; i++) {
+                const [a, bb] = ranges[i];
+                if (a <= hi + EPS) { if (bb > hi) hi = bb; }   // overlap/touch → extend
+                else { makeLine(lo, hi, fixed); lo = a; hi = bb; }
+            }
+            makeLine(lo, hi, fixed);
         }
-    }
+    };
+
+    emitRuns(horiz, (x1, x2, y) => pdf.line(x1, y, x2, y));
+    emitRuns(vert,  (y1, y2, x) => pdf.line(x, y1, x, y2));
 }
 
 // ── VectorPageRenderer — inline backend for PDFOrchestrator ──────────────────
@@ -573,26 +748,71 @@ class VectorPageRenderer {
     /** @type {Map<string, {dataUrl:string, naturalW:number, naturalH:number}>} */
     #imgAssets = new Map();
     #floatingImages = [];
+    /** @type {Function|null} blobId → Promise<Blob> */
+    #fetchBlobFn = null;
+    /** Print user-scale, captured in prepare() for on-demand in-cell image loads. */
+    #scale = 1;
 
-    async prepare(params, _geo) {
+    /**
+     * Fetch a blob, downscale to (maxW × maxH) device px, and cache the encoded
+     * asset under `blobId`. No-op if already cached or no fetcher is available.
+     * @param {string} blobId
+     * @param {number} maxW maxH  Target pixel budget
+     */
+    async #loadAsset(blobId, maxW, maxH) {
+        if (!blobId || this.#imgAssets.has(blobId) || !this.#fetchBlobFn) return;
+        try {
+            const blob   = await this.#fetchBlobFn(blobId);
+            const srcUrl = await blobToDataUrl(blob);
+            const img    = await loadImage(srcUrl);
+            if (!img) return;
+            // PNG/GIF/SVG/WebP may carry alpha; JPEG never does.
+            const hasAlpha = !/^data:image\/jpe?g/i.test(srcUrl);
+            const asset    = encodeScaledImage(img, Math.max(1, Math.ceil(maxW)), Math.max(1, Math.ceil(maxH)), hasAlpha);
+            this.#imgAssets.set(blobId, asset);
+        } catch { /* skip images that fail to load */ }
+    }
+
+    /** CSS px → target device px at the current print scale and IMAGE_TARGET_DPI. */
+    #dpiFactor() {
+        return this.#scale * IMAGE_TARGET_DPI / CSS_PX_PER_INCH;
+    }
+
+    async prepare(params, geo) {
         const { fetchBlobFn = null, sheetStore } = params;
+        this.#fetchBlobFn = fetchBlobFn;
+        this.#scale = geo.s ?? 1;
         this.#floatingImages = [...(sheetStore?.floatingImages?.values() ?? [])];
         if (this.#floatingImages.length && fetchBlobFn) {
-            const uniqueIds = [...new Set(this.#floatingImages.map(f => f.blobId))];
-            await Promise.all(uniqueIds.map(async blobId => {
-                try {
-                    const blob    = await fetchBlobFn(blobId);
-                    const dataUrl = await blobToDataUrl(blob);
-                    const { w, h } = await getImgNaturalSize(dataUrl);
-                    this.#imgAssets.set(blobId, { dataUrl, naturalW: w, naturalH: h });
-                } catch { /* skip images that fail to load */ }
+            // For each blob, the largest on-page footprint (in CSS px) it's drawn
+            // at. The embedded raster only needs enough pixels to look crisp at
+            // that size and the print scale — so we cap resolution per blob.
+            const maxDisplay = new Map(); // blobId → { w, h } in CSS px
+            for (const f of this.#floatingImages) {
+                const cur = maxDisplay.get(f.blobId);
+                maxDisplay.set(f.blobId, {
+                    w: Math.max(cur?.w ?? 0, f.width),
+                    h: Math.max(cur?.h ?? 0, f.height),
+                });
+            }
+            const dpiFactor = this.#dpiFactor();
+            await Promise.all([...maxDisplay.keys()].map(blobId => {
+                const disp = maxDisplay.get(blobId);
+                return this.#loadAsset(blobId, disp.w * dpiFactor, disp.h * dpiFactor);
             }));
         }
     }
 
-    renderCells(pdf, cells, pd, _params) {
+    async renderCells(pdf, cells, pd, _params) {
         const { geo, s, showGridLines } = pd;
         const { marginLeft, marginTop, printableW, printableH } = geo;
+
+        // Preload any in-cell image assets on this page before drawing, sized to
+        // the cell's footprint so we don't embed full-res photos for a thumbnail.
+        const dpiFactor = this.#dpiFactor();
+        await Promise.all(cells
+            .filter(c => c.renderType === 'image' && c.rawValue)
+            .map(c => this.#loadAsset(c.rawValue, c.width * dpiFactor, c.height * dpiFactor)));
 
         pdf.setFillColor(255, 255, 255);
         pdf.rect(0, 0, geo.pageW, geo.pageH, 'F');
@@ -603,9 +823,26 @@ class VectorPageRenderer {
         // render fully instead of being half-clipped at the margin.
         const pad = 1;
         beginClip(pdf, marginLeft - pad, marginTop - pad, printableW + 2 * pad, printableH + 2 * pad);
+
+        // Pass 1: backgrounds + content; gridline segments are collected, not drawn.
+        const gridSegs = [];
         for (const cell of cells) {
-            drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines);
+            drawCell(pdf, cell, marginLeft, marginTop, s, showGridLines, this.#imgAssets, gridSegs);
         }
+
+        // Pass 2: gridlines — merged into long polylines and stroked once. This
+        // collapses thousands of per-cell line ops (a major PDF-viewer slowdown)
+        // into a handful of operators.
+        if (gridSegs.length) strokeGridSegments(pdf, gridSegs, s);
+
+        // Pass 3: custom borders on top of gridlines (matches CanvasRenderer order).
+        // drawBordersVec (BorderGeometry) sets draw color/width directly, bypassing
+        // the dedup cache, so invalidate it afterwards to keep the cache honest.
+        for (const cell of cells) {
+            drawCellBorders(pdf, cell, marginLeft, marginTop, s);
+        }
+        resetStateCache();
+
         endClip(pdf);
     }
 
@@ -635,7 +872,11 @@ class VectorPageRenderer {
             const clipY2 = Math.min(imgY_mm + imgH_mm, marginTop  + printableH);
             if (clipX2 <= clipX || clipY2 <= clipY) continue;
             beginClip(pdf, clipX, clipY, clipX2 - clipX, clipY2 - clipY);
-            pdf.addImage(asset.dataUrl, '', dx, dy, dw, dh, undefined, 'FAST');
+            // Format is known from how we encoded in prepare(): JPEG for opaque
+            // photos (embedded as a DCT stream — already compressed), PNG for
+            // images with alpha. Passing it explicitly skips jsPDF's sniffing.
+            const fmt = asset.dataUrl.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+            pdf.addImage(asset.dataUrl, fmt, dx, dy, dw, dh, undefined, 'FAST');
             endClip(pdf);
         }
     }
@@ -643,6 +884,7 @@ class VectorPageRenderer {
     cleanup() {
         this.#imgAssets.clear();
         this.#floatingImages = [];
+        this.#fetchBlobFn = null;
     }
 }
 
