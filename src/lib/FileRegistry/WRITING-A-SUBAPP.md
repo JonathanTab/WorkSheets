@@ -2,7 +2,7 @@
 
 This guide is for anyone adding a new collaborative document type to Scriptorium (a new editor, a new viewer, anything that owns its own Yjs document shape). It explains the load / init / migration contract every sub-app inherits from `FileRegistry` and shows where each piece plugs in.
 
-The spreadsheet sub-app is the reference implementation — when in doubt, look at `src/stores/spreadsheet/schema.js` and `src/stores/spreadsheet/SpreadsheetSession.svelte.js`. The docs sub-app (`src/stores/docs/`) was written before this contract existed and should be migrated to it (see "Migrating an existing sub-app" at the end).
+The spreadsheet sub-app is the reference implementation — when in doubt, look at `src/stores/spreadsheet/schema.js` and `src/stores/spreadsheet/SpreadsheetSession.svelte.js`. The docs sub-app (`src/stores/docs/`) now also conforms to this contract and is a useful second reference — in particular for a sub-app whose Yjs shape is **flat** (top-level `XmlFragment` + `Map`s) rather than a single root `Y.Map`; see how it points `rootKey` at `metadata` and nests the schema-version stamp under `metadata.sys` in `src/stores/docs/schema.js`.
 
 ---
 
@@ -407,13 +407,14 @@ The server treats your doc's bytes as opaque Yjs updates. It does not understand
 
 ## Migrating an existing sub-app to this contract
 
-The docs sub-app (`src/stores/docs/docStore.svelte.js`) was written before this contract existed. To bring it into compliance:
+The docs sub-app was migrated to this contract as the worked example. The steps that brought it into compliance generalize to any pre-contract sub-app:
 
-1. Move structure-initializing writes (the `if (!metaMap.get('createdAt')) …` block) into a dedicated `initializeDocument(ydoc)` function.
-2. Define an `AppSchema` (`rootKey: 'document'`, `isStructureValid: (ydoc) => ydoc.getXmlFragment('document').length > 0` — or whatever your shape predicates).
-3. Replace the manual `waitForServerSync` + speculative default-setting with one call to `prepareDocForUse`.
-4. Pipe `schemaVersion` through `HistoryManager` so manual snapshots are tagged.
-5. Bump your `SCHEMA_VERSION` from "1" to "2" (the stamping change *is* a schema change — the first stamped doc moves from "unknown" to "known").
+1. Move structure-initializing writes (the `if (!metaMap.get('createdAt')) …` block) into a dedicated `initializeDocument(ydoc)` function (`src/stores/docs/schema.js`).
+2. Define an `AppSchema`. When your shape is flat (no single root `Y.Map`), pick the map that holds your metadata as `rootKey` and nest the version stamp under it via `metadataKey` — docs uses `rootKey: 'metadata'`, `metadataKey: 'sys'`, and `isStructureValid: (ydoc) => ydoc.getMap('metadata').get('createdAt') != null` (the init marker), since an empty ProseMirror fragment isn't a reliable "initialized" signal.
+3. Replace the manual `waitForServerSync` + speculative default-setting with one call to `prepareDocForUse` (`src/stores/docs/docStore.svelte.js`).
+4. Pipe `getSchemaVersion` and `onAfterRestore` through `HistoryManager` so manual snapshots are tagged and restores trigger a session `reload()`.
+5. Switch creation from plain `createFile` to `createAndInitializeFile` with your `initializer`, so structure is written (and verified/rolled-back) at create time instead of speculatively on first load.
+6. Enforce `session.readOnly` (docs swallows local doc-changing ProseMirror transactions and sets `editable: () => !readOnly`) and surface `session.notices` as banners.
 
 After this, your sub-app gets all the runtime protections (read-only on newer docs, missed-rotation detection, init verification) automatically.
 

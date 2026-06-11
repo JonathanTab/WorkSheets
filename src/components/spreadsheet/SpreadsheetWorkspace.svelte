@@ -339,6 +339,20 @@
 
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="workspace-container" class:mobile={mobileState.isMobile} oncontextmenu={(e) => e.preventDefault()}>
+                <!-- Lifecycle banners: read-only (newer schema) + transient notices -->
+                {#if spreadsheetSession.readOnly}
+                    <div class="banner warn">
+                        <span>{spreadsheetSession.readOnlyReason}</span>
+                        <button onclick={() => location.reload()}>Reload</button>
+                    </div>
+                {/if}
+                {#each spreadsheetSession.notices as n (n.id)}
+                    <div class="banner {n.severity}">
+                        <span>{n.message}</span>
+                        <button onclick={() => spreadsheetSession.dismissNotice(n.id)} aria-label="Dismiss">×</button>
+                    </div>
+                {/each}
+
                 <!-- Toolbar: desktop two-row vs mobile single-row -->
                 {#if mobileState.isMobile}
                     <MobileToolbar
@@ -499,6 +513,39 @@
         overflow: hidden;
         min-height: 0;
     }
+
+    /* ── Lifecycle banners ── */
+    .banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 14px;
+        font-size: 13px;
+        line-height: 1.4;
+        border-bottom: 1px solid transparent;
+    }
+    .banner.warn {
+        background: #fff4e5;
+        color: #7a4f01;
+        border-bottom-color: #f4d8a8;
+    }
+    .banner.info {
+        background: #e8f1ff;
+        color: #1c4e80;
+        border-bottom-color: #bcd6f5;
+    }
+    .banner button {
+        flex-shrink: 0;
+        padding: 3px 10px;
+        background: rgba(0, 0, 0, 0.06);
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 12px;
+        color: inherit;
+    }
+    .banner button:hover { background: rgba(0, 0, 0, 0.12); }
 
     .grid-container {
         flex: 1;

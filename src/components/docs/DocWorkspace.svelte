@@ -24,7 +24,7 @@
         toggleBold, toggleItalic, toggleUnderline,
     } from '../../stores/docs/docCommands.js';
     import { buildFindPlugin } from '../../stores/docs/docFindPlugin.js';
-    import { docSession, loadDoc } from '../../stores/docs/docStore.svelte.js';
+    import { docSession, loadDoc, getDocSchemaVersion } from '../../stores/docs/docStore.svelte.js';
     import { router } from '../../lib/router.svelte.js';
     import { authStore } from '../../stores/authStore.js';
 
@@ -130,10 +130,21 @@
     }
 
     // ── Mount ProseMirror ─────────────────────────────────────────────────────
+    // Tracks which XmlFragment the live view is bound to. After a snapshot
+    // restore, docSession.reload() swaps in a fresh ydoc (new fragment +
+    // awareness); we detect the identity change and rebuild the view.
+    let boundFragment = null;
+
     $effect(() => {
         const fragment = docSession.fragment;
         if (!fragment || !editorMount || isLoading) return;
-        if (view) return;
+        if (view && boundFragment === fragment) return;
+        // Fragment swapped under us (restore) — tear the stale view down first.
+        if (view && boundFragment !== fragment) {
+            view.destroy();
+            view = null;
+            pmState = null;
+        }
 
         const aw = docSession.awareness;
         if (aw) {
@@ -195,6 +206,9 @@
 
         const editorView = new EditorView(editorMount, {
             state: EditorState.create({ schema, plugins }),
+            // Read-only when the doc was written under a newer schema than this
+            // client knows (see prepareDocForUse). Blocks typing/DOM input.
+            editable: () => !docSession.readOnly,
             nodeViews: {
                 check_list_item: (node, v, getPos) => makeCheckListItemView(node, v, getPos),
             },
@@ -204,6 +218,13 @@
                 // fires a sync transaction synchronously during EditorView construction,
                 // before the assignment `const editorView = new EditorView(...)` completes.
                 const v = /** @type {any} */ (this);
+                // Read-only enforcement: swallow any local doc-changing transaction
+                // (toolbar command, paste, programmatic edit) so a stale client can
+                // never corrupt a newer-schema doc. Remote y-sync transactions and
+                // selection-only changes still apply.
+                if (docSession.readOnly && tr.docChanged && !tr.getMeta('y-sync$')) {
+                    return;
+                }
                 const newState = v.state.apply(tr);
                 v.updateState(newState);
                 pmState = newState;
@@ -214,6 +235,7 @@
         });
         view = editorView;
         pmState = editorView.state;
+        boundFragment = fragment;
     });
 
     // ── Ctrl+F global handler (catches when editor not focused) ───────────────
@@ -240,7 +262,16 @@
     $effect(() => {
         const ydoc = docSession.ydoc;
         if (!ydoc || !registry || !docId) return;
-        const hm = new HistoryManager({ fileId: docId, registry, appType: 'docs' });
+        const hm = new HistoryManager({
+            fileId: docId,
+            registry,
+            appType: 'docs',
+            // After a restore the runtime swaps in the restored doc; reload the
+            // session so observers/metadata rebind, and the mount effect rebuilds
+            // the editor against the new fragment.
+            onAfterRestore: () => docSession.reload(),
+            getSchemaVersion: () => getDocSchemaVersion(),
+        });
         historyManager = hm;
         hm.loadSnapshots();
         const unsubFileMeta = registry.subscribeFileMeta(docId, (meta) => hm.receiveFileMeta(meta));
@@ -249,6 +280,7 @@
 
     function destroyView() {
         if (view) { view.destroy(); view = null; pmState = null; }
+        boundFragment = null;
     }
 
     onMount(() => { if (docId) loadDocument(docId); });
@@ -288,6 +320,20 @@
             {/if}
 
             <div class="workspace-container">
+                <!-- Lifecycle banners: read-only (newer schema) + transient notices -->
+                {#if docSession.readOnly}
+                    <div class="banner warn">
+                        <span>{docSession.readOnlyReason}</span>
+                        <button onclick={() => location.reload()}>Reload</button>
+                    </div>
+                {/if}
+                {#each docSession.notices as n (n.id)}
+                    <div class="banner {n.severity}">
+                        <span>{n.message}</span>
+                        <button onclick={() => docSession.dismissNotice(n.id)} aria-label="Dismiss">×</button>
+                    </div>
+                {/each}
+
                 <!-- Toolbar (rows 1 & 2) -->
                 <DocToolbar
                     {view}
@@ -398,6 +444,39 @@
         border-radius: 6px;
         cursor: pointer;
     }
+
+    /* ── Lifecycle banners ── */
+    .banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 14px;
+        font-size: 13px;
+        line-height: 1.4;
+        border-bottom: 1px solid transparent;
+    }
+    .banner.warn {
+        background: #fff4e5;
+        color: #7a4f01;
+        border-bottom-color: #f4d8a8;
+    }
+    .banner.info {
+        background: #e8f1ff;
+        color: #1c4e80;
+        border-bottom-color: #bcd6f5;
+    }
+    .banner button {
+        flex-shrink: 0;
+        padding: 3px 10px;
+        background: rgba(0, 0, 0, 0.06);
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 12px;
+        color: inherit;
+    }
+    .banner button:hover { background: rgba(0, 0, 0, 0.12); }
 
     /* ── Workspace layout ── */
     .workspace-outer {

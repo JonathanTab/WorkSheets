@@ -43,6 +43,8 @@ import {
     setSnapshotPinned,
     updateSnapshotDescription,
     deleteSnapshot,
+    getDocDiskSize,
+    getAllPersistedDocNames,
     PERSISTENCE_ORIGIN,
 } from './db.js';
 import { SnapshotScheduler } from './snapshot-scheduler.js';
@@ -55,6 +57,21 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 const LEVELDB_PATH = process.env.LEVELDB_PATH ?? './data/yjs-leveldb';
 const SQLITE_PATH = process.env.SQLITE_PATH ?? './data/yjs-snapshots.db';
 const GC_ENABLED = process.env.GC !== 'false' && process.env.GC !== '0';
+
+// ---------------------------------------------------------------------------
+// Server-wide metrics — process-lifetime counters surfaced via /api/stats.
+// Per-room counters live on each WSSharedDoc; these aggregate across the whole
+// server and survive room eviction (so totals don't reset when a room closes).
+// ---------------------------------------------------------------------------
+const serverMetrics = {
+    startedAt: Date.now(),
+    wireBytesIn: 0,          // total bytes received over all WS connections
+    wireBytesOut: 0,         // total bytes sent over all WS connections
+    messagesIn: 0,
+    messagesOut: 0,
+    connectionsOpened: 0,    // cumulative WS connections accepted since boot
+    connectionsClosed: 0,    // cumulative WS connections closed since boot
+};
 
 // ---------------------------------------------------------------------------
 // Initialise DB + scheduler
@@ -192,6 +209,15 @@ class WSSharedDoc extends Y.Doc {
         this.fileId = fileId;
         this.appType = appType;
 
+        // Live per-room metrics (surfaced via /api/stats and /api/room/:id/stats).
+        this.createdAt = Date.now();
+        this.lastActivityAt = Date.now(); // last inbound message timestamp
+        this.wireBytesIn = 0;             // bytes received over WS for this room
+        this.wireBytesOut = 0;            // bytes sent over WS for this room
+        this.messagesIn = 0;
+        this.messagesOut = 0;
+        this.connectionsOpened = 0;       // cumulative connections for this room since it loaded
+
         /** @type {Map<WebSocket, Set<number>>} conn → clientID set */
         this.conns = new Map();
         /** @type {Map<WebSocket, string>} conn → username */
@@ -291,6 +317,10 @@ const send = (doc, conn, m) => {
     }
     try {
         conn.send(m, {}, err => { if (err != null) closeConn(doc, conn); });
+        doc.wireBytesOut += m.byteLength;
+        doc.messagesOut++;
+        serverMetrics.wireBytesOut += m.byteLength;
+        serverMetrics.messagesOut++;
     } catch {
         closeConn(doc, conn);
     }
@@ -302,6 +332,8 @@ const send = (doc, conn, m) => {
  */
 const closeConn = (doc, conn) => {
     if (!doc.conns.has(conn)) return;
+
+    serverMetrics.connectionsClosed++;
 
     const controlledIds = doc.conns.get(conn);
     const username = doc.connUsers.get(conn);
@@ -373,6 +405,16 @@ const setupWSConnection = async (conn, name, fileId, username, appType) => {
     let docRef = null;
 
     const handleMessage = (/** @type {ArrayBuffer} */ message) => {
+        // Account inbound traffic before processing (covers both live and
+        // drained-from-buffer messages). message is an ArrayBuffer here.
+        const inBytes = message.byteLength ?? 0;
+        serverMetrics.wireBytesIn += inBytes;
+        serverMetrics.messagesIn++;
+        if (docRef) {
+            docRef.wireBytesIn += inBytes;
+            docRef.messagesIn++;
+            docRef.lastActivityAt = Date.now();
+        }
         try {
             const encoder = encoding.createEncoder();
             const decoder = decoding.createDecoder(new Uint8Array(message));
@@ -408,6 +450,10 @@ const setupWSConnection = async (conn, name, fileId, username, appType) => {
     docRef = doc;
     doc.conns.set(conn, new Set());
     doc.connUsers.set(conn, username);
+
+    // Connection accounting (cumulative; current count is doc.conns.size).
+    doc.connectionsOpened++;
+    serverMetrics.connectionsOpened++;
 
     console.log(`[room] ${username} joined ${name} (${doc.conns.size} users)`);
 
@@ -538,11 +584,40 @@ function _getToken(req, url) {
     return url.searchParams.get('auth') ?? null;
 }
 
+/**
+ * Build a live metrics summary for a single in-memory room.
+ * `stateSize` is the current in-memory logical size (encoded update bytes);
+ * for the persisted on-disk size use getDocDiskSize via the room-detail endpoint.
+ * @param {WSSharedDoc} doc
+ */
+function _roomSummary(doc) {
+    const users = doc.getActiveUsers();
+    return {
+        roomId:            doc.name,
+        fileId:            doc.fileId,
+        appType:           doc.appType,
+        connections:       doc.conns.size,
+        users,
+        userCount:         users.length,
+        awarenessStates:   doc.awareness.getStates().size,
+        stateSize:         Y.encodeStateAsUpdate(doc).byteLength,
+        wireBytesIn:       doc.wireBytesIn,
+        wireBytesOut:      doc.wireBytesOut,
+        messagesIn:        doc.messagesIn,
+        messagesOut:       doc.messagesOut,
+        connectionsOpened: doc.connectionsOpened,
+        createdAt:         doc.createdAt,
+        lastActivityAt:    doc.lastActivityAt,
+    };
+}
+
 async function handleHttp(req, res, url) {
     const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
     if (pathname === '/health' || pathname === '/api/health') {
-        return _json(res, 200, { ok: true, activeDocs: docs.size });
+        let totalConnections = 0;
+        for (const doc of docs.values()) totalConnections += doc.conns.size;
+        return _json(res, 200, { ok: true, activeDocs: docs.size, totalConnections });
     }
 
     if (pathname === '/') {
@@ -558,6 +633,63 @@ async function handleHttp(req, res, url) {
     const token = _getToken(req, url);
     const auth = validateToken(token);
     if (!auth) return _json(res, 401, { error: 'Unauthorized' });
+
+    // GET /api/stats — server-wide metrics + per-room live summaries.
+    // Surfaces total connection count, over-the-wire byte totals, active rooms,
+    // and on-disk document count for the admin inspector.
+    if (pathname === '/api/stats' && req.method === 'GET') {
+        const rooms = [...docs.values()].map(_roomSummary);
+
+        let totalConnections = 0;
+        const userSet = new Set();
+        for (const doc of docs.values()) {
+            totalConnections += doc.conns.size;
+            for (const u of doc.getActiveUsers()) userSet.add(u);
+        }
+
+        let onDiskDocCount = null;
+        try { onDiskDocCount = (await getAllPersistedDocNames()).length; }
+        catch (err) { console.warn('[stats] getAllPersistedDocNames failed:', err?.message); }
+
+        return _json(res, 200, {
+            server: {
+                startedAt:         serverMetrics.startedAt,
+                uptimeMs:          Date.now() - serverMetrics.startedAt,
+                activeRooms:       docs.size,
+                totalConnections,
+                uniqueUsers:       userSet.size,
+                wireBytesIn:       serverMetrics.wireBytesIn,
+                wireBytesOut:      serverMetrics.wireBytesOut,
+                messagesIn:        serverMetrics.messagesIn,
+                messagesOut:       serverMetrics.messagesOut,
+                connectionsOpened: serverMetrics.connectionsOpened,
+                connectionsClosed: serverMetrics.connectionsClosed,
+                onDiskDocCount,
+                gcEnabled:         GC_ENABLED,
+            },
+            rooms,
+        });
+    }
+
+    // GET /api/room/:roomId/stats — per-document detail incl. persisted on-disk size.
+    // Works even when the room is not currently loaded (onDiskSize is read from LevelDB).
+    const roomStatsMatch = pathname.match(/^\/api\/room\/([^/]+)\/stats$/);
+    if (roomStatsMatch && req.method === 'GET') {
+        const roomId = decodeURIComponent(roomStatsMatch[1]);
+        const doc = docs.get(roomId);
+
+        let onDiskSize = null;
+        try { onDiskSize = await getDocDiskSize(roomId); }
+        catch (err) { console.warn(`[stats] getDocDiskSize failed for ${roomId}:`, err?.message); }
+
+        return _json(res, 200, {
+            roomId,
+            loaded:     !!doc,
+            onDiskSize,
+            live:       doc ? _roomSummary(doc) : null,
+            scheduler:  scheduler.getStats(roomId),
+        });
+    }
 
     // GET /api/snapshots?roomId=X  or  ?fileId=X
     if (pathname === '/api/snapshots' && req.method === 'GET') {

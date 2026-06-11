@@ -56,6 +56,7 @@
     import { router } from "../lib/router.svelte.js";
     import { getOfflineMode, setOfflineMode } from "../lib/FileRegistry/offlineMode.js";
     import { initializeDocument as initializeSpreadsheet } from "../stores/spreadsheet/schema.js";
+    import { initializeDocument as initializeDoc } from "../stores/docs/schema.js";
     import {
         APP_SHEETS,
         APP_DOCS,
@@ -584,10 +585,11 @@
             confirmText: "Create",
             onConfirm: async (title) => {
                 try {
-                    const doc = await registry.drive.createFile({
+                    const doc = await registry.drive.createAndInitializeFile({
                         title,
                         app: APP_DOCS,
                         folderId: tab === "drive" ? currentFolderId : null,
+                        initializer: (ydoc) => initializeDoc(ydoc),
                     });
                     router.openDoc(doc.id);
                 } catch (e) {

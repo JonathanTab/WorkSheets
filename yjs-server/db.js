@@ -15,6 +15,34 @@ export function getSqliteDb() {
 }
 
 /**
+ * Compute the on-disk (persisted) size of a document in LevelDB, in bytes.
+ *
+ * Loads the merged state from LevelDB and measures its encoded length. Because
+ * writeDocState compacts each room to a single merged update on eviction, this
+ * is an accurate proxy for the bytes the document occupies on disk. Works for
+ * any persisted room, including ones not currently loaded in memory.
+ *
+ * @param {string} roomId
+ * @returns {Promise<number>} byte length of the persisted state (0 if absent)
+ */
+export async function getDocDiskSize(roomId) {
+    const storedDoc = await levelPersistence.getYDoc(roomId);
+    try {
+        return Y.encodeStateAsUpdate(storedDoc).byteLength;
+    } finally {
+        storedDoc.destroy();
+    }
+}
+
+/**
+ * List every document name persisted in LevelDB (i.e. rooms that have on-disk state).
+ * @returns {Promise<string[]>}
+ */
+export function getAllPersistedDocNames() {
+    return levelPersistence.getAllDocNames();
+}
+
+/**
  * Initialize both y-leveldb for document persistence and SQLite for snapshots.
  * @param {string} levelDbPath
  * @param {string} sqlitePath

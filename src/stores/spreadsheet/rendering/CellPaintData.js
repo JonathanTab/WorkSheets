@@ -384,11 +384,7 @@ export function buildPaneData(params) {
                 placeholderText: undefined,
             };
 
-            // For merged primary cells, default to top vertical alignment (supports paragraph-style text)
-            // This can be overridden by explicit formatting
-            if (cellType === CELL_TYPE.MERGE_PRIMARY) {
-                item.vAlign = 'top';
-            }
+            // no special vAlign default for merged cells — use same 'middle' as regular cells
 
             // Pre-resolve descriptor for custom paint during rendering
             if (descriptor?.paintCell) {
@@ -878,9 +874,7 @@ export function buildPaneData(params) {
             fontSize: null,
             fontFamily: null,
             hAlign: 'left',
-            // Merged primaries default to top alignment (supports paragraph-style text).
-            // Explicit cell/row/col vAlign below can still override.
-            vAlign: 'top',
+            vAlign: 'middle',
             wrapText: false,
             borders: null,
             isRepeaterCopy: false,

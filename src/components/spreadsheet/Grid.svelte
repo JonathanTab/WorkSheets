@@ -155,6 +155,7 @@
     let resizeObserver = null;
     let dprMql = null; // matchMedia query for DPR change (moving between displays)
     let vvCleanup = null; // visual viewport cleanup for iOS keyboard handling
+    let remeasureRAF = null; // post-mount deferred re-measure (mobile layout settling)
     /** @type {Map<string, {scrollTop: number, scrollLeft: number}>} */
     const sheetScrollPositions = new Map();
 
@@ -3178,6 +3179,25 @@
             selectionState.startSelection(0, 0);
             selectionState.endSelection();
         }
+
+        // Deferred re-measure: on mobile the grid frequently mounts before the
+        // viewport/flex layout has settled, so the initial getBoundingClientRect()
+        // and the ResizeObserver's first callback can report height 0. When that
+        // happens the paint effect bails (w/h <= 0) and the grid stays blank until
+        // some later layout change (e.g. opening a menu) finally triggers a resize.
+        // Force a fresh measure across the next few frames so the first valid size
+        // reaches the virtualizer and the grid paints without user interaction.
+        let remeasureFrame = 0;
+        const remeasure = () => {
+            if (!containerEl || !virtualizer) return;
+            const r = containerEl.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0)
+                virtualizer.setContainerSize(r.width, r.height);
+            // Keep retrying for a short window in case layout is still settling.
+            if (remeasureFrame++ < 6)
+                remeasureRAF = requestAnimationFrame(remeasure);
+        };
+        remeasureRAF = requestAnimationFrame(remeasure);
     });
 
     // Re-measure viewport-dependent layout when soft-keyboard metrics change.
@@ -3235,6 +3255,7 @@
         document.removeEventListener("mouseup", handleMouseUp);
         document.removeEventListener("mousemove", handleHeaderDragMouseMove);
         if (resizeObserver) resizeObserver.disconnect();
+        if (remeasureRAF !== null) cancelAnimationFrame(remeasureRAF);
         vvCleanup?.();
         virtualizer?.destroy();
         paintCoord.destroy();

@@ -412,10 +412,16 @@
         color: var(--text-color, #1e293b);
     }
 
-    /* Scroll-snap for mobile tabs */
+    /* Smooth momentum scrolling for mobile tabs.
+       NOTE: do NOT use `scroll-snap-type: x mandatory` here — mandatory snap makes
+       mobile browsers interpret taps on the strip as pan/snap gestures, which
+       swallows the tap and makes tabs feel unresponsive. `proximity` snaps only
+       when the user actually scrolls, leaving taps intact. */
     .tabs-container.snap {
-        scroll-snap-type: x mandatory;
+        scroll-snap-type: x proximity;
         -webkit-overflow-scrolling: touch;
+        /* Let the browser handle horizontal pans but pass taps straight through. */
+        touch-action: pan-x;
     }
 
     .tabs-container.snap .tab {

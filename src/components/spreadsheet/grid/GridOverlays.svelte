@@ -79,7 +79,14 @@
     let cellFormatting = $derived.by(() => {
         if (!editSessionState.isEditing || !editSessionState.cell) return null;
         const { row, col } = editSessionState.cell;
-        return spreadsheetSession?.activeSheetStore?.getEffectiveCellStyle(row, col) ?? null;
+        const sheetStore = spreadsheetSession?.activeSheetStore;
+        if (!sheetStore) return null;
+        // Touch version counters so this re-runs whenever any formatting changes
+        // (row/col meta and cell styles are not tracked through Map.get alone).
+        const _r = sheetStore.rowMetaVersion;
+        const _c = sheetStore.colMetaVersion;
+        const _v = sheetStore.cellsVersion;
+        return sheetStore.getEffectiveCellStyle(row, col) ?? null;
     });
 
     // Map cell vAlign → flex align-items / multi-line justify-content so the

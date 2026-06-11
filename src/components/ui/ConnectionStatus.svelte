@@ -1,10 +1,12 @@
 <script>
     import { untrack } from "svelte";
-    import {
-        spreadsheetSession,
-        getDocManager,
-    } from "../../../stores/spreadsheetStore.svelte.js";
-    import { log } from "../../../util/log.js";
+    import { storage } from "../../stores/storage.js";
+    import { log } from "../../util/log.js";
+
+    // Fully modular: the only input is the doc id to monitor. Any sub-app
+    // (sheets, docs, …) passes its own session's docId; the underlying
+    // YjsRuntime/providers live on the shared storage singleton.
+    let { docId = null } = $props();
 
     // Connection states: 'offline' | 'disconnected' | 'connecting' | 'connected' | 'syncing'
     // All state uses $state.raw to prevent reactive triggers from value changes
@@ -32,17 +34,14 @@
         });
     }
 
-    // Get the provider from the active document
-    function getProvider(docId) {
-        if (!docId) return null;
+    // Get the provider for a document from the shared runtime.
+    function getProvider(id) {
+        if (!id) return null;
 
-        const storage = getDocManager();
-        if (!storage) return null;
-
-        const runtime = storage._runtime;
+        const runtime = storage?._runtime;
         if (!runtime) return null;
 
-        const activeDoc = runtime.activeDocs?.get(docId);
+        const activeDoc = runtime.activeDocs?.get(id);
         if (!activeDoc) return null;
 
         return activeDoc.provider;
@@ -255,8 +254,6 @@
 
     // Reactive effect to setup listeners when docId changes
     $effect(() => {
-        const docId = spreadsheetSession.docId;
-
         // Use previousDocId to detect actual changes
         if (docId === previousDocId) {
             return;
