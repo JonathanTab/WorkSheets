@@ -5,7 +5,7 @@
  * into a single ergonomic class suitable for scripts and automation.
  *
  * Usage:
- *   import { SpreadsheetClient } from './src/cli/SpreadsheetClient.js';
+ *   import { SpreadsheetClient } from './SpreadsheetClient.js';
  *
  *   const client = new SpreadsheetClient({ apiKey: process.env.SCRIPTORIUM_API_KEY });
  *   await client.init();
@@ -22,7 +22,7 @@
  *   await client.close();
  */
 
-import { StorageAPI } from '../lib/FileRegistry/api/StorageAPI.js';
+import { StorageAPI } from '../src/lib/FileRegistry/api/StorageAPI.js';
 import { NodeYjsRuntime } from './runtime.js';
 import * as ops from './operations.js';
 
@@ -156,6 +156,16 @@ export class SpreadsheetClient {
         const ydoc = await this._runtime.load(fileId, file.roomId, { fileId, appType });
         this._docs.set(fileId, ydoc);
         return ydoc;
+    }
+
+    /**
+     * Disconnect and destroy a single open document, freeing its WebSocket connection.
+     * No-op if the document is not currently open.
+     * @param {string} fileId
+     */
+    closeDoc(fileId) {
+        this._runtime.unload(fileId);
+        this._docs.delete(fileId);
     }
 
     // ─── Sheets ─────────────────────────────────────────────────────────────

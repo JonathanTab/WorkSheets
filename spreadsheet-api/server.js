@@ -28,7 +28,7 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { SpreadsheetClient } from '../src/cli/SpreadsheetClient.js';
+import { SpreadsheetClient } from './SpreadsheetClient.js';
 import { parseFormula } from '../src/formulas/parser.js';
 import { evaluate } from '../src/formulas/evaluator.js';
 
@@ -64,6 +64,23 @@ async function getClient(apiKey) {
     await c.init();
     clientCache.set(apiKey, c);
     return c;
+}
+
+// ─── Per-document idle release ───────────────────────────────────────────────
+// Documents are kept open for fast repeated access but released after 15 s of
+// inactivity so idle WebSocket connections don't accumulate indefinitely.
+
+const DOC_IDLE_MS = 15_000;
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const docTimers = new Map();
+
+function touchDoc(apiKey, fileId, client) {
+    const key = `${apiKey}:${fileId}`;
+    clearTimeout(docTimers.get(key));
+    docTimers.set(key, setTimeout(() => {
+        docTimers.delete(key);
+        client.closeDoc(fileId);
+    }, DOC_IDLE_MS));
 }
 
 // ─── HTTP server ─────────────────────────────────────────────────────────────
@@ -222,13 +239,13 @@ async function route(req, res) {
 
     // GET /file/:fileId/sheets
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheets$/))) {
-        const ydoc = await openDoc(client, m[1]);
+        const ydoc = await openDoc(client, m[1], apiKey);
         return json(res, 200, client.listSheets(ydoc));
     }
 
     // GET /file/:fileId/sheet/:sheetId/tables
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/tables$/))) {
-        const ydoc = await openDoc(client, m[1]);
+        const ydoc = await openDoc(client, m[1], apiKey);
         const tables = client.listTables(ydoc, m[2]);
         return json(res, 200, tables.map(t => ({ id: t.id, name: t.name, mode: t.mode })));
     }
@@ -236,7 +253,7 @@ async function route(req, res) {
     // GET /file/:fileId/sheet/:sheetId/table/:tableId/schema
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/schema$/))) {
         const [, fileId, sheetId, tableId] = m;
-        const ydoc = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId, apiKey);
         const tables = client.listTables(ydoc, sheetId);
         const table = tables.find(t => t.id === tableId);
         if (!table) return json(res, 404, { error: `Table "${tableId}" not found` });
@@ -250,6 +267,8 @@ async function route(req, res) {
                 required: col.required ?? false,
                 isFormula: col.isNonEntry ?? false,
             };
+            if (col.defaultFormula) base.defaultFormula = col.defaultFormula;
+            if (col.hAlign) base.hAlign = col.hAlign;
             if (col.typeConfig) {
                 try {
                     const tc = typeof col.typeConfig === 'string' ? JSON.parse(col.typeConfig) : col.typeConfig;
@@ -273,7 +292,7 @@ async function route(req, res) {
         const [, fileId, sheetId, tableId] = m;
         const useNames = url.searchParams.get('colNames') === '1';
         const withFormulas = url.searchParams.get('formulas') !== '0'; // default on
-        const ydoc = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId, apiKey);
 
         // Use formula-aware rows by default; fall back to raw on explicit ?formulas=0
         let rows = withFormulas
@@ -299,7 +318,7 @@ async function route(req, res) {
     if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
         const [, fileId, sheetId, tableId] = m;
         const body = await readJsonBody(req);
-        const ydoc = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId, apiKey);
         const resolved = client.resolveColumnNames(ydoc, sheetId, tableId, body);
         client.insertTableRow(ydoc, sheetId, tableId, resolved);
         return json(res, 200, { ok: true });
@@ -311,7 +330,7 @@ async function route(req, res) {
         const row = Number(url.searchParams.get('row'));
         const col = Number(url.searchParams.get('col'));
         if (isNaN(row) || isNaN(col)) return json(res, 400, { error: 'row and col query params required' });
-        const ydoc = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId, apiKey);
         const cell = client.getCell(ydoc, sheetId, row, col);
         return json(res, 200, { value: cell?.v ?? null });
     }
@@ -323,7 +342,7 @@ async function route(req, res) {
         const { row, col, value, props } = body;
         if (row == null || col == null || value === undefined)
             return json(res, 400, { error: 'row, col, and value are required' });
-        const ydoc = await openDoc(client, fileId);
+        const ydoc = await openDoc(client, fileId, apiKey);
         client.setCell(ydoc, sheetId, Number(row), Number(col), value, props ?? {});
         return json(res, 200, { ok: true });
     }
@@ -357,10 +376,13 @@ function extractBearer(req) {
 /**
  * Open a doc, re-initializing the file list once if the fileId is unknown.
  * This handles files created after the server started.
+ * Resets the 15-second idle timer so the doc is released after inactivity.
  */
-async function openDoc(client, fileId) {
+async function openDoc(client, fileId, apiKey) {
     if (!client.getFile(fileId)) await client.init();
-    return client.openDoc(fileId);
+    const ydoc = await client.openDoc(fileId);
+    touchDoc(apiKey, fileId, client);
+    return ydoc;
 }
 
 function json(res, status, data) {

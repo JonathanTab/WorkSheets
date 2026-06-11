@@ -9,10 +9,10 @@
 
 import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
-import { TableFormulaEvaluator } from '../stores/spreadsheet/features/tableFormulaEval.js';
-import { cmpValues, initPos, computeInsertPos } from '../stores/spreadsheet/features/tableRowHelpers.js';
-import { mkCellValuesKV, mkCellStylesKV, createSheetYMap } from '../stores/spreadsheet/schema.js';
-import { CELL_VALUE_KEYS } from '../stores/spreadsheet/constants.js';
+import { TableFormulaEvaluator } from '../src/stores/spreadsheet/features/tableFormulaEval.js';
+import { cmpValues, initPos, computeInsertPos } from '../src/stores/spreadsheet/features/tableRowHelpers.js';
+import { mkCellValuesKV, mkCellStylesKV, createSheetYMap } from '../src/stores/spreadsheet/schema.js';
+import { CELL_VALUE_KEYS } from '../src/stores/spreadsheet/constants.js';
 
 // Local aliases matching the pre-existing call sites (sheetYMap is always a Y.Map).
 const cellValuesKV = mkCellValuesKV;
@@ -213,7 +213,7 @@ export function setCell(ydoc, sheetId, row, col, value, props = {}) {
         /** @type {Record<string,any>} */ const valData = { v: value };
         /** @type {Record<string,any>} */ const styData = {};
         for (const [k, v] of Object.entries(props)) {
-            if (VALUE_KEYS.has(k)) valData[k] = v;
+            if (CELL_VALUE_KEYS.has(k)) valData[k] = v;
             else styData[k] = v;
         }
         cvKV?.set(key, { ...(cvKV.get(key) ?? {}), ...valData });
@@ -284,7 +284,7 @@ export function setRange(ydoc, sheetId, startRow, startCol, values2d, props = {}
     const csKV   = cellStylesKV(sheet);
     /** @type {Record<string,any>} */ const sharedSty = {};
     for (const [k, v] of Object.entries(props)) {
-        if (!VALUE_KEYS.has(k)) sharedSty[k] = v;
+        if (!CELL_VALUE_KEYS.has(k)) sharedSty[k] = v;
     }
     const hasSty = Object.keys(sharedSty).length > 0;
 
@@ -331,11 +331,13 @@ export function clearRange(ydoc, sheetId, startRow, startCol, endRow, endCol) {
 
 /**
  * List all source tables in the document (from root.tableData).
+ * Tables are document-wide per the schema — sheetId is accepted for API
+ * compatibility but does not filter the results.
  * The `id` in each result is usable directly with getTableRows(), insertTableRow(), etc.
  *
  * @param {Y.Doc} ydoc
- * @param {string} [_sheetId]  unused — tables are document-wide
- * @returns {{ id: string, name: string, columns: object[] }[]}
+ * @param {string} [_sheetId]  unused — tables live in root.tableData, not per-sheet
+ * @returns {{ id: string, name: string, mode: string, columns: object[] }[]}
  */
 export function listTables(ydoc, _sheetId) {
     const tableData = root(ydoc).get('tableData');
@@ -346,6 +348,7 @@ export function listTables(ydoc, _sheetId) {
         result.push({
             id,
             name:    tableYMap.get('name') ?? id,
+            mode:    tableYMap.get('mode') ?? 'inline',
             columns,
         });
     });
