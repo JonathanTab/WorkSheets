@@ -6,8 +6,5 @@
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "y-websocket": "^3.0.0",
-    "yjs": "^13.6.27"
-  }
+  "comment": "Intentionally declares NO dependencies. This package lives inside scriptorium/ and shares its node_modules — server.js imports yjs/y-websocket/y-utility transitively through ../src code. Declaring them here (and running `npm install` in this dir) creates a SECOND copy of yjs, which breaks `instanceof Y.Array` checks in schema.js (\"Yjs was already imported\" warning) and silently makes cell reads return null. Do not add a dependencies block; do not create spreadsheet-api/node_modules."
 }
