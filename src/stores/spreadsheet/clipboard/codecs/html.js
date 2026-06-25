@@ -62,7 +62,7 @@ export function encodeHTML(region, fingerprint = null) {
             }
 
             if (cell.fontFamily)       styles.push(`font-family:${cell.fontFamily}`);
-            if (cell.fontSize)         styles.push(`font-size:${Math.round(cell.fontSize * 0.75)}pt`);
+            if (cell.fontSize)         styles.push(`font-size:${cell.fontSize}pt`);
             if (cell.bold)             styles.push('font-weight:bold');
             if (cell.italic)           styles.push('font-style:italic');
             const textDecor = [];
@@ -107,7 +107,7 @@ function serializeRichTextHtml(plainText, tfr) {
         }).join('');
 
         const styles = [];
-        if (run.f)           styles.push(`font-size:${Math.round(run.f * 0.75)}pt`);
+        if (run.f)           styles.push(`font-size:${run.f}pt`);
         if (run.ff)          styles.push(`font-family:${run.ff}`);
         if (run.b === true)  styles.push('font-weight:bold');
         if (run.b === false) styles.push('font-weight:normal');
@@ -408,12 +408,14 @@ function parseHTMLStyleProps(style) {
 
     const fsMatch = style.match(/font-size:\s*(\d+(?:\.\d+)?)(pt|px|em|rem)/);
     if (fsMatch) {
+        // Storage is points; normalize the CSS unit to pt (mirrors the tfr decode
+        // in parseInnerSpansToTfr so cell- and run-level sizes agree).
         const val = parseFloat(fsMatch[1]);
         switch (fsMatch[2]) {
-            case 'pt':  props.fontSize = Math.round(val * 4 / 3); break;
-            case 'px':  props.fontSize = Math.round(val);         break;
+            case 'pt':  props.fontSize = Math.round(val);         break;
+            case 'px':  props.fontSize = Math.round(val * 3 / 4); break;
             case 'em':
-            case 'rem': props.fontSize = Math.round(val * 16);    break;
+            case 'rem': props.fontSize = Math.round(val * 12);    break;
         }
     }
 
@@ -520,7 +522,7 @@ function parseBorderValue(value) {
     return { width, style: styleMatch[1], color };
 }
 
-function inferValueFromText(text) {
+export function inferValueFromText(text) {
     if (!text || text === '') return { v: null };
     if (text === 'TRUE')  return { v: true };
     if (text === 'FALSE') return { v: false };

@@ -6,6 +6,11 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vitejs.dev/config/
 export default defineConfig({
     base: '/scriptorium/',
+    server: {
+        allowedHosts: [
+            'tabeling-pc'
+        ]
+    },
     define: {
         __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
@@ -101,6 +106,21 @@ export default defineConfig({
                     // Always fetch fresh so clients detect schema bumps immediately.
                     urlPattern: /\/schema-version\.json$/,
                     handler: 'NetworkOnly',
+                },
+                {
+                    // Load fast-path: the generic Yjs state snapshot. Serve the
+                    // cached copy instantly on repeat loads and revalidate in the
+                    // background — the WebSocket sync reconciles any delta, so a
+                    // momentarily-stale head-start is safe.
+                    urlPattern: /\/api\/doc\/[^/]+\/state$/i,
+                    handler: 'StaleWhileRevalidate',
+                    options: {
+                        cacheName: 'doc-state-snapshot',
+                        expiration: {
+                            maxEntries: 50,
+                            maxAgeSeconds: 60 * 60 * 24 // 1 day
+                        }
+                    }
                 },
                 {
                     urlPattern: /\/api\/.*/i,

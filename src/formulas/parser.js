@@ -210,10 +210,13 @@ export class Tokenizer {
                 const tok = this.readIdentifier();
                 tokens.push({ ...tok, start: tokenStart, end: this.pos });
             } else if (char === '$') {
-                // Absolute reference OR $rep variable
+                // Absolute reference OR $rep variable.
+                // Include '$' in the run so fully-absolute refs like $A$2 (and ranges
+                // $A$2:$A$16) tokenize as a single CELL_REF — matching readIdentifier,
+                // which handles the row-absolute form A$2.
                 this.advance();
                 let result = '$';
-                while (this.currentChar && /[a-zA-Z0-9_]/.test(this.currentChar)) {
+                while (this.currentChar && /[a-zA-Z0-9_$]/.test(this.currentChar)) {
                     result += this.currentChar;
                     this.advance();
                 }

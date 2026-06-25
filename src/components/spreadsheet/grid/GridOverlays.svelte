@@ -27,7 +27,11 @@
     import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
     import FileEditor from "../cellTypes/FileEditor.svelte";
-    import { ptToPx } from "../../../stores/spreadsheet/rendering/fontUnits.js";
+    import { ptToPx, lineHeightPxFor } from "../../../stores/spreadsheet/rendering/fontUnits.js";
+
+    // Mirrors CanvasRenderer DEFAULT_THEME.defaultFontFamily so the editor's
+    // line cadence is computed against the same font the canvas uses.
+    const DEFAULT_FONT_FAMILY = 'system-ui, -apple-system, sans-serif';
 
     // Canvas default — kept in sync with CanvasRenderer DEFAULT_THEME.defaultFontSize.
     // The editor uses the same pt → integer-px conversion as the canvas so the visible
@@ -97,22 +101,49 @@
         return 'center';
     }
 
+    // The vertical-alignment flex lives on the WRAPPER, not the editable, so the
+    // contenteditable can flow its inline content (spans + <br>) as a normal block.
+    // A flex column on the editable itself turns every <span>/<br> into its own
+    // flex row, which doubles every line break.
+    let richWrapStyle = $derived.by(() => {
+        const f = cellFormatting;
+        if (!f) return null;
+        const parts = [`justify-content: ${_vAlignToFlex(f.verticalAlign)}`];
+        if (f.backgroundColor) parts.push(`background: ${f.backgroundColor}`);
+        return parts.join('; ');
+    });
+
     let richEditStyle = $derived.by(() => {
         const f = cellFormatting;
         if (!f) return null;
-        const parts = [`font-size: ${ptToPx(f.fontSize || DEFAULT_FONT_SIZE_PT)}px`];
-        // .cell-rich-edit is a flex column: justify-content controls the vertical
-        // position of the text block (matches canvas vAlign), text-align the
-        // horizontal (matches canvas hAlign).
-        parts.push(`justify-content: ${_vAlignToFlex(f.verticalAlign)}`);
-        parts.push(`text-align: ${f.horizontalAlign || 'left'}`);
+        // text-align matches canvas hAlign; font props mirror the cell baseline.
+        const parts = [
+            `font-size: ${ptToPx(f.fontSize || DEFAULT_FONT_SIZE_PT)}px`,
+            `text-align: ${f.horizontalAlign || 'left'}`,
+            // Fixed px line cadence derived from the cell's DEFAULT font, exactly as
+            // CanvasRenderer#paintRichTextContent does — so every line is spaced
+            // uniformly regardless of per-run font sizes. A unitless line-height
+            // would instead scale each line by its own size and stagger them.
+            `line-height: ${_canvasLineHeight(f)}px`,
+        ];
         if (f.fontFamily)      parts.push(`font-family: ${f.fontFamily}, system-ui, -apple-system, sans-serif`);
         if (f.bold)            parts.push('font-weight: bold');
         if (f.italic)          parts.push('font-style: italic');
         if (f.color)           parts.push(`color: ${f.color}`);
-        if (f.backgroundColor) parts.push(`background: ${f.backgroundColor}`);
         return parts.join('; ');
     });
+
+    /**
+     * Canvas line cadence: (ascent+descent)*1.2 of the cell's default font.
+     * Uses the cell's primary family only (matching CanvasRenderer's defaultFamily)
+     * so getFontMetrics returns the same value the grid and PDF compute.
+     */
+    function _canvasLineHeight(f) {
+        const sizePx = ptToPx(f.fontSize || DEFAULT_FONT_SIZE_PT);
+        const family = f.fontFamily || DEFAULT_FONT_FAMILY;
+        const font = `${f.italic ? 'italic' : 'normal'} ${f.bold ? 'bold' : 'normal'} ${sizePx}px ${family}`;
+        return lineHeightPxFor(font);
+    }
 
     let plainEditStyle = $derived.by(() => {
         const f = cellFormatting;
@@ -277,6 +308,64 @@
         }
     }
 
+    // ── Paste ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Intercept paste into the rich-text cell. Without this the browser drops
+     * whatever sanitized HTML it likes into the contenteditable, which then
+     * round-trips through htmlToTfr/runsToHtml differently on the next edit
+     * (losing/gaining line breaks, dropping formatting). Instead we parse the
+     * ORIGINAL clipboard HTML deterministically and re-insert it as our own
+     * canonical markup, so the DOM matches exactly what a re-render would produce.
+     */
+    function handleRichPaste(e) {
+        if (!richEditEl) return;
+        const dt = e.clipboardData;
+        if (!dt) return;
+        e.preventDefault();
+
+        const html = dt.getData('text/html');
+        const text = dt.getData('text/plain');
+
+        let plainText, tfr;
+        if (html) {
+            ({ plainText, tfr } = htmlToTfr(html));
+        }
+        if (plainText == null || plainText === '') {
+            plainText = text ?? '';
+            tfr = null;
+        }
+        if (!plainText) return;
+
+        _insertRichAtCaret(plainText, tfr);
+    }
+
+    /** Insert plain text + runs at the caret as canonical editor markup. */
+    function _insertRichAtCaret(plainText, tfr) {
+        const fragHtml = runsToHtml(plainText, tfr);
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0 || !richEditEl.contains(sel.anchorNode)) {
+            richEditEl.insertAdjacentHTML('beforeend', fragHtml);
+        } else {
+            const range = sel.getRangeAt(0);
+            range.deleteContents();
+            const tmp = document.createElement('div');
+            tmp.innerHTML = fragHtml;
+            const frag = document.createDocumentFragment();
+            let lastNode = null;
+            while (tmp.firstChild) { lastNode = tmp.firstChild; frag.appendChild(lastNode); }
+            range.insertNode(frag);
+            if (lastNode) {
+                range.setStartAfter(lastNode);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }
+        }
+        _syncLive();
+        onEditInput?.(editSessionState.livePlainText ?? '', null, null);
+    }
+
     // ── Rich text editing helpers ─────────────────────────────────────────────
 
     function _insertLineBreak() {
@@ -390,20 +479,23 @@
                     on:blur={handleEditBlur}
                 />
             {:else if isTextMode}
-                <div
-                    role="textbox"
-                    tabindex="-1"
-                    class="cell-rich-edit"
-                    style={richEditStyle}
-                    contenteditable="true"
-                    bind:this={richEditEl}
-                    onblur={handleRichBlur}
-                    onkeydown={handleRichKeydown}
-                    oninput={() => {
-                        _syncLive();
-                        onEditInput?.(editSessionState.livePlainText ?? '', null, null);
-                    }}
-                ></div>
+                <div class="cell-rich-edit-wrap" style={richWrapStyle}>
+                    <div
+                        role="textbox"
+                        tabindex="-1"
+                        class="cell-rich-edit"
+                        style={richEditStyle}
+                        contenteditable="true"
+                        bind:this={richEditEl}
+                        onblur={handleRichBlur}
+                        onpaste={handleRichPaste}
+                        onkeydown={handleRichKeydown}
+                        oninput={() => {
+                            _syncLive();
+                            onEditInput?.(editSessionState.livePlainText ?? '', null, null);
+                        }}
+                    ></div>
+                </div>
             {:else}
                 <!-- Formula / plain-text input -->
                 <div class="formula-cell-wrap" style={plainEditStyle}>
@@ -459,32 +551,43 @@
         align-items: center;
     }
 
-    .cell-rich-edit {
+    /* The wrapper fills the cell and carries the editor chrome (outline/background)
+       plus the vertical-alignment flex. Keeping the flex here — not on the
+       editable — means the contenteditable lays its content out as a normal block,
+       so <br> line breaks render once instead of being doubled by flex rows. */
+    .cell-rich-edit-wrap {
         width: 100%;
         height: auto;
         min-height: 100%;
-        border: none;
         /* Padding mirrors the canvas painter: CELL_PAD=2 vertical, CELL_PAD_X=4
            horizontal, so text starts at the same offset whether painted or edited. */
         padding: 2px 4px;
-        font-size: 13px;
-        font-family: system-ui, -apple-system, sans-serif;
         outline: 2px solid var(--editor-outline, #3b82f6);
         background: var(--input-bg, #ffffff);
-        color: var(--text-color, #1e293b);
         position: relative;
         z-index: 2;
         box-sizing: border-box;
         overflow: visible;
+        display: flex;
+        flex-direction: column;
+        /* Default 'center' covers the common middle-aligned case; richWrapStyle
+           overrides per-cell vAlign. */
+        justify-content: center;
+    }
+
+    .cell-rich-edit {
+        display: block;
+        width: 100%;
+        border: none;
+        outline: none;
+        background: transparent;
+        font-size: 13px;
+        font-family: system-ui, -apple-system, sans-serif;
+        color: var(--text-color, #1e293b);
+        box-sizing: border-box;
         white-space: pre-wrap;
         overflow-wrap: break-word;
         word-break: break-word;
-        /* Flex column lets justify-content (set per-cell vAlign in richEditStyle)
-           position the text block to match the canvas. The default 'center'
-           covers the common middle-aligned case. */
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
         /* Matches the canvas line cadence ((ascent+descent)*1.2 ≈ 1.2em) so
            multi-line text doesn't drift relative to the painted version. */
         line-height: 1.2;

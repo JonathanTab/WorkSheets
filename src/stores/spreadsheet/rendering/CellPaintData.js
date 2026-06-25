@@ -20,6 +20,7 @@
 import { CELL_TYPE } from '../features/SheetRenderContext.svelte.js';
 import { CellTypeRegistry } from '../cellTypes/index.js';
 import { buildRenderRuns } from '../textFormatRuns.js';
+import { evalFormulaRule } from '../conditionalFormatFormula.js';
 
 const TABLE_HEADER_BORDER_WIDTH = 1.5; // px — default bottom border on table header cells
 
@@ -681,7 +682,12 @@ export function buildPaneData(params) {
                 for (const rule of cfRules) {
                     if (!rule.wholeCol && (r < rule.startRow || r > rule.endRow)) continue;
                     if (!rule.wholeRow && (c < rule.startCol || c > rule.endCol)) continue;
-                    if (matchesCondition(cfVal, rule.condition, rule.threshold)) {
+                    // Custom-formula rules evaluate a user formula against displayed
+                    // grid values; all others test the cell's own value.
+                    const passed = rule.condition === 'formula'
+                        ? evalFormulaRule(rule.formula, rule.startRow ?? 0, rule.startCol ?? 0, r, c, session)
+                        : matchesCondition(cfVal, rule.condition, rule.threshold);
+                    if (passed) {
                         if (rule.style?.backgroundColor) item.bgColor = rule.style.backgroundColor;
                         if (rule.style?.color) item.textColor = rule.style.color;
                         if (rule.style?.bold) item.bold = true;

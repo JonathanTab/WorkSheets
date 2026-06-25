@@ -10,7 +10,7 @@
  */
 
 import storage from '../../../storage.js';
-import { getFontMetrics, computeBaselineY } from '../../rendering/fontUnits.js';
+import { getFontMetrics, computeBaselineY, snapToDevice } from '../../rendering/fontUnits.js';
 
 // ─── File category helpers ─────────────────────────────────────────────────
 
@@ -72,8 +72,9 @@ export const fileType = {
      * @param {{x:number,y:number,width:number,height:number}} rect
      * @param {Object} style
      * @param {Object} theme
+     * @param {number} [dpr] device pixel ratio for crisp text snapping
      */
-    paintCell(ctx, blobId, cellItem, rect, style, theme) {
+    paintCell(ctx, blobId, cellItem, rect, style, theme, dpr = 1) {
         const { x, y, width, height } = rect;
 
         if (!blobId) {
@@ -84,13 +85,13 @@ export const fileType = {
         const descriptor = storage.app.get(blobId);
         if (!descriptor) storage.app.resolveBlob(blobId).catch(() => {});
         const filename = descriptor?.filename ?? '';
-        _drawFileCell(ctx, x, y, width, height, filename, theme);
+        _drawFileCell(ctx, x, y, width, height, filename, theme, dpr);
     },
 };
 
 // ─── Private draw helpers ─────────────────────────────────────────────────
 
-function _drawFileCell(ctx, x, y, w, h, filename, theme) {
+function _drawFileCell(ctx, x, y, w, h, filename, theme, dpr = 1) {
     const color = '#64748b';
     const pad      = 6;
     const iconSize = Math.min(h - pad * 2, 22);
@@ -99,7 +100,7 @@ function _drawFileCell(ctx, x, y, w, h, filename, theme) {
 
     _drawDocumentIcon(ctx, iconX, iconY, iconSize, color);
 
-    const textX = iconX + iconSize + 6;
+    const textX = snapToDevice(iconX + iconSize + 6, dpr);
     const maxW  = w - (textX - x) - pad;
 
     ctx.save();
@@ -108,7 +109,8 @@ function _drawFileCell(ctx, x, y, w, h, filename, theme) {
     ctx.fillStyle     = theme?.textColor ?? '#1e293b';
     ctx.textAlign     = 'left';
     ctx.textBaseline  = 'alphabetic';
-    const textY = computeBaselineY(y, h, 'middle', getFontMetrics(font), 2);
+    // Snap baseline to the device-pixel grid to keep the filename crisp.
+    const textY = snapToDevice(computeBaselineY(y, h, 'middle', getFontMetrics(font), 2), dpr);
 
     if (filename && maxW > 10) {
         let text = filename;

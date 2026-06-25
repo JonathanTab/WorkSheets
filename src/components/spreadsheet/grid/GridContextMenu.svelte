@@ -21,6 +21,8 @@
     import ContextMenu from "../../ui/ContextMenu.svelte";
     import MobileCellActionBar from "./MobileCellActionBar.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
+    import { getConfig as getEntryForgeConfig } from "../../../stores/spreadsheet/plugins/entryForge/entryForgeConfig.js";
+    import { openSplit, openEntryForgeConfig } from "../../../stores/spreadsheet/plugins/entryForge/entryForgeUiState.svelte.js";
 
     /**
      * Props:
@@ -151,6 +153,25 @@
         }
         return indices.size > 0 ? [...indices] : [tableCellInfo.dataIndex];
     });
+
+    // Entry Forge config for the table under the cursor (keyed by source id).
+    let entryForgeConfig = $derived.by(() => {
+        if (!tableCellInfo?.table || !sheetStore) return null;
+        const _pv = sheetStore.pluginsVersion;
+        return getEntryForgeConfig(sheetStore, tableCellInfo.table.sourceTableId);
+    });
+
+    function tableSplitEntry() {
+        if (!tableCellInfo?.table) return;
+        openSplit(tableCellInfo.table.id, tableCellInfo.dataIndex);
+        onClose?.();
+    }
+
+    function openEntryForgeSettings() {
+        if (!tableCellInfo?.table) return;
+        openEntryForgeConfig(tableCellInfo.table.sourceTableId);
+        onClose?.();
+    }
 
     // ─── Action functions ────────────────────────────────────────────────────
     function copySelection() {
@@ -489,6 +510,13 @@
                                 isSvgIcon: true,
                                 action: tableDeleteRow,
                             },
+                            ...(entryForgeConfig?.actions?.split?.enabled && tableSelectedDataRows.length === 1
+                                ? [{
+                                      label: "Split Entry…",
+                                      icon: "⑂",
+                                      action: tableSplitEntry,
+                                  }]
+                                : []),
                             { divider: true },
                         ]
                       : []),
@@ -528,7 +556,10 @@
                                 icon: "⚙",
                                 action: () => {
                                     if (tableCellInfo?.colDef) {
-                                        onShowTablesPanel?.(tableCellInfo.table.id, tableCellInfo.colDef.id);
+                                        // Column config is shared between a source table and its
+                                        // views, so always resolve to the source table id — opening
+                                        // this from a view must not land on the wrong table.
+                                        onShowTablesPanel?.(tableCellInfo.table.sourceTableId, tableCellInfo.colDef.id);
                                     }
                                 },
                             },
@@ -544,9 +575,18 @@
                       label: "Configure Table ⊞",
                       action: () => {
                           if (tableCellInfo) {
-                              onShowTablesPanel?.(tableCellInfo.table.id);
+                              // From a view, jump straight to that view's own settings
+                              // (column order/filters) rather than the source table's
+                              // generic column list.
+                              const t = tableCellInfo.table;
+                              onShowTablesPanel?.(t.sourceTableId, undefined, t.isView ? t.id : undefined);
                           }
                       },
+                  },
+                  {
+                      label: "Entry Forge Settings…",
+                      icon: "⚒",
+                      action: openEntryForgeSettings,
                   },
                   {
                       label: "Delete Table",

@@ -45,6 +45,7 @@
     let showTablesPanel = $state(false);
     let tablesPanelTableId = $state(/** @type {string|null} */ (null));
     let tablesPanelColId   = $state(/** @type {string|null} */ (null));
+    let tablesPanelViewId  = $state(/** @type {string|null} */ (null));
     let formulaBarRef = $state(null);
     let mobileInputBarRef = $state(null);
 
@@ -271,7 +272,10 @@
     }
 
     function handleCloseDocument() {
-        router.goBack();
+        router.goBack({
+            file: registry?.drive.getFile(docId),
+            folderExists: (id) => registry?.drive.getFolder(id) != null,
+        });
     }
 
     // Capture the hash present in the URL at the moment this component mounts
@@ -331,9 +335,10 @@
             {#if showTablesPanel && !mobileState.isMobile}
                 <DocumentTablesPanel
                     session={spreadsheetSession}
-                    onClose={() => { showTablesPanel = false; tablesPanelTableId = null; tablesPanelColId = null; }}
+                    onClose={() => { showTablesPanel = false; tablesPanelTableId = null; tablesPanelColId = null; tablesPanelViewId = null; }}
                     initialTableId={tablesPanelTableId}
                     initialColId={tablesPanelColId}
+                    initialViewId={tablesPanelViewId}
                 />
             {/if}
 
@@ -366,7 +371,7 @@
                         {awareness}
                         {currentUser}
                         onShowHistory={registry ? () => { showHistory = !showHistory; } : undefined}
-                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; tablesPanelTableId = null; tablesPanelColId = null; }}
+                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; tablesPanelTableId = null; tablesPanelColId = null; tablesPanelViewId = null; }}
                         tablesPanelOpen={showTablesPanel}
                         {registry}
                         {historyManager}
@@ -412,7 +417,7 @@
                                 ? mobileInputBarRef?.captureKeyboardFocus?.()
                                 : formulaBarRef?.captureKeyboardFocus?.()}
                         printSettings={pageBreakPrintSettings}
-                        onShowTablesPanel={(tableId, colId) => { tablesPanelTableId = tableId ?? null; tablesPanelColId = colId ?? null; showTablesPanel = true; }}
+                        onShowTablesPanel={(tableId, colId, viewId) => { tablesPanelTableId = tableId ?? null; tablesPanelColId = colId ?? null; tablesPanelViewId = viewId ?? null; showTablesPanel = true; }}
                     />
                     {#if isCrossSheetFormulaEdit}
                         <div class="cross-sheet-indicator">

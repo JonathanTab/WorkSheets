@@ -8,6 +8,16 @@
  *   // ... interact with the spreadsheet ...
  *   window.__spreadsheetPerf.report()
  *
+ * Load-path breakdown (no enable() needed — the marks are always emitted by
+ * SpreadsheetSession#doLoad). Reload the page, open a sheet, then:
+ *
+ *   window.__spreadsheetPerf.loadReport()
+ *
+ * Scripted scroll benchmark (reproducible frame numbers, installed from main.js):
+ *
+ *   await window.__spreadsheetPerf.scrollBench()            // vertical, round-trip
+ *   await window.__spreadsheetPerf.scrollBench({ axis: 'x' })
+ *
  * Instrumented categories (recorded automatically once enabled):
  *
  *   render.frame           ms per RAF paint cycle (all panes combined)
@@ -168,6 +178,52 @@ class PerfMonitor {
         return Object.fromEntries(
             allCategories.map(cat => [cat, this.stats(cat) ?? { count: this.#counts.get(cat) ?? 0 }])
         );
+    }
+
+    /**
+     * Print the load-path breakdown from the `ss:*` performance measures emitted
+     * by SpreadsheetSession#doLoad. These marks are written unconditionally (no
+     * enable() required). Dedupes by name, keeping the most recent measurement so
+     * repeated in-session loads report the latest open.
+     *
+     * `ss:yjsLoad` covers `storage.drive.loadDoc` — network transfer + IndexedDB
+     * (if enabled) + `Y.applyUpdate` decode, lumped together (the WS round-trip
+     * cannot be separated from decode on the client alone).
+     *
+     * @returns {Record<string, number> | null} name → duration(ms), or null if no marks
+     */
+    loadReport() {
+        if (typeof performance === 'undefined' || !performance.getEntriesByType) {
+            console.warn('[PerfMonitor] performance.getEntriesByType unavailable');
+            return null;
+        }
+        const measures = performance.getEntriesByType('measure').filter(m => m.name.startsWith('ss:'));
+        if (measures.length === 0) {
+            console.warn('[PerfMonitor] No ss:* load measures found. Reload the page, open a sheet, then call loadReport().');
+            return null;
+        }
+
+        // Keep the most recent measurement per name (the buffer accumulates across loads).
+        const byName = new Map();
+        for (const m of measures) {
+            const prev = byName.get(m.name);
+            if (!prev || m.startTime > prev.startTime) byName.set(m.name, m);
+        }
+
+        const total = byName.get('ss:load:total');
+        const phases = [...byName.values()]
+            .filter(m => m.name !== 'ss:load:total')
+            .sort((a, b) => a.startTime - b.startTime);
+
+        console.group('[PerfMonitor] Load breakdown');
+        if (total) console.log(`${total.name.padEnd(22)} ${total.duration.toFixed(1)}ms`);
+        for (const m of phases) {
+            const pct = total?.duration ? ` (${((m.duration / total.duration) * 100).toFixed(0)}%)` : '';
+            console.log(`  ${m.name.padEnd(20)} ${m.duration.toFixed(1)}ms${pct}`);
+        }
+        console.groupEnd();
+
+        return Object.fromEntries([...byName.values()].map(m => [m.name, +m.duration.toFixed(1)]));
     }
 
     /**

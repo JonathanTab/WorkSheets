@@ -77,7 +77,11 @@
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import SelectionHandles from "./grid/SelectionHandles.svelte";
     import PluginOverlay from "./plugins/PluginOverlay.svelte";
+    import EntryForgeOverlay from "./plugins/entryForge/EntryForgeOverlay.svelte";
+    import SplitOverlay from "./plugins/entryForge/SplitOverlay.svelte";
+    import { resolveRangeValues } from "../../stores/spreadsheet/rangeRefUtils.js";
     import "../../stores/spreadsheet/plugins/horam/registerHoramPlugin.js";
+    import "../../stores/spreadsheet/plugins/entryForge/registerEntryForgePlugin.js";
 
     // ─── Props ─────────────────────────────────────────────────────────────────
     let {
@@ -1081,26 +1085,6 @@
         if (w <= 0 || h <= 0) return null;
         return { left, top, width: w, height: h };
     }
-
-    /**
-     * All visible table outlines (subtle, always-on, pointer-events:none).
-     */
-    let allTableOutlines = $derived.by(() => {
-        if (!renderContext?.tableManager || !virtualizer || !renderPlan)
-            return [];
-        const result = [];
-        for (const table of renderContext.tableManager.stores.values()) {
-            const endRow = table.startRow + 1 + table.sortedFilteredRows.length;
-            const rect = rangeOutlineStyle(
-                table.startRow,
-                table.startCol,
-                endRow,
-                table.endCol,
-            );
-            if (rect) result.push({ table, rect });
-        }
-        return result;
-    });
 
     /**
      * All visible repeater outlines (subtle, always-on, pointer-events:none).
@@ -2222,40 +2206,7 @@
     // ─── Dropdown range / table resolver helpers ─────────────────────────────
     function resolveRangeOptions(rangeStr) {
         if (!sheetStore) return [];
-        let targetSheetId = null;
-        let cellRange = rangeStr.trim();
-        const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
-        if (sheetRefMatch) {
-            const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
-            cellRange = sheetRefMatch[3];
-            const entry = spreadsheetSession.sheets.find(s => s.name === sheetName);
-            if (entry) targetSheetId = entry.id;
-        }
-        const parts = cellRange.trim().toUpperCase().split(':');
-        function parseRef(ref) {
-            const m = ref.match(/^([A-Z]+)(\d+)$/);
-            if (!m) return null;
-            let col = 0;
-            for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
-            col--;
-            return { row: parseInt(m[2]) - 1, col };
-        }
-        const start = parseRef(parts[0]);
-        const end = parts[1] ? parseRef(parts[1]) : start;
-        if (!start || !end) return [];
-        const opts = [];
-        if (!targetSheetId || targetSheetId === spreadsheetSession.activeSheetId) {
-            for (let r = start.row; r <= end.row; r++)
-                for (let c = start.col; c <= end.col; c++) {
-                    const v = spreadsheetSession.getCellDisplayValue(r, c);
-                    if (v != null && v !== '') opts.push(String(v));
-                }
-        } else {
-            const values = spreadsheetSession.computeSheetRange(targetSheetId, start.row, start.col, end.row, end.col);
-            for (const v of values)
-                if (v != null && v !== '' && !(v instanceof Object)) opts.push(String(v));
-        }
-        return opts;
+        return resolveRangeValues(spreadsheetSession, rangeStr);
     }
 
     function resolveTableColumnOptions(tableName, columnId) {
@@ -3496,25 +3447,6 @@
                 >
             {/each}
 
-            <!-- Table settings buttons (no outline — tables look like regular cells) -->
-            {#each allTableOutlines as { table: tbl }}
-                {@const btnLeft =
-                    cellContainerLeft(tbl.endCol) +
-                    (virtualizer?.getColWidth(tbl.endCol) ?? 0)}
-                <button
-                    class="feature-settings-btn feature-settings-btn--table"
-                    style="left:{btnLeft}px; top:{cellContainerTop(
-                        tbl.startRow,
-                    )}px;"
-                    onclick={(e) => {
-                        e.stopPropagation();
-                        onShowTablesPanel?.(tbl.id);
-                    }}
-                    title="Table settings: {tbl.name}"
-                    aria-label="Table settings">⊞</button
-                >
-            {/each}
-
             <!-- Edit panel (repeater settings) -->
             {#if activeEditPanel && editPanelPosition}
                 <div
@@ -3673,6 +3605,8 @@
             <!-- Plugin action buttons (positioned over their anchor cells) -->
             {#if virtualizer}
                 <PluginOverlay {virtualizer} />
+                <EntryForgeOverlay {virtualizer} />
+                <SplitOverlay {virtualizer} />
             {/if}
 
             <!-- (Viewport mode removed — all tables/repeaters are inline) -->
@@ -4223,15 +4157,6 @@
     .feature-settings-btn--repeater:hover {
         background: #ede9fe;
         border-color: #7c3aed;
-    }
-
-    .feature-settings-btn--table {
-        color: #3b82f6;
-        border-color: rgba(59, 130, 246, 0.4);
-    }
-    .feature-settings-btn--table:hover {
-        background: #eff6ff;
-        border-color: #3b82f6;
     }
 
     /* ── Edit panel anchor ── */

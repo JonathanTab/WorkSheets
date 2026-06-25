@@ -21,6 +21,7 @@
         { value: 'eq',       label: '= Equal to' },
         { value: 'neq',      label: '≠ Not equal to' },
         { value: 'contains', label: 'Contains' },
+        { value: 'formula',  label: 'Custom formula' },
     ];
 
     // ── Drag-to-move ────────────────────────────────────────────────────────────
@@ -109,6 +110,7 @@
         return {
             condition: 'gt',
             threshold: '',
+            formula: '',
             style: { backgroundColor: '#fef08a', color: '', bold: false, italic: false },
             startRow: sel?.startRow ?? 0,
             startCol: sel?.startCol ?? 0,
@@ -175,15 +177,56 @@
 
     let draftRangeLabel = $derived(rangeToStr(draft));
 
-    function addRule() {
-        if (!sheetStore || draft.threshold === '') return;
-        const id = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        sheetStore.addConditionalFormat({ id, ...draft });
+    let canAdd = $derived(
+        draft.condition === 'formula' ? draft.formula.trim() !== '' : draft.threshold !== ''
+    );
+
+    // id of the rule currently being edited, or null when adding a new one.
+    let editingId = $state(null);
+
+    function startEdit(rule) {
+        editingId = rule.id;
+        draft = {
+            condition: rule.condition ?? 'gt',
+            threshold: rule.threshold ?? '',
+            formula: rule.formula ?? '',
+            style: {
+                backgroundColor: rule.style?.backgroundColor ?? '#fef08a',
+                color: rule.style?.color ?? '',
+                bold: rule.style?.bold ?? false,
+                italic: rule.style?.italic ?? false,
+            },
+            startRow: rule.startRow ?? 0,
+            startCol: rule.startCol ?? 0,
+            endRow: rule.endRow ?? 0,
+            endCol: rule.endCol ?? 0,
+            wholeCol: rule.wholeCol,
+            wholeRow: rule.wholeRow,
+        };
+        rangeInputError = false;
+    }
+
+    function cancelEdit() {
+        editingId = null;
+        draft = makeDraft();
+        rangeInputError = false;
+    }
+
+    function saveRule() {
+        if (!sheetStore || !canAdd) return;
+        if (editingId) {
+            sheetStore.updateConditionalFormat(editingId, { ...draft });
+            editingId = null;
+        } else {
+            const id = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            sheetStore.addConditionalFormat({ id, ...draft });
+        }
         draft = makeDraft();
         rangeInputError = false;
     }
 
     function removeRule(id) {
+        if (editingId === id) cancelEdit();
         sheetStore?.deleteConditionalFormat(id);
     }
 </script>
@@ -222,18 +265,22 @@
         {#if rules.length}
             <div class="rules-list">
                 {#each rules as rule (rule.id)}
-                    <div class="rule-row">
+                    <div class="rule-row" class:editing={editingId === rule.id}>
                         <div
                             class="rule-swatch"
                             style="background:{rule.style?.backgroundColor || 'transparent'};border:1px solid #cbd5e1"
                         ></div>
-                        <div class="rule-desc">
+                        <button class="rule-desc" onclick={() => startEdit(rule)} title="Edit rule">
                             <span class="rule-range">{rangeToStr(rule)}</span>
                             <span class="rule-cond">
-                                {CONDITIONS.find(c => c.value === rule.condition)?.label ?? rule.condition}
-                                {rule.threshold}
+                                {#if rule.condition === 'formula'}
+                                    {rule.formula}
+                                {:else}
+                                    {CONDITIONS.find(c => c.value === rule.condition)?.label ?? rule.condition}
+                                    {rule.threshold}
+                                {/if}
                             </span>
-                        </div>
+                        </button>
                         <button class="del-btn" onclick={() => removeRule(rule.id)}>✕</button>
                     </div>
                 {/each}
@@ -244,8 +291,9 @@
 
         <div class="divider"></div>
 
-        <!-- Add new rule -->
+        <!-- Add / edit rule -->
         <div class="add-section">
+            <div class="section-title">{editingId ? 'Edit rule' : 'New rule'}</div>
             <div class="row">
                 <label for="cf-range">Range</label>
                 <div class="range-row">
@@ -275,10 +323,28 @@
                 </select>
             </div>
 
-            <div class="row">
-                <label for="cf-threshold">Value</label>
-                <input id="cf-threshold" type="text" bind:value={draft.threshold} placeholder="e.g. 100" />
-            </div>
+            {#if draft.condition === 'formula'}
+                <div class="row formula-row">
+                    <label for="cf-formula">Formula</label>
+                    <input
+                        id="cf-formula"
+                        class="formula-input"
+                        type="text"
+                        bind:value={draft.formula}
+                        placeholder="=AND($I2<0, NOT(ISERROR(MATCH(F2,$A$4:$A$14,0))))"
+                        spellcheck="false"
+                    />
+                </div>
+                <div class="formula-hint">
+                    Written for the top-left cell of the range; relative refs shift per cell,
+                    <code>$</code> refs stay fixed. Reads the values shown in the grid.
+                </div>
+            {:else}
+                <div class="row">
+                    <label for="cf-threshold">Value</label>
+                    <input id="cf-threshold" type="text" bind:value={draft.threshold} placeholder="e.g. 100" />
+                </div>
+            {/if}
 
             <div class="row">
                 <label for="cf-bg">Background</label>
@@ -295,7 +361,14 @@
                 <input id="cf-bold" type="checkbox" bind:checked={draft.style.bold} />
             </div>
 
-            <button class="add-btn" onclick={addRule} disabled={draft.threshold === ''}>Add Rule</button>
+            <div class="btn-row">
+                {#if editingId}
+                    <button class="cancel-btn" onclick={cancelEdit}>Cancel</button>
+                {/if}
+                <button class="add-btn" onclick={saveRule} disabled={!canAdd}>
+                    {editingId ? 'Update Rule' : 'Add Rule'}
+                </button>
+            </div>
         </div>
     </div>
 {/if}
@@ -341,14 +414,27 @@
         display: flex; align-items: center; gap: 8px;
         padding: 4px; border: 1px solid var(--color-border, #e2e8f0); border-radius: 4px;
     }
+    .rule-row.editing { border-color: #3b82f6; background: #eff6ff; }
     .rule-swatch { width: 20px; height: 20px; border-radius: 3px; flex-shrink: 0; }
-    .rule-desc { flex: 1; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+    .rule-desc {
+        flex: 1; display: flex; flex-direction: column; gap: 2px; overflow: hidden;
+        background: none; border: none; padding: 0; margin: 0; text-align: left;
+        cursor: pointer; font: inherit;
+    }
+    .rule-desc:hover .rule-range { text-decoration: underline; }
     .rule-range { font-weight: 500; color: #374151; font-family: monospace; font-size: 0.75rem; }
     .rule-cond { color: #6b7280; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .del-btn { background: none; border: none; cursor: pointer; color: #ef4444; padding: 2px 6px; flex-shrink: 0; }
     .empty { color: #94a3b8; padding: 8px 12px; margin: 0; font-style: italic; }
     .divider { border-top: 1px solid var(--color-border, #e2e8f0); margin: 0; }
     .add-section { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; user-select: auto; }
+    .section-title { font-size: 0.75rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+    .btn-row { display: flex; gap: 6px; justify-content: flex-end; }
+    .cancel-btn {
+        padding: 5px 12px; background: #f1f5f9; color: #374151;
+        border: 1px solid #e2e8f0; border-radius: 4px; cursor: pointer; font-size: 0.8125rem;
+    }
+    .cancel-btn:hover { background: #e2e8f0; }
     .row {
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
     }
@@ -359,6 +445,11 @@
     }
     .row input[type="color"] { width: 40px; height: 24px; border: 1px solid #cbd5e1; border-radius: 3px; cursor: pointer; }
     .row input[type="checkbox"] { width: 16px; height: 16px; }
+
+    .formula-row { align-items: flex-start; }
+    .formula-input { font-family: monospace; font-size: 0.75rem; }
+    .formula-hint { font-size: 0.7rem; color: #94a3b8; line-height: 1.35; padding: 0 0 2px; }
+    .formula-hint code { background: #f1f5f9; padding: 0 3px; border-radius: 3px; font-size: 0.7rem; }
 
     /* Range row */
     .range-row { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; }

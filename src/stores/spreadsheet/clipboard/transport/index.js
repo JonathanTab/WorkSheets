@@ -11,6 +11,7 @@ import { encodeTSV, decodeTSV } from '../codecs/tsv.js';
 import { encodeHTML, decodeHTML, parseHTMLTableToRegion } from '../codecs/html.js';
 import { encodeScriptoriumJSON, decodeScriptoriumJSON } from '../codecs/scriptorium.js';
 import { decodeGoogleCompact } from '../codecs/googleCompact.js';
+import { decodeGoogleDoc, isGoogleDocHTML } from '../codecs/googleDoc.js';
 
 export { writeToSystem, readBagFromSystem } from './asyncClipboard.js';
 export { writeToDataTransfer, readBagFromDataTransfer } from './nativeEvent.js';
@@ -32,8 +33,9 @@ export function encodeModel(model) {
  * Decode a normalized MIME bag into a model + provenance, via one priority chain:
  *   1. our JSON (custom MIME, native or 'web '-prefixed) → full fidelity, internal
  *   2. Google compact (+ HTML for borders/format)        → external
- *   3. HTML table                                         → external
- *   4. plain text / TSV                                   → external
+ *   3. Google Docs document slice (multi-block flatten)   → external
+ *   4. HTML table                                         → external
+ *   5. plain text / TSV                                   → external
  *
  * @param {{scriptorium?:string, scriptoriumWeb?:string, google?:string, html?:string, text?:string}} bag
  * @returns {{ model:object, isInternal:boolean } | null}
@@ -55,13 +57,21 @@ export function decodeBag(bag) {
         if (model) return { model, isInternal: false };
     }
 
-    // 3. HTML table.
+    // 3. Google Docs document slice — a sequence of tables + paragraphs, not a
+    //    single grid. Flatten the whole document before the generic table decoder
+    //    (which would otherwise grab only the first table).
+    if (bag.html && isGoogleDocHTML(bag.html)) {
+        const model = decodeGoogleDoc(bag.html);
+        if (model) return { model, isInternal: false };
+    }
+
+    // 4. HTML table.
     if (bag.html) {
         const model = decodeHTML(bag.html);
         if (model) return { model, isInternal: false };
     }
 
-    // 4. Plain text / TSV.
+    // 5. Plain text / TSV.
     if (bag.text) {
         const model = decodeTSV(bag.text);
         if (model) return { model, isInternal: false };

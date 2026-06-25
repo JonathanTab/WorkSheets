@@ -294,7 +294,12 @@
 
     onDestroy(() => { destroyView(); docSession.unload(); });
 
-    function handleCloseDocument() { router.goBack(); }
+    function handleCloseDocument() {
+        router.goBack({
+            file: registry?.drive.getFile(docId),
+            folderExists: (id) => registry?.drive.getFolder(id) != null,
+        });
+    }
 </script>
 
 <svelte:window onkeydown={handleGlobalKeydown} />

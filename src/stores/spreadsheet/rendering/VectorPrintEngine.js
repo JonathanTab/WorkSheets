@@ -17,6 +17,7 @@
  */
 
 import { buildWrappedLines } from './RichTextLayout.js';
+import { ptToPx, lineHeightPxFor } from './fontUnits.js';
 import { orchestratePDF, downloadPDF as _downloadPDF } from './PDFOrchestrator.js';
 import { CSS_PX_PER_INCH, MM_PER_INCH, parseCssColor } from './PrintShared.js';
 import { paintBordersVec } from './BorderGeometry.js';
@@ -348,9 +349,13 @@ function drawRichTextContent(pdf, cell, cx, cy, cw, ch, s, overrideColor) {
         else for (const wl of wrapped) lines.push(wl);
     }
 
-    // Line height = 1.5× font size, computed in mm from pt.
-    const lineH      = pt2mm(defaultSizePt * 1.5, s);
-    const halfFontMm = pt2mm(defaultSizePt / 2, s);
+    // Line height: the SAME cadence the canvas/editor use — (ascent+descent)*1.2
+    // of the cell's default font, measured in CSS px then converted to mm — so a
+    // multi-line cell is spaced identically across grid, editor and PDF.
+    const metricFamily = cell.fontFamily || 'system-ui, -apple-system, sans-serif';
+    const metricFont   = `${cell.italic ? 'italic' : 'normal'} ${cell.bold ? 'bold' : 'normal'} ${ptToPx(defaultSizePt)}px ${metricFamily}`;
+    const lineH        = px2mm(lineHeightPxFor(metricFont), s);
+    const halfFontMm   = pt2mm(defaultSizePt / 2, s);
     const totalH     = lines.length * lineH;
 
     // startY = center of the first line (matches canvas convention).

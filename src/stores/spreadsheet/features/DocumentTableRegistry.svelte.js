@@ -464,6 +464,23 @@ export class DocumentTableRegistry {
     }
 
     /**
+     * Resolve any table/view id to its source table id, plus the view id if
+     * the input id was itself a view. Used by UI entry points (grid outline
+     * buttons, context menu, "Configure" actions) so that opening config
+     * from a view always lands on the right source table — and, when
+     * relevant, the right view — instead of silently falling back to
+     * whichever table happens to be listed first.
+     * @param {string | null} id
+     * @returns {{ sourceId: string | null, viewId: string | null }}
+     */
+    resolveSourceId(id) {
+        if (!id) return { sourceId: null, viewId: null };
+        const store = this.#stores.get(id);
+        if (store?.isView) return { sourceId: store.sourceTableId, viewId: id };
+        return { sourceId: id, viewId: null };
+    }
+
+    /**
      * The document-level source tables Y.Map (root.tableData).
      * Used by TableManager to create new source tables.
      * @returns {import('yjs').Map<any>}

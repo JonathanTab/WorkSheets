@@ -294,7 +294,17 @@ export class GridPaintCoordinator {
             if (tableCanvasX > virtualizer.containerWidth - HEADER_WIDTH || tableCanvasX + colW < 0) continue;
             const firstDataRow = table.startRow + 2;
             const rowCount = table.sortedFilteredRows.length;
-            for (let di = 0; di < rowCount; di++) {
+            // Cull the iteration to the visible body row window instead of walking
+            // every data row (~1000+ on large tables) once per scroll frame. The
+            // pixel-bounds `continue` below still guards the edges precisely.
+            const bodyRowRange = this.renderPlan?.plans?.body?.rowRange;
+            let diStart = 0;
+            let diEnd = rowCount - 1;
+            if (bodyRowRange && bodyRowRange.count > 0) {
+                diStart = Math.max(0, bodyRowRange.start - firstDataRow);
+                diEnd = Math.min(rowCount - 1, bodyRowRange.end - firstDataRow);
+            }
+            for (let di = diStart; di <= diEnd; di++) {
                 const gridRow = firstDataRow + di;
                 const rowCanvasY = virtualizer.rowMetrics.offsetOf(gridRow) - scrollTop + frozenHeight;
                 const rowH = virtualizer.getRowHeight(gridRow);
@@ -434,6 +444,8 @@ export class GridPaintCoordinator {
         const { selectCanvasEl, selectionRenderer, renderPlan, virtualizer, renderContext } = this;
         if (!selectCanvasEl || !selectionRenderer || !renderPlan || !virtualizer) return;
 
+        const _perfT = perfMon.enabled ? performance.now() : 0;
+
         const frozenRows = virtualizer.frozenRows;
         const frozenCols = virtualizer.frozenCols;
         const frozenHeight = renderPlan.frozenHeight;
@@ -502,5 +514,7 @@ export class GridPaintCoordinator {
         // Grip icons on top of selection fills — cheap, no buildPaneData needed.
         // Hover changes only trigger selectionScheduler, not the expensive data scheduler.
         this.#paintTableGripIcons(scrollLeft, scrollTop, frozenHeight, renderPlan.bodyViewportHeight);
+
+        if (perfMon.enabled) perfMon.record('render.selectionPaint', performance.now() - _perfT);
     }
 }

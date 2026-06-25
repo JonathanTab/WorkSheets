@@ -147,15 +147,17 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
         const edge = normalizeBorderStyle(rawEdge);
         if (!edge) return;
 
-        // Interpret edge.width in PHYSICAL pixels so that "1" matches the
-        // gridline thickness (which the renderer paints at 1 physical px).
-        // Without this scaling the border would be `dpr`× as thick as the
-        // gridline on hi-DPI displays.
-        const physPx = Math.max(1, Math.round(edge.width));
-        const lineWidth = physPx / dpr;
+        // Border widths are authored in CSS px and must render at the same visual
+        // thickness as the PDF (which uses CSS px directly) — so widths > 1 use
+        // their nominal CSS px and read as genuinely thicker. The one exception is
+        // the default "normal" border (width ≤ 1): it's painted as a 1-physical-px
+        // hairline so it stays crisp and matches the gridlines (also 1 physical px),
+        // rather than the dpr× thicker line a plain CSS-px width would give.
+        const lineWidth = edge.width <= 1 ? 1 / dpr : edge.width;
         // Snap odd-physical-pixel strokes onto a half-physical-pixel position
         // so they render as a single crisp row/column instead of antialiasing
         // across two. Even widths already sit on the physical-pixel grid.
+        const physPx = Math.max(1, Math.round(lineWidth * dpr));
         const snap = (physPx % 2 === 1) ? 0.5 / dpr : 0;
 
         // Each endpoint extends to meet the far edge of the PERPENDICULAR border
@@ -167,7 +169,8 @@ export function paintBordersCanvas(ctx, borders, x, y, w, h, dpr = 1) {
         const perpHalf = (rawPerp) => {
             const pe = normalizeBorderStyle(rawPerp);
             if (!pe) return 0;
-            return (Math.max(1, Math.round(pe.width)) / dpr) / 2;
+            const pw = pe.width <= 1 ? 1 / dpr : pe.width;
+            return pw / 2;
         };
 
         let x1, y1, x2, y2;

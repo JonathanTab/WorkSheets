@@ -10,6 +10,28 @@ export function ptToPx(pt) {
     return Math.round(pt * 4 / 3);
 }
 
+/**
+ * Inverse of {@link ptToPx}: CSS pixels → points, rounded to a whole point. Used
+ * when reading a font-size out of the DOM (contenteditable / pasted HTML) back
+ * into the pt-based storage model.
+ */
+export function pxToPt(px) {
+    return Math.round(px * 3 / 4);
+}
+
+/**
+ * Snap a CSS-pixel coordinate to the device-pixel grid so glyphs and 1px
+ * strokes rasterize crisply instead of soft/blurry across two physical pixels.
+ * At dpr=2 this rounds to the nearest 0.5 CSS px; at dpr=1 to the nearest 1 px.
+ *
+ * @param {number} v   coordinate in CSS px
+ * @param {number} dpr device pixel ratio (defaults to 1 / no snap)
+ * @returns {number}
+ */
+export function snapToDevice(v, dpr = 1) {
+    return dpr ? Math.round(v * dpr) / dpr : v;
+}
+
 // ── Font metrics (ascent/descent) ────────────────────────────────────────────
 // Cached per font string. Each cell in a typical sheet shares a font with
 // dozens of others, so this is essentially free after warm-up.
@@ -62,6 +84,20 @@ export function getFontMetrics(fontStr) {
     const entry = { ascent, descent, centerOffset };
     _metricsCache.set(fontStr, entry);
     return entry;
+}
+
+/**
+ * The single source of truth for multi-line line spacing: (ascent+descent)*1.2
+ * of the cell's *default* font, in CSS px. Canvas, the cell editor, and the PDF
+ * engine all derive their per-line step from this so a multi-line cell is spaced
+ * identically in every render path (editor px, canvas px, PDF px→pt→mm).
+ *
+ * @param {string} fontStr A CSS font shorthand for the cell's default font.
+ * @returns {number} line height in CSS px
+ */
+export function lineHeightPxFor(fontStr) {
+    const m = getFontMetrics(fontStr);
+    return (m.ascent + m.descent) * 1.2;
 }
 
 /**

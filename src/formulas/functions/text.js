@@ -210,6 +210,7 @@ export const textFunctions = {
         example: '=VALUE("42")  →  42\n=VALUE("$1,234")  →  1234',
         description: 'Text to number', minArgs: 1, maxArgs: 1,
         call: (args) => {
+            if (args[0] === '') return FormulaError.VALUE;
             const n = toNumber(args[0]);
             return isError(n) ? FormulaError.VALUE : n;
         }
@@ -266,6 +267,7 @@ export const textFunctions = {
         example: '=NUMBERVALUE("1,234.56")  →  1234.56',
         description: 'Locale-aware text to number', minArgs: 1, maxArgs: 1,
         call: (args) => {
+            if (args[0] === '') return FormulaError.VALUE;
             const n = toNumber(args[0]);
             return isError(n) ? FormulaError.VALUE : n;
         }

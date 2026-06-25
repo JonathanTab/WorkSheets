@@ -202,11 +202,16 @@ function parseCompactToRegion(jsonStr, htmlRegion) {
         if (fmt['16']) cell.fontSize = Math.round(fmt['16'] * 4 / 3);
         if (fmt['21']) cell.wrapText = true;
 
+        // Field "2" is a packed flag bitfield. Only 0x20/0x40 are font toggles
+        // (bold/italic). 0x04 is Google's "this cell carries a border" flag (it
+        // is set exactly on descriptors that also have a "5" border block) — it
+        // is NOT underline, and reading it as such stamped phantom underlines on
+        // the rows following a bordered cell. Underline/strikethrough are carried
+        // reliably by Google's HTML as text-decoration, which is authoritative in
+        // the merge below, so we don't derive them from these ambiguous bits.
         const bits = fmt['2'] || 0;
         if (bits & 0x20) cell.bold = true;
         if (bits & 0x40) cell.italic = true;
-        if (bits & 0x04) cell.underline = true;
-        if (bits & 0x08) cell.strikethrough = true;
     }
 
     // Merge HTML formatting on top (HTML authoritative for content/styles; compact back-fills).

@@ -8,283 +8,168 @@
     // YjsRuntime/providers live on the shared storage singleton.
     let { docId = null } = $props();
 
-    // Connection states: 'offline' | 'disconnected' | 'connecting' | 'connected' | 'syncing'
-    // All state uses $state.raw to prevent reactive triggers from value changes
-    let connectionStatus = $state.raw("disconnected");
-    let isBrowserOffline = $state.raw(!navigator.onLine);
+    // Phases: 'no-connection' | 'connecting' | 'connected'.
+    // 'no-connection' covers both "no network" and "server unreachable" —
+    // distinguished only in the tooltip (noConnectionReason), per design:
+    // one visual state, accurate cause on hover.
+    let phase = $state.raw("connecting");
+    let noConnectionReason = $state.raw(null); // 'network' | 'server' | null
+    // Transient flash for real traffic, not a steady-state phase.
+    let activityPulse = $state.raw(null); // 'sent' | 'received' | null
 
-    // Non-reactive internal state
-    let syncTimeout = null;
-    let currentDocId = null;
+    // After this many consecutive failed connection attempts (no successful
+    // open since the last one), stop pretending we're "connecting" and tell
+    // the user the server is unreachable. y-websocket retries forever with
+    // backoff regardless — we just stop narrating every attempt once it's
+    // clear this isn't progressing. Kept low so a dead server is reported
+    // within ~300ms (100ms + 200ms backoff), not after a long fake wait.
+    const FAILURE_THRESHOLD = 2;
+    const PULSE_DURATION_MS = 450;
+    // One-time bootstrap wait for YjsRuntime to create the provider for this
+    // docId (load() is async). Not a connectivity check — just "does the
+    // provider object exist yet".
+    const PROVIDER_BOOTSTRAP_POLL_MS = 100;
+    const PROVIDER_BOOTSTRAP_MAX_ATTEMPTS = 30; // 3s
+
+    let pulseTimeout = null;
     let providerPollInterval = null;
-    let connectionPollInterval = null;
     let listenerCleanup = null;
     let previousDocId = null;
-    let isUpdating = false; // Guard against reentrant updates
+    let isBrowserOffline = !(typeof navigator !== "undefined" ? navigator.onLine : true);
 
-    // Helper to set status with guard against reentrant updates
-    function setStatus(newStatus) {
-        if (isUpdating) return;
-        if (connectionStatus === newStatus) return;
-        isUpdating = true;
-        connectionStatus = newStatus;
-        // Use queueMicrotask to reset the flag after the current update cycle
-        queueMicrotask(() => {
-            isUpdating = false;
-        });
-    }
-
-    // Get the provider for a document from the shared runtime.
-    function getProvider(id) {
+    function getActive(id) {
         if (!id) return null;
-
         const runtime = storage?._runtime;
-        if (!runtime) return null;
-
-        const activeDoc = runtime.activeDocs?.get(id);
-        if (!activeDoc) return null;
-
-        return activeDoc.provider;
+        return runtime?.activeDocs?.get(id) ?? null;
     }
 
-    // Clear all timers and listeners
-    function clearAllTimers() {
-        if (syncTimeout) {
-            clearTimeout(syncTimeout);
-            syncTimeout = null;
-        }
+    function clearProviderPoll() {
         if (providerPollInterval) {
             clearInterval(providerPollInterval);
             providerPollInterval = null;
         }
-        if (connectionPollInterval) {
-            clearInterval(connectionPollInterval);
-            connectionPollInterval = null;
-        }
-        if (listenerCleanup) {
-            listenerCleanup();
-            listenerCleanup = null;
+    }
+
+    function setPhase(next, reason = null) {
+        phase = next;
+        noConnectionReason = next === "no-connection" ? reason : null;
+    }
+
+    function pulse(kind) {
+        activityPulse = kind;
+        clearTimeout(pulseTimeout);
+        pulseTimeout = setTimeout(() => {
+            activityPulse = null;
+        }, PULSE_DURATION_MS);
+    }
+
+    // Single source of truth for the non-network phase: derive it from the
+    // provider's own counters rather than trusting whichever status event
+    // happened to fire last. This is what keeps "no connection possible"
+    // stable instead of flickering back to "connecting" on every background
+    // retry attempt.
+    function evaluateProvider(provider) {
+        if (isBrowserOffline) return; // network state takes priority
+        if (provider.wsconnected) {
+            setPhase("connected");
+        } else if (provider.wsUnsuccessfulReconnects >= FAILURE_THRESHOLD) {
+            setPhase("no-connection", "server");
+        } else {
+            setPhase("connecting");
         }
     }
 
-    // Set up listeners when we have a provider
-    function setupProviderListeners(provider, docId) {
-        log.debug(
-            "[ConnectionStatus] Setting up listeners for provider, initial state - wsconnected:",
-            provider.wsconnected,
-            "wsconnecting:",
-            provider.wsconnecting,
-        );
+    function setupProviderListeners(provider, ydoc) {
+        evaluateProvider(provider);
 
-        // Set up event listeners FIRST to avoid race conditions
-        const handleStatus = (event) => {
-            log.debug("[ConnectionStatus] Status event:", event.status);
-            if (event.status === "connected") {
-                setStatus("connected");
-                clearConnectionPoll();
-            } else if (event.status === "connecting") {
-                setStatus("connecting");
-            } else if (event.status === "disconnected") {
-                setStatus("disconnected");
+        const handleStatus = ({ status }) => {
+            log.debug("[ConnectionStatus] status event:", status);
+            if (status === "connected") {
+                setPhase("connected");
+            } else {
+                evaluateProvider(provider);
             }
         };
 
-        // Listen for sync events (data being exchanged)
         const handleSync = (isSynced) => {
-            log.debug("[ConnectionStatus] Sync event:", isSynced);
-            if (isSynced) {
-                setStatus("connected");
-                clearConnectionPoll();
-                // Don't call triggerSyncing on sync - it causes loops
-            }
+            if (isSynced) pulse("received");
+        };
+
+        const handleUpdate = (_update, origin) => {
+            if (phase !== "connected") return; // don't claim traffic we didn't actually send/receive
+            pulse(origin === provider ? "received" : "sent");
         };
 
         provider.on("status", handleStatus);
         provider.on("sync", handleSync);
+        ydoc.on("update", handleUpdate);
 
-        // Return cleanup function
         listenerCleanup = () => {
-            log.debug("[ConnectionStatus] Cleaning up provider listeners");
             try {
                 provider.off("status", handleStatus);
                 provider.off("sync", handleSync);
+                ydoc.off("update", handleUpdate);
             } catch (e) {
-                // Provider may have been destroyed before cleanup ran
+                // Provider/doc may have been destroyed before cleanup ran
             }
         };
+    }
 
-        // NOW check current status after listeners are set up
-        if (provider.wsconnected) {
-            log.debug("[ConnectionStatus] Provider already connected");
-            setStatus("connected");
-        } else {
-            // Not connected yet - show connecting state
-            log.debug(
-                "[ConnectionStatus] Provider not connected, wsconnecting:",
-                provider.wsconnecting,
-            );
-            setStatus("connecting");
-            startConnectionPoll(provider);
+    function setupForDocId(id) {
+        clearProviderPoll();
+        if (listenerCleanup) {
+            listenerCleanup();
+            listenerCleanup = null;
         }
-    }
 
-    // Clear connection polling
-    function clearConnectionPoll() {
-        if (connectionPollInterval) {
-            clearInterval(connectionPollInterval);
-            connectionPollInterval = null;
-        }
-    }
-
-    // Start polling for connection state (safety net)
-    function startConnectionPoll(provider) {
-        let pollAttempts = 0;
-        const maxPollAttempts = 100; // 10 seconds
-        let notConnectingCount = 0;
-
-        connectionPollInterval = setInterval(() => {
-            pollAttempts++;
-
-            // Log every 10 attempts (1 second)
-            if (pollAttempts % 10 === 0) {
-                const ws = provider.ws;
-                const wsState = ws
-                    ? {
-                          readyState: ws.readyState,
-                          readyStateText:
-                              ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][
-                                  ws.readyState
-                              ] || "UNKNOWN",
-                      }
-                    : "no ws";
-
-                log.debug(
-                    "[ConnectionStatus] Polling... attempt",
-                    pollAttempts,
-                    "wsconnected:",
-                    provider.wsconnected,
-                    "wsconnecting:",
-                    provider.wsconnecting,
-                    "ws:",
-                    wsState,
-                );
-            }
-
-            const ws = provider.ws;
-            const isWsOpen = ws && ws.readyState === WebSocket.OPEN;
-
-            if (provider.wsconnected || isWsOpen) {
-                log.debug("[ConnectionStatus] Poll detected connection");
-                setStatus("connected");
-                clearConnectionPoll();
-            } else if (!provider.wsconnecting && !isWsOpen) {
-                notConnectingCount++;
-                if (notConnectingCount >= 30) {
-                    log.debug(
-                        "[ConnectionStatus] WebSocket not connecting for 3+ seconds, assuming disconnected",
-                    );
-                    setStatus("disconnected");
-                    clearConnectionPoll();
-                }
-            } else {
-                notConnectingCount = 0;
-            }
-
-            if (pollAttempts >= maxPollAttempts) {
-                log.debug(
-                    "[ConnectionStatus] Connection poll timeout after",
-                    pollAttempts * 100,
-                    "ms",
-                );
-                clearConnectionPoll();
-                setStatus(provider.wsconnected ? "connected" : "disconnected");
-            }
-        }, 100);
-    }
-
-    // Track connection status changes
-    function setupForDocId(docId) {
-        // Clear any existing state
-        clearAllTimers();
-
-        if (!docId) {
-            setStatus("disconnected");
+        if (!id) {
+            setPhase("no-connection", null);
             return;
         }
 
-        // Check if provider already exists
-        const provider = getProvider(docId);
-
-        if (provider) {
-            log.debug("[ConnectionStatus] Provider exists immediately");
-            setupProviderListeners(provider, docId);
-        } else {
-            log.debug(
-                "[ConnectionStatus] Provider not found, polling for availability",
-            );
-            setStatus("connecting");
-
-            let attempts = 0;
-            const maxAttempts = 50;
-
-            providerPollInterval = setInterval(() => {
-                attempts++;
-                const newProvider = getProvider(docId);
-
-                if (newProvider) {
-                    log.debug(
-                        "[ConnectionStatus] Provider found after",
-                        attempts * 100,
-                        "ms",
-                    );
-                    clearInterval(providerPollInterval);
-                    providerPollInterval = null;
-                    setupProviderListeners(newProvider, docId);
-                } else if (attempts >= maxAttempts) {
-                    log.debug(
-                        "[ConnectionStatus] Timed out waiting for provider",
-                    );
-                    clearInterval(providerPollInterval);
-                    providerPollInterval = null;
-                    setStatus("disconnected");
-                }
-            }, 100);
+        const active = getActive(id);
+        if (active) {
+            setupProviderListeners(active.provider, active.ydoc);
+            return;
         }
+
+        // Provider not created yet — runtime.load() is still in flight.
+        setPhase("connecting");
+        let attempts = 0;
+        providerPollInterval = setInterval(() => {
+            attempts++;
+            const found = getActive(id);
+            if (found) {
+                clearProviderPoll();
+                setupProviderListeners(found.provider, found.ydoc);
+            } else if (attempts >= PROVIDER_BOOTSTRAP_MAX_ATTEMPTS) {
+                clearProviderPoll();
+                setPhase("no-connection", "server");
+            }
+        }, PROVIDER_BOOTSTRAP_POLL_MS);
     }
 
-    // Reactive effect to setup listeners when docId changes
     $effect(() => {
-        // Use previousDocId to detect actual changes
-        if (docId === previousDocId) {
-            return;
-        }
-
-        log.debug(
-            "[ConnectionStatus] docId changed from",
-            previousDocId,
-            "to",
-            docId,
-        );
-
+        if (docId === previousDocId) return;
         previousDocId = docId;
-        currentDocId = docId;
-
-        // Setup in untracked context
         untrack(() => setupForDocId(docId));
     });
 
-    // Listen for browser online/offline events
     $effect(() => {
         const handleOnline = () => {
             log.debug("[ConnectionStatus] Browser online");
             isBrowserOffline = false;
+            // Optimistic: YjsRuntime reconnects providers on this same event;
+            // real status events correct this shortly after.
+            const active = getActive(docId);
+            if (active) evaluateProvider(active.provider);
+            else setPhase("connecting");
         };
 
         const handleOffline = () => {
             log.debug("[ConnectionStatus] Browser offline");
             isBrowserOffline = true;
-            setStatus("offline");
-            clearConnectionPoll();
+            setPhase("no-connection", "network");
         };
 
         window.addEventListener("online", handleOnline);
@@ -296,43 +181,35 @@
         };
     });
 
-    // Cleanup on component destroy
     $effect(() => {
         return () => {
-            log.debug("[ConnectionStatus] Component destroy cleanup");
-            clearAllTimers();
+            clearProviderPoll();
+            clearTimeout(pulseTimeout);
+            if (listenerCleanup) listenerCleanup();
         };
     });
 
-    // Computed display status - derived from raw state values
-    // This is safe because the source values are $state.raw
-    function getDisplayStatus() {
-        return isBrowserOffline ? "offline" : connectionStatus;
-    }
-
-    // Status label for tooltip
     function getStatusLabel() {
-        const status = getDisplayStatus();
-        switch (status) {
-            case "offline":
-                return "You are offline";
-            case "disconnected":
-                return "Disconnected from server";
-            case "connecting":
-                return "Connecting...";
-            case "connected":
-                return "Connected and synced";
-            case "syncing":
-                return "Syncing changes...";
-            default:
-                return "Unknown status";
+        if (phase === "no-connection") {
+            if (noConnectionReason === "network") return "No internet connection";
+            if (noConnectionReason === "server") return "Server unavailable";
+            return "Not connected";
         }
+        if (phase === "connecting") return "Connecting…";
+        if (activityPulse === "sent") return "Connected — sending changes";
+        if (activityPulse === "received") return "Connected — receiving changes";
+        return "Connected";
     }
 </script>
 
-<div class="connection-status" title={getStatusLabel()}>
-    {#if getDisplayStatus() === "offline"}
-        <!-- Cloud with slash icon (offline) -->
+<div
+    class="connection-status"
+    class:pulse-sent={activityPulse === "sent"}
+    class:pulse-received={activityPulse === "received"}
+    title={getStatusLabel()}
+>
+    {#if phase === "no-connection"}
+        <!-- Cloud with slash icon -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
             width="18"
@@ -343,30 +220,12 @@
             stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
-            class="icon offline"
+            class="icon no-connection"
         >
             <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
             <path d="m2 2 20 20" />
         </svg>
-    {:else if getDisplayStatus() === "disconnected"}
-        <!-- Cloud with X icon -->
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="icon disconnected"
-        >
-            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
-            <path d="m9 15 6-6" />
-            <path d="m15 15-6-6" />
-        </svg>
-    {:else if getDisplayStatus() === "connecting"}
+    {:else if phase === "connecting"}
         <!-- Cloud with loading indicator -->
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -383,26 +242,6 @@
             <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
             <path d="M12 12v-2" />
             <path d="M12 15h.01" />
-        </svg>
-    {:else if getDisplayStatus() === "syncing"}
-        <!-- Cloud with arrows icon -->
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="icon syncing"
-        >
-            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
-            <path d="m9 12 2 2" />
-            <path d="m9 14 2-2" />
-            <path d="M15 12l2 2" />
-            <path d="M15 14l2-2" />
         </svg>
     {:else}
         <!-- Cloud icon (connected) -->
@@ -437,12 +276,8 @@
         transition: stroke 0.2s ease;
     }
 
-    .offline {
+    .no-connection {
         stroke: var(--color-error, #ef4444);
-    }
-
-    .disconnected {
-        stroke: var(--color-text-secondary, #888);
     }
 
     .connecting {
@@ -454,9 +289,14 @@
         stroke: var(--color-success, #22c55e);
     }
 
-    .syncing {
+    .pulse-sent .icon {
+        animation: activity-pulse 0.45s ease-in-out;
+        stroke: var(--color-info, #3b82f6);
+    }
+
+    .pulse-received .icon {
+        animation: activity-pulse 0.45s ease-in-out;
         stroke: var(--color-success, #22c55e);
-        animation: sync-pulse 0.5s ease-in-out;
     }
 
     @keyframes pulse {
@@ -469,12 +309,12 @@
         }
     }
 
-    @keyframes sync-pulse {
+    @keyframes activity-pulse {
         0% {
             transform: scale(1);
         }
         50% {
-            transform: scale(1.15);
+            transform: scale(1.25);
         }
         100% {
             transform: scale(1);

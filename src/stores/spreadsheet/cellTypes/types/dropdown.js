@@ -1,4 +1,4 @@
-import { getFontMetrics, computeBaselineY, ptToPx } from '../../rendering/fontUnits.js';
+import { getFontMetrics, computeBaselineY, ptToPx, snapToDevice } from '../../rendering/fontUnits.js';
 
 /**
  * Dropdown cell type descriptor
@@ -55,7 +55,7 @@ export const dropdownType = {
      * @param {{ textColor?:string, bold?:boolean, italic?:boolean, fontSize?:number, fontFamily?:string }} style
      * @param {object} theme
      */
-    paintCell(ctx, _value, cell, rect, style, theme) {
+    paintCell(ctx, _value, cell, rect, style, theme, dpr = 1) {
         const { x, y, width, height } = rect;
         const ARROW_W = 16;
         const PAD     = 4;
@@ -72,14 +72,16 @@ export const dropdownType = {
         ctx.textBaseline = 'alphabetic';
         ctx.textAlign    = 'left';
 
-        const textY = computeBaselineY(y, height, 'middle', getFontMetrics(font), 2);
+        // Snap baseline + x to the device-pixel grid so glyphs stay crisp at
+        // fractional cell positions / non-integer DPR (matches CanvasRenderer).
+        const textY = snapToDevice(computeBaselineY(y, height, 'middle', getFontMetrics(font), 2), dpr);
 
         // Clip text to leave room for the arrow
         ctx.save();
         ctx.beginPath();
         ctx.rect(x + PAD, y, width - ARROW_W - PAD * 2, height);
         ctx.clip();
-        if (text) ctx.fillText(text, x + PAD, textY);
+        if (text) ctx.fillText(text, snapToDevice(x + PAD, dpr), textY);
         ctx.restore();
 
         // ▾ chevron

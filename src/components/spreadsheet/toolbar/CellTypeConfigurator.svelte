@@ -136,47 +136,51 @@
 
 <style>
     .configurator {
-        padding: 8px;
+        padding: 2px 0;
         min-width: 220px;
-        background: white;
+        background: transparent;
         border-radius: 4px;
     }
 
     .type-grid {
         display: grid;
         grid-template-columns: repeat(2, 1fr);
-        gap: 4px;
-        margin-bottom: 8px;
+        gap: 6px;
+        margin-bottom: 10px;
     }
 
     .type-btn {
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 6px 12px;
+        gap: 9px;
+        padding: 7px 11px;
         border: 1px solid #e2e8f0;
-        background: white;
-        border-radius: 4px;
+        background: var(--cell-bg, #fff);
+        border-radius: 6px;
         cursor: pointer;
-        font-size: 0.875rem;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-color, #1e293b);
         text-align: left;
     }
 
-    .type-btn:hover { background: #f8fafc; }
+    .type-btn:hover { background: #f8fafc; border-color: #94a3b8; }
 
     .type-btn.active {
         background: #eff6ff;
         border-color: #3b82f6;
         color: #1d4ed8;
+        font-weight: 600;
     }
 
     .icon {
         font-weight: bold;
-        width: 16px;
-        height: 16px;
+        width: 18px;
+        height: 18px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 12px;
+        font-size: 13px;
+        flex-shrink: 0;
     }
 </style>

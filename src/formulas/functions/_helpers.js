@@ -70,6 +70,11 @@ export function toNumber(value) {
     if (isError(value)) return value;
     if (typeof value === 'number') return value;
     if (typeof value === 'string') {
+        // Blank cell (substituted as "" by table column-ref DSL) coerces to 0,
+        // matching how blank cells behave elsewhere in arithmetic. Functions
+        // that must reject an explicit empty string (VALUE, NUMBERVALUE) guard
+        // for '' themselves before calling toNumber.
+        if (value === '') return 0;
         const num = parseNumericString(value);
         if (!isNaN(num)) return num;
         const serial = coerceToSerial(value);
@@ -77,6 +82,7 @@ export function toNumber(value) {
         return FormulaError.VALUE;
     }
     if (typeof value === 'boolean') return value ? 1 : 0;
+    if (value == null) return 0;
     return FormulaError.VALUE;
 }
 

@@ -8,8 +8,10 @@
  * about physical pixels.
  *
  * ## Extensible cell types
- * If a CellTypeRegistry descriptor defines paintCell(ctx, value, config, rect, style),
- * the renderer will call it instead of the built-in text renderer. This allows
+ * If a CellTypeRegistry descriptor defines paintCell(ctx, value, config, rect, style, theme, dpr),
+ * the renderer will call it instead of the built-in text renderer. Painters
+ * receive the device pixel ratio so they can snap text/strokes to the physical
+ * grid (see snapToDevice) and stay crisp. This allows
  * future cell types (dropdowns, avatars, progress bars) to register their own
  * canvas paint logic.
  */
@@ -19,7 +21,7 @@ import { perfMon } from '../perf/PerfMonitor.js';
 import { buildWrappedLines } from './RichTextLayout.js';
 import { paintBordersCanvas } from './BorderGeometry.js';
 import { getOverflowBorderSpec, getShadowBorderSpec } from './OverflowGeometry.js';
-import { ptToPx, getFontMetrics, computeBaselineY, computeBaselineYForBlock } from './fontUnits.js';
+import { ptToPx, getFontMetrics, lineHeightPxFor, computeBaselineY, computeBaselineYForBlock } from './fontUnits.js';
 
 // Inner padding used by the cell text painters. Symmetric on all four sides so
 // 'top' / 'bottom' / 'middle' alignments share the same clamp math.
@@ -108,10 +110,20 @@ export class CanvasRenderer {
         if (this.#canvas.width !== physW) this.#canvas.width = physW;
         if (this.#canvas.height !== physH) this.#canvas.height = physH;
 
-        // Set CSS size only on real DOM canvas
+        // Set CSS size only on real DOM canvas.
+        // Derive the CSS box from the *rounded* backing store (physW/physH) rather
+        // than the raw cssWidth/cssHeight. The backing store is whole pixels, but
+        // cssWidth from a ResizeObserver is usually fractional, so cssWidth*dpr
+        // rarely lands on an integer. If we sized the CSS box at cssWidth, the
+        // browser would map physW backing pixels onto (cssWidth*dpr) device pixels
+        // — a sub-pixel mismatch that forces a bilinear resample of the whole
+        // canvas. That resample is sharp at the origin but drifts increasingly out
+        // of phase toward the right/bottom edges, blurring text the further it is
+        // from (0,0). Sizing the CSS box at physW/dpr keeps 1 backing px == 1
+        // device px everywhere, so glyphs stay crisp across the entire grid.
         if (this.#canvas instanceof HTMLCanvasElement) {
-            this.#canvas.style.width = cssWidth + 'px';
-            this.#canvas.style.height = cssHeight + 'px';
+            this.#canvas.style.width = (physW / this.#dpr) + 'px';
+            this.#canvas.style.height = (physH / this.#dpr) + 'px';
         }
     }
 
@@ -584,7 +596,7 @@ export class CanvasRenderer {
                 hAlign: cell.hAlign,
                 vAlign: cell.vAlign,
             };
-            descriptor.paintCell(ctx, cell.rawValue ?? cell.displayValue, cell, rect, style, this.#theme);
+            descriptor.paintCell(ctx, cell.rawValue ?? cell.displayValue, cell, rect, style, this.#theme, this.#dpr);
             return;
         }
 
@@ -768,7 +780,7 @@ export class CanvasRenderer {
         // so mixed-size runs don't stagger vertically.
         const defaultFont = this.#buildRunFont({}, defaultFontSize, defaultFamily, defaultBold, defaultItalic);
         const defaultMetrics = getFontMetrics(defaultFont);
-        const lineHeight = (defaultMetrics.ascent + defaultMetrics.descent) * 1.2;
+        const lineHeight = lineHeightPxFor(defaultFont);
         const totalTextH = allLines.length * lineHeight;
 
         // Baseline Y of the *first* line. We center the block, then offset to

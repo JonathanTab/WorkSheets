@@ -106,11 +106,20 @@ export function computeUsedArea(sheetStore) {
     let minRow = Infinity, maxRow = -Infinity;
     let minCol = Infinity, maxCol = -Infinity;
 
+    // Ignore orphan cells outside the sheet's current dimensions — stale data left
+    // behind when the sheet was shrunk. AxisMetrics clamps their offset to the
+    // content edge while still reporting a default size, so they'd otherwise pile
+    // up as garbled overlapping text at the bottom/right of an export (the grid and
+    // canvas preview never show them because both are bounded by row/col count).
+    const rowCount = sheetStore.rowCount ?? Infinity;
+    const colCount = sheetStore.colCount ?? Infinity;
+
     sheetStore.cells.forEach((cell, key) => {
         if (!cell || !cell.exists) return;
         const comma = key.indexOf(',');
         const row = parseInt(key.slice(0, comma), 10);
         const col = parseInt(key.slice(comma + 1), 10);
+        if (row < 0 || row >= rowCount || col < 0 || col >= colCount) return;
         if (row < minRow) minRow = row;
         if (row > maxRow) maxRow = row;
         if (col < minCol) minCol = col;

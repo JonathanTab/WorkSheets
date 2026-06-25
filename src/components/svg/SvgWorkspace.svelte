@@ -60,6 +60,13 @@
         }
     }
 
+    function handleClose() {
+        router.goBack({
+            file: registry?.drive.getFile(docId),
+            folderExists: (id) => registry?.drive.getFolder(id) != null,
+        });
+    }
+
     // Ctrl+S handled in SvgEditor keyboard handler; also wire at workspace level
     function handleKeydown(e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -104,7 +111,7 @@
             <!-- Row 1: title + menus + save -->
             <SvgMenuBar
                 {isSaving}
-                onClose={() => router.goBack()}
+                onClose={handleClose}
                 onSave={handleSave}
                 onToggleDocProps={() => (docPropsOpen = !docPropsOpen)}
             />

@@ -15,6 +15,16 @@ const PERSISTENCE_TIMEOUT = 5000;
 // This is the max wait for the server to deliver its document state on first load.
 const WS_SYNC_TIMEOUT = 5000;
 
+// HTTP state-snapshot fast-path tunables.
+// Origin tag for snapshot applies so the local-update handler can distinguish
+// them from genuine user edits (and not mark the file dirty / queue an offline sync).
+const SNAPSHOT_ORIGIN = Symbol('http-snapshot');
+// Max time to wait for the HTTP snapshot fetch before giving up (falls back to WS).
+const SNAPSHOT_FETCH_TIMEOUT = 4000;
+// Max time to defer the WebSocket connect while the snapshot is in flight. A slow
+// or missing snapshot must never delay live connectivity beyond this bound.
+const SNAPSHOT_CONNECT_BOUND = 1500;
+
 /**
  * YjsRuntime - Manages the lifecycle of active Y.Doc instances.
  *
@@ -249,6 +259,11 @@ export class YjsRuntime {
 
         const provider = new WebsocketProvider(this.wsUrl, roomId, ydoc, {
             params: wsParams,
+            // Defer the actual connection: we first apply an HTTP state snapshot
+            // (below) so the provider's initial SyncStep1 carries the snapshot's
+            // state vector and the server replies with only the delta — not the
+            // whole document a second time.
+            connect: false,
         });
 
         // Set local awareness state so remote users can see who is editing
@@ -303,10 +318,34 @@ export class YjsRuntime {
             ydoc.on('update', (_update, origin) => {
                 const active = this.activeDocs.get(docId);
                 const isRemote = active && origin === active.provider;
-                if (!isRemote) {
+                // The HTTP snapshot apply (SNAPSHOT_ORIGIN) is server state, not a
+                // local user edit — never treat it as a change to persist/queue.
+                if (!isRemote && origin !== SNAPSHOT_ORIGIN) {
                     this.onDocUpdate(docId, { offline: this.isOffline });
                 }
             });
+        }
+
+        // ── Snapshot fast-path ──────────────────────────────────────────────
+        // Before connecting the WebSocket, fetch the room's current state over
+        // HTTP and apply it. This (a) gives the doc its content without waiting
+        // on the WS handshake + sync round-trip (the measured 85–92% of load),
+        // and (b) lets the deferred provider.connect() send a state vector that
+        // already reflects this state, so the server returns only the delta.
+        // Generic: raw Yjs binary, no app/schema awareness. Best-effort — on any
+        // failure we simply connect and rely on the WS sync as before.
+        const snapshotPromise =
+            (navigator.onLine && !this._locallyCreated.has(docId))
+                ? this._fetchAndApplySnapshot(docId, roomId, ydoc)
+                : Promise.resolve(false);
+        // Connect once the snapshot is applied, or after a short bound so a slow
+        // or missing snapshot never delays live connectivity.
+        await Promise.race([
+            snapshotPromise,
+            new Promise((r) => setTimeout(r, SNAPSHOT_CONNECT_BOUND)),
+        ]);
+        if (this.activeDocs.get(docId)?.provider === provider) {
+            provider.connect();
         }
 
         // 3. Wait for IndexedDB OR WebSocket to deliver data, whichever is first.
@@ -403,6 +442,61 @@ export class YjsRuntime {
         recordOpenedRoom(docId, roomId);
 
         return ydoc;
+    }
+
+    /**
+     * Derive the HTTP(S) API base from the WebSocket URL.
+     * `wss://host/congruum/` → `https://host/congruum/`.
+     * @returns {string} base ending in a single slash
+     */
+    _httpApiBase() {
+        // `wss` → `https`, `ws` → `http` (leading-"ws" replace handles both).
+        return this.wsUrl.replace(/^ws/i, 'http').replace(/\/+$/, '') + '/';
+    }
+
+    /**
+     * Fetch the server's current binary state for a room over HTTP and apply it
+     * to the local doc as a load fast-path. App-agnostic; best-effort.
+     *
+     * @param {string} docId
+     * @param {string} roomId
+     * @param {import('yjs').Doc} ydoc
+     * @returns {Promise<boolean>} true if non-empty state was applied
+     */
+    async _fetchAndApplySnapshot(docId, roomId, ydoc) {
+        try {
+            const url = `${this._httpApiBase()}api/doc/${encodeURIComponent(roomId)}/state`;
+            /** @type {Record<string,string>} */
+            const headers = {};
+            const apiKey = this.getApiKey?.();
+            if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), SNAPSHOT_FETCH_TIMEOUT);
+            let res;
+            try {
+                res = await fetch(url, { headers, credentials: 'include', signal: controller.signal });
+            } finally {
+                clearTimeout(timer);
+            }
+            if (!res.ok) return false; // 404 (no state yet) / 401 / 5xx → fall back to WS
+
+            const buf = new Uint8Array(await res.arrayBuffer());
+            if (buf.byteLength === 0) return false;
+
+            // The doc may have been unloaded/replaced while the fetch was in flight.
+            const active = this.activeDocs.get(docId);
+            if (!active || active.ydoc !== ydoc) return false;
+
+            Y.applyUpdate(ydoc, buf, SNAPSHOT_ORIGIN);
+            log.debug(`[YjsRuntime] Applied HTTP snapshot for ${roomId} (${buf.byteLength} bytes)`);
+            return ydoc.store.clients.size > 0;
+        } catch (err) {
+            if (err?.name !== 'AbortError') {
+                log.debug(`[YjsRuntime] Snapshot fast-path skipped for ${roomId}: ${err?.message ?? err}`);
+            }
+            return false;
+        }
     }
 
     /**

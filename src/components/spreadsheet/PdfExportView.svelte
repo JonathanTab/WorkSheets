@@ -429,11 +429,15 @@
         const { rowMetrics, colMetrics } = buildMetrics(sheetStore);
         const bounds = computePrintBounds(sheetStore, rowMetrics, colMetrics);
         if (!bounds) return;
-        // Pixel extent: max of (last cell's right edge, any floating image's right edge).
-        let contentW_css = colMetrics.offsetOf(bounds.endCol + 1);
+        // Pixel extent: max of (last cell's right edge, any floating image's right edge),
+        // measured from the print area's first column — not column 0. A leading empty
+        // gutter column (startCol > 0) must not inflate the fit width, or the scale
+        // comes out too small and leaves blank space on the right of the page.
+        const startOffset = colMetrics.offsetOf(bounds.startCol);
+        let contentW_css = colMetrics.offsetOf(bounds.endCol + 1) - startOffset;
         for (const img of (sheetStore.floatingImages?.values() ?? [])) {
             const ac = Math.max(0, img.anchorCol);
-            const imgRight = colMetrics.offsetOf(ac) + img.offsetX + img.width;
+            const imgRight = colMetrics.offsetOf(ac) + img.offsetX + img.width - startOffset;
             if (imgRight > contentW_css) contentW_css = imgRight;
         }
         contentW_css = Math.max(1, contentW_css);

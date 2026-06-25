@@ -43,6 +43,20 @@ function resolveNumeric(v) {
     return v;
 }
 
+/**
+ * Like resolveNumeric, but additionally treats an empty string as 0. Used
+ * only by arithmetic operators (+ - * / ^ and unary +/-/%) so that a blank
+ * cell substituted as "" (e.g. an empty table column ref) doesn't break
+ * addition, matching how null/undefined already resolve to 0. Comparison
+ * operators (= <> < > <= >=) intentionally keep "" distinct from 0.
+ * @param {any} v
+ * @returns {any}
+ */
+function resolveArithmetic(v) {
+    if (v === '') return 0;
+    return resolveNumeric(v);
+}
+
 // Formula string → AST cache. Parsing is expensive; the AST is a pure function
 // of the formula string so caching is safe. True LRU: on a hit we delete+set
 // the entry to move it to the most-recently-used end of the Map's insertion
@@ -228,8 +242,8 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
 
     switch (ast.op) {
         case '+': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
+            const lv = resolveArithmetic(left  ?? 0);
+            const rv = resolveArithmetic(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') return lv + rv;
             // `+` is arithmetic-only; use `&` for string concatenation.
             return FormulaError.VALUE;
@@ -238,22 +252,22 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
             return String(left ?? '') + String(right ?? '');
 
         case '-': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
+            const lv = resolveArithmetic(left  ?? 0);
+            const rv = resolveArithmetic(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') return lv - rv;
             return FormulaError.VALUE;
         }
 
         case '*': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
+            const lv = resolveArithmetic(left  ?? 0);
+            const rv = resolveArithmetic(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') return lv * rv;
             return FormulaError.VALUE;
         }
 
         case '/': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
+            const lv = resolveArithmetic(left  ?? 0);
+            const rv = resolveArithmetic(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') {
                 if (rv === 0) return FormulaError.DIV_ZERO;
                 return lv / rv;
@@ -262,8 +276,8 @@ function evaluateBinaryOp(ast, getCellValue, context, customFunctions, getCrossS
         }
 
         case '^': {
-            const lv = resolveNumeric(left  ?? 0);
-            const rv = resolveNumeric(right ?? 0);
+            const lv = resolveArithmetic(left  ?? 0);
+            const rv = resolveArithmetic(right ?? 0);
             if (typeof lv === 'number' && typeof rv === 'number') return Math.pow(lv, rv);
             return FormulaError.VALUE;
         }
@@ -352,20 +366,20 @@ function evaluateUnaryOp(ast, getCellValue, context, customFunctions, getCrossSh
     switch (ast.op) {
         case '+': {
             // Coerce numeric strings/booleans so `+"5"` → 5 (Excel-compatible)
-            const v = resolveNumeric(operand);
+            const v = resolveArithmetic(operand);
             if (typeof v === 'number') return v;
             return FormulaError.VALUE;
         }
 
         case '-': {
             // Coerce numeric strings/booleans so `-"5"` → -5 (Excel-compatible)
-            const v = resolveNumeric(operand);
+            const v = resolveArithmetic(operand);
             if (typeof v === 'number') return -v;
             return FormulaError.VALUE;
         }
 
         case '%': {
-            const v = resolveNumeric(operand);
+            const v = resolveArithmetic(operand);
             if (typeof v === 'number') return v / 100;
             return FormulaError.VALUE;
         }
@@ -442,6 +456,47 @@ export function evaluateFormula(formula, getCellValue, context = {}, customFunct
     } catch (err) {
         log.debug('Error parsing/evaluating formula:', err);
         return FormulaError.ERROR;
+    }
+}
+
+/**
+ * Return a copy of `ast` with all *relative* cell references shifted by
+ * (dr, dc). Absolute parts ($col / $row) are left untouched. This implements
+ * spreadsheet-style relative references: a formula authored for an anchor cell
+ * can be evaluated for any other cell in a range by offsetting it.
+ *
+ * Used by custom-formula conditional formatting, where one formula (written
+ * relative to the range's top-left anchor) is evaluated per cell.
+ *
+ * @param {any} ast   parsed formula AST (from parseFormula)
+ * @param {number} dr row offset (cellRow - anchorRow)
+ * @param {number} dc column offset (cellCol - anchorCol)
+ * @returns {any} a new AST with relative refs shifted
+ */
+export function offsetRefs(ast, dr, dc) {
+    if (!ast || typeof ast !== 'object') return ast;
+
+    const shiftRef = (ref) => ({
+        ...ref,
+        row: ref.rowAbsolute ? ref.row : ref.row + dr,
+        col: ref.colAbsolute ? ref.col : ref.col + dc,
+    });
+
+    switch (ast.type) {
+        case NodeType.CELL_REF:
+            return shiftRef(ast);
+        case NodeType.RANGE:
+            return { ...ast, start: shiftRef(ast.start), end: shiftRef(ast.end) };
+        case NodeType.SHEET_REF:
+            return { ...ast, ref: offsetRefs(ast.ref, dr, dc) };
+        case NodeType.BINARY_OP:
+            return { ...ast, left: offsetRefs(ast.left, dr, dc), right: offsetRefs(ast.right, dr, dc) };
+        case NodeType.UNARY_OP:
+            return { ...ast, operand: offsetRefs(ast.operand, dr, dc) };
+        case NodeType.FUNCTION_CALL:
+            return { ...ast, args: ast.args.map((a) => offsetRefs(a, dr, dc)) };
+        default:
+            return ast; // leaf nodes (NUMBER, STRING, ERROR_LITERAL, REP_VAR, …)
     }
 }
 

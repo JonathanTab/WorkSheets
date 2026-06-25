@@ -14,7 +14,7 @@
     import TableColumnPanel from './TableColumnPanel.svelte';
     import { viewPlacementStore } from '../../../stores/spreadsheet/viewPlacementStore.svelte.js';
 
-    let { session, onClose, initialTableId = null, initialColId = null } = $props();
+    let { session, onClose, initialTableId = null, initialColId = null, initialViewId = null } = $props();
 
     // ── Registry / data ────────────────────────────────────────────────────────
     let registry = $derived(session?.tableRegistry ?? null);
@@ -45,13 +45,20 @@
         selectedTableId ? sourceTables.find(t => t.tableId === selectedTableId) ?? null : null
     );
 
-    // Apply initialTableId prop once on mount, then auto-select first table
+    // Apply initialTableId prop once on mount, then auto-select first table.
+    // initialTableId may name a *view* (e.g. clicked from a view on the grid) —
+    // resolve it to its source table so the correct entry is selected instead
+    // of silently falling back to whichever table is listed first.
     let _initialApplied = $state(false);
+    let _resolvedInitialViewId = $state(/** @type {string|null} */ (null));
     $effect(() => {
         if (!_initialApplied && sourceTables.length > 0) {
             _initialApplied = true;
-            if (initialTableId && sourceTables.some(t => t.tableId === initialTableId)) {
-                selectedTableId = initialTableId;
+            const resolved = initialTableId ? registry?.resolveSourceId(initialTableId) : null;
+            const sourceId = resolved?.sourceId;
+            _resolvedInitialViewId = resolved?.viewId ?? null;
+            if (sourceId && sourceTables.some(t => t.tableId === sourceId)) {
+                selectedTableId = sourceId;
             } else {
                 selectedTableId = sourceTables[0].tableId;
             }
@@ -81,12 +88,36 @@
     /** colId currently open in the inline config expander */
     let expandedColId = $state(/** @type {string|null} */ (null));
 
-    // Apply initialColId once after table is selected
+    // Apply initialColId once after table is selected — opens the Columns
+    // tab and expands that column's config, regardless of whether the menu
+    // was opened from the source table or one of its views (column config
+    // is shared, since views only control ordering/visibility/filters).
+    // Guarded by _initialColApplied so collapsing the column later doesn't
+    // make this effect spring it back open.
+    let _initialColApplied = $state(false);
     $effect(() => {
-        if (initialColId && selectedTableId === initialTableId && !expandedColId) {
+        if (!_initialColApplied && initialColId && selectedTable) {
+            _initialColApplied = true;
             expandedColId = initialColId;
             activeTab = 'columns';
         }
+    });
+
+    // Apply initialViewId (explicit prop, or resolved from initialTableId
+    // when the menu was opened on a view) — opens the Views tab and expands
+    // that specific view's settings, so e.g. "Configure Table" from inside a
+    // view jumps straight to that view's column order/filters.
+    let _viewExpansionApplied = $state(false);
+    $effect(() => {
+        if (_viewExpansionApplied || !selectedTable || initialColId) return;
+        const viewId = initialViewId ?? _resolvedInitialViewId;
+        if (!viewId) return;
+        const match = viewsFor(selectedTable.tableId).find(v => v.viewId === viewId);
+        if (!match) return;
+        _viewExpansionApplied = true;
+        activeTab = 'views';
+        expandedViewId = viewId;
+        initViewCols(viewId, match.store, selectedTable.store);
     });
 
     /** colId currently being renamed */
@@ -112,10 +143,15 @@
         expandedColId = id;
     }
 
-    const TYPE_ICONS = { text:'A', number:'#', currency:'$', percent:'%', date:'D',
-                         checkbox:'✓', rating:'★', url:'↗', dropdown:'▾' };
+    const TYPE_ICONS  = { text:'A', number:'#', currency:'$', percent:'%', date:'📅',
+                         checkbox:'✓', rating:'★', url:'↗', dropdown:'▾', image:'🖼', file:'📎' };
+    const TYPE_LABELS = { text:'Text', number:'Number', currency:'Currency', percent:'Percent',
+                         date:'Date', checkbox:'Checkbox', rating:'Rating', url:'Link',
+                         dropdown:'Dropdown', image:'Image', file:'File' };
     /** @param {any} col */
-    function colTypeIcon(col) { return col.defaultFormula ? 'fx' : (TYPE_ICONS[col.type] ?? 'A'); }
+    function colTypeIcon(col) { return col.defaultFormula ? 'ƒx' : (TYPE_ICONS[col.type] ?? 'A'); }
+    /** @param {any} col */
+    function colTypeLabel(col) { return col.defaultFormula ? 'Formula' : (TYPE_LABELS[col.type] ?? 'Text'); }
 
     // ── Drag-to-reorder source columns ──────────────────────────────────────
     let dragColFrom = $state(-1);
@@ -491,8 +527,11 @@
                                     class="col-type-btn"
                                     class:formula={col.defaultFormula}
                                     onclick={() => expandedColId = expandedColId === col.id ? null : col.id}
-                                    title="Configure column"
-                                >{colTypeIcon(col)}</button>
+                                    title="Configure column type, formula, and options"
+                                >
+                                    <span class="col-type-icon">{colTypeIcon(col)}</span>
+                                    <span class="col-type-label">{colTypeLabel(col)}</span>
+                                </button>
                                 {#if renamingColId === col.id}
                                     <!-- svelte-ignore a11y_autofocus -->
                                     <input
@@ -816,7 +855,7 @@
 <style>
     /* ── Panel shell ────────────────────────────────────────────────────────── */
     .panel {
-        width: 560px;
+        width: 680px;
         height: 100%;
         display: flex;
         flex-direction: column;
@@ -831,7 +870,7 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 10px 14px 8px;
+        padding: 10px 14px;
         border-bottom: 1px solid var(--cell-border, #e2e8f0);
         background: var(--color-bg-secondary, #f8fafc);
         flex-shrink: 0;
@@ -844,7 +883,7 @@
         align-items: center;
         gap: 7px;
     }
-    .panel-title svg { flex-shrink: 0; }
+    .panel-title svg { flex-shrink: 0; width: 15px; height: 15px; }
 
     .count-badge {
         background: #e2e8f0;
@@ -852,12 +891,12 @@
         font-size: 10px;
         padding: 1px 6px;
         border-radius: 10px;
-        font-weight: 500;
+        font-weight: 600;
     }
 
     .close-btn {
         background: none; border: none; cursor: pointer; color: #94a3b8;
-        width: 24px; height: 24px; border-radius: 4px; padding: 0;
+        width: 26px; height: 26px; border-radius: 5px; padding: 0;
         display: flex; align-items: center; justify-content: center;
     }
     .close-btn:hover { background: #e2e8f0; color: #475569; }
@@ -873,12 +912,12 @@
 
     /* ── Left: table list ─────────────────────────────────────────────────── */
     .table-list {
-        width: 180px;
+        width: 200px;
         flex-shrink: 0;
         border-right: 1px solid var(--cell-border, #e2e8f0);
         overflow-y: auto;
         background: var(--color-bg-secondary, #f8fafc);
-        padding: 4px 0;
+        padding: 5px 0;
     }
 
     .table-list-item {
@@ -893,6 +932,7 @@
         text-align: left;
         border-bottom: 1px solid transparent;
         transition: background 0.1s;
+        min-height: 40px;
     }
     .table-list-item:hover { background: #f1f5f9; }
     .table-list-item.selected { background: #eff6ff; }
@@ -906,10 +946,11 @@
 
     .tli-info {
         flex: 1;
-        padding: 7px 10px;
+        padding: 7px 11px;
         min-width: 0;
         display: flex;
         flex-direction: column;
+        justify-content: center;
         gap: 2px;
     }
 
@@ -985,7 +1026,7 @@
     }
 
     .detail-name {
-        font-weight: 700;
+        font-weight: 600;
         font-size: 14px;
         cursor: pointer;
         overflow: hidden;
@@ -996,9 +1037,9 @@
 
     .detail-name-input {
         font-size: 14px;
-        font-weight: 700;
+        font-weight: 600;
         border: 1px solid #94a3b8;
-        border-radius: 3px;
+        border-radius: 4px;
         padding: 1px 6px;
         outline: none;
         background: var(--cell-bg, #fff);
@@ -1013,7 +1054,7 @@
         border-radius: 8px;
         background: #f1f5f9;
         color: #64748b;
-        font-weight: 500;
+        font-weight: 600;
         flex-shrink: 0;
     }
 
@@ -1023,7 +1064,7 @@
         display: flex;
         gap: 5px;
         align-items: center;
-        margin-bottom: 5px;
+        margin-bottom: 6px;
     }
     .dot { color: #cbd5e1; }
 
@@ -1045,14 +1086,14 @@
         color: #1e293b;
         background: #f1f5f9;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
+        border-radius: 4px;
         padding: 1px 6px;
     }
     .insert-sort-sel, .insert-sort-dir {
-        height: 22px;
+        height: 24px;
         font-size: 10px;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
+        border-radius: 4px;
         padding: 0 4px;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
@@ -1065,7 +1106,7 @@
         color: #94a3b8;
         font-size: 10px;
         padding: 1px 4px;
-        border-radius: 3px;
+        border-radius: 4px;
         line-height: 1;
     }
     .insert-sort-clear:hover { color: #dc2626; background: #fef2f2; }
@@ -1082,20 +1123,20 @@
     .hdr-btn {
         background: none;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 4px 7px;
+        border-radius: 5px;
+        padding: 4px 8px;
         cursor: pointer;
         color: #64748b;
         display: flex;
         align-items: center;
         gap: 4px;
         font-size: 10px;
-        height: 26px;
+        height: 27px;
     }
     .hdr-btn:hover { background: #f1f5f9; }
     .hdr-btn.danger { color: #dc2626; border-color: #fca5a5; }
     .hdr-btn.danger:hover { background: #fef2f2; }
-    .hdr-btn :global(svg) { width: 11px; height: 11px; }
+    .hdr-btn :global(svg) { width: 12px; height: 12px; }
 
     /* ── Tabs ─────────────────────────────────────────────────────────────── */
     .tabs {
@@ -1106,7 +1147,7 @@
     }
 
     .tab {
-        padding: 7px 16px;
+        padding: 8px 16px;
         background: none;
         border: none;
         border-bottom: 2px solid transparent;
@@ -1133,52 +1174,61 @@
     .col-row {
         display: flex;
         align-items: center;
-        gap: 5px;
-        padding: 5px 4px;
-        border-radius: 5px;
+        gap: 7px;
+        padding: 6px 6px;
+        border-radius: 6px;
         cursor: default;
+        min-height: 34px;
     }
     .col-row:hover { background: #f8fafc; }
     .col-row.drag-over { border-top: 2px solid #3b82f6; }
     .col-row.dragging  { opacity: 0.4; }
-    .col-row.col-expanded { background: #f0f4ff; }
+    .col-row.col-expanded { background: #eff6ff; }
 
     .drag-grip {
         color: #cbd5e1;
         cursor: grab;
-        font-size: 13px;
+        font-size: 14px;
         flex-shrink: 0;
         user-select: none;
         line-height: 1;
+        width: 12px;
+        text-align: center;
     }
     .drag-grip:hover { color: #94a3b8; }
     .drag-grip:active { cursor: grabbing; }
 
     .col-type-btn {
-        font-size: 9px;
-        padding: 1px 5px;
-        border-radius: 3px;
+        font-size: 10px;
+        padding: 3px 8px;
+        border-radius: 5px;
         background: #f1f5f9;
         color: #475569;
         font-weight: 600;
-        min-width: 20px;
         text-align: center;
         border: 1px solid #e2e8f0;
         cursor: pointer;
         flex-shrink: 0;
-        height: 18px;
-        line-height: 16px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
     }
-    .col-type-btn:hover { background: #e2e8f0; }
-    .col-type-btn.formula { font-family: monospace; color: #7c3aed; }
+    .col-type-btn:hover { background: #e2e8f0; border-color: #94a3b8; }
+    .col-type-btn.formula { color: #7c3aed; background: #f5f3ff; border-color: #e9d8fd; }
+    .col-type-btn.formula:hover { background: #ede9fe; }
+    .col-type-icon { font-size: 10px; line-height: 1; }
+    .col-type-label { font-size: 10px; }
 
     .col-name {
         flex: 1;
         font-size: 12px;
+        font-weight: 500;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         cursor: pointer;
+        min-width: 0;
     }
     .col-name:hover { color: #3b82f6; }
 
@@ -1186,8 +1236,8 @@
         flex: 1;
         font-size: 12px;
         border: 1px solid #94a3b8;
-        border-radius: 3px;
-        padding: 1px 5px;
+        border-radius: 4px;
+        padding: 1px 6px;
         outline: none;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
@@ -1196,15 +1246,15 @@
 
     .col-formula-badge {
         font-size: 9px;
-        padding: 1px 4px;
-        border-radius: 3px;
+        padding: 1px 5px;
+        border-radius: 4px;
         background: #f5f3ff;
         color: #7c3aed;
         font-family: monospace;
         flex-shrink: 0;
         white-space: nowrap;
         overflow: hidden;
-        max-width: 90px;
+        max-width: 100px;
         text-overflow: ellipsis;
     }
 
@@ -1219,12 +1269,12 @@
         border: none;
         cursor: pointer;
         color: #cbd5e1;
-        padding: 2px;
-        border-radius: 3px;
+        padding: 4px;
+        border-radius: 4px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
-        opacity: 0;
+        opacity: 0.55;
         transition: opacity 0.1s;
     }
     .col-row:hover .col-del-btn { opacity: 1; }
@@ -1232,9 +1282,11 @@
     .col-del-btn :global(svg) { width: 12px; height: 12px; }
 
     .col-config-slot {
-        margin: 0 0 6px 28px;
-        border-left: 2px solid #e2e8f0;
-        padding-left: 8px;
+        margin: 2px 0 6px 12px;
+        padding: 6px 10px 6px 12px;
+        border-left: 2px solid #bfdbfe;
+        background: #f8fafc;
+        border-radius: 0 6px 6px 0;
     }
 
     .add-col-btn {
@@ -1242,9 +1294,10 @@
         width: 100%;
         background: none;
         border: 1px dashed #cbd5e1;
-        border-radius: 5px;
+        border-radius: 6px;
         padding: 7px 10px;
         font-size: 11px;
+        font-weight: 500;
         color: #64748b;
         cursor: pointer;
         text-align: left;
@@ -1252,7 +1305,7 @@
         align-items: center;
         gap: 5px;
     }
-    .add-col-btn:hover { border-color: #94a3b8; color: #1e293b; background: #f8fafc; }
+    .add-col-btn:hover { border-color: #3b82f6; color: #2563eb; background: #eff6ff; }
     .add-col-btn :global(svg) { width: 11px; height: 11px; }
 
     /* ── Views tab ────────────────────────────────────────────────────────── */
@@ -1260,15 +1313,15 @@
         display: flex;
         align-items: flex-start;
         gap: 6px;
-        padding: 6px 4px;
-        border-radius: 5px;
+        padding: 6px 6px;
+        border-radius: 6px;
         border: 1px solid transparent;
     }
     .view-row:hover { background: #f8fafc; }
     .view-row.expanded {
         background: #f8fafc;
         border-color: #e2e8f0;
-        border-radius: 5px 5px 0 0;
+        border-radius: 6px 6px 0 0;
     }
 
     /* Expand button — wider and more prominent */
@@ -1278,15 +1331,15 @@
         cursor: pointer;
         font-size: 10px;
         color: #475569;
-        height: 22px;
+        height: 23px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
         gap: 3px;
         margin-top: 1px;
-        border-radius: 4px;
-        padding: 0 6px;
-        font-weight: 500;
+        border-radius: 5px;
+        padding: 0 7px;
+        font-weight: 600;
         transition: background 0.1s, color 0.1s;
     }
     .view-expand-btn:hover { background: #e2e8f0; color: #1e293b; }
@@ -1315,8 +1368,8 @@
         font-size: 12px;
         font-weight: 600;
         border: 1px solid #94a3b8;
-        border-radius: 3px;
-        padding: 1px 5px;
+        border-radius: 4px;
+        padding: 1px 6px;
         outline: none;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
@@ -1332,9 +1385,9 @@
     }
     .chip {
         font-size: 9px;
-        padding: 1px 5px;
+        padding: 1px 6px;
         border-radius: 8px;
-        font-weight: 500;
+        font-weight: 600;
     }
     .chip.sheet  { background: #eff6ff; color: #2563eb; }
     .chip.cols   { background: #f0fdf4; color: #16a34a; }
@@ -1342,7 +1395,7 @@
     .chip.filt :global(svg) { width: 8px; height: 8px; }
     .chip.legacy { background: #f1f5f9; color: #94a3b8; font-style: italic; }
 
-    .view-expand-spacer { width: 60px; flex-shrink: 0; }
+    .view-expand-spacer { width: 62px; flex-shrink: 0; }
 
     .view-row-actions {
         display: flex;
@@ -1352,12 +1405,12 @@
     .vra-btn {
         background: none;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
+        border-radius: 4px;
         padding: 2px 6px;
         font-size: 11px;
         color: #64748b;
         cursor: pointer;
-        height: 22px;
+        height: 23px;
         display: flex;
         align-items: center;
         gap: 2px;
@@ -1376,12 +1429,12 @@
         background: #f8fafc;
         border: 1px solid #e2e8f0;
         border-top: none;
-        border-radius: 0 0 5px 5px;
+        border-radius: 0 0 6px 6px;
     }
 
     .vd-section-label {
         font-size: 10px;
-        font-weight: 600;
+        font-weight: 700;
         color: #94a3b8;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -1411,11 +1464,12 @@
     .vd-col-item {
         display: flex;
         align-items: center;
-        gap: 5px;
-        padding: 3px 4px;
-        border-radius: 4px;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: 5px;
         border: 1px solid transparent;
         font-size: 11px;
+        min-height: 27px;
     }
     .vd-col-item.visible {
         background: #fff;
@@ -1431,7 +1485,7 @@
     .vd-col-grip {
         color: #cbd5e1;
         cursor: grab;
-        font-size: 12px;
+        font-size: 13px;
         user-select: none;
         line-height: 1;
         flex-shrink: 0;
@@ -1444,6 +1498,8 @@
         flex-shrink: 0;
         cursor: pointer;
         accent-color: #3b82f6;
+        width: 14px;
+        height: 14px;
     }
 
     .vd-col-type {
@@ -1463,7 +1519,7 @@
 
     .vd-hidden-label {
         font-size: 9px;
-        font-weight: 600;
+        font-weight: 700;
         color: #b0b8c4;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -1474,10 +1530,10 @@
         display: flex;
         align-items: center;
         gap: 5px;
-        padding: 4px 6px;
+        padding: 4px 7px;
         background: #fff;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
+        border-radius: 5px;
         margin-bottom: 3px;
     }
     .vdf-col { font-size: 11px; font-weight: 600; color: #1e293b; }
@@ -1485,7 +1541,7 @@
     .vdf-val { font-size: 11px; color: #3b82f6; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .vdf-del {
         background: none; border: none; cursor: pointer; color: #cbd5e1;
-        display: flex; align-items: center; padding: 2px; border-radius: 3px; flex-shrink: 0;
+        display: flex; align-items: center; padding: 2px; border-radius: 4px; flex-shrink: 0;
     }
     .vdf-del:hover { color: #dc2626; background: #fef2f2; }
     .vdf-del :global(svg) { width: 11px; height: 11px; }
@@ -1494,18 +1550,18 @@
         padding: 7px;
         background: #fff;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
+        border-radius: 5px;
         display: flex;
         flex-direction: column;
         gap: 5px;
         margin-bottom: 4px;
     }
     .vff-sel, .vff-input {
-        height: 24px;
+        height: 25px;
         font-size: 11px;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
-        padding: 0 5px;
+        border-radius: 4px;
+        padding: 0 6px;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
         outline: none;
@@ -1515,15 +1571,15 @@
     .vff-sel.narrow { width: auto; }
     .vff-actions { display: flex; gap: 4px; align-items: center; }
     .vff-add {
-        flex: 1; height: 24px; font-size: 11px;
-        border: 1px solid #3b82f6; border-radius: 3px;
-        background: #3b82f6; color: #fff; cursor: pointer; font-weight: 500;
+        flex: 1; height: 25px; font-size: 11px;
+        border: 1px solid #3b82f6; border-radius: 4px;
+        background: #3b82f6; color: #fff; cursor: pointer; font-weight: 600;
         display: flex; align-items: center; justify-content: center; gap: 3px;
     }
     .vff-add:hover { background: #2563eb; }
     .vff-add :global(svg) { width: 11px; height: 11px; }
     .vff-cancel {
-        width: 24px; height: 24px; border-radius: 3px;
+        width: 25px; height: 25px; border-radius: 4px;
         border: 1px solid #e2e8f0; cursor: pointer; background: #f8fafc; color: #64748b;
         display: flex; align-items: center; justify-content: center; padding: 0;
     }
@@ -1533,8 +1589,8 @@
     .vd-add-filter-btn {
         background: none;
         border: 1px dashed #cbd5e1;
-        border-radius: 4px;
-        padding: 4px 8px;
+        border-radius: 5px;
+        padding: 5px 9px;
         font-size: 10px;
         color: #64748b;
         cursor: pointer;
@@ -1544,13 +1600,13 @@
         width: 100%;
         margin-top: 2px;
     }
-    .vd-add-filter-btn:hover { border-color: #94a3b8; color: #1e293b; }
+    .vd-add-filter-btn:hover { border-color: #3b82f6; color: #2563eb; background: #eff6ff; }
     .vd-add-filter-btn :global(svg) { width: 10px; height: 10px; }
 
     .vd-clear-filters {
         background: none;
         border: 1px solid #fca5a5;
-        border-radius: 3px;
+        border-radius: 4px;
         padding: 3px 8px;
         font-size: 10px;
         color: #dc2626;
@@ -1573,10 +1629,10 @@
     .vd-pos-edit {
         background: #eff6ff;
         border: 1px solid #bfdbfe;
-        border-radius: 4px;
+        border-radius: 5px;
         padding: 3px 8px;
         font-size: 10px;
-        font-weight: 500;
+        font-weight: 600;
         color: #2563eb;
         cursor: pointer;
         white-space: nowrap;
@@ -1589,7 +1645,7 @@
         padding: 12px;
         background: #f8fafc;
         border: 1px solid #e2e8f0;
-        border-radius: 6px;
+        border-radius: 7px;
         display: flex;
         flex-direction: column;
         gap: 7px;
@@ -1616,17 +1672,17 @@
         font-size: 10px;
         font-weight: 600;
         color: #64748b;
-        width: 36px;
+        width: 38px;
         flex-shrink: 0;
         text-align: right;
     }
     .cv-input {
         flex: 1;
-        height: 26px;
+        height: 27px;
         font-size: 11px;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 0 6px;
+        border-radius: 5px;
+        padding: 0 7px;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
         outline: none;
@@ -1640,15 +1696,15 @@
         align-items: center;
     }
     .cv-create-btn {
-        flex: 1; height: 28px; font-size: 11px;
-        border: 1px solid #3b82f6; border-radius: 4px;
+        flex: 1; height: 29px; font-size: 11px;
+        border: 1px solid #3b82f6; border-radius: 5px;
         background: #3b82f6; color: #fff; cursor: pointer; font-weight: 600;
         display: flex; align-items: center; justify-content: center; gap: 4px;
     }
     .cv-create-btn:hover { background: #2563eb; }
     .cv-create-btn :global(svg) { width: 12px; height: 12px; }
     .cv-cancel-btn {
-        width: 28px; height: 28px; border-radius: 4px;
+        width: 29px; height: 29px; border-radius: 5px;
         border: 1px solid #e2e8f0; cursor: pointer; background: #f8fafc; color: #64748b;
         display: flex; align-items: center; justify-content: center; padding: 0;
     }
@@ -1657,10 +1713,10 @@
 
     .add-view-btn {
         width: 100%; margin-top: 4px;
-        background: none; border: 1px dashed #cbd5e1; border-radius: 5px;
-        padding: 7px 10px; font-size: 11px; color: #64748b; cursor: pointer;
+        background: none; border: 1px dashed #cbd5e1; border-radius: 6px;
+        padding: 7px 10px; font-size: 11px; font-weight: 500; color: #64748b; cursor: pointer;
         text-align: left; display: flex; align-items: center; gap: 5px;
     }
-    .add-view-btn:hover { border-color: #94a3b8; color: #1e293b; background: #f8fafc; }
+    .add-view-btn:hover { border-color: #3b82f6; color: #2563eb; background: #eff6ff; }
     .add-view-btn :global(svg) { width: 11px; height: 11px; }
 </style>

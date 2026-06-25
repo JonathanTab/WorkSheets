@@ -10,7 +10,7 @@
  * ── ClipboardModel ────────────────────────────────────────────────────────────
  *   {
  *     version:     5,
- *     source:      'scriptorium' | 'html' | 'google' | 'tsv',
+ *     source:      'scriptorium' | 'html' | 'google' | 'google-doc' | 'tsv',
  *     fingerprint: string | null,        // identifies OUR payloads across tabs
  *     origin:      { row, col } | null,   // absolute top-left of region[0] for
  *                                         //   internal copies; null for external

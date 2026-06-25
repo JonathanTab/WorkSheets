@@ -26,6 +26,8 @@
     import AlertModal from "../../modals/AlertModal.svelte";
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
     import HoramConfigPanel from "../plugins/horam/HoramConfigPanel.svelte";
+    import EntryForgeConfigPanel from "../plugins/entryForge/EntryForgeConfigPanel.svelte";
+    import { entryForgeUi, openEntryForgeConfig, closeEntryForgeConfig } from "../../../stores/spreadsheet/plugins/entryForge/entryForgeUiState.svelte.js";
     import DataValidationPanel from "../DataValidationPanel.svelte";
     import FormulaDocsPanel from "../FormulaDocsPanel.svelte";
     import MakeCopyModal from "../../modals/MakeCopyModal.svelte";
@@ -700,6 +702,10 @@
             label: "Horam Time Import…",
             action: () => (showHoramPanel = !showHoramPanel),
         },
+        {
+            label: "Entry Forge…",
+            action: () => openEntryForgeConfig(null),
+        },
     ];
 
     // ─── HELP MENU ────────────────────────────────────────────────────────────
@@ -917,6 +923,12 @@ Ctrl+\` - Toggle formula view`;
 
 {#if showHoramPanel}
     <HoramConfigPanel onclose={() => (showHoramPanel = false)} />
+{/if}
+
+{#if entryForgeUi.configOpen}
+    {#key entryForgeUi.configTableId}
+        <EntryForgeConfigPanel tableId={entryForgeUi.configTableId} onclose={closeEntryForgeConfig} />
+    {/key}
 {/if}
 
 

@@ -50,6 +50,7 @@
         if (col) {
             localFormula = col.defaultFormula ?? "";
             localIsNonEntry = col.isNonEntry ?? false;
+            setTimeout(autoGrowFormula, 0);
         }
     });
 
@@ -93,7 +94,15 @@
         setTimeout(() => {
             formulaInputEl?.focus();
             formulaInputEl?.setSelectionRange(start + text.length, start + text.length);
+            autoGrowFormula();
         }, 0);
+    }
+
+    /** Grows the formula textarea to fit its content, up to a generous cap. */
+    function autoGrowFormula() {
+        if (!formulaInputEl) return;
+        formulaInputEl.style.height = 'auto';
+        formulaInputEl.style.height = Math.min(formulaInputEl.scrollHeight, 220) + 'px';
     }
 
     /** All columns except this one (for chip insertion) */
@@ -206,21 +215,24 @@
 
             <div class="formula-input-row">
                 <span class="fx-badge">fx</span>
-                <input
+                <textarea
                     bind:this={formulaInputEl}
                     class="formula-input"
-                    type="text"
+                    rows="2"
                     bind:value={localFormula}
                     placeholder="e.g. {'{amount}'} + PREV(balance, 0)"
                     onblur={applyFormula}
+                    oninput={autoGrowFormula}
                     onkeydown={(e) => {
-                        if (e.key === "Enter") { e.stopPropagation(); applyFormula(); }
+                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.stopPropagation(); e.preventDefault(); applyFormula(); }
+                        else if (e.key === "Escape") { e.stopPropagation(); formulaInputEl?.blur(); }
                     }}
-                />
+                ></textarea>
                 {#if hasFormula}
                     <button class="clear-formula-btn" onclick={clearFormula} title="Clear formula">×</button>
                 {/if}
             </div>
+            <div class="formula-apply-hint">Ctrl/Cmd + Enter to apply · click away to save</div>
 
             {#if hasFormula}
                 <div class="formula-quick-hint">
@@ -341,6 +353,14 @@
     <BottomSheet open={true} onClose={onClose} title="Column Settings" maxHeight="85vh">
         {@render colPanelContent()}
     </BottomSheet>
+{:else if inline}
+    <!-- Embedded directly in the Tables panel's column row — no boxed chrome
+         of its own (the row above already names/identifies the column), just
+         a full-width continuation so it blends into the surrounding list. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div bind:this={panelEl} class="col-panel-inline" onkeydown={handleKeydown} role="region" aria-label="Column settings" tabindex="-1">
+        {@render colPanelContent()}
+    </div>
 {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div bind:this={panelEl} class="col-panel" onkeydown={handleKeydown} role="dialog" aria-label="Column settings" tabindex="-1">
@@ -358,7 +378,7 @@
         border: 1px solid var(--cell-border, #e2e8f0);
         border-radius: 8px;
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
-        width: 280px;
+        width: 320px;
         font-size: 12px;
         color: var(--text-color, #1e293b);
         display: flex;
@@ -367,10 +387,21 @@
         max-height: min(78vh, 660px);
     }
 
+    .col-panel-inline {
+        width: 100%;
+        font-size: 12px;
+        color: var(--text-color, #1e293b);
+        display: flex;
+        flex-direction: column;
+    }
+    .col-panel-inline .panel-body { padding: 0; }
+    .col-panel-inline .section:first-child { padding-top: 4px; }
+    .col-panel-inline .panel-footer { padding: 8px 0 2px; background: none; border-top: 1px solid var(--border-color, #f1f5f9); }
+
     .panel-header {
         display: flex;
         align-items: center;
-        padding: 8px 10px;
+        padding: 10px 14px;
         border-bottom: 1px solid var(--cell-border, #e2e8f0);
         background: var(--table-header-bg, #f8fafc);
     }
@@ -387,25 +418,25 @@
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        padding: 2px;
-        border-radius: 3px;
+        padding: 3px;
+        border-radius: 4px;
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 20px;
-        height: 20px;
+        width: 24px;
+        height: 24px;
     }
 
     .close-btn:hover { background: #e2e8f0; color: #475569; }
 
     .panel-body {
-        padding: 4px 0;
+        padding: 6px 0;
         overflow-y: auto;
         flex: 1;
     }
 
     .section {
-        padding: 8px 12px;
+        padding: 12px 16px;
         border-bottom: 1px solid var(--border-color, #f1f5f9);
     }
     .section:last-child { border-bottom: none; }
@@ -423,16 +454,17 @@
         font-size: 10px;
         color: #94a3b8;
         margin-top: 1px;
+        line-height: 1.4;
     }
 
     .computed-note {
-        font-size: 9px;
+        font-size: 10px;
         color: #7c3aed;
         background: #f5f3ff;
-        border-radius: 3px;
-        padding: 3px 6px;
+        border-radius: 4px;
+        padding: 4px 7px;
         margin-top: 6px;
-        line-height: 1.4;
+        line-height: 1.5;
     }
 
     .toggle-label {
@@ -448,10 +480,10 @@
     .toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
 
     .toggle-track {
-        width: 28px;
-        height: 16px;
+        width: 34px;
+        height: 19px;
         background: #cbd5e1;
-        border-radius: 8px;
+        border-radius: 10px;
         position: relative;
         transition: background 0.15s;
     }
@@ -461,22 +493,22 @@
         position: absolute;
         left: 2px;
         top: 2px;
-        width: 12px;
-        height: 12px;
+        width: 15px;
+        height: 15px;
         background: white;
         border-radius: 50%;
         transition: transform 0.15s;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
     }
 
-    .toggle-track.on { background: #475569; }
-    .toggle-track.on::after { transform: translateX(12px); }
+    .toggle-track.on { background: #3b82f6; }
+    .toggle-track.on::after { transform: translateX(15px); }
 
     .formula-input-row {
         display: flex;
-        align-items: center;
-        gap: 4px;
-        margin-bottom: 6px;
+        align-items: flex-start;
+        gap: 7px;
+        margin-bottom: 4px;
     }
 
     .fx-badge {
@@ -484,57 +516,72 @@
         font-weight: 600;
         color: #64748b;
         background: #f1f5f9;
-        padding: 1px 5px;
-        border-radius: 3px;
+        padding: 4px 6px;
+        border-radius: 4px;
         flex-shrink: 0;
         font-family: monospace;
+        margin-top: 2px;
     }
 
     .formula-input {
         flex: 1;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 4px 6px;
-        font-size: 11px;
-        font-family: monospace;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        font-family: "SF Mono", Consolas, monospace;
+        line-height: 1.55;
         background: var(--cell-bg, #fff);
         color: var(--text-color, #1e293b);
         outline: none;
         min-width: 0;
+        min-height: 56px;
+        max-height: 220px;
+        resize: vertical;
+        white-space: pre-wrap;
+        word-break: break-word;
     }
 
-    .formula-input:focus { border-color: #94a3b8; }
+    .formula-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); }
 
     .clear-formula-btn {
         background: none;
         border: none;
         cursor: pointer;
         color: #94a3b8;
-        font-size: 14px;
-        padding: 0 2px;
+        font-size: 16px;
+        padding: 0 4px;
         flex-shrink: 0;
         line-height: 1;
+        margin-top: 4px;
     }
     .clear-formula-btn:hover { color: #475569; }
 
+    .formula-apply-hint {
+        font-size: 10px;
+        color: #b0b8c4;
+        font-style: italic;
+        margin-bottom: 8px;
+    }
+
     .formula-quick-hint {
-        font-size: 9px;
+        font-size: 10px;
         color: #94a3b8;
-        line-height: 1.5;
-        margin-bottom: 5px;
+        line-height: 1.6;
+        margin-bottom: 6px;
     }
 
     .formula-quick-hint code {
         font-family: monospace;
-        font-size: 9px;
+        font-size: 10px;
         background: #f1f5f9;
         color: #475569;
-        padding: 0 3px;
-        border-radius: 2px;
+        padding: 1px 4px;
+        border-radius: 3px;
     }
 
     .chips-label {
-        font-size: 9px;
+        font-size: 10px;
         color: #94a3b8;
         margin-bottom: 3px;
     }
@@ -542,8 +589,8 @@
     .chips-row {
         display: flex;
         flex-wrap: wrap;
-        gap: 3px;
-        margin-bottom: 6px;
+        gap: 5px;
+        margin-bottom: 8px;
     }
 
     .col-chip {
@@ -551,12 +598,12 @@
         font-family: monospace;
         background: #f1f5f9;
         border: 1px solid #e2e8f0;
-        border-radius: 3px;
-        padding: 1px 6px;
+        border-radius: 4px;
+        padding: 3px 8px;
         cursor: pointer;
         color: #475569;
         white-space: nowrap;
-        max-width: 90px;
+        max-width: 110px;
         overflow: hidden;
         text-overflow: ellipsis;
     }
@@ -564,28 +611,28 @@
     .col-chip:hover { background: #e2e8f0; border-color: #94a3b8; color: #1e293b; }
 
     .preview-label {
-        font-size: 9px;
+        font-size: 10px;
         font-weight: 600;
         color: #64748b;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        margin-bottom: 3px;
+        margin-bottom: 4px;
     }
 
     .preview-table {
         background: #f8fafc;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
+        border-radius: 5px;
         overflow: hidden;
-        margin-bottom: 6px;
+        margin-bottom: 8px;
     }
 
     .preview-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 2px 6px;
-        font-size: 10px;
+        padding: 3px 7px;
+        font-size: 11px;
         border-bottom: 1px solid #f1f5f9;
     }
     .preview-row:last-child { border-bottom: none; }
@@ -609,7 +656,7 @@
 
     .preview-val.preview-null { color: #94a3b8; font-weight: 400; }
 
-    .ref-toggle { margin-bottom: 2px; }
+    .ref-toggle { margin-bottom: 3px; }
 
     .ref-toggle-btn {
         background: none;
@@ -626,56 +673,56 @@
     .ref-panel {
         background: #f8fafc;
         border: 1px solid #e2e8f0;
-        border-radius: 4px;
-        padding: 6px 8px;
-        max-height: 240px;
+        border-radius: 5px;
+        padding: 8px 10px;
+        max-height: 260px;
         overflow-y: auto;
     }
 
     .ref-section {
-        margin-bottom: 8px;
+        margin-bottom: 10px;
     }
     .ref-section:last-child { margin-bottom: 0; }
 
     .ref-section-title {
-        font-size: 9px;
+        font-size: 10px;
         font-weight: 700;
         color: #475569;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        margin-bottom: 3px;
-        padding-bottom: 2px;
+        margin-bottom: 4px;
+        padding-bottom: 3px;
         border-bottom: 1px solid #e2e8f0;
     }
 
     .ref-item, .ref-example {
         display: flex;
         align-items: flex-start;
-        gap: 4px;
-        margin-bottom: 2px;
+        gap: 5px;
+        margin-bottom: 3px;
         flex-wrap: wrap;
     }
 
     .ref-syntax, .ref-panel code {
-        font-size: 9px;
+        font-size: 10px;
         font-family: monospace;
         background: #e8f0fe;
         color: #1e40af;
-        padding: 1px 4px;
-        border-radius: 2px;
+        padding: 1px 5px;
+        border-radius: 3px;
         white-space: nowrap;
     }
 
     .ref-desc {
-        font-size: 9px;
+        font-size: 10px;
         color: #64748b;
-        line-height: 1.4;
+        line-height: 1.5;
     }
 
-    .ref-examples { margin-top: 4px; }
+    .ref-examples { margin-top: 5px; }
 
     .panel-footer {
-        padding: 8px 12px;
+        padding: 10px 16px;
         border-top: 1px solid var(--cell-border, #e2e8f0);
         background: var(--table-header-bg, #f8fafc);
     }
@@ -683,16 +730,17 @@
     .delete-btn {
         background: none;
         border: 1px solid #fca5a5;
-        border-radius: 4px;
-        padding: 4px 10px;
+        border-radius: 5px;
+        padding: 6px 10px;
         font-size: 11px;
+        font-weight: 500;
         color: #dc2626;
         cursor: pointer;
         width: 100%;
         text-align: left;
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 5px;
     }
 
     .delete-btn:hover:not(:disabled) { background: #fef2f2; }

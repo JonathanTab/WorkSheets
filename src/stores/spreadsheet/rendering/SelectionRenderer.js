@@ -49,8 +49,12 @@ export class SelectionRenderer {
         if (this.#canvas.width  !== physW) this.#canvas.width  = physW;
         if (this.#canvas.height !== physH) this.#canvas.height = physH;
         if (this.#canvas instanceof HTMLCanvasElement) {
-            this.#canvas.style.width  = cssWidth  + 'px';
-            this.#canvas.style.height = cssHeight + 'px';
+            // Size the CSS box from the rounded backing store so 1 backing px maps
+            // to exactly 1 device px (no bilinear resample). Must match
+            // CanvasRenderer.resize() so this overlay stays pixel-aligned with the
+            // data canvas it sits on top of. See the detailed note there.
+            this.#canvas.style.width  = (physW / this.#dpr) + 'px';
+            this.#canvas.style.height = (physH / this.#dpr) + 'px';
         }
     }
 

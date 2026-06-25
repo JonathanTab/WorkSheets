@@ -623,17 +623,14 @@ export class TableStore {
     // ─── Mutation API ─────────────────────────────────────────────────────────
 
     /**
-     * Insert a row of data.
-     * Assigns a _pos higher than all existing rows so the new entry appears at top,
-     * unless insertSort is configured — in that case _pos is computed to place the
-     * row at the top of its sort-value group.
+     * Build a new row Y.Map from row data: evaluates default formulas, merges
+     * with the provided values, and stores all non-isNonEntry columns. The
+     * caller is responsible for assigning `_pos` and pushing it into the array
+     * (inside a transaction). Shared by insertRow / insertRowAfter.
      * @param {Object} rowData  colId → value
+     * @returns {import('yjs').Map}
      */
-    insertRow(rowData) {
-        // Views write back to the source table's rows
-        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
-        if (!rowArr) return;
-
+    #buildRowYMap(rowData) {
         // Evaluate default formulas and merge with user-provided data.
         // isNonEntry columns are never stored; defaultFormula (non-isNonEntry) cols
         // get their formula result stored unless the user already provided a value.
@@ -649,15 +646,30 @@ export class TableStore {
             }
         }
 
-        this.#transact(() => {
-            const yRow = new Y.Map();
-            // Store all columns except isNonEntry (pure computed, never stored)
-            for (const [k, v] of Object.entries(withDefaults)) {
-                const colDef = this.columns.find(c => c.id === k);
-                if (colDef?.isNonEntry) continue;
-                yRow.set(k, v);
-            }
+        const yRow = new Y.Map();
+        // Store all columns except isNonEntry (pure computed, never stored)
+        for (const [k, v] of Object.entries(withDefaults)) {
+            const colDef = this.columns.find(c => c.id === k);
+            if (colDef?.isNonEntry) continue;
+            yRow.set(k, v);
+        }
+        return yRow;
+    }
 
+    /**
+     * Insert a row of data.
+     * Assigns a _pos higher than all existing rows so the new entry appears at top,
+     * unless insertSort is configured — in that case _pos is computed to place the
+     * row at the top of its sort-value group.
+     * @param {Object} rowData  colId → value
+     */
+    insertRow(rowData) {
+        // Views write back to the source table's rows
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return;
+
+        this.#transact(() => {
+            const yRow = this.#buildRowYMap(rowData);
             initPos(rowArr);
             const newPos = this.insertSortColId
                 ? computeInsertPos(rowArr, this.insertSortColId, this.insertSortDir, rowData[this.insertSortColId])
@@ -665,6 +677,94 @@ export class TableStore {
             yRow.set('_pos', newPos);
             rowArr.push([yRow]);
         });
+    }
+
+    /**
+     * Insert a row immediately after the row at `displayIndex` (in display order),
+     * so the new row lands visually adjacent rather than at the top. Used by the
+     * Entry Forge split flow, where each split line should appear next to the row
+     * being split. Ignores insertSort (the caller wants positional placement).
+     *
+     * The new `_pos` is the midpoint between the anchor row and its display
+     * neighbour below. Unlike reorderRow this never renormalizes the whole array,
+     * so existing rows keep their `_pos` — letting callers track rows by `_pos`
+     * across the inserts in a split session. Float precision is ample for the
+     * small number of rows a split produces.
+     *
+     * Returns the plain-object snapshot of the inserted row (resolved after the
+     * transaction via #syncRows, matched by the unique `_pos` assigned), or null.
+     * @param {number} displayIndex
+     * @param {Object} rowData  colId → value
+     * @returns {object|null}
+     */
+    insertRowAfter(displayIndex, rowData) {
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return null;
+
+        // Resolve the anchor row and the display neighbour below it (in current
+        // display order) to bracket the new _pos between them. Higher _pos sorts
+        // first (newer = top), so "after" the anchor means a _pos below it.
+        const rows = this.sortedFilteredRows;
+        const anchor = rows[displayIndex];
+        const below = rows[displayIndex + 1];
+
+        let assignedPos = null;
+        this.#transact(() => {
+            initPos(rowArr);
+            const yRow = this.#buildRowYMap(rowData);
+
+            const anchorPos = anchor?._pos ?? 1000;
+            const belowPos = below?._pos;
+            const newPos = belowPos == null
+                ? Math.max(0, anchorPos - 1000)   // anchor is bottom row
+                : (anchorPos + belowPos) / 2;     // between anchor and its neighbour
+            yRow.set('_pos', newPos);
+            assignedPos = newPos;
+            rowArr.push([yRow]);
+        });
+
+        if (assignedPos == null) return null;
+        // #syncRows has refreshed this.rows; find our row by the unique _pos.
+        return this.rows.find(r => r._pos === assignedPos) ?? null;
+    }
+
+    /**
+     * Insert a row immediately before the row at `displayIndex` (i.e. visually
+     * above it, since higher _pos sorts to the top). The mirror of insertRowAfter:
+     * same non-renormalizing midpoint approach so callers can keep tracking rows
+     * by `_pos`. Used by the Entry Forge split flow, where new split rows should
+     * appear above the row being split (newest-at-top convention).
+     *
+     * Returns the inserted row's plain-object snapshot, or null.
+     * @param {number} displayIndex
+     * @param {Object} rowData  colId → value
+     * @returns {object|null}
+     */
+    insertRowBefore(displayIndex, rowData) {
+        const rowArr = (this.#sourceYMap ?? this.#tableYMap).get("rows");
+        if (!rowArr) return null;
+
+        const rows = this.sortedFilteredRows;
+        const anchor = rows[displayIndex];
+        const above = rows[displayIndex - 1];
+
+        let assignedPos = null;
+        this.#transact(() => {
+            initPos(rowArr);
+            const yRow = this.#buildRowYMap(rowData);
+
+            const anchorPos = anchor?._pos ?? 1000;
+            const abovePos = above?._pos;
+            const newPos = abovePos == null
+                ? anchorPos + 1000              // anchor is the top row
+                : (anchorPos + abovePos) / 2;   // between anchor and the row above it
+            yRow.set('_pos', newPos);
+            assignedPos = newPos;
+            rowArr.push([yRow]);
+        });
+
+        if (assignedPos == null) return null;
+        return this.rows.find(r => r._pos === assignedPos) ?? null;
     }
 
     /**
@@ -1662,6 +1762,9 @@ export class TableStore {
 
     /** True when this store is a view of another table. */
     get isView() { return this.#sourceYMap !== null; }
+
+    /** The source table's id for views; this table's own id otherwise. */
+    get sourceTableId() { return this.#sourceStore?.id ?? this.id; }
 
     /**
      * The Y.Map that owns rows, columnDefs, and columnOrder for this store.

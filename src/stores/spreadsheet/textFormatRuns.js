@@ -22,7 +22,7 @@
  * Properties absent in a run's format are inherited from the cell level.
  */
 
-import { ptToPx, getFontMetrics } from './rendering/fontUnits.js';
+import { ptToPx, pxToPt, getFontMetrics } from './rendering/fontUnits.js';
 
 // ─── Build render runs (for CanvasRenderer) ───────────────────────────────────
 
@@ -100,6 +100,36 @@ function renderRunKey(run) {
 // ─── HTML ↔ TFR (editor serialization) ───────────────────────────────────────
 
 /**
+ * Block-level tags that force a line break when flattening pasted HTML into a
+ * single cell's plain-text + runs. Table rows, list items and headings join the
+ * usual <p>/<div> so a Google Docs table or multi-paragraph slice pasted into
+ * one cell keeps its line structure. Containers (table/tbody/td) are NOT here —
+ * they recurse so a row's cells stay on one line.
+ */
+const _BLOCK_TAGS = new Set([
+    'p', 'div', 'tr', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote',
+]);
+
+/**
+ * Normalize a CSS font-size into the stored unit (points). Our own editor markup
+ * uses px (via {@link ptToPx}); externally pasted HTML may use pt/px/em. Returns
+ * null for unparseable / zero sizes so the run inherits the cell baseline.
+ */
+function _cssFontSizeToPt(value) {
+    const m = String(value).trim().match(/^([\d.]+)\s*(px|pt|em|rem)?$/);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!n) return null;
+    switch (m[2]) {
+        case 'pt':  return Math.round(n);
+        case 'em':
+        case 'rem': return Math.round(n * 12);
+        case 'px':
+        default:    return pxToPt(n);
+    }
+}
+
+/**
  * Build HTML string for contenteditable initialization from plain text + tfr.
  * Outputs <span> elements with inline styles; newlines become <br>.
  *
@@ -129,7 +159,10 @@ export function runsToHtml(plainText, tfr) {
         if (run.s) dec.push('line-through');
         if (dec.length) styles.push(`text-decoration:${dec.join(' ')}`);
         if (run.c)  styles.push(`color:${run.c}`);
-        if (run.f)  styles.push(`font-size:${run.f}px`);
+        // run.f is points (canvas/storage convention); the editor is on-screen, so
+        // emit integer CSS px via ptToPx — matching the cell-level baseline and the
+        // canvas, so a run's size looks identical in edit mode and after commit.
+        if (run.f)  styles.push(`font-size:${ptToPx(run.f)}px`);
         if (run.ff) styles.push(`font-family:${run.ff}`);
 
         if (styles.length === 0 && !run.link) return encoded;
@@ -171,24 +204,32 @@ function _domToTfr(el) {
         const cs  = { ...style };
         const s   = node.style;
 
-        if (s.fontWeight === 'bold')         cs.bold = true;
-        else if (s.fontWeight === 'normal')  cs.bold = false;
-        if (s.fontStyle === 'italic')        cs.italic = true;
-        else if (s.fontStyle === 'normal')   cs.italic = false;
-        if (s.textDecoration.includes('underline'))   cs.underline     = true;
-        if (s.textDecoration.includes('line-through')) cs.strikethrough = true;
-        if (s.color)      cs.foregroundColor = s.color;
-        if (s.fontSize)   cs.fontSize        = parseFloat(s.fontSize);
-        if (s.fontFamily) cs.fontFamily      = s.fontFamily;
-
-        const linkAttr = node.getAttribute('data-link');
-        if (linkAttr) cs.link = { uri: linkAttr };
-
-        // Semantic tags
+        // Semantic tags first; explicit inline style below overrides them (e.g.
+        // Google Docs wraps its slice in <b style="font-weight:normal"> — the
+        // inline 'normal' must win over the bold <b>).
         if (tag === 'b' || tag === 'strong') cs.bold      = true;
         if (tag === 'i' || tag === 'em')     cs.italic    = true;
         if (tag === 'u')                     cs.underline = true;
         if (tag === 's' || tag === 'strike') cs.strikethrough = true;
+
+        const fw = (s.fontWeight || '').toLowerCase();
+        const fwNum = parseInt(fw, 10);
+        if (fw === 'bold' || fw === 'bolder' || (!isNaN(fwNum) && fwNum >= 600)) cs.bold = true;
+        else if (fw === 'normal' || fw === 'lighter' || (!isNaN(fwNum) && fwNum > 0 && fwNum < 600)) cs.bold = false;
+        if (s.fontStyle === 'italic' || s.fontStyle === 'oblique') cs.italic = true;
+        else if (s.fontStyle === 'normal')   cs.italic = false;
+        const dec = `${s.textDecoration || ''} ${s.textDecorationLine || ''}`;
+        if (dec.includes('underline'))   cs.underline     = true;
+        if (dec.includes('line-through')) cs.strikethrough = true;
+        if (s.color)      cs.foregroundColor = s.color;
+        if (s.fontSize)   cs.fontSize        = _cssFontSizeToPt(s.fontSize);
+        if (s.fontFamily) cs.fontFamily      = s.fontFamily.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+
+        const linkAttr = node.getAttribute('data-link') ||
+            (tag === 'a' ? node.getAttribute('href') : null);
+        if (linkAttr && !linkAttr.startsWith('#') && !linkAttr.startsWith('javascript:')) {
+            cs.link = { uri: linkAttr };
+        }
 
         if (tag === 'br') {
             if (lastWasBlockBoundary) {
@@ -197,7 +238,9 @@ function _domToTfr(el) {
                 _pushFlat(flatRuns, '\n', {});
                 lastWasBlockBoundary = false;
             }
-        } else if (tag === 'div' || tag === 'p') {
+        } else if (_BLOCK_TAGS.has(tag)) {
+            // Block-level elements separate lines. A guard against double newlines
+            // lets nested blocks (e.g. <tr><td><p>) collapse to a single break.
             if (flatRuns.length > 0) {
                 const last = flatRuns[flatRuns.length - 1];
                 if (!last.text.endsWith('\n')) {
