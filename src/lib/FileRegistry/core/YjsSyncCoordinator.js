@@ -144,6 +144,10 @@ export class YjsSyncCoordinator {
      * @param {string} fileId
      */
     async queueTouch(fileId) {
+        // Skip files we've already learned we can't touch (e.g. read-only / shared
+        // reference docs that returned 403). Without this, every sync update on such
+        // a doc re-queues a touch that floods the console with 403s.
+        if ((this._noTouchFiles ??= new Set()).has(fileId)) return;
         await this._pendingStore.addToTouchQueue({
             fileId,
             mtime: new Date().toISOString(),
@@ -303,7 +307,17 @@ export class YjsSyncCoordinator {
                 await this._api.touchFile(entry.fileId);
                 await this._pendingStore.removeFromTouchQueue(entry.fileId);
             } catch (err) {
-                console.warn(`[YjsSyncCoordinator] Touch failed for ${entry.fileId}: ${err.message}`);
+                const msg = String(err?.message ?? '');
+                // 4xx (403 forbidden / 404 gone / 401) is permanent — retrying won't
+                // help. Drop the entry and remember the file so we stop re-queuing it.
+                // Common for read-only / shared reference docs the user can't write.
+                if (/HTTP_4\d\d/.test(msg)) {
+                    (this._noTouchFiles ??= new Set()).add(entry.fileId);
+                    await this._pendingStore.removeFromTouchQueue(entry.fileId);
+                    log.debug(`[YjsSyncCoordinator] Touch not permitted for ${entry.fileId} (${msg}); won't retry this session`);
+                } else {
+                    console.warn(`[YjsSyncCoordinator] Touch failed for ${entry.fileId}: ${msg}`);
+                }
             }
         }
     }

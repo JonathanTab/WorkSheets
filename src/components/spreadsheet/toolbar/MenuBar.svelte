@@ -21,7 +21,6 @@
     import { clearFormatting as clearFormattingCmd } from "../../../stores/spreadsheet/formatCommands.js";
     import { applyFormatting as applyFormattingCmd } from "../../../stores/spreadsheet/cellFormattingCommands.js";
     import TableCreateDialog from "../features/TableCreateDialog.svelte";
-    import RepeaterCreateDialog from "../features/RepeaterCreateDialog.svelte";
     import { openModal } from "../../../lib/ui/modalStore.svelte.js";
     import AlertModal from "../../modals/AlertModal.svelte";
     import ConditionalFormatPanel from "../ConditionalFormatPanel.svelte";
@@ -42,7 +41,7 @@
         renameDocument,
     } from "../../../stores/spreadsheet/SpreadsheetSession.svelte.js";
 
-    let { showTablesPanel = false, onShowTablesPanel = undefined } = $props();
+    let { showTablesPanel = false, onShowTablesPanel = undefined, onShowRepeatersPanel = undefined } = $props();
 
     let showCFPanel = $state(false);
     let showDVPanel = $state(false);
@@ -68,9 +67,8 @@
         }
     }
 
-    // Dialog state for table/repeater creation
+    // Dialog state for table creation
     let showCreateTableDialog = $state(false);
-    let showCreateRepeaterDialog = $state(false);
 
     // ─── VIEW STATE ───────────────────────────────────────────────────────────
     // Local state mirrors what was dispatched so checkmarks stay correct
@@ -103,6 +101,10 @@
         document.dispatchEvent(new CustomEvent('togglePageBreaks', {
             detail: { show: showPageBreakMarkers },
         }));
+    }
+
+    function openRepeatersPanel() {
+        onShowRepeatersPanel?.();
     }
 
     // ─── FILE MENU ────────────────────────────────────────────────────────────
@@ -514,9 +516,8 @@
             },
             {
                 label: "Repeater",
-                action: () => (showCreateRepeaterDialog = true),
+                action: openRepeatersPanel,
                 icon: "↻",
-                disabled: !selectionState.range,
             },
         ];
     });
@@ -685,7 +686,7 @@
         {
             label: "Repeaters",
             icon: "↻",
-            action: () => showAlert("Repeaters", "Open the Repeaters panel from the Tables panel.", "info"),
+            action: openRepeatersPanel,
         },
         { divider: true },
         {
@@ -903,10 +904,6 @@ Ctrl+\` - Toggle formula view`;
 
 {#if showCreateTableDialog}
     <TableCreateDialog onClose={() => (showCreateTableDialog = false)} />
-{/if}
-
-{#if showCreateRepeaterDialog}
-    <RepeaterCreateDialog onClose={() => (showCreateRepeaterDialog = false)} />
 {/if}
 
 {#if showCFPanel}

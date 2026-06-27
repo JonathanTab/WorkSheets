@@ -3,7 +3,7 @@
      * GridOverlays - Cell Editor Overlay (Canvas Architecture)
      *
      * Editor modes:
-     *   formula  — FormulaInput (transparent input + colored overlay)
+     *   formula  — FormulaCodeEditor (CodeMirror 6)
      *   text     — contenteditable for plain and rich text
      *   picker   — date/time/image/file pickers
      */
@@ -22,7 +22,7 @@
         getCharOffset,
         restoreSelection,
     } from "../../../stores/spreadsheet/textFormatRuns.js";
-    import FormulaInput from "../FormulaInput.svelte";
+    import FormulaCodeEditor from "../formula-editor/FormulaCodeEditor.svelte";
     import PickerEditor from "../cellTypes/PickerEditor.svelte";
     import DatePickerEditor from "../cellTypes/DatePickerEditor.svelte";
     import ImageEditor from "../cellTypes/ImageEditor.svelte";
@@ -275,17 +275,12 @@
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
 
-    function handleFormulaKeydown(e) {
-        if (e.key === 'Enter') {
-            e.stopPropagation(); e.preventDefault();
-            onTabCommit ? onTabCommit(1) : onCommitEdit?.(editValue);
-        } else if (e.key === 'Escape') {
-            e.stopPropagation();
-            onCancelEdit?.();
-        } else if (e.key === 'Tab') {
-            e.stopPropagation(); e.preventDefault();
-            onTabCommit ? onTabCommit(e.shiftKey ? -1 : 1, 'tab') : onCommitEdit?.(editValue);
-        }
+    function handleFormulaCommit() {
+        onTabCommit ? onTabCommit(1) : onCommitEdit?.(editValue);
+    }
+
+    function handleFormulaTab(dir) {
+        onTabCommit ? onTabCommit(dir, 'tab') : onCommitEdit?.(editValue);
     }
 
     function handleRichKeydown(e) {
@@ -443,7 +438,7 @@
 
 <div class="overlays-root">
     {#if editorBounds && isEditing && editSessionState.surface === 'grid'}
-        <div class="cell-editor" style={editorStyle}>
+        <div class="cell-editor" class:cell-editor--formula={isFormulaMode} style={editorStyle}>
             {#if isImagePickerMode}
                 <ImageEditor
                     value={editValue}
@@ -499,16 +494,17 @@
             {:else}
                 <!-- Formula / plain-text input -->
                 <div class="formula-cell-wrap" style={plainEditStyle}>
-                    <FormulaInput
+                    <FormulaCodeEditor
                         bind:this={formulaInputComponent}
                         value={editValue}
-                        scrollable={false}
                         selStart={editSessionState.cursorStart}
                         selEnd={editSessionState.cursorEnd}
                         caretSync={editSessionState.caretSync}
                         onInput={(val, s, e) => onEditInput?.(val, s, e)}
                         onSelect={(s, e) => onEditSelect?.(s, e)}
-                        onKeydown={handleFormulaKeydown}
+                        onCommit={handleFormulaCommit}
+                        onCancel={onCancelEdit}
+                        onTab={handleFormulaTab}
                         onBlur={handleEditBlur}
                     />
                 </div>
@@ -533,7 +529,17 @@
         overflow: visible;
     }
 
-    /* Wrapper that passes cell-level font/size styles to FormulaInput.
+    /* Formula editing gets a comfortable minimum width so the CodeMirror editor
+       (highlighting, bracket matching, autocomplete) is usable even in narrow
+       cells. min-width only widens it past the inline cell width — never shrinks
+       a wider cell — and it overflows rightward past the cell edge like Excel.
+       Single-line semantics are kept (Enter still commits); long formulas scroll
+       horizontally within this width. */
+    .cell-editor--formula {
+        min-width: 260px;
+    }
+
+    /* Wrapper that passes cell-level font/size styles to FormulaCodeEditor.
        font-size matches CanvasRenderer's ptToPx(defaultFontSize=10pt) = 13px so the
        editor and the grid render the same text size when no cell formatting is set. */
     .formula-cell-wrap {

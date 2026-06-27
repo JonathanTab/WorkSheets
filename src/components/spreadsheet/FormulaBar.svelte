@@ -5,12 +5,12 @@
     import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { untrack } from "svelte";
-    import FormulaInput from "./FormulaInput.svelte";
+    import FormulaCodeEditor from "./formula-editor/FormulaCodeEditor.svelte";
     import { close, check } from "../../lib/icons/index.js";
 
     let { selectedCell = null, onEdit } = $props();
 
-    let inputComponent = $state(null); // FormulaInput instance
+    let inputComponent = $state(null); // FormulaCodeEditor instance
     let captureInputEl = $state(null);
     let previousCellKey = $state(null);
 
@@ -124,12 +124,6 @@
         blurMobileKeyboard();
     }
 
-    function handleKeydown(e) {
-        if (e.key === 'Enter')  { commitEdit(); e.preventDefault(); }
-        else if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-        else if (e.key === 'Tab')    { commitEdit(); e.preventDefault(); }
-    }
-
     // ── Focus management ──────────────────────────────────────────────────────
 
     export function captureKeyboardFocus() {
@@ -190,8 +184,16 @@
         <div class="divider"></div>
         <div class="formula-input-area">
             {#if isEditing}
-                <div class="input-wrap" class:has-formula={isFormulaMode}>
-                    <FormulaInput
+                <div
+                    class="input-wrap"
+                    class:has-formula={isFormulaMode}
+                    onmousedown={(e) => {
+                        e.stopPropagation();
+                        if (!hasRichText && editSessionState.isEditing)
+                            editSessionState.switchSurface('formulaBar', { focus: false });
+                    }}
+                >
+                    <FormulaCodeEditor
                         bind:this={inputComponent}
                         value={editValue}
                         readonly={hasRichText}
@@ -201,15 +203,12 @@
                         caretSync={editSessionState.caretSync}
                         onInput={(val, s, e) => editSessionState.updateDraft(val, s, e)}
                         onSelect={(s, e) => editSessionState.setCursor(s, e)}
-                        onKeydown={handleKeydown}
+                        onCommit={() => commitEdit()}
+                        onCancel={cancelEdit}
+                        onTab={() => commitEdit()}
                         onBlur={() => {
                             if (editSessionState.surface === 'formulaBar' && !hasRichText)
                                 commitEdit({ blurKeyboard: false });
-                        }}
-                        onmousedown={(e) => {
-                            e.stopPropagation();
-                            if (!hasRichText && editSessionState.isEditing)
-                                editSessionState.switchSurface('formulaBar', { focus: false });
                         }}
                     />
                 </div>

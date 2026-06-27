@@ -38,13 +38,22 @@ export default defineConfig({
                         'y-prosemirror',
                     ],
                     'vendor-pdf': ['jspdf'],
+                    'vendor-codemirror': [
+                        '@codemirror/state',
+                        '@codemirror/view',
+                        '@codemirror/commands',
+                        '@codemirror/autocomplete',
+                        '@codemirror/language',
+                    ],
                 },
             },
         },
     },
     plugins: [svelte(), tailwindcss(), VitePWA({
         registerType: 'autoUpdate',
-        injectRegister: 'inline',
+        // Registration is driven manually from offlineMode.js (via virtual:pwa-register)
+        // so the SW is only installed when the user has opted into offline mode.
+        injectRegister: false,
 
         manifest: {
             name: 'Scriptorium',
@@ -106,21 +115,6 @@ export default defineConfig({
                     // Always fetch fresh so clients detect schema bumps immediately.
                     urlPattern: /\/schema-version\.json$/,
                     handler: 'NetworkOnly',
-                },
-                {
-                    // Load fast-path: the generic Yjs state snapshot. Serve the
-                    // cached copy instantly on repeat loads and revalidate in the
-                    // background — the WebSocket sync reconciles any delta, so a
-                    // momentarily-stale head-start is safe.
-                    urlPattern: /\/api\/doc\/[^/]+\/state$/i,
-                    handler: 'StaleWhileRevalidate',
-                    options: {
-                        cacheName: 'doc-state-snapshot',
-                        expiration: {
-                            maxEntries: 50,
-                            maxAgeSeconds: 60 * 60 * 24 // 1 day
-                        }
-                    }
                 },
                 {
                     urlPattern: /\/api\/.*/i,

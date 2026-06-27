@@ -32,9 +32,6 @@
         PANEL_MIN_HEIGHT,
         FILTER_POPOVER_DEFAULT_WIDTH,
         FILTER_POPOVER_DEFAULT_HEIGHT,
-        EDIT_PANEL_DEFAULT_WIDTH,
-        EDIT_PANEL_DEFAULT_HEIGHT,
-        REPEATER_PANEL_ICON_OFFSET_PX,
         TABLE_GRIP_HANDLE_PX,
     } from "../../stores/spreadsheet/gridConstants.js";
     import { toRangeRef } from "../../formulas/refCoords.js";
@@ -62,8 +59,6 @@
     import FileViewer from "./cellTypes/FileViewer.svelte";
     import TableFilterPopover from "./features/TableFilterPopover.svelte";
     import TableCreateDialog from "./features/TableCreateDialog.svelte";
-    import RepeaterCreateDialog from "./features/RepeaterCreateDialog.svelte";
-    import RepeaterEditPanel from "./features/RepeaterEditPanel.svelte";
     import ViewPlacementOverlay from "./features/ViewPlacementOverlay.svelte";
     import { viewPlacementStore } from "../../stores/spreadsheet/viewPlacementStore.svelte.js";
     import { computePrintBounds, computePageBreaks } from "../../stores/spreadsheet/rendering/PrintShared.js";
@@ -89,6 +84,7 @@
         printSettings = null,
         requestMobileKeyboardFocus = null,
         onShowTablesPanel = undefined,
+        onShowRepeatersPanel = undefined,
         showGridlines = true,
         showFormulas = false,
     } = $props();
@@ -383,59 +379,6 @@
 
     // ─── Edit panel position (with boundary detection) ────────────────────────
     /** @type {{ x: number, y: number }|null} */
-    let editPanelPosition = $state(null);
-    let editPanelEl = $state(null);
-
-    /**
-     * Calculate position for repeater edit panel, ensuring it stays within viewport.
-     * @param {'repeater'} type
-     * @param {any} store
-     * @returns {{ x: number, y: number }}
-     */
-    function calculateEditPanelPosition(type, store) {
-        if (!containerEl || !virtualizer || !renderPlan) return { x: 0, y: 0 };
-
-        const panelRect = editPanelEl?.getBoundingClientRect();
-        const panelWidth = panelRect?.width ?? EDIT_PANEL_DEFAULT_WIDTH;
-        const panelHeight = panelRect?.height ?? EDIT_PANEL_DEFAULT_HEIGHT;
-
-        let anchorRight, anchorTop;
-
-        const rect = rangeOutlineStyle(
-            store.templateStartRow,
-            store.templateStartCol,
-            store.inlineEndRow,
-            store.inlineEndCol,
-        );
-        if (!rect) return { x: 0, y: 0 };
-        anchorRight = rect.left + rect.width;
-        anchorTop = rect.top;
-
-        const placed = placeOverlayNearAnchor(
-            { left: anchorRight, top: anchorTop + REPEATER_PANEL_ICON_OFFSET_PX, width: 18, height: 18 },
-            { width: panelWidth, height: panelHeight },
-            { preferX: "start", preferY: "below", offset: OVERLAY_OFFSET_PX, margin: OVERLAY_MARGIN_PX },
-        );
-        return { x: placed.left, y: placed.top };
-    }
-
-    // Recalculate position when activeEditPanel changes
-    $effect(() => {
-        const _sl = virtualizer?.scrollLeft;
-        const _st = virtualizer?.scrollTop;
-        const _cw = containerEl?.clientWidth;
-        const _vh = getContainerVisibleBottomPx();
-        const _panelEl = editPanelEl;
-        if (activeEditPanel && containerEl && virtualizer && renderPlan) {
-            editPanelPosition = calculateEditPanelPosition(
-                activeEditPanel.type,
-                activeEditPanel.store,
-            );
-        } else {
-            editPanelPosition = null;
-        }
-    });
-
     // Recalculate filter popover position when it changes
     $effect(() => {
         const _sl = virtualizer?.scrollLeft;
@@ -451,9 +394,6 @@
     });
     /** Stores last TABLE_ENTRY edit info for post-commit navigation (rich-text path). */
     let lastTableEntryEditInfo = $state(null);
-    /** @type {{ row:number, col:number, options:string[], left:number, top:number, width:number, height:number }|null} */
-    /** @type {{ type: 'repeater', store:any }|null} */
-    let activeEditPanel = $state(null);
 
     // ─── Context menu ─────────────────────────────────────────────────────────
     let contextMenuVisible = $state(false);
@@ -477,7 +417,6 @@
 
     // ─── Dialog state ─────────────────────────────────────────────────────────
     let showCreateTableDialog = $state(false);
-    let showCreateRepeaterDialog = $state(false);
     let showFloatingImageInsert = $state(false);
 
     function handleInsertFloatingImageEvent() {
@@ -3437,32 +3376,12 @@
                     style="left:{btnLeft}px; top:{btnTop}px;"
                     onclick={(e) => {
                         e.stopPropagation();
-                        activeEditPanel =
-                            activeEditPanel?.store === rep
-                                ? null
-                                : { type: "repeater", store: rep };
+                        onShowRepeatersPanel?.(rep.id);
                     }}
                     title="Repeater settings: {rep.name}"
                     aria-label="Repeater settings">↻</button
                 >
             {/each}
-
-            <!-- Edit panel (repeater settings) -->
-            {#if activeEditPanel && editPanelPosition}
-                <div
-                    class="edit-panel-anchor"
-                    bind:this={editPanelEl}
-                    style="left:{editPanelPosition.x}px; top:{editPanelPosition.y}px;"
-                >
-                    {#if activeEditPanel.type === "repeater"}
-                        <RepeaterEditPanel
-                            repeater={activeEditPanel.store}
-                            repeaterEngine={spreadsheetSession.repeaterEngine}
-                            onClose={() => (activeEditPanel = null)}
-                        />
-                    {/if}
-                </div>
-            {/if}
 
             <!-- Dropdown cell overlay -->
             {#if kbCtrl.focusedDropdownCell}
@@ -3723,13 +3642,11 @@
     onClose={closeContextMenu}
     {containerEl}
     {selectionHandleRect}
-    {activeEditPanel}
-    onSetActiveEditPanel={(panel) => { activeEditPanel = panel; }}
     onBeginCellEdit={beginCellEdit}
     onShowFloatingImageInsert={() => { showFloatingImageInsert = true; }}
     onShowCreateTableDialog={() => { showCreateTableDialog = true; }}
-    onShowCreateRepeaterDialog={() => { showCreateRepeaterDialog = true; }}
     {onShowTablesPanel}
+    {onShowRepeatersPanel}
 />
 
 <!-- File viewer (portalled outside grid-root to escape contain:layout stacking context) -->
@@ -3742,10 +3659,6 @@
 
 {#if showCreateTableDialog}
     <TableCreateDialog onClose={() => (showCreateTableDialog = false)} />
-{/if}
-
-{#if showCreateRepeaterDialog}
-    <RepeaterCreateDialog onClose={() => (showCreateRepeaterDialog = false)} />
 {/if}
 
 {#if showFloatingImageInsert && anchor && sheetStore}
@@ -4319,14 +4232,23 @@
     }
 
     .floating-insert-dialog {
+        position: relative;
         background: #fff;
         border-radius: 10px;
         box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
         padding: 20px;
-        min-width: 320px;
+        width: 360px;
+        max-width: 92vw;
         display: flex;
         flex-direction: column;
         gap: 12px;
+    }
+
+    /* ImageEditor is absolutely positioned for cell overlay use; in this dialog it
+       should sit in normal flow under the title. */
+    .floating-insert-dialog :global(.image-editor) {
+        position: relative;
+        z-index: auto;
     }
 
     .floating-insert-title {

@@ -14,7 +14,7 @@
         selectionState,
     } from "../../../stores/spreadsheetStore.svelte.js";
 
-    let { onClose = () => {} } = $props();
+    let { onClose = () => {}, onCreated = undefined } = $props();
 
     // Get selection bounds
     let selection = $derived(selectionState.range);
@@ -84,7 +84,7 @@
     function handleCreate() {
         if (!selection || !spreadsheetSession.repeaterEngine) return;
 
-        spreadsheetSession.repeaterEngine.createRepeater({
+        const repeaterId = spreadsheetSession.repeaterEngine.createRepeater({
             name: repeaterName,
             templateStartRow: selection.startRow,
             templateEndRow: selection.endRow,
@@ -95,6 +95,7 @@
             gap: gap,
         });
 
+        onCreated?.(repeaterId);
         onClose();
     }
 

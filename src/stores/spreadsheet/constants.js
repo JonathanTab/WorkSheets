@@ -35,7 +35,9 @@ export const OVERSCAN_ROWS = OVERSCAN_PX_ROWS;
 export const OVERSCAN_COLS = OVERSCAN_PX_COLS;
 
 // Schema version
-export const SCHEMA_VERSION = '8';
+// v9: cell styles interned into a doc-level content-addressed palette
+//     (cellStyles entries become `{ s: sid }` refs; see cells/StylePalette.js).
+export const SCHEMA_VERSION = '9';
 
 // Default sheet dimensions
 export const DEFAULT_ROW_COUNT = 1000;

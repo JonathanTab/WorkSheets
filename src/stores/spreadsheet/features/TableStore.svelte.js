@@ -72,6 +72,7 @@ import { TableFormulaEvaluator, matchCondition } from './tableFormulaEval.js';
 import { cmpValues, initPos, computeInsertPos } from './tableRowHelpers.js';
 import { YJS_ORIGIN } from '../yjsOrigins.js';
 import { CellTypeRegistry, colParseConfig } from '../cellTypes/index.js';
+import { perfMon } from '../perf/PerfMonitor.js';
 
 /**
  * View mode: when a TableStore is created with a sourceTableYMap, it acts as a
@@ -235,22 +236,17 @@ export class TableStore {
         }
 
         this.sortedFilteredRows = result;
-        // Cumulative formulas always accumulate from bottom upward: oldest rows at bottom
-        // contribute first. Canonical order is always newest-first, so this never changes.
-        const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
 
-        // Build the formula evaluator from ALL rows in canonical _pos-desc order so
-        // that computed formulas (RUNNINGIF, SUM, CUMSUM, etc.) are never affected by
-        // display filters — filters are a display-only concept.
-        const allSorted = [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0));
-        const plainAllSorted = allSorted.map(r => ({ ...r }));
-        this.#eval = new TableFormulaEvaluator(plainAllSorted, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
-
-        // Build display→full index map so getValue(displayIndex) can translate to
-        // the correct index in the all-rows evaluator. Uses object identity since
-        // allSorted and result both hold references to the same this.rows objects.
-        const refToFullIndex = new Map(allSorted.map((r, i) => [r, i]));
-        this.#displayToFullIndex = result.map(r => refToFullIndex.get(r) ?? -1);
+        // The display formula evaluator (#eval) and its display→full index map are
+        // built LAZILY by #ensureEval() on first use. Building TableFormulaEvaluator
+        // is O(rows × cols) with formula parsing/eval, so eagerly constructing it for
+        // every table at document load (incl. tables on non-visible sheets) dominated
+        // load time. Deferring it means a table only pays this cost when it's actually
+        // rendered or referenced by a formula. Mirror of the existing #allRowsEval
+        // lazy pattern (#ensureAllRowsEval).
+        this.#eval = null;
+        this.#displayToFullIndex = [];
+        this.#evalDirty = true;
 
         // #allRowsEval is lazily built on the first getFullValue() call so
         // tables that no sheet/cross-table formula references never pay for
@@ -259,6 +255,34 @@ export class TableStore {
         if (!this.#sourceStore && rebuildAllRowsEval) {
             this.#allRowsEval = null;
         }
+    }
+
+    /**
+     * Lazily (re)build the display formula evaluator #eval and the
+     * display→full index map. Called by every consumer of #eval before reading
+     * it. Cheap no-op once built and not dirtied. See #rebuildView for why this
+     * is deferred rather than built eagerly.
+     */
+    #ensureEval() {
+        if (this.#eval && !this.#evalDirty) return;
+        const build = () => {
+            const result = this.sortedFilteredRows;
+            const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
+
+            // Build from ALL rows in canonical _pos-desc order so computed formulas
+            // (RUNNINGIF, SUM, CUMSUM, …) are never affected by display filters.
+            const allSorted = [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0));
+            const plainAllSorted = allSorted.map(r => ({ ...r }));
+            this.#eval = new TableFormulaEvaluator(plainAllSorted, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+
+            // Display→full index map so getValue(displayIndex) translates to the
+            // correct index in the all-rows evaluator (object identity).
+            const refToFullIndex = new Map(allSorted.map((r, i) => [r, i]));
+            this.#displayToFullIndex = result.map(r => refToFullIndex.get(r) ?? -1);
+            this.#evalDirty = false;
+        };
+        if (perfMon.enabled) perfMon.time('table.ensureEval', build);
+        else build();
     }
 
     /**
@@ -296,9 +320,11 @@ export class TableStore {
      */
     #renameRewriter = null;
 
-    // ── Formula evaluators (recreated on every #rebuildView) ─────────────────
+    // ── Formula evaluators (lazily built via #ensureEval / #ensureAllRowsEval) ──
     /** @type {TableFormulaEvaluator|null} Evaluator built from all rows in _pos-desc order (display API). */
     #eval = null;
+    /** @type {boolean} True when #eval needs (re)building on next access. */
+    #evalDirty = true;
     /** @type {number[]} Maps displayIndex → index in #eval's row array (all rows, _pos-desc). */
     #displayToFullIndex = [];
     /** @type {TableFormulaEvaluator|null} Evaluator for all rows (sheet formula API). */
@@ -462,7 +488,9 @@ export class TableStore {
             return;
         }
         // _fmt / _rowFmt are Y.Maps — r.toJSON() returns nested plain objects.
-        this.#_rows = arr.toArray().map((r) => r.toJSON ? r.toJSON() : { ...r });
+        this.#_rows = perfMon.enabled
+            ? perfMon.time('table.syncRowsToJSON', () => arr.toArray().map((r) => r.toJSON ? r.toJSON() : { ...r }))
+            : arr.toArray().map((r) => r.toJSON ? r.toJSON() : { ...r });
         this.#rebuildView();
         this.#notifyViewStores();
     }
@@ -635,6 +663,7 @@ export class TableStore {
         // isNonEntry columns are never stored; defaultFormula (non-isNonEntry) cols
         // get their formula result stored unless the user already provided a value.
         const withDefaults = { ...rowData };
+        this.#ensureEval();
         if (this.#eval) {
             const computed = this.#eval.applyDefaultFormulas(rowData);
             for (const [colId, val] of computed) {
@@ -1358,7 +1387,11 @@ export class TableStore {
     setViewFilter(colId, op, value) {
         if (!this.#sourceYMap) return;
         const pf = this.#getOrCreatePersistedFilters();
-        this.#transact(() => { pf.set(colId, JSON.stringify({ op, value })); });
+        const next = JSON.stringify({ op, value });
+        // No-op guard: re-applying the same filter would still tombstone the old
+        // entry. Skip the Yjs write (and the rebuild) when nothing changed.
+        if (pf.get(colId) === next) return;
+        this.#transact(() => { pf.set(colId, next); });
         this.viewDefinitionFilters = { ...this.viewDefinitionFilters, [colId]: { op, value } };
         this.#rebuildView(false);
         this._onFilterChange?.();
@@ -1604,6 +1637,7 @@ export class TableStore {
     }
 
     getValue(displayIndex, colId) {
+        this.#ensureEval();
         const fullIndex = this.#displayToFullIndex[displayIndex] ?? displayIndex;
         const raw = this.#eval
             ? this.#eval.getValue(fullIndex, colId)
@@ -1670,12 +1704,14 @@ export class TableStore {
     }
 
     getCumulativeSum(colId, upToDisplayIndex) {
+        this.#ensureEval();
         if (!this.#eval) return 0;
         const fullIndex = this.#displayToFullIndex[upToDisplayIndex] ?? upToDisplayIndex;
         return this.#eval.getCumulativeSum(colId, fullIndex);
     }
 
     evaluateFormula(formula, rowIndex) {
+        this.#ensureEval();
         if (!this.#eval) return null;
         const fullIndex = this.#displayToFullIndex[rowIndex] ?? rowIndex;
         return this.#eval.evaluateFormula(formula, fullIndex);
@@ -1689,7 +1725,11 @@ export class TableStore {
      */
     setSheetFormulaEvaluator(fn) {
         this.#sheetFormulaEval = fn;
-        if (this.#eval) this.#rebuildView();
+        // Mark the (possibly already-built) evaluator stale so it picks up the new
+        // callback. If #eval was already materialized, rebuild it now; otherwise the
+        // lazy build on next access will use the updated callback.
+        this.#evalDirty = true;
+        if (this.#eval) this.#ensureEval();
     }
 
     /**
@@ -1701,7 +1741,8 @@ export class TableStore {
     setTableResolver(fn) {
         if (this.#tableResolver === fn) return;
         this.#tableResolver = fn;
-        if (this.#eval) this.#rebuildView();
+        this.#evalDirty = true;
+        if (this.#eval) this.#ensureEval();
     }
 
     /**
@@ -1719,6 +1760,7 @@ export class TableStore {
     }
 
     resolveColId(/** @type {string} */ nameOrId) {
+        this.#ensureEval();
         return this.#eval ? this.#eval.resolveColId(nameOrId) : String(nameOrId ?? '');
     }
 

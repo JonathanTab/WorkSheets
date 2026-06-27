@@ -10,6 +10,7 @@
     import HistoryViewer from "../history/HistoryViewer.svelte";
     import SpreadsheetHistoryViewer from "../history/SpreadsheetHistoryViewer.svelte";
     import DocumentTablesPanel from "./features/DocumentTablesPanel.svelte";
+    import DocumentRepeatersPanel from "./features/DocumentRepeatersPanel.svelte";
     import PdfExportView from "./PdfExportView.svelte";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { HistoryManager } from "../../lib/history/HistoryManager.svelte.js";
@@ -46,6 +47,8 @@
     let tablesPanelTableId = $state(/** @type {string|null} */ (null));
     let tablesPanelColId   = $state(/** @type {string|null} */ (null));
     let tablesPanelViewId  = $state(/** @type {string|null} */ (null));
+    let showRepeatersPanel = $state(false);
+    let repeatersPanelRepeaterId = $state(/** @type {string|null} */ (null));
     let formulaBarRef = $state(null);
     let mobileInputBarRef = $state(null);
 
@@ -278,6 +281,44 @@
         });
     }
 
+    function showTablesPanelFor(tableId = null, colId = null, viewId = null) {
+        showRepeatersPanel = false;
+        repeatersPanelRepeaterId = null;
+        tablesPanelTableId = tableId;
+        tablesPanelColId = colId;
+        tablesPanelViewId = viewId;
+        showTablesPanel = true;
+    }
+
+    function toggleTablesPanel() {
+        if (showTablesPanel) {
+            showTablesPanel = false;
+            tablesPanelTableId = null;
+            tablesPanelColId = null;
+            tablesPanelViewId = null;
+            return;
+        }
+        showTablesPanelFor();
+    }
+
+    function showRepeatersPanelFor(repeaterId = null) {
+        showTablesPanel = false;
+        tablesPanelTableId = null;
+        tablesPanelColId = null;
+        tablesPanelViewId = null;
+        repeatersPanelRepeaterId = repeaterId;
+        showRepeatersPanel = true;
+    }
+
+    function toggleRepeatersPanel() {
+        if (showRepeatersPanel) {
+            showRepeatersPanel = false;
+            repeatersPanelRepeaterId = null;
+            return;
+        }
+        showRepeatersPanelFor();
+    }
+
     // Capture the hash present in the URL at the moment this component mounts
     // (before any effect can overwrite it with the default sheet id).
     const _initialHash = window.location.hash.slice(1);
@@ -342,6 +383,14 @@
                 />
             {/if}
 
+            {#if showRepeatersPanel && !mobileState.isMobile}
+                <DocumentRepeatersPanel
+                    session={spreadsheetSession}
+                    onClose={() => { showRepeatersPanel = false; repeatersPanelRepeaterId = null; }}
+                    initialRepeaterId={repeatersPanelRepeaterId}
+                />
+            {/if}
+
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="workspace-container" class:mobile={mobileState.isMobile} oncontextmenu={(e) => e.preventDefault()}>
                 <!-- Lifecycle banners: read-only (newer schema) + transient notices -->
@@ -371,7 +420,8 @@
                         {awareness}
                         {currentUser}
                         onShowHistory={registry ? () => { showHistory = !showHistory; } : undefined}
-                        onShowTablesPanel={() => { showTablesPanel = !showTablesPanel; tablesPanelTableId = null; tablesPanelColId = null; tablesPanelViewId = null; }}
+                        onShowTablesPanel={toggleTablesPanel}
+                        onShowRepeatersPanel={toggleRepeatersPanel}
                         tablesPanelOpen={showTablesPanel}
                         {registry}
                         {historyManager}
@@ -417,7 +467,8 @@
                                 ? mobileInputBarRef?.captureKeyboardFocus?.()
                                 : formulaBarRef?.captureKeyboardFocus?.()}
                         printSettings={pageBreakPrintSettings}
-                        onShowTablesPanel={(tableId, colId, viewId) => { tablesPanelTableId = tableId ?? null; tablesPanelColId = colId ?? null; tablesPanelViewId = viewId ?? null; showTablesPanel = true; }}
+                        onShowTablesPanel={showTablesPanelFor}
+                        onShowRepeatersPanel={showRepeatersPanelFor}
                     />
                     {#if isCrossSheetFormulaEdit}
                         <div class="cross-sheet-indicator">

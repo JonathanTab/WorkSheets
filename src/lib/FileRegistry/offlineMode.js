@@ -1,15 +1,17 @@
 /**
- * Offline mode preference and Yjs IndexedDB cleanup utilities.
+ * Offline mode preference, Yjs IndexedDB cleanup, and service worker registration.
  *
  * Offline mode controls whether Yjs documents are persisted to IndexedDB for
- * offline editing. When disabled (default), no local Yjs copies are created and
- * the browser stays clean of accumulated Yjs databases.
+ * offline editing, and whether the PWA service worker is installed at all. When
+ * disabled (default), no local Yjs copies are created, no service worker caches
+ * app assets, and the app always loads fresh from the network.
  *
  * The preference is stored in localStorage so it persists across page loads.
  * Changing the setting requires a page reload to take effect.
  *
  * When offline mode is disabled, any Yjs IndexedDB databases previously created
- * are tracked by room ID and deleted automatically on the next startup.
+ * are tracked by room ID and deleted automatically on the next startup. Likewise,
+ * any previously-registered service worker and its caches are torn down.
  */
 
 const OFFLINE_MODE_KEY = 'scriptorium_offline_mode';
@@ -134,5 +136,35 @@ export function forgetOpenedRoom(docId) {
     delete map[docId];
     try {
         localStorage.setItem(LAST_OPENED_ROOM_KEY, JSON.stringify(map));
+    } catch { /* ignore */ }
+}
+
+/**
+ * Registers the PWA service worker if offline mode is enabled, or tears down
+ * any existing registration and its caches if not. Call once on app startup
+ * (after that, toggling offline mode requires a reload, same as Yjs persistence).
+ *
+ * Service worker caching only ever happens when offline mode is on — with it
+ * off, the app always fetches fresh from the network instead of a cached copy.
+ */
+export async function syncServiceWorkerRegistration() {
+    if (!('serviceWorker' in navigator)) return;
+
+    if (getOfflineMode() && import.meta.env.PROD) {
+        try {
+            const { registerSW } = await import('virtual:pwa-register');
+            registerSW({ immediate: true });
+        } catch { /* ignore */ }
+        return;
+    }
+
+    try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map(reg => reg.unregister()));
+    } catch { /* ignore */ }
+
+    try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(key => caches.delete(key)));
     } catch { /* ignore */ }
 }

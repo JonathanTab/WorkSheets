@@ -46,6 +46,16 @@ function _userColor(username) {
     return _PRESENCE_COLORS[h % _PRESENCE_COLORS.length];
 }
 
+/**
+ * True if `parentId` is one of a file's owning parents. Supports both the
+ * multi-parent `parentIds` array and the legacy single `parentId` field.
+ * @param {FileDescriptor} f @param {string} parentId
+ */
+function _hasParent(f, parentId) {
+    if (Array.isArray(f.parentIds) && f.parentIds.length) return f.parentIds.includes(parentId);
+    return f.parentId === parentId;
+}
+
 // ============================================================
 // Internal EventEmitter
 // ============================================================
@@ -111,7 +121,7 @@ class AppView {
      * @returns {FileDescriptor[]}
      */
     getAttachments(parentId) {
-        return [...this._r._files.values()].filter(f => f.parentId === parentId && !f.deleted);
+        return [...this._r._files.values()].filter(f => _hasParent(f, parentId) && !f.deleted);
     }
 
     // -------------------------------------------------------
@@ -265,6 +275,7 @@ class AppView {
                     scope:        'app',
                     folderId:     null,
                     parentId:     null,
+                    parentIds:    [],
                     roomId:       null,
                     blobKey:      id,
                     mimeType:     info.mimeType || null,
@@ -335,6 +346,25 @@ class AppView {
         await this._r._api.deleteFile(id);
         this._r._markDeleted(id);
     }
+
+    /**
+     * Release one document's claim on a blob (detach a parent). The blob survives as
+     * long as another document still owns it; the server reclaims it only when the
+     * last parent is gone. Use this instead of `delete()` when removing/replacing a
+     * blob that may be shared (e.g. after duplicating a document).
+     * @param {string} id @param {string} parentId
+     * @returns {Promise<{ success: boolean, deleted: boolean }>}
+     */
+    async releaseBlob(id, parentId) {
+        if (!parentId) { await this.delete(id); return { success: true, deleted: true }; }
+        return this._r._removeParent(id, parentId);
+    }
+
+    /** Add an additional owning document to a blob (multi-parent). @returns {Promise<FileDescriptor>} */
+    async addParent(id, parentId) { return this._r._addParent(id, parentId); }
+
+    /** Copy-on-write fork of a blob, owned by `parentId`. @returns {Promise<FileDescriptor>} */
+    async forkBlob(id, parentId) { return this._r._forkBlob(id, parentId); }
 
     /** @returns {Promise<FileDescriptor>} */
     async share(id, username, permissions = ['read', 'write']) {
@@ -498,7 +528,7 @@ class DriveView {
      * @param {string} parentId @returns {FileDescriptor[]}
      */
     getAttachments(parentId) {
-        return [...this._r._files.values()].filter(f => f.parentId === parentId && !f.deleted);
+        return [...this._r._files.values()].filter(f => _hasParent(f, parentId) && !f.deleted);
     }
 
     /** All drive files (flat list, for search/bulk ops). @returns {FileDescriptor[]} */
@@ -829,12 +859,29 @@ class DriveView {
         } else {
             const sourceDoc = await this._r._runtime.load(id, file.roomId);
             const update = Y.encodeStateAsUpdate(sourceDoc);
-            return this.createAndInitializeFile({
+            const newFile = await this.createAndInitializeFile({
                 title,
                 folderId,
                 app: file.app,
                 initializer: (doc) => Y.applyUpdate(doc, update),
             });
+
+            // The cloned Yjs state preserves every embedded blobId, so instead of
+            // re-uploading the source's attachments we share them: add the new doc as
+            // an additional owning parent of each child blob (zero bytes, zero network
+            // payload beyond the metadata link). Lifecycle stays correct because each
+            // blob now survives until BOTH documents release it.
+            const children = this.getAttachments(id);
+            await Promise.all(children.map(async (b) => {
+                try {
+                    const updated = await this._r._addParent(b.id, newFile.id);
+                    if (updated) this._r._upsertFile(updated);
+                } catch (err) {
+                    console.warn(`duplicateFile: failed to share blob ${b.id}`, err);
+                }
+            }));
+
+            return newFile;
         }
     }
 
@@ -1594,13 +1641,109 @@ export class FileRegistry extends EventEmitter {
     async _setParentOffline(id, parentId) {
         const file = this._files.get(id);
         if (!file) throw new Error(`File not found: ${id}`);
-        const updated = { ...file, parentId, ctime: new Date().toISOString() };
+        const updated = { ...file, parentId, parentIds: parentId ? [parentId] : [], ctime: new Date().toISOString() };
         this._files.set(id, updated);
         await this._persistFile(updated);
         await this._mutationQueue.enqueue('set_parent', { id, parentId });
         this._broadcastDriveFile(updated);
         this.emit('change');
         return updated;
+    }
+
+    // -------------------------------------------------------
+    // Multi-parent blob links (shared by AppView + DriveView)
+    // -------------------------------------------------------
+
+    /** Optimistically merge a parent link into the local descriptor. */
+    _localAddParent(id, parentId) {
+        const file = this._files.get(id);
+        if (!file) return null;
+        const parentIds = Array.from(new Set([...(file.parentIds ?? (file.parentId ? [file.parentId] : [])), parentId]));
+        const updated = { ...file, parentIds, parentId: file.parentId ?? parentId };
+        this._files.set(id, updated);
+        return updated;
+    }
+
+    /** Optimistically remove a parent link from the local descriptor. */
+    _localRemoveParent(id, parentId) {
+        const file = this._files.get(id);
+        if (!file) return null;
+        const parentIds = (file.parentIds ?? (file.parentId ? [file.parentId] : [])).filter(p => p !== parentId);
+        const updated = {
+            ...file,
+            parentIds,
+            parentId: file.parentId === parentId ? (parentIds[0] ?? null) : file.parentId,
+            deleted: file.type === 'blob' && parentIds.length === 0 ? true : file.deleted,
+        };
+        this._files.set(id, updated);
+        return updated;
+    }
+
+    /**
+     * Add an additional owning parent to a file. Works offline (optimistic local
+     * merge + queued mutation). Returns the updated descriptor.
+     */
+    async _addParent(id, parentId) {
+        if (!navigator.onLine) {
+            const updated = this._localAddParent(id, parentId);
+            if (updated) { await this._persistFile(updated); this._broadcastDriveFile(updated); }
+            await this._mutationQueue?.enqueue('add_parent', { id, parentId });
+            this.emit('change');
+            return updated;
+        }
+        const file = await this._api.addParent(id, parentId);
+        this._upsertFile(file);
+        return file;
+    }
+
+    /**
+     * Detach one owning parent. When the last parent is removed the server reclaims
+     * the orphaned attachment blob; locally we mark it deleted.
+     */
+    async _removeParent(id, parentId) {
+        if (!navigator.onLine) {
+            const updated = this._localRemoveParent(id, parentId);
+            if (updated) { await this._persistFile(updated); this._broadcastDriveFile(updated); }
+            await this._mutationQueue?.enqueue('remove_parent', { id, parentId });
+            this.emit('change');
+            return { success: true, deleted: updated?.deleted ?? false };
+        }
+        const res = await this._api.removeParent(id, parentId);
+        if (res?.deleted) this._markDeleted(id);
+        else this.emit('change');
+        return res;
+    }
+
+    /**
+     * Copy-on-write fork of a blob, owned by `parentId`. Works offline by minting a
+     * client id and queueing the fork. Returns the new descriptor.
+     */
+    async _forkBlob(id, parentId) {
+        if (!navigator.onLine) {
+            const src = this._files.get(id);
+            const newId = (src?.app ? src.app + '_' : '') + crypto.randomUUID();
+            const now = new Date().toISOString();
+            const descriptor = {
+                ...(src ?? {}),
+                id: newId,
+                blobKey: newId,
+                parentId: parentId ?? null,
+                parentIds: parentId ? [parentId] : [],
+                folderId: null,
+                deleted: false,
+                birthtime: now, mtime: now, ctime: now,
+                sharedWith: [],
+            };
+            this._files.set(newId, descriptor);
+            await this._persistFile(descriptor);
+            await this._mutationQueue?.enqueue('fork_blob', { id, parentId, newId });
+            this._broadcastDriveFile(descriptor);
+            this.emit('change');
+            return descriptor;
+        }
+        const file = await this._api.forkBlob(id, parentId);
+        this._upsertFile(file);
+        return file;
     }
 
     // -------------------------------------------------------
@@ -1698,6 +1841,7 @@ export class FileRegistry extends EventEmitter {
             scope,
             folderId: folderId ?? null,
             parentId: parentId ?? null,
+            parentIds: parentId ? [parentId] : [],
             roomId: null,
             blobKey: id,
             mimeType: file?.type || null,
@@ -1971,7 +2115,8 @@ export class FileRegistry extends EventEmitter {
  * @property {'yjs'|'blob'} type
  * @property {'drive'|'app'} scope
  * @property {string|null} folderId
- * @property {string|null} parentId
+ * @property {string|null} parentId  - Legacy primary parent (first of parentIds).
+ * @property {string[]} [parentIds]  - All owning parents (multi-parent). A blob lives while ≥1 remains.
  * @property {string|null} roomId
  * @property {string|null} blobKey
  * @property {string|null} mimeType

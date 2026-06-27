@@ -23,6 +23,7 @@ import {
     DEFAULT_COL_COUNT
 } from './constants.js';
 import { buildCellRenderObject } from './cells/CellShape.js';
+import { StylePalette, canonicalize } from './cells/StylePalette.js';
 import { MergeEngine } from './features/MergeEngine.svelte.js';
 import {
     adjustByOffset,
@@ -35,6 +36,22 @@ import { YJS_ORIGIN } from './yjsOrigins.js';
 
 // Frozen empty object for non-existent cells (prevents allocation churn)
 const EMPTY_CELL = Object.freeze({ v: undefined, exists: false });
+
+/**
+ * Value equality for no-op-write guards. Every Y.Map/YKeyValue `set` creates a
+ * new struct and tombstones the old one — even when the value is unchanged — so
+ * re-applying identical values (slider drags, reactive re-saves, re-applying the
+ * same format) silently bloats the CRDT. Guarding writes with this avoids that.
+ * Uses canonical (sorted-key) JSON for objects so key order never causes a false
+ * "changed".
+ */
+function valuesEqual(a, b) {
+    if (a === b) return true;
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+        return canonicalize(a) === canonicalize(b);
+    }
+    return false;
+}
 
 // Style keys whose default is `false`. Storing `false` is redundant — readers
 // treat missing keys as false — so we strip them on write to keep the document
@@ -80,6 +97,9 @@ export class SheetStore {
 
     /** @type {YKeyValue} YKeyValue wrapper for #borders */
     #bordersKV;
+
+    /** @type {StylePalette} doc-level content-addressed cell-style dedupe store */
+    #stylePalette;
 
     /** @type {Function | null} */
     #cleanup = null;
@@ -157,6 +177,20 @@ export class SheetStore {
         this.#borders = sheet.get('borders');
         if (this.#borders) this.#bordersKV = new YKeyValue(this.#borders);
 
+        // Doc-level style palette (content-addressed dedupe of cell styles).
+        // Lives at the document root so duplicated/copied sheets share refs.
+        // Normally created by the v9 migration before any SheetStore is built;
+        // the lazy-create here is a safety net for fresh/test docs.
+        const root = ydoc.getMap('spreadsheet');
+        let palArr = root.get('stylePalette');
+        if (!(palArr instanceof Y.Array)) {
+            ydoc.transact(() => {
+                palArr = new Y.Array();
+                root.set('stylePalette', palArr);
+            }, YJS_ORIGIN.MIGRATION);
+        }
+        this.#stylePalette = new StylePalette(new YKeyValue(palArr));
+
         // 1. Synchronous initial sync
         this.#syncSheetProps();
         this.#syncAllCells();
@@ -202,17 +236,27 @@ export class SheetStore {
         if (v instanceof Y.Map) {
             return {
                 id,
-                blobId:     v.get('blobId') ?? '',
-                anchorRow:  v.get('anchorRow') ?? 0,
-                anchorCol:  v.get('anchorCol') ?? 0,
-                offsetX:    v.get('offsetX') ?? 0,
-                offsetY:    v.get('offsetY') ?? 0,
-                width:      v.get('width') ?? 200,
-                height:     v.get('height') ?? 150,
-                fit:        v.get('fit') ?? 'contain',
+                blobId:       v.get('blobId') ?? '',
+                anchorRow:    v.get('anchorRow') ?? 0,
+                anchorCol:    v.get('anchorCol') ?? 0,
+                offsetX:      v.get('offsetX') ?? 0,
+                offsetY:      v.get('offsetY') ?? 0,
+                width:        v.get('width') ?? 200,
+                height:       v.get('height') ?? 150,
+                fit:          v.get('fit') ?? 'contain',
+                alt:          v.get('alt') ?? '',
+                caption:      v.get('caption') ?? '',
+                borderWidth:  v.get('borderWidth') ?? 0,
+                borderColor:  v.get('borderColor') ?? '#000000',
+                borderRadius: v.get('borderRadius') ?? 0,
+                opacity:      v.get('opacity') ?? 1,
             };
         }
-        return { id, blobId: '', anchorRow: 0, anchorCol: 0, offsetX: 0, offsetY: 0, width: 200, height: 150, fit: 'contain', ...v };
+        return {
+            id, blobId: '', anchorRow: 0, anchorCol: 0, offsetX: 0, offsetY: 0,
+            width: 200, height: 150, fit: 'contain', alt: '', caption: '',
+            borderWidth: 0, borderColor: '#000000', borderRadius: 0, opacity: 1, ...v,
+        };
     }
 
     #syncAllCells() {
@@ -227,17 +271,39 @@ export class SheetStore {
         this.cells = newCells;
     }
 
+    /** Resolve a cell's stored style entry (a `{ s }` palette ref, or a legacy
+     *  inline style on un-migrated docs) to its plain style object, or null. */
+    #readStyle(key) {
+        if (!this.#cellStylesKV) return null;
+        return this.#stylePalette.resolve(this.#cellStylesKV.get(key));
+    }
+
+    /** Intern a plain style object and store the cell's `{ s }` ref, or delete the
+     *  entry when the style is empty. Skips the write when the ref is unchanged so
+     *  re-applying the same style doesn't churn the CRDT (tombstone growth). */
+    #writeStyle(key, style) {
+        if (!this.#cellStylesKV) return;
+        if (!style || Object.keys(style).length === 0) {
+            if (this.#cellStylesKV.has(key)) this.#cellStylesKV.delete(key);
+            return;
+        }
+        const sid = this.#stylePalette.intern(style);
+        const cur = this.#cellStylesKV.get(key);
+        if (cur && cur.s === sid) return;
+        this.#cellStylesKV.set(key, { s: sid });
+    }
+
     /** Merge cellValues + cellStyles into a single plain render object for key "row,col". */
     #processCellData(key) {
         const val = this.#cellValuesKV?.get(key) ?? null;
-        const sty = this.#cellStylesKV?.get(key) ?? null;
+        const sty = this.#readStyle(key);
         return buildCellRenderObject(val, sty);
     }
 
     /** Return merged plain data object for a cell key, or null if the cell does not exist. */
     #getCellData(key) {
         const val = this.#cellValuesKV?.get(key);
-        const sty = this.#cellStylesKV?.get(key);
+        const sty = this.#readStyle(key);
         if (!val && !sty) return null;
         return { ...(sty ?? {}), ...(val ?? {}) };
     }
@@ -258,8 +324,7 @@ export class SheetStore {
         }
         if (Object.keys(valData).length > 0) this.#cellValuesKV?.set(key, valData);
         else this.#cellValuesKV?.delete(key);
-        if (Object.keys(styData).length > 0) this.#cellStylesKV?.set(key, styData);
-        else this.#cellStylesKV?.delete(key);
+        this.#writeStyle(key, styData);
     }
 
     /** Delete a cell from both stores. */
@@ -477,6 +542,7 @@ export class SheetStore {
             if (printSettingsMap) printSettingsMap.unobserve(printSettingsHandler);
             if (pluginsMap) pluginsMap.unobserve(pluginsHandler);
             if (floatingImagesMap) floatingImagesMap.unobserveDeep(floatingImagesHandler);
+            this.#stylePalette?.destroy();
         };
     }
 
@@ -506,6 +572,12 @@ export class SheetStore {
             img.set('width',     opts.width ?? 200);
             img.set('height',    opts.height ?? 150);
             img.set('fit',       opts.fit ?? 'contain');
+            if (opts.alt)          img.set('alt', opts.alt);
+            if (opts.caption)      img.set('caption', opts.caption);
+            if (opts.borderWidth)  img.set('borderWidth', opts.borderWidth);
+            if (opts.borderColor)  img.set('borderColor', opts.borderColor);
+            if (opts.borderRadius) img.set('borderRadius', opts.borderRadius);
+            if (opts.opacity != null && opts.opacity !== 1) img.set('opacity', opts.opacity);
             ymap.set(id, img);
         });
         return id;
@@ -692,8 +764,7 @@ export class SheetStore {
             }
 
             if (Object.keys(styUpdates).length > 0) {
-                const cur = this.#cellStylesKV?.get(key) ?? {};
-                const upd = { ...cur };
+                const upd = { ...(this.#readStyle(key) ?? {}) };
                 // Treat null/undefined as "delete" everywhere; for strict-boolean style
                 // keys, also delete on false (false is the default, no need to store it).
                 for (const [k, v] of Object.entries(styUpdates)) {
@@ -701,8 +772,7 @@ export class SheetStore {
                     else if (STRIP_FALSE_STYLE_KEYS.has(k) && v === false) delete upd[k];
                     else upd[k] = v;
                 }
-                if (Object.keys(upd).length > 0) this.#cellStylesKV?.set(key, upd);
-                else this.#cellStylesKV?.delete(key);
+                this.#writeStyle(key, upd);
             }
         });
     }
@@ -832,14 +902,7 @@ export class SheetStore {
      * @param {string} property
      */
     clearCellStylePropertyAll(property) {
-        if (!this.#cellStylesKV) return;
-        for (const [key, { val: style }] of this.#cellStylesKV.map) {
-            if (!(property in style)) continue;
-            const updated = { ...style };
-            delete updated[property];
-            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
-            else this.#cellStylesKV.delete(key);
-        }
+        this.#clearCellStyleProperty(property, null);
     }
 
     /**
@@ -849,16 +912,7 @@ export class SheetStore {
      * @param {string} property
      */
     clearCellStylePropertyInRows(rowSet, property) {
-        if (!this.#cellStylesKV) return;
-        for (const [key, { val: style }] of this.#cellStylesKV.map) {
-            if (!(property in style)) continue;
-            const row = parseInt(key.split(',')[0], 10);
-            if (!rowSet.has(row)) continue;
-            const updated = { ...style };
-            delete updated[property];
-            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
-            else this.#cellStylesKV.delete(key);
-        }
+        this.#clearCellStyleProperty(property, (key) => rowSet.has(parseInt(key.split(',')[0], 10)));
     }
 
     /**
@@ -868,16 +922,28 @@ export class SheetStore {
      * @param {string} property
      */
     clearCellStylePropertyInCols(colSet, property) {
+        this.#clearCellStyleProperty(property, (key) => colSet.has(parseInt(key.split(',')[1], 10)));
+    }
+
+    /**
+     * Shared body for clearCellStyleProperty{All,InRows,InCols}: resolve each
+     * matching cell's style through the palette, drop `property`, and re-intern.
+     * Collects updates first so we don't mutate the store while iterating it.
+     * @param {string} property
+     * @param {((key: string) => boolean) | null} keyFilter
+     */
+    #clearCellStyleProperty(property, keyFilter) {
         if (!this.#cellStylesKV) return;
-        for (const [key, { val: style }] of this.#cellStylesKV.map) {
-            if (!(property in style)) continue;
-            const col = parseInt(key.split(',')[1], 10);
-            if (!colSet.has(col)) continue;
+        const updates = [];
+        for (const [key, { val: entry }] of this.#cellStylesKV.map) {
+            if (keyFilter && !keyFilter(key)) continue;
+            const style = this.#stylePalette.resolve(entry);
+            if (!style || !(property in style)) continue;
             const updated = { ...style };
             delete updated[property];
-            if (Object.keys(updated).length > 0) this.#cellStylesKV.set(key, updated);
-            else this.#cellStylesKV.delete(key);
+            updates.push([key, updated]);
         }
+        for (const [key, updated] of updates) this.#writeStyle(key, updated);
     }
 
     /**
@@ -948,19 +1014,28 @@ export class SheetStore {
     // All sheet-level mutations route through #transact so they're tagged with
     // YJS_ORIGIN.UI and tracked by the UndoManager.
 
-    setName(name)              { this.#transact(() => this.#sheet.set('name', name)); }
-    setRowCount(count)         { this.#transact(() => this.#sheet.set('rowCount', count)); }
-    setColCount(count)         { this.#transact(() => this.#sheet.set('colCount', count)); }
-    setFrozenRows(count)       { this.#transact(() => this.#sheet.set('frozenRows', count)); }
-    setFrozenColumns(count)    { this.#transact(() => this.#sheet.set('frozenColumns', count)); }
-    setDefaultRowHeight(height){ this.#transact(() => this.#sheet.set('defaultRowHeight', height)); }
-    setDefaultColWidth(width)  { this.#transact(() => this.#sheet.set('defaultColWidth', width)); }
-    setHidden(hidden)          { this.#transact(() => this.#sheet.set('hidden', hidden)); }
+    // Guarded scalar set: skip the write (and tombstone) when the value is
+    // already current. Cheap protection against reactive/repeated re-saves.
+    #setSheetProp(key, val) {
+        if (valuesEqual(this.#sheet.get(key), val)) return;
+        this.#transact(() => this.#sheet.set(key, val));
+    }
+
+    setName(name)              { this.#setSheetProp('name', name); }
+    setRowCount(count)         { this.#setSheetProp('rowCount', count); }
+    setColCount(count)         { this.#setSheetProp('colCount', count); }
+    setFrozenRows(count)       { this.#setSheetProp('frozenRows', count); }
+    setFrozenColumns(count)    { this.#setSheetProp('frozenColumns', count); }
+    setDefaultRowHeight(height){ this.#setSheetProp('defaultRowHeight', height); }
+    setDefaultColWidth(width)  { this.#setSheetProp('defaultColWidth', width); }
+    setHidden(hidden)          { this.#setSheetProp('hidden', hidden); }
     setTabColor(color) {
-        this.#transact(() => {
-            if (color === undefined) this.#sheet.delete('tabColor');
-            else this.#sheet.set('tabColor', color);
-        });
+        if (color === undefined) {
+            if (!this.#sheet.has('tabColor')) return;
+            this.#transact(() => this.#sheet.delete('tabColor'));
+        } else {
+            this.#setSheetProp('tabColor', color);
+        }
     }
 
     // --- Row/Column Operations ---
@@ -1356,11 +1431,23 @@ export class SheetStore {
                 return;
         }
 
+        // No-op guard: re-applying the same border (or clearing an absent one)
+        // would still tombstone the old entry. Skip when nothing would change.
+        const cur = this.#bordersKV.get(edgeKey);
+        if (style === null) {
+            if (cur === undefined) return;
+        } else if (valuesEqual(cur, compactBorderStyle(style))) {
+            return;
+        }
+
         this.#transact(() => {
             if (style === null) {
                 this.#bordersKV.delete(edgeKey);
             } else {
-                this.#bordersKV.set(edgeKey, style);
+                // Strip redundant style:'solid' / width:1 before storing — readers
+                // reconstruct those via normalizeBorderStyle, so storing them just
+                // bloats the doc (matches the bulk border setters below).
+                this.#bordersKV.set(edgeKey, compactBorderStyle(style));
             }
         });
     }
@@ -2226,6 +2313,11 @@ export class SheetStore {
      */
     setPrintSettings(updates) {
         if (!updates || typeof updates !== 'object') return;
+        const existing = this.#sheet.get('printSettings');
+        // Skip the whole transaction if every key already matches — callers like
+        // the PDF export panel re-save the full settings object on each change
+        // (incl. slider drags), which would otherwise churn the printSettings map.
+        if (existing && Object.entries(updates).every(([k, v]) => valuesEqual(existing.get(k), v))) return;
         this.#transact(() => {
             let ps = this.#sheet.get('printSettings');
             if (!ps) {
@@ -2233,7 +2325,7 @@ export class SheetStore {
                 this.#sheet.set('printSettings', ps);
             }
             for (const [k, v] of Object.entries(updates)) {
-                ps.set(k, v);
+                if (!valuesEqual(ps.get(k), v)) ps.set(k, v);
             }
         });
     }

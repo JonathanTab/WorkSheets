@@ -86,6 +86,9 @@ export class StorageAPI {
             scope:       raw.scope       ?? 'drive',
             folderId:    raw.folderId    ?? null,
             parentId:    raw.parentId    ?? null,
+            parentIds:   Array.isArray(raw.parentIds)
+                ? raw.parentIds
+                : (raw.parentId ? [raw.parentId] : []),
             roomId:      raw.roomId      ?? null,
             blobKey:     raw.blobKey     ?? null,
             mimeType:    raw.mimeType    ?? null,
@@ -196,6 +199,36 @@ export class StorageAPI {
     /** @returns {Promise<FileDescriptor>} */
     async setParent(id, parentId) {
         return this._normalizeFile(await this._post({ action: 'set_parent', id, parent_id: parentId }));
+    }
+
+    /**
+     * Add an additional owning parent to a file (multi-parent). Used when a document
+     * is duplicated so its child blobs are shared rather than re-uploaded.
+     * @returns {Promise<FileDescriptor>}
+     */
+    async addParent(id, parentId) {
+        return this._normalizeFile(await this._post({ action: 'add_parent', id, parent_id: parentId }));
+    }
+
+    /**
+     * Detach one owning parent. When the last parent is removed the server reclaims
+     * the (orphaned) attachment blob.
+     * @returns {Promise<{ success: boolean, deleted: boolean }>}
+     */
+    async removeParent(id, parentId) {
+        return this._post({ action: 'remove_parent', id, parent_id: parentId });
+    }
+
+    /**
+     * Copy-on-write fork: create a new blob handle that shares the source's bytes
+     * (same content_key — zero copy) owned by `parentId`. Optionally supply a
+     * client-generated `newId` for offline/idempotent creation.
+     * @returns {Promise<FileDescriptor>}
+     */
+    async forkBlob(id, parentId, newId = null) {
+        return this._normalizeFile(await this._post({
+            action: 'fork_blob', id, parent_id: parentId, new_id: newId,
+        }));
     }
 
     /** @returns {Promise<FileDescriptor>} */

@@ -43,28 +43,6 @@ export function getAllPersistedDocNames() {
 }
 
 /**
- * Get the current persisted state of a room as a Yjs binary update, suitable
- * for a client to apply via Y.applyUpdate as a load fast-path. App-agnostic —
- * this is raw CRDT state with no schema awareness, so it works for any sub-app
- * (sheets / docs / svg) identically.
- *
- * Returns null when the room has no persisted content yet (so callers can 404
- * rather than serve an empty doc).
- *
- * @param {string} roomId
- * @returns {Promise<Uint8Array|null>}
- */
-export async function getDocStateUpdate(roomId) {
-    const storedDoc = await levelPersistence.getYDoc(roomId);
-    try {
-        if (storedDoc.store.clients.size === 0) return null; // never persisted / empty
-        return Y.encodeStateAsUpdate(storedDoc);
-    } finally {
-        storedDoc.destroy();
-    }
-}
-
-/**
  * Initialize both y-leveldb for document persistence and SQLite for snapshots.
  * @param {string} levelDbPath
  * @param {string} sqlitePath

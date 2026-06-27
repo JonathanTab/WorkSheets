@@ -201,6 +201,22 @@ export class OfflineMutationQueue {
                 this._onFileUpdate(result);
                 break;
 
+            case 'add_parent':
+                result = await this._api.addParent(p.id, p.parentId);
+                this._onFileUpdate(result);
+                break;
+
+            case 'remove_parent':
+                // Server reclaims the blob if this was its last parent; nothing to merge.
+                await this._api.removeParent(p.id, p.parentId);
+                break;
+
+            case 'fork_blob':
+                // Recreate the COW fork server-side with the same client id (idempotent).
+                result = await this._api.forkBlob(p.id, p.parentId, p.newId);
+                this._onFileUpdate(result);
+                break;
+
             case 'create_folder':
                 result = await this._api.createFolder(p);
                 this._onFolderUpdate(result);

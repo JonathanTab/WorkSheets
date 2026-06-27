@@ -70,6 +70,32 @@ function readYKeyValue(arr) {
 }
 
 /**
+ * Resolve v9 style palette references in a cellStyles map.
+ * Each entry is either `{ s: sid }` (→ look up the style object in `palette`)
+ * or a legacy inline style object (→ passed through unchanged). Dangling refs
+ * resolve to null so the diff treats them as "no style".
+ * @param {Map<string, any>} styleMap   key → cellStyles entry
+ * @param {Map<string, any>} palette    sid → style object
+ * @returns {Map<string, any>}
+ */
+function resolveStyleMap(styleMap, palette) {
+    let hasRef = false;
+    for (const v of styleMap.values()) {
+        if (v && typeof v === 'object' && 's' in v && Object.keys(v).length === 1) { hasRef = true; break; }
+    }
+    if (!hasRef) return styleMap; // legacy doc — nothing to resolve
+    const out = new Map();
+    for (const [k, v] of styleMap) {
+        if (v && typeof v === 'object' && 's' in v && Object.keys(v).length === 1) {
+            out.set(k, palette.get(String(v.s)) ?? null);
+        } else {
+            out.set(k, v);
+        }
+    }
+    return out;
+}
+
+/**
  * Safely extract a numeric dimension (width or height) from a rowMeta/colMeta entry.
  * The entry can be:
  *   - an object like { width: 120 } (current v4 format)
@@ -239,6 +265,12 @@ export function computeSheetsDiff(prevDoc, newDoc) {
         const prevSheets = prevRoot.get('sheets');
         const newSheets  = newRoot.get('sheets');
 
+        // v9: cell styles are interned into a doc-level palette; cellStyles entries
+        // are `{ s: sid }` refs. Read each doc's palette so we can resolve refs back
+        // to the real style objects before diffing (legacy inline styles pass through).
+        const prevPalette = readYKeyValue(prevRoot.get('stylePalette'));
+        const newPalette  = readYKeyValue(newRoot.get('stylePalette'));
+
         // Handle initial snapshot (prevDoc is empty)
         const isInitial = !prevSheets || prevSheets.size === 0;
 
@@ -300,9 +332,10 @@ export function computeSheetsDiff(prevDoc, newDoc) {
             const cells = [];
             let cellsTruncated = 0;
 
-            // Hoist style maps — used both in the value loop (for ct) and in the format loop
-            const prevStyleMap = readYKeyValue(prevSheet.get('cellStyles'));
-            const newStyleMap  = readYKeyValue(newSheet.get('cellStyles'));
+            // Hoist style maps — used both in the value loop (for ct) and in the format loop.
+            // Resolve v9 `{ s: sid }` palette refs to the underlying style objects.
+            const prevStyleMap = resolveStyleMap(readYKeyValue(prevSheet.get('cellStyles')), prevPalette);
+            const newStyleMap  = resolveStyleMap(readYKeyValue(newSheet.get('cellStyles')), newPalette);
 
             const allCellKeys = new Set([...prevValMap.keys(), ...newValMap.keys()]);
             for (const key of allCellKeys) {

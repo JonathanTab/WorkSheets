@@ -19,6 +19,7 @@
     import BottomSheet from "../../ui/BottomSheet.svelte";
     import { mobileState } from "../../../stores/mobileState.svelte.js";
     import CellTypeConfigurator from "../toolbar/CellTypeConfigurator.svelte";
+    import FormulaCodeEditor from "../formula-editor/FormulaCodeEditor.svelte";
 
     let {
         table,
@@ -43,14 +44,13 @@
 
     let localFormula = $state("");
     let localIsNonEntry = $state(false);
-    let formulaInputEl = $state(null);
+    let formulaEditor = $state(null);
     let showRef = $state(false);
 
     $effect(() => {
         if (col) {
             localFormula = col.defaultFormula ?? "";
             localIsNonEntry = col.isNonEntry ?? false;
-            setTimeout(autoGrowFormula, 0);
         }
     });
 
@@ -84,25 +84,11 @@
     }
 
     function insertAtCursor(text) {
-        if (!formulaInputEl) {
+        if (!formulaEditor) {
             localFormula += text;
             return;
         }
-        const start = formulaInputEl.selectionStart ?? localFormula.length;
-        const end = formulaInputEl.selectionEnd ?? localFormula.length;
-        localFormula = localFormula.slice(0, start) + text + localFormula.slice(end);
-        setTimeout(() => {
-            formulaInputEl?.focus();
-            formulaInputEl?.setSelectionRange(start + text.length, start + text.length);
-            autoGrowFormula();
-        }, 0);
-    }
-
-    /** Grows the formula textarea to fit its content, up to a generous cap. */
-    function autoGrowFormula() {
-        if (!formulaInputEl) return;
-        formulaInputEl.style.height = 'auto';
-        formulaInputEl.style.height = Math.min(formulaInputEl.scrollHeight, 220) + 'px';
+        formulaEditor.insertText(text);
     }
 
     /** All columns except this one (for chip insertion) */
@@ -215,19 +201,19 @@
 
             <div class="formula-input-row">
                 <span class="fx-badge">fx</span>
-                <textarea
-                    bind:this={formulaInputEl}
-                    class="formula-input"
-                    rows="2"
-                    bind:value={localFormula}
-                    placeholder="e.g. {'{amount}'} + PREV(balance, 0)"
-                    onblur={applyFormula}
-                    oninput={autoGrowFormula}
-                    onkeydown={(e) => {
-                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.stopPropagation(); e.preventDefault(); applyFormula(); }
-                        else if (e.key === "Escape") { e.stopPropagation(); formulaInputEl?.blur(); }
-                    }}
-                ></textarea>
+                <div class="formula-input">
+                    <FormulaCodeEditor
+                        bind:this={formulaEditor}
+                        value={localFormula}
+                        dialect="table"
+                        multiline={true}
+                        placeholder="e.g. {'{amount}'} + PREV(balance, 0)"
+                        onInput={(v) => { localFormula = v; }}
+                        onBlur={applyFormula}
+                        onCommit={applyFormula}
+                        onCancel={() => formulaEditor?.el?.blur()}
+                    />
+                </div>
                 {#if hasFormula}
                     <button class="clear-formula-btn" onclick={clearFormula} title="Clear formula">×</button>
                 {/if}
@@ -537,12 +523,10 @@
         min-width: 0;
         min-height: 56px;
         max-height: 220px;
-        resize: vertical;
-        white-space: pre-wrap;
-        word-break: break-word;
+        overflow: hidden;
     }
 
-    .formula-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); }
+    .formula-input:focus-within { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); }
 
     .clear-formula-btn {
         background: none;

@@ -17,7 +17,6 @@ try {
 
 import WebSocket, { WebSocketServer } from 'ws';
 import http from 'http';
-import { createHash } from 'crypto';
 import * as Y from 'yjs';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -36,7 +35,6 @@ import {
     getSnapshotData,
     getSnapshotDiff,
     getSnapshotMeta,
-    getDocStateUpdate,
     prepareRestore,
     getSqliteDb,
     updateFileLastEdit,
@@ -533,22 +531,33 @@ const setupWSConnection = async (conn, name, fileId, username, appType) => {
 const MAX_WS_PAYLOAD  = parseInt(process.env.MAX_WS_PAYLOAD  ?? String(10 * 1024 * 1024)); // 10 MB
 const MAX_HTTP_BODY   = parseInt(process.env.MAX_HTTP_BODY   ?? String(1  * 1024 * 1024)); // 1 MB
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
+// permessage-deflate: compress sync/update frames on the wire (network transfer
+// is the #2 priority). Config favours low memory/CPU (the #1 priority):
+//   - {server,client}NoContextTakeover: don't retain a per-connection zlib
+//     context between messages. Costs a little ratio but avoids the unbounded
+//     per-connection memory growth that context-takeover causes with many peers.
+//   - level 3 / windowBits 10: fast compression, small sliding window.
+//   - threshold 1024: skip tiny frames (awareness, sync step headers) where the
+//     deflate overhead would cost CPU for no transfer win.
+//   - concurrencyLimit: cap simultaneous zlib jobs so a burst can't pin the CPU.
+const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_WS_PAYLOAD,
+    perMessageDeflate: {
+        zlibDeflateOptions: { level: 3, memLevel: 7 },
+        zlibInflateOptions: { chunkSize: 16 * 1024 },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        serverMaxWindowBits: 10,
+        concurrencyLimit: 10,
+        threshold: 1024,
+    },
+});
 
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
 
-    // Echo the request origin (instead of '*') when present so credentialed
-    // requests (cookie auth for the snapshot fast-path) are allowed by the
-    // browser. Falls back to '*' for non-browser / no-Origin callers.
-    const origin = req.headers.origin;
-    if (origin) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Access-Control-Allow-Credentials', 'true');
-        res.setHeader('Vary', 'Origin');
-    } else {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-    }
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
 
@@ -593,16 +602,7 @@ function _readBody(req) {
 function _getToken(req, url) {
     const authHeader = req.headers['authorization'];
     if (authHeader?.startsWith('Bearer ')) return authHeader.slice(7);
-    const queryToken = url.searchParams.get('auth');
-    if (queryToken) return queryToken;
-    // Cookie fallback (mirrors the WS upgrade path) so browser clients on the
-    // same origin can call the HTTP API with their session cookie.
-    const cookie = req.headers.cookie;
-    if (cookie) {
-        const m = cookie.match(/session_token=([a-f0-9]{64})/i);
-        if (m) return m[1];
-    }
-    return null;
+    return url.searchParams.get('auth') ?? null;
 }
 
 /**
@@ -710,48 +710,6 @@ async function handleHttp(req, res, url) {
             live:       doc ? _roomSummary(doc) : null,
             scheduler:  scheduler.getStats(roomId),
         });
-    }
-
-    // GET /api/doc/:roomId/state — generic Yjs binary state for the client load
-    // fast-path. App-agnostic (raw CRDT state, no schema awareness — works for
-    // sheets/docs/svg alike). Prefers (1) the live in-memory doc, (2) the latest
-    // precomputed snapshot BLOB for this room (no doc construction), (3) LevelDB.
-    const docStateMatch = pathname.match(/^\/api\/doc\/([^/]+)\/state$/);
-    if (docStateMatch && req.method === 'GET') {
-        const roomId = decodeURIComponent(docStateMatch[1]);
-        let bytes = null;
-
-        const live = docs.get(roomId);
-        if (live) {
-            try { await live.ready; } catch { /* ignore */ }
-            bytes = Y.encodeStateAsUpdate(live);
-        } else {
-            // Latest precomputed snapshot — a raw BLOB read, no Y.Doc construction.
-            // Slightly stale is fine: the client's WebSocket sync reconciles the
-            // delta after this head-start is applied.
-            const snaps = listSnapshotsByRoom(roomId);
-            if (snaps.length > 0) {
-                const data = getSnapshotData(snaps[0].id);
-                if (data) bytes = data; // Buffer is a Uint8Array
-            }
-            // Fallback: reconstruct from LevelDB.
-            if (!bytes) bytes = await getDocStateUpdate(roomId);
-        }
-
-        if (!bytes || bytes.byteLength === 0) return _json(res, 404, { error: 'No state for room' });
-
-        const buf = Buffer.from(bytes);
-        const etag = 'W/"' + createHash('sha1').update(buf).digest('hex').slice(0, 16) + '"';
-        if (req.headers['if-none-match'] === etag) {
-            res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'private, max-age=5' });
-            return res.end();
-        }
-        res.writeHead(200, {
-            'Content-Type': 'application/octet-stream',
-            'Cache-Control': 'private, max-age=5',
-            'ETag': etag,
-        });
-        return res.end(buf);
     }
 
     // GET /api/snapshots?roomId=X  or  ?fileId=X

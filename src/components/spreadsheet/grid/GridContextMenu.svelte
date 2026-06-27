@@ -31,12 +31,10 @@
      *   onClose         — close callback (sets visible=false in Grid.svelte)
      *   containerEl     — Grid's root DOM element (for MobileCellActionBar)
      *   selectionHandleRect — mobile handle geometry (for MobileCellActionBar)
-     *   activeEditPanel — current repeater/panel state from Grid.svelte
-     *   onSetActiveEditPanel — setter for activeEditPanel in Grid.svelte
+     *   onShowRepeatersPanel — opens the document repeaters panel (optionally for a repeater id)
      *   onBeginCellEdit — Grid.svelte's beginCellEdit(row, col, opts)
      *   onShowFloatingImageInsert — opens floating image dialog in Grid.svelte
      *   onShowCreateTableDialog   — opens table create dialog in Grid.svelte
-     *   onShowCreateRepeaterDialog — opens repeater create dialog in Grid.svelte
      *   onShowTablesPanel         — Grid.svelte prop for tables panel navigation
      */
     let {
@@ -45,12 +43,10 @@
         onClose,
         containerEl = null,
         selectionHandleRect = null,
-        activeEditPanel = null,
-        onSetActiveEditPanel,
         onBeginCellEdit,
         onShowFloatingImageInsert,
         onShowCreateTableDialog,
-        onShowCreateRepeaterDialog,
+        onShowRepeatersPanel,
         onShowTablesPanel,
     } = $props();
 
@@ -280,18 +276,6 @@
     function tableDelete() {
         if (tableCellInfo && spreadsheetSession.tableManager)
             spreadsheetSession.tableManager.deleteTable(tableCellInfo.table.id);
-    }
-    function repeaterAddOne() {
-        if (repeaterContext)
-            repeaterContext.repeater.setCount(Math.min(100, repeaterContext.repeater.count + 1));
-    }
-    function repeaterRemoveOne() {
-        if (repeaterContext)
-            repeaterContext.repeater.setCount(Math.max(1, repeaterContext.repeater.count - 1));
-    }
-    function repeaterDelete() {
-        if (repeaterContext && spreadsheetSession.repeaterEngine)
-            spreadsheetSession.repeaterEngine.deleteRepeater(repeaterContext.repeater.id);
     }
 
     // ─── Context menu items ──────────────────────────────────────────────────
@@ -608,11 +592,7 @@
                       icon: "⚙",
                       action: () => {
                           if (repeaterContext) {
-                              onSetActiveEditPanel?.(
-                                  activeEditPanel?.store === repeaterContext.repeater
-                                      ? null
-                                      : { type: "repeater", store: repeaterContext.repeater },
-                              );
+                              onShowRepeatersPanel?.(repeaterContext.repeater.id);
                           }
                       },
                   },
@@ -645,7 +625,7 @@
                   {
                       label: "Create Repeater",
                       icon: "↻",
-                      action: () => { onShowCreateRepeaterDialog?.(); },
+                      action: () => { onShowRepeatersPanel?.(); },
                   },
               ]
             : []),

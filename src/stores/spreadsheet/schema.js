@@ -29,6 +29,7 @@ import {
     CELL_VALUE_KEYS,
 } from './constants.js';
 import { YJS_ORIGIN } from './yjsOrigins.js';
+import { StylePalette, isStyleRef } from './cells/StylePalette.js';
 import {
     readSchemaVersion as _readSchemaVersionGeneric,
     stampSchemaVersion as _stampSchemaVersionGeneric,
@@ -146,6 +147,8 @@ export function initializeDocument(ydoc, metadata = {}) {
         root.set('sheetOrder',  new Y.Array());
         root.set('namedRanges', new Y.Map());
         root.set('tableData',   new Y.Map());
+        // v9: doc-level content-addressed cell-style palette (see StylePalette.js).
+        root.set('stylePalette', new Y.Array());
 
         const sheets     = root.get('sheets');
         const sheetOrder = root.get('sheetOrder');
@@ -420,6 +423,12 @@ export const spreadsheetSchema = {
         // of the document size.
         migrateStripDefaults(ydoc, sheets);
 
+        // v9: intern inline cellStyles into the doc-level style palette, replacing
+        // each entry with a `{ s: sid }` reference. Runs LAST so it operates on the
+        // already-cleaned styles produced by v5/v7/v8. Must come after v8 so the
+        // palette never accumulates default-laden duplicates.
+        migrateInternStyles(ydoc, root, sheets);
+
         // All migrations complete — stamp the doc with this client's version
         // so future loads skip the chain entirely.
         stampSchemaVersion(ydoc);
@@ -575,6 +584,46 @@ function collapseMeta(sheet, metaKey, dimKey, defaultKey, hardcodedDefault) {
         if (Object.keys(rest).length > 0) kv.set(key, rest);
         else kv.delete(key);
     }
+}
+
+// ── v9 helper — intern inline cell styles into the doc-level palette ──────────
+
+/**
+ * Replace each sheet's inline cellStyles entries with `{ s: sid }` references
+ * into a shared, content-addressed palette at root.stylePalette. Identical style
+ * objects collapse to a single palette entry. Idempotent: entries already in
+ * ref form are skipped, so re-running is a no-op.
+ *
+ * @param {Y.Doc} ydoc
+ * @param {Y.Map} root
+ * @param {Y.Map} sheets
+ */
+function migrateInternStyles(ydoc, root, sheets) {
+    migrateTransact(ydoc, () => {
+        let palArr = root.get('stylePalette');
+        if (!(palArr instanceof Y.Array)) {
+            palArr = new Y.Array();
+            root.set('stylePalette', palArr);
+        }
+        const palette = new StylePalette(new YKeyValue(palArr));
+
+        sheets.forEach((sheet) => {
+            const arr = sheet.get('cellStyles');
+            if (!(arr instanceof Y.Array)) return;
+            const kv = new YKeyValue(arr);
+            for (const [key, { val: entry }] of kv.map) {
+                if (isStyleRef(entry)) continue;             // already migrated
+                if (!entry || typeof entry !== 'object' || Object.keys(entry).length === 0) {
+                    kv.delete(key);                          // empty/garbage entry
+                    continue;
+                }
+                const sid = palette.intern(entry);
+                kv.set(key, { s: sid });
+            }
+        });
+
+        palette.destroy();
+    });
 }
 
 // ── v5 helpers ────────────────────────────────────────────────────────────────

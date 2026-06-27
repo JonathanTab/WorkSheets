@@ -17,6 +17,7 @@
         currentUser = "",
         onShowHistory = undefined,
         onShowTablesPanel = undefined,
+        onShowRepeatersPanel = undefined,
         tablesPanelOpen = false,
         registry = null,
         historyManager = null,
@@ -44,7 +45,7 @@
                 </button>
             {/if}
             <DocumentName />
-            <MenuBar {onShowTablesPanel} />
+            <MenuBar {onShowTablesPanel} {onShowRepeatersPanel} />
             <button
                 class="share-pill"
                 onclick={openShareModal}

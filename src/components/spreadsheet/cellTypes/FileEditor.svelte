@@ -172,14 +172,17 @@
     // ─── Actions ──────────────────────────────────────────────────────────
 
     function handleConfirm() {
-        // Delete old blob if we're replacing it
+        // Release this document's claim on the old blob if we're replacing/clearing it.
+        // releaseBlob detaches only THIS doc; a shared blob (e.g. from a duplicated
+        // document) survives for its other owners until the last one releases it.
         if (pendingBlobId !== originalBlobId && originalBlobId) {
-            storage.app.delete(originalBlobId).catch(() => {});
+            storage.app.releaseBlob(originalBlobId, docId).catch(() => {});
         }
-        // Clean up intermediate session uploads that weren't committed
+        // Clean up intermediate session uploads that weren't committed (each was created
+        // with this doc as its only parent, so releaseBlob reclaims its bytes immediately).
         for (const id of sessionUploads) {
             if (id !== pendingBlobId) {
-                storage.app.delete(id).catch(() => {});
+                storage.app.releaseBlob(id, docId).catch(() => {});
             }
         }
         onCommit?.(pendingBlobId);
@@ -190,10 +193,10 @@
     }
 
     function handleCancel() {
-        // Clean up any blobs uploaded during this session that differ from original
+        // Discard any blobs uploaded during this session that differ from the original.
         for (const id of sessionUploads) {
             if (id !== originalBlobId) {
-                storage.app.delete(id).catch(() => {});
+                storage.app.releaseBlob(id, docId).catch(() => {});
             }
         }
         onCancel?.();

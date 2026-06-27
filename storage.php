@@ -16,7 +16,7 @@
  */
 
 define('DATA_ROOT', dirname(__DIR__) . '/data/congruum-docs/');
-require_once "iauth.php";
+require_once __DIR__ . '/../lib/iauth.php';
 define('DB_FILE', DATA_ROOT . 'storage.sqlite');
 define('BLOBS_DIR', DATA_ROOT . 'blobs/');
 define('YJS_SERVER_URL', rtrim(getenv('YJS_SERVER_URL') ?: 'http://localhost:1889', '/'));
@@ -118,6 +118,30 @@ try {
     // Schema migrations (idempotent ALTER TABLE — ignored if column already exists)
     try { $db->exec("ALTER TABLE files ADD COLUMN thumbnail_key TEXT"); } catch (PDOException $e) {}
     try { $db->exec("ALTER TABLE files ADD COLUMN search_text TEXT"); } catch (PDOException $e) {}
+
+    // Multi-parent + copy-on-write blob substrate.
+    //   content_key  — physical bytes live at BLOBS_DIR/{content_key}; multiple blob
+    //                  handles may share one content_key (zero-copy fork / COW).
+    //   file_parents — a file may have many owning parents. A blob handle stays alive
+    //                  while it has >= 1 parent; the legacy files.parent_id column is
+    //                  retained for back-compat reads but file_parents is authoritative.
+    try { $db->exec("ALTER TABLE files ADD COLUMN content_key TEXT"); } catch (PDOException $e) {}
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS file_parents (
+            file_id   TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            parent_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            PRIMARY KEY (file_id, parent_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_parents_parent ON file_parents(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_file_parents_file   ON file_parents(file_id);
+    ");
+    // One-time idempotent backfill (cheap; OR IGNORE / WHERE-guarded so re-runs are no-ops):
+    //   - seed file_parents from the legacy single parent_id column
+    //   - point every existing blob handle at its own id as content_key (bytes already
+    //     live at BLOBS_DIR/{id}, so nothing on disk needs to move)
+    $db->exec("INSERT OR IGNORE INTO file_parents (file_id, parent_id)
+               SELECT id, parent_id FROM files WHERE parent_id IS NOT NULL");
+    $db->exec("UPDATE files SET content_key = id WHERE type = 'blob' AND content_key IS NULL");
 } catch (PDOException $e) {
     http_response_code(500);
     die(json_encode(['error' => 'Database error: ' . $e->getMessage()]));
@@ -294,6 +318,18 @@ function parseShares(?string $raw): array {
     return $shares;
 }
 
+/**
+ * Build the parentIds array for a file. Prefers the GROUP_CONCAT of file_parents
+ * (column alias `parents_raw`); falls back to the legacy single parent_id so callers
+ * that don't join file_parents still return a sensible value.
+ */
+function parseParentIds(?string $raw, ?string $legacyParentId): array {
+    if ($raw !== null && $raw !== '') {
+        return array_values(array_unique(array_filter(explode(',', $raw), fn($v) => $v !== '')));
+    }
+    return $legacyParentId ? [$legacyParentId] : [];
+}
+
 function normalizeFile(array $row): array {
     return [
         'id'          => $row['id'],
@@ -304,6 +340,7 @@ function normalizeFile(array $row): array {
         'scope'       => $row['scope'],
         'folderId'    => $row['folder_id']  ?? null,
         'parentId'    => $row['parent_id']  ?? null,
+        'parentIds'   => parseParentIds($row['parents_raw'] ?? null, $row['parent_id'] ?? null),
         'roomId'      => $row['room_id']    ?? null,
         'blobKey'     => $row['blob_key']   ?? null,
         'mimeType'    => $row['mime_type']  ?? null,
@@ -388,11 +425,24 @@ function canWriteFolder(PDO $db, string $folderId, string $user): bool {
 }
 
 /**
+ * Returns true if ANY owning parent (multi-parent) grants access via $check.
+ * $check is canReadFile / canWriteFile, applied recursively to each parent.
+ */
+function anyParentGrants(PDO $db, string $fileId, ?string $user, callable $check): bool {
+    $stmt = $db->prepare("SELECT parent_id FROM file_parents WHERE file_id = ?");
+    $stmt->execute([$fileId]);
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $parentId) {
+        if ($check($db, $parentId, $user)) return true;
+    }
+    return false;
+}
+
+/**
  * Returns whether user has read access to a file.
  * Checks: owner, public_read, direct share, folder access, parent file access.
  */
 function canReadFile(PDO $db, string $fileId, ?string $user): bool {
-    $stmt = $db->prepare("SELECT owner, folder_id, public_read, parent_id FROM files WHERE id = ? AND deleted = 0");
+    $stmt = $db->prepare("SELECT owner, folder_id, public_read FROM files WHERE id = ? AND deleted = 0");
     $stmt->execute([$fileId]);
     $file = $stmt->fetch();
     if (!$file) return false;
@@ -405,7 +455,7 @@ function canReadFile(PDO $db, string $fileId, ?string $user): bool {
     if ($stmt->fetch()) return true;
 
     if ($file['folder_id'] && canReadFolder($db, $file['folder_id'], $user)) return true;
-    if ($file['parent_id'] && canReadFile($db, $file['parent_id'], $user)) return true;
+    if (anyParentGrants($db, $fileId, $user, 'canReadFile')) return true;
 
     return false;
 }
@@ -414,7 +464,7 @@ function canReadFile(PDO $db, string $fileId, ?string $user): bool {
  * Returns whether user has write access to a file.
  */
 function canWriteFile(PDO $db, string $fileId, ?string $user): bool {
-    $stmt = $db->prepare("SELECT owner, folder_id, public_write, parent_id FROM files WHERE id = ? AND deleted = 0");
+    $stmt = $db->prepare("SELECT owner, folder_id, public_write FROM files WHERE id = ? AND deleted = 0");
     $stmt->execute([$fileId]);
     $file = $stmt->fetch();
     if (!$file) return false;
@@ -427,7 +477,7 @@ function canWriteFile(PDO $db, string $fileId, ?string $user): bool {
     if ($stmt->fetch()) return true;
 
     if ($file['folder_id'] && canWriteFolder($db, $file['folder_id'], $user)) return true;
-    if ($file['parent_id'] && canWriteFile($db, $file['parent_id'], $user)) return true;
+    if (anyParentGrants($db, $fileId, $user, 'canWriteFile')) return true;
 
     return false;
 }
@@ -438,7 +488,9 @@ function canWriteFile(PDO $db, string $fileId, ?string $user): bool {
 
 function fetchFile(PDO $db, string $id): ?array {
     $stmt = $db->prepare("
-        SELECT f.*, GROUP_CONCAT(fs.username || '|' || fs.can_read || '|' || fs.can_write, ',') as shares_raw
+        SELECT f.*,
+               GROUP_CONCAT(DISTINCT fs.username || '|' || fs.can_read || '|' || fs.can_write) as shares_raw,
+               (SELECT GROUP_CONCAT(fp.parent_id) FROM file_parents fp WHERE fp.file_id = f.id) as parents_raw
         FROM files f
         LEFT JOIN file_shares fs ON fs.file_id = f.id
         WHERE f.id = ?
@@ -484,6 +536,49 @@ function insertFolderClosure(PDO $db, string $folderId, ?string $parentId): void
 function removeFolderFromClosure(PDO $db, string $folderId): void {
     $db->prepare("DELETE FROM folder_closure WHERE descendant_id = ? OR ancestor_id = ?")
        ->execute([$folderId, $folderId]);
+}
+
+// ============================================================
+// Blob lifecycle helpers (multi-parent + content-key GC)
+// ============================================================
+
+/** Number of parent links a file currently has. */
+function countParents(PDO $db, string $fileId): int {
+    $stmt = $db->prepare("SELECT COUNT(*) FROM file_parents WHERE file_id = ?");
+    $stmt->execute([$fileId]);
+    return (int)$stmt->fetchColumn();
+}
+
+/**
+ * Delete the on-disk bytes for a content_key only if no remaining file handle
+ * references it (copy-on-write safe). Pass an optional id to ignore (e.g. a row
+ * about to be deleted in the same transaction but not yet removed).
+ */
+function purgeBlobBytesIfUnreferenced(PDO $db, ?string $contentKey, ?string $ignoreFileId = null): void {
+    if (!$contentKey) return;
+    if ($ignoreFileId !== null) {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM files WHERE content_key = ? AND id != ?");
+        $stmt->execute([$contentKey, $ignoreFileId]);
+    } else {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM files WHERE content_key = ?");
+        $stmt->execute([$contentKey]);
+    }
+    if ((int)$stmt->fetchColumn() === 0) {
+        $blobPath = BLOBS_DIR . $contentKey;
+        if (file_exists($blobPath)) @unlink($blobPath);
+    }
+}
+
+/**
+ * Hard-delete a blob handle row and free its bytes if no other handle shares the
+ * same content_key. Assumes caller has verified ownership / orphan status.
+ */
+function hardDeleteBlobHandle(PDO $db, string $fileId): void {
+    $stmt = $db->prepare("SELECT content_key FROM files WHERE id = ?");
+    $stmt->execute([$fileId]);
+    $contentKey = $stmt->fetchColumn() ?: null;
+    $db->prepare("DELETE FROM files WHERE id = ?")->execute([$fileId]);
+    purgeBlobBytesIfUnreferenced($db, $contentKey);
 }
 
 // ============================================================
@@ -533,7 +628,9 @@ try {
             if ($adminAll) {
                 // Admin all: every file regardless of ownership / sharing
                 $filesStmt = $db->prepare("
-                    SELECT f.*, GROUP_CONCAT(fs.username || '|' || fs.can_read || '|' || fs.can_write, ',') as shares_raw
+                    SELECT f.*,
+                           GROUP_CONCAT(DISTINCT fs.username || '|' || fs.can_read || '|' || fs.can_write) as shares_raw,
+                           (SELECT GROUP_CONCAT(fp.parent_id) FROM file_parents fp WHERE fp.file_id = f.id) as parents_raw
                     FROM files f
                     LEFT JOIN file_shares fs ON fs.file_id = f.id
                     WHERE 1=1 $deletedClause
@@ -553,7 +650,9 @@ try {
             } else {
                 // Standard access-filtered query, evaluated for $viewAs
                 $filesStmt = $db->prepare("
-                    SELECT f.*, GROUP_CONCAT(fs.username || '|' || fs.can_read || '|' || fs.can_write, ',') as shares_raw
+                    SELECT f.*,
+                           GROUP_CONCAT(DISTINCT fs.username || '|' || fs.can_read || '|' || fs.can_write) as shares_raw,
+                           (SELECT GROUP_CONCAT(fp.parent_id) FROM file_parents fp WHERE fp.file_id = f.id) as parents_raw
                     FROM files f
                     LEFT JOIN file_shares fs ON fs.file_id = f.id
                     WHERE (1=1 $deletedClause) AND (
@@ -574,9 +673,10 @@ try {
                                 WHERE fc2.descendant_id = f.folder_id AND fc2.depth > 0 AND anc.owner = :user
                             )
                         ))
-                        OR (f.parent_id IS NOT NULL AND EXISTS (
-                            SELECT 1 FROM files p
-                            WHERE p.id = f.parent_id AND p.deleted = 0 AND (
+                        OR EXISTS (
+                            SELECT 1 FROM file_parents fpx
+                            JOIN files p ON p.id = fpx.parent_id
+                            WHERE fpx.file_id = f.id AND p.deleted = 0 AND (
                                 p.owner = :user
                                 OR p.public_read = 1
                                 OR EXISTS (SELECT 1 FROM file_shares WHERE file_id = p.id AND username = :user AND can_read = 1)
@@ -595,7 +695,7 @@ try {
                                     )
                                 ))
                             )
-                        ))
+                        )
                     )
                     GROUP BY f.id
                     ORDER BY f.updated_at DESC
@@ -703,18 +803,26 @@ try {
                     $roomId = generateRoomId();
                 }
             }
-            if ($type === 'blob') $blobKey = $id;
+            $contentKey = null;
+            if ($type === 'blob') { $blobKey = $id; $contentKey = $id; }
 
             $mimeType = $type === 'blob' ? (post('mime_type') ?: null)  : null;
             $size     = $type === 'blob' ? (int)(post('size') ?: '0')   : null;
             $filename = $type === 'blob' ? (post('filename') ?: null)   : null;
 
+            $db->beginTransaction();
             $db->prepare("
                 INSERT INTO files (id, owner, app, title, type, scope, folder_id, parent_id,
-                                   room_id, blob_key, mime_type, size, filename, public_read, public_write)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   room_id, blob_key, content_key, mime_type, size, filename, public_read, public_write)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ")->execute([$id, $user, $app, $title, $type, $scope, $folderId, $parentId,
-                         $roomId, $blobKey, $mimeType, $size, $filename, $publicRead, $publicWrite]);
+                         $roomId, $blobKey, $contentKey, $mimeType, $size, $filename, $publicRead, $publicWrite]);
+            // Mirror the (single) creation parent into the multi-parent table.
+            if ($parentId) {
+                $db->prepare("INSERT OR IGNORE INTO file_parents (file_id, parent_id) VALUES (?, ?)")
+                   ->execute([$id, $parentId]);
+            }
+            $db->commit();
 
             respond(fetchFile($db, $id));
         }
@@ -766,17 +874,35 @@ try {
             $id   = post('id');
             if (!$id) error('id required');
 
-            $stmt = $db->prepare("SELECT owner, blob_key FROM files WHERE id = ?");
+            $stmt = $db->prepare("SELECT owner, type, content_key FROM files WHERE id = ?");
             $stmt->execute([$id]);
             $file = $stmt->fetch();
             if (!$file || ($file['owner'] !== $user && !isAdmin($user))) error('Access denied', 403);
 
-            if ($file['blob_key']) {
-                $blobPath = BLOBS_DIR . $file['blob_key'];
-                if (file_exists($blobPath)) @unlink($blobPath);
+            $db->beginTransaction();
+
+            // Collect child blobs owned by this file before we drop the parent links.
+            $childStmt = $db->prepare("SELECT file_id FROM file_parents WHERE parent_id = ?");
+            $childStmt->execute([$id]);
+            $children = $childStmt->fetchAll(PDO::FETCH_COLUMN);
+
+            // Delete the file row. FK cascade removes its file_parents links (as both
+            // file_id and parent_id), so children lose this parent automatically.
+            $db->prepare("DELETE FROM files WHERE id = ?")->execute([$id]);
+            // Free the deleted file's own bytes if nothing else shares its content_key.
+            if ($file['type'] === 'blob') {
+                purgeBlobBytesIfUnreferenced($db, $file['content_key'] ?? null);
             }
 
-            $db->prepare("DELETE FROM files WHERE id = ?")->execute([$id]);
+            // Hard-delete any child blob that is now orphaned (no remaining parents).
+            // Children still referenced by another document (multi-parent) are kept.
+            foreach ($children as $childId) {
+                if (countParents($db, $childId) === 0) {
+                    hardDeleteBlobHandle($db, $childId);
+                }
+            }
+
+            $db->commit();
             respond(['success' => true]);
         }
 
@@ -803,9 +929,122 @@ try {
             if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
             if ($parentId && !canWriteFile($db, $parentId, $user)) error('No write access to parent', 403);
 
+            $db->beginTransaction();
             $db->prepare("UPDATE files SET parent_id = ?, updated_at = datetime('now') WHERE id = ?")
                ->execute([$parentId, $id]);
+            // Keep the multi-parent table in sync for set_parent (single-parent semantics):
+            // drop the previous primary link and record the new one.
+            $db->prepare("DELETE FROM file_parents WHERE file_id = ?")->execute([$id]);
+            if ($parentId) {
+                $db->prepare("INSERT OR IGNORE INTO file_parents (file_id, parent_id) VALUES (?, ?)")
+                   ->execute([$id, $parentId]);
+            }
+            $db->commit();
             respond(fetchFile($db, $id));
+        }
+
+        case 'add_parent': {
+            // Add an additional owning parent to a file (multi-parent). Used when a
+            // document is duplicated so child blobs are shared, not copied.
+            requirePost();
+            $user     = requireAuth();
+            $id       = post('id');
+            $parentId = post('parent_id') ?: null;
+            if (!$id || !$parentId) error('id and parent_id required');
+            if (!canWriteFile($db, $id, $user))       error('Access denied', 403);
+            if (!canWriteFile($db, $parentId, $user)) error('No write access to parent', 403);
+
+            $db->prepare("INSERT OR IGNORE INTO file_parents (file_id, parent_id) VALUES (?, ?)")
+               ->execute([$id, $parentId]);
+            $db->prepare("UPDATE files SET updated_at = datetime('now') WHERE id = ?")->execute([$id]);
+            respond(fetchFile($db, $id));
+        }
+
+        case 'remove_parent': {
+            // Detach one owning parent. When the last parent is removed, the handle is
+            // soft-deleted (and its bytes GC'd on permanent delete / orphan sweep).
+            requirePost();
+            $user     = requireAuth();
+            $id       = post('id');
+            $parentId = post('parent_id') ?: null;
+            if (!$id || !$parentId) error('id and parent_id required');
+            if (!canWriteFile($db, $id, $user)) error('Access denied', 403);
+
+            $stmt = $db->prepare("SELECT type FROM files WHERE id = ?");
+            $stmt->execute([$id]);
+            $fileType = $stmt->fetchColumn();
+
+            $db->beginTransaction();
+            $db->prepare("DELETE FROM file_parents WHERE file_id = ? AND parent_id = ?")
+               ->execute([$id, $parentId]);
+            // Also clear the legacy primary-parent pointer if it named this parent.
+            $db->prepare("UPDATE files SET parent_id = NULL WHERE id = ? AND parent_id = ?")
+               ->execute([$id, $parentId]);
+
+            $orphaned = countParents($db, $id) === 0;
+            if ($orphaned) {
+                if ($fileType === 'blob') {
+                    // Attachment blobs aren't independently browsable, so an orphaned
+                    // handle is unreachable — hard-delete it and free its bytes (when no
+                    // other handle shares the content_key) to actually reclaim storage.
+                    hardDeleteBlobHandle($db, $id);
+                } else {
+                    // Non-blob (e.g. a child doc): soft-delete so it stays recoverable.
+                    $db->prepare("UPDATE files SET deleted = 1, updated_at = datetime('now') WHERE id = ?")
+                       ->execute([$id]);
+                }
+            }
+            $db->commit();
+            respond(['success' => true, 'deleted' => $orphaned]);
+        }
+
+        case 'fork_blob': {
+            // Copy-on-write fork: create a new blob handle that shares the source's
+            // bytes (same content_key — zero copy) owned by a single new parent.
+            requirePost();
+            $user     = requireAuth();
+            $id       = post('id');
+            $parentId = post('parent_id') ?: null;
+            $newId    = post('new_id') ?: null;
+            if (!$id) error('id required');
+            if (!canReadFile($db, $id, $user)) error('Access denied', 403);
+            if ($parentId && !canWriteFile($db, $parentId, $user)) error('No write access to parent', 403);
+
+            $stmt = $db->prepare("SELECT * FROM files WHERE id = ? AND type = 'blob' AND deleted = 0");
+            $stmt->execute([$id]);
+            $src = $stmt->fetch();
+            if (!$src) error('Blob not found', 404);
+
+            if ($newId) {
+                if (!validateId($newId)) error('Invalid new_id format');
+                $stmt = $db->prepare("SELECT owner FROM files WHERE id = ?");
+                $stmt->execute([$newId]);
+                $existing = $stmt->fetch();
+                if ($existing) {
+                    if ($existing['owner'] !== $user) error('ID conflict', 409);
+                    respond(fetchFile($db, $newId));
+                    break;
+                }
+            } else {
+                $newId = ($src['app'] ? $src['app'] . '_' : '') . generateId();
+            }
+
+            $contentKey = $src['content_key'] ?: $src['id'];
+
+            $db->beginTransaction();
+            $db->prepare("
+                INSERT INTO files (id, owner, app, title, type, scope, folder_id, parent_id,
+                                   room_id, blob_key, content_key, mime_type, size, filename, public_read, public_write)
+                VALUES (?, ?, ?, ?, 'blob', ?, NULL, ?, NULL, ?, ?, ?, ?, ?, 0, 0)
+            ")->execute([$newId, $user, $src['app'], $src['title'], $src['scope'], $parentId,
+                         $newId, $contentKey, $src['mime_type'], $src['size'], $src['filename']]);
+            if ($parentId) {
+                $db->prepare("INSERT OR IGNORE INTO file_parents (file_id, parent_id) VALUES (?, ?)")
+                   ->execute([$newId, $parentId]);
+            }
+            $db->commit();
+
+            respond(fetchFile($db, $newId));
         }
 
         case 'share': {
@@ -1304,7 +1543,9 @@ try {
             if ($app)   { $extraClauses .= ' AND f.app   = :app';   $params[':app']   = $app; }
 
             $stmt = $db->prepare("
-                SELECT f.*, GROUP_CONCAT(fs.username || '|' || fs.can_read || '|' || fs.can_write, ',') as shares_raw
+                SELECT f.*,
+                       GROUP_CONCAT(DISTINCT fs.username || '|' || fs.can_read || '|' || fs.can_write) as shares_raw,
+                       (SELECT GROUP_CONCAT(fp.parent_id) FROM file_parents fp WHERE fp.file_id = f.id) as parents_raw
                 FROM files f
                 LEFT JOIN file_shares fs ON fs.file_id = f.id
                 WHERE f.deleted = 0

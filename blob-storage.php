@@ -13,7 +13,7 @@
  */
 
 define('DATA_ROOT', dirname(__DIR__) . '/data/congruum-docs/');
-require_once "iauth.php";
+require_once __DIR__ . '/../lib/iauth.php';
 define('DB_FILE', DATA_ROOT . 'storage.sqlite');
 define('BLOBS_DIR', DATA_ROOT . 'blobs/');
 
@@ -123,6 +123,24 @@ function getFolderPublicFlags($db, $folderId) {
  * @param string|null $user Null for unauthenticated (public-only) access
  * @return bool
  */
+/**
+ * Returns true if ANY owning parent (multi-parent, plus the legacy parent_id)
+ * grants access via $check (hasReadAccess / hasWriteAccess), applied recursively.
+ */
+function anyParentGrantsBlobAccess($db, $docId, $user, $legacyParentId, callable $check) {
+    $seen = [];
+    if ($legacyParentId) $seen[$legacyParentId] = true;
+    $stmt = $db->prepare("SELECT parent_id FROM file_parents WHERE file_id = ?");
+    $stmt->execute([$docId]);
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $pid) {
+        $seen[$pid] = true;
+    }
+    foreach (array_keys($seen) as $pid) {
+        if ($check($db, $pid, $user)) return true;
+    }
+    return false;
+}
+
 function hasWriteAccess($db, $docId, $user = null) {
     // Get document with all relevant fields
     $stmt = $db->prepare("
@@ -167,10 +185,8 @@ function hasWriteAccess($db, $docId, $user = null) {
         if ($folderPerms['can_write']) return true;
     }
 
-    // Check parent document permission (inheritance)
-    if ($doc['parent_id']) {
-        if (hasWriteAccess($db, $doc['parent_id'], $user)) return true;
-    }
+    // Check parent document permission (inheritance) — any owning parent grants access.
+    if (anyParentGrantsBlobAccess($db, $docId, $user, $doc['parent_id'], 'hasWriteAccess')) return true;
 
     return false;
 }
@@ -227,10 +243,8 @@ function hasReadAccess($db, $docId, $user = null) {
         if ($folderPerms['can_read']) return true;
     }
 
-    // Check parent document permission (inheritance)
-    if ($doc['parent_id']) {
-        if (hasReadAccess($db, $doc['parent_id'], $user)) return true;
-    }
+    // Check parent document permission (inheritance) — any owning parent grants access.
+    if (anyParentGrantsBlobAccess($db, $docId, $user, $doc['parent_id'], 'hasReadAccess')) return true;
 
     return false;
 }
@@ -415,7 +429,7 @@ try {
             }
 
             // Get document info
-            $stmt = $db->prepare("SELECT blob_key FROM files WHERE id = ? AND type = 'blob' AND deleted = 0");
+            $stmt = $db->prepare("SELECT blob_key, content_key FROM files WHERE id = ? AND type = 'blob' AND deleted = 0");
             $stmt->execute([$docId]);
             $doc = $stmt->fetch();
 
@@ -423,10 +437,24 @@ try {
                 jsonError('Blob document not found', 404);
             }
 
-            $blobKey = $doc['blob_key'];
-            if (!$blobKey) {
-                jsonError('Document has no blob key', 500);
+            // Bytes live at content_key (falls back to blob_key/id for legacy rows).
+            $contentKey = $doc['content_key'] ?: ($doc['blob_key'] ?: $docId);
+
+            // Copy-on-write: if another handle shares this content_key, writing here
+            // would corrupt those siblings. Mint a fresh content_key for THIS handle
+            // and point it there so the divergent bytes are isolated.
+            $shareStmt = $db->prepare("SELECT COUNT(*) FROM files WHERE content_key = ? AND id != ?");
+            $shareStmt->execute([$contentKey, $docId]);
+            if ((int)$shareStmt->fetchColumn() > 0) {
+                $contentKey = $docId . '_' . bin2hex(random_bytes(6));
+                $db->prepare("UPDATE files SET content_key = ? WHERE id = ?")
+                   ->execute([$contentKey, $docId]);
+            } elseif (($doc['content_key'] ?? null) === null) {
+                // Legacy row with no content_key yet — anchor it now.
+                $db->prepare("UPDATE files SET content_key = ? WHERE id = ?")
+                   ->execute([$contentKey, $docId]);
             }
+            $blobKey = $contentKey;
 
             // Get content from request body
             $content = file_get_contents('php://input');
@@ -501,7 +529,7 @@ try {
 
             // Get document info
             $stmt = $db->prepare("
-                SELECT blob_key, filename, mime_type, size
+                SELECT blob_key, content_key, filename, mime_type, size
                 FROM files
                 WHERE id = ? AND type = 'blob' AND deleted = 0
             ");
@@ -512,10 +540,8 @@ try {
                 jsonError('Blob document not found', 404);
             }
 
-            $blobKey = $doc['blob_key'];
-            if (!$blobKey) {
-                jsonError('Document has no blob key', 500);
-            }
+            // Bytes live at content_key (fall back to blob_key/id for legacy rows).
+            $blobKey = $doc['content_key'] ?: ($doc['blob_key'] ?: $docId);
 
             $blobPath = BLOBS_DIR . $blobKey;
             if (!file_exists($blobPath)) {
@@ -588,7 +614,7 @@ try {
 
             // Get document info
             $stmt = $db->prepare("
-                SELECT blob_key, filename, mime_type, size, created_at, updated_at
+                SELECT blob_key, content_key, filename, mime_type, size, created_at, updated_at
                 FROM files
                 WHERE id = ? AND type = 'blob' AND deleted = 0
             ");
@@ -599,7 +625,7 @@ try {
                 jsonError('Blob document not found', 404);
             }
 
-            $blobPath = BLOBS_DIR . $doc['blob_key'];
+            $blobPath = BLOBS_DIR . ($doc['content_key'] ?: ($doc['blob_key'] ?: $docId));
             $exists = file_exists($blobPath);
 
             header('Content-Type: application/json');

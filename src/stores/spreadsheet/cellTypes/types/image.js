@@ -167,19 +167,33 @@ function _drawLoadingPlaceholder(ctx, x, y, w, h, theme) {
 }
 
 function _drawErrorPlaceholder(ctx, x, y, w, h, theme) {
+    // Neutral "image missing" look (the referenced blob is gone or inaccessible —
+    // e.g. a loose Drive reference whose original was deleted).
     const cx = x + w / 2;
     const cy = y + h / 2;
-    const size = Math.min(w, h, 14);
 
     ctx.save();
-    ctx.fillStyle = '#fef2f2';
+    ctx.fillStyle = '#f1f5f9';
     ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
 
-    ctx.fillStyle = '#ef4444';
-    ctx.font = `${size}px system-ui`;
+    // Dashed frame
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(x + 2.5, y + 2.5, w - 5, h - 5);
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#94a3b8';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('⚠', cx, cy);
+    // Show a broken-image glyph; add a label when the cell is roomy enough.
+    if (w >= 90 && h >= 28) {
+        ctx.font = '11px system-ui, sans-serif';
+        ctx.fillText('🖼 image missing', cx, cy);
+    } else {
+        ctx.font = `${Math.min(w, h, 16)}px system-ui, sans-serif`;
+        ctx.fillText('🖼', cx, cy);
+    }
     ctx.restore();
 }
 

@@ -4,12 +4,12 @@
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { toCellRef } from "../../formulas/refCoords.js";
     import { applyFormatting } from "../../stores/spreadsheet/cellFormattingCommands.js";
-    import FormulaInput from "./FormulaInput.svelte";
+    import FormulaCodeEditor from "./formula-editor/FormulaCodeEditor.svelte";
     import MobileFormattingSheet from "./MobileFormattingSheet.svelte";
 
     let { selectedCell = null, onEdit } = $props();
 
-    let inputComponent = $state(null); // FormulaInput instance
+    let inputComponent = $state(null); // FormulaCodeEditor instance
     let captureInputEl = $state(null);
     let showFormatSheet = $state(false);
 
@@ -123,24 +123,9 @@
     }
 
     function insertSymbol(sym) {
-        const el = inputComponent?.el;
-        if (!el) return;
-        const start = el.selectionStart ?? editValue.length;
-        const end   = el.selectionEnd   ?? start;
-        const next  = editValue.slice(0, start) + sym + editValue.slice(end);
-        editSessionState.updateDraft(next, start + sym.length, start + sym.length);
-        requestAnimationFrame(() => {
-            el.focus({ preventScroll: true });
-            el.setSelectionRange(start + sym.length, start + sym.length);
-        });
+        inputComponent?.insertText(sym);
     }
 
-
-    function handleKeydown(e) {
-        if (e.key === 'Enter')  { commitAndMoveDown(); e.preventDefault(); }
-        else if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-        else if (e.key === 'Tab')    { commitEdit(); e.preventDefault(); }
-    }
 
     // ── Focus management ──────────────────────────────────────────────────────
 
@@ -179,7 +164,7 @@
             </button>
             <span class="entry-cell-ref">{cellRef}</span>
             <div class="entry-input-wrap" class:formula={isFormulaMode}>
-                <FormulaInput
+                <FormulaCodeEditor
                     bind:this={inputComponent}
                     value={editValue}
                     readonly={hasRichText}
@@ -189,7 +174,9 @@
                     caretSync={editSessionState.caretSync}
                     onInput={(val, s, e) => editSessionState.updateDraft(val, s, e)}
                     onSelect={(s, e) => editSessionState.setCursor(s, e)}
-                    onKeydown={handleKeydown}
+                    onCommit={commitAndMoveDown}
+                    onCancel={cancelEdit}
+                    onTab={() => commitEdit()}
                 />
             </div>
             <button

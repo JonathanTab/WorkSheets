@@ -1,5 +1,6 @@
 <script>
     import { spreadsheetSession, selectionState } from '../../stores/spreadsheetStore.svelte.js';
+    import FormulaCodeEditor from './formula-editor/FormulaCodeEditor.svelte';
 
     let { onclose } = $props();
 
@@ -326,14 +327,13 @@
             {#if draft.condition === 'formula'}
                 <div class="row formula-row">
                     <label for="cf-formula">Formula</label>
-                    <input
-                        id="cf-formula"
-                        class="formula-input"
-                        type="text"
-                        bind:value={draft.formula}
-                        placeholder="=AND($I2<0, NOT(ISERROR(MATCH(F2,$A$4:$A$14,0))))"
-                        spellcheck="false"
-                    />
+                    <div class="formula-input-wrap" id="cf-formula">
+                        <FormulaCodeEditor
+                            value={draft.formula}
+                            onInput={(v) => { draft.formula = v; }}
+                            placeholder="=AND($I2<0, NOT(ISERROR(MATCH(F2,$A$4:$A$14,0))))"
+                        />
+                    </div>
                 </div>
                 <div class="formula-hint">
                     Written for the top-left cell of the range; relative refs shift per cell,
@@ -447,7 +447,12 @@
     .row input[type="checkbox"] { width: 16px; height: 16px; }
 
     .formula-row { align-items: flex-start; }
-    .formula-input { font-family: monospace; font-size: 0.75rem; }
+    .formula-input-wrap {
+        flex: 1; height: 22px; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 3px;
+        font-family: monospace; font-size: 0.75rem; background: var(--color-surface, white); color: var(--color-text, #111);
+        box-sizing: border-box;
+    }
+    .formula-input-wrap:focus-within { outline: 2px solid var(--focus-color, #3b82f6); outline-offset: -1px; }
     .formula-hint { font-size: 0.7rem; color: #94a3b8; line-height: 1.35; padding: 0 0 2px; }
     .formula-hint code { background: #f1f5f9; padding: 0 3px; border-radius: 3px; font-size: 0.7rem; }
 
