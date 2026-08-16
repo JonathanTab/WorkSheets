@@ -265,6 +265,14 @@ export class TableStore {
      */
     #ensureEval() {
         if (this.#eval && !this.#evalDirty) return;
+        // Re-entrancy guard: a table cell whose stored value is a sheet formula (=…)
+        // is resolved during the build via the injected sheet evaluator, which can
+        // reference a cell that maps back to THIS table → getValue → #ensureEval.
+        // Without this guard (and the publish-before-build below) that re-entrant
+        // read triggered a fresh full rebuild, cascading into an O(cells × ref-depth)
+        // rebuild storm — dozens of full evaluator rebuilds per sheet switch.
+        if (this.#buildingEval) return;
+        this.#buildingEval = true;
         const build = () => {
             const result = this.sortedFilteredRows;
             const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
@@ -273,16 +281,25 @@ export class TableStore {
             // (RUNNINGIF, SUM, CUMSUM, …) are never affected by display filters.
             const allSorted = [...this.rows].sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0));
             const plainAllSorted = allSorted.map(r => ({ ...r }));
-            this.#eval = new TableFormulaEvaluator(plainAllSorted, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+            const evaluator = new TableFormulaEvaluator(plainAllSorted, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval, /* deferBuild */ true);
 
             // Display→full index map so getValue(displayIndex) translates to the
             // correct index in the all-rows evaluator (object identity).
             const refToFullIndex = new Map(allSorted.map((r, i) => [r, i]));
             this.#displayToFullIndex = result.map(r => refToFullIndex.get(r) ?? -1);
+            // Publish the evaluator (and clear dirty) BEFORE building its computed
+            // cache, so a re-entrant getValue during the build reads the in-progress
+            // evaluator rather than constructing another one.
+            this.#eval = evaluator;
             this.#evalDirty = false;
+            evaluator.buildComputed();
         };
-        if (perfMon.enabled) perfMon.time('table.ensureEval', build);
-        else build();
+        try {
+            if (perfMon.enabled) perfMon.time('table.ensureEval', build);
+            else build();
+        } finally {
+            this.#buildingEval = false;
+        }
     }
 
     /**
@@ -291,9 +308,19 @@ export class TableStore {
      */
     #ensureAllRowsEval() {
         if (this.#sourceStore || this.#allRowsEval) return;
-        const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
-        const plainAllRows = this.rows.map(r => ({ ...r }));
-        this.#allRowsEval = new TableFormulaEvaluator(plainAllRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval);
+        if (this.#buildingAllRowsEval) return; // re-entrancy guard (see #ensureEval)
+        this.#buildingAllRowsEval = true;
+        try {
+            const evalColumns = this.allColumns?.length ? this.allColumns : this.columns;
+            const plainAllRows = this.rows.map(r => ({ ...r }));
+            const evaluator = new TableFormulaEvaluator(plainAllRows, evalColumns, true, this.#tableResolver, this.#sheetFormulaEval, /* deferBuild */ true);
+            // Publish before building the computed cache so a re-entrant getFullValue
+            // during the build resolves against the in-progress evaluator.
+            this.#allRowsEval = evaluator;
+            evaluator.buildComputed();
+        } finally {
+            this.#buildingAllRowsEval = false;
+        }
     }
 
     // ── Entry form buffer (local only — not in Yjs until committed) ──────────
@@ -329,6 +356,11 @@ export class TableStore {
     #displayToFullIndex = [];
     /** @type {TableFormulaEvaluator|null} Evaluator for all rows (sheet formula API). */
     #allRowsEval = null;
+    /** @type {boolean} Re-entrancy guards: true while the corresponding evaluator's
+     *  computed cache is being built, so a nested getValue during the build resolves
+     *  against the in-progress evaluator instead of triggering a fresh rebuild. */
+    #buildingEval = false;
+    #buildingAllRowsEval = false;
 
     /**
      * @param {import('yjs').Map<any>} tableYMap
@@ -1656,7 +1688,15 @@ export class TableStore {
     }
 
     getColumn(colId) {
-        return this.sortedFilteredRows.map((_, i) => this.getValue(i, colId));
+        // Iterate by index rather than .map()-ing the sortedFilteredRows $state
+        // proxy: getValue() reads the plain #eval internally, so touching each
+        // proxy element (as .map's callback arg) is pure overhead. Materialising a
+        // column for a cross-table aggregate over a large table was dominated by
+        // these Svelte proxy get/ownKeys traps in the switch-sheet CPU profile.
+        const n = this.sortedFilteredRows.length;
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) out[i] = this.getValue(i, colId);
+        return out;
     }
 
     getRowCount() {
@@ -1700,7 +1740,16 @@ export class TableStore {
     getFullColumn(colId) {
         if (this.#sourceStore) return this.#sourceStore.getFullColumn(colId);
         this.#ensureAllRowsEval();
-        return this.rows.map((_, i) => this.getFullValue(i, colId));
+        // Iterate by index instead of .map()-ing the this.rows $state proxy.
+        // #allRowsEval holds a plain snapshot of the rows, and getFullValue reads
+        // from it, so the only proxy access here was reading each element to feed
+        // .map's (unused) callback arg. This path materialises source columns for
+        // cross-table TABLE_SUMIFS/etc. and was the top proxy-trap cost when
+        // switching to a sheet whose view aggregates a large table.
+        const n = this.#allRowsEval ? this.#allRowsEval.getRowCount() : this.rows.length;
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) out[i] = this.getFullValue(i, colId);
+        return out;
     }
 
     getCumulativeSum(colId, upToDisplayIndex) {

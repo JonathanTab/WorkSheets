@@ -81,6 +81,27 @@ let _tableEvalDepth = 0;
 const _TABLE_EVAL_MAX_DEPTH = 64;
 
 /**
+ * Bounded AST cache for #evalExpression. `evaluate()` treats parsed ASTs as
+ * read-only, and identical substituted expressions recur constantly — a column
+ * formula produces the same string for the same row on every rebuild (e.g. each
+ * time a table view is re-opened by switching sheets). Caching parsed ASTs keeps
+ * the tokenizer/parser off the hot path on all but the first parse of each
+ * distinct expression. Shared across evaluators/tables/docs, which is safe
+ * because the key is the exact source string and ASTs are never mutated.
+ */
+const _astCache = new Map();
+const _AST_CACHE_MAX = 4000;
+function cachedParseFormula(src) {
+    let ast = _astCache.get(src);
+    if (ast === undefined) {
+        ast = parseFormula(src);
+        if (_astCache.size >= _AST_CACHE_MAX) _astCache.delete(_astCache.keys().next().value);
+        _astCache.set(src, ast);
+    }
+    return ast;
+}
+
+/**
  * Validate a column DSL formula. Column formulas are table-scoped: they may
  * reference other columns via `{colName}`, call functions (including TABLE_*),
  * and use the row-helper DSL (PREV/NEXT/ROWVAL/WINDOW), but they MAY NOT
@@ -180,10 +201,29 @@ export function resultToExpr(val) {
     return '0';
 }
 
+/** Cheap gate before the expensive parseLocalDate() probe: every valid date
+ *  contains at least one digit, so digit-free text skips date parsing entirely. */
+const HAS_DIGIT = /\d/;
+
 /** Compare a row value against a filter condition. */
 export function matchCondition(rowVal, op, filterVal) {
     const rv = rowVal, fv = filterVal;
-    if (typeof rv === 'string' && typeof fv === 'string') {
+    // Substring / presence operators never need date or numeric coercion. Handle
+    // them first: these are the hot path for text-column filters (e.g.
+    // TABLE_SUMIFS(..,'Project Title','contains',..)) and must not pay for the
+    // multi-regex parseLocalDate() probe below — doing so on every scanned cell
+    // was the dominant cost when a computed column aggregates a large table.
+    switch (op) {
+        case 'contains':    return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        case 'startswith':  return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
+        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
+        case 'empty':    return rv == null || rv === '' || rv === false;
+        case 'notempty': return rv != null && rv !== '' && rv !== false;
+    }
+    // Ordering / equality operators: dates first, then numeric, then string.
+    // Gate the expensive parseLocalDate() on a cheap "has a digit" test — every
+    // valid date contains one, so non-date text (names, labels) skips it entirely.
+    if (typeof rv === 'string' && typeof fv === 'string' && HAS_DIGIT.test(rv) && HAS_DIGIT.test(fv)) {
         const rvDate = parseLocalDate(rv), fvDate = parseLocalDate(fv);
         if (rvDate && fvDate) {
             const rvT = rvDate.getTime(), fvT = fvDate.getTime();
@@ -211,11 +251,7 @@ export function matchCondition(rowVal, op, filterVal) {
         case '<':  return String(rv ?? '') <  String(fv ?? '');
         case '>=': return String(rv ?? '') >= String(fv ?? '');
         case '<=': return String(rv ?? '') <= String(fv ?? '');
-        case 'contains':    return String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        case 'startswith':  return String(rv ?? '').toLowerCase().startsWith(String(fv ?? '').toLowerCase());
-        case 'notcontains': return !String(rv ?? '').toLowerCase().includes(String(fv ?? '').toLowerCase());
-        case 'empty':    return rv == null || rv === '' || rv === false;
-        case 'notempty': return rv != null && rv !== '' && rv !== false;
+        // contains/startswith/notcontains/empty/notempty handled at the top.
         default: return false;
     }
 }
@@ -243,6 +279,117 @@ export function buildTableFunctions(resolveTableByName) {
         filtered ? t.getValue(idx, colId) : t.getFullValue(idx, colId);
     const colOf = (t, colId, filtered) =>
         filtered ? t.getColumn(colId) : t.getFullColumn(colId);
+
+    // Per-build column-materialization cache. buildTableFunctions() is invoked
+    // once per evaluator instance (see TableFormulaEvaluator #buildCustomFunctions),
+    // and an evaluator is thrown away + rebuilt whenever its table's data changes.
+    // So caching a referenced table's materialized columns for the lifetime of
+    // this function map is safe — the underlying rows cannot change while these
+    // closures live. This collapses the O(callerRows × sourceRows) re-scan of the
+    // conditional aggregates: a computed column running e.g.
+    //   TABLE_SUMIFS('Ledger', 'Amount', 'Project Title', 'contains', {Project #}, …)
+    // once per row previously re-read *every* Ledger cell for *every* caller row
+    // (155k+ getValue calls for a 76-row table over a 339-row Ledger). With the
+    // cache each referenced column is materialized once and the per-row work is a
+    // plain array scan.
+    const _colCache = new Map();
+    const colCached = (tableName, t, colId, filtered) => {
+        const key = String(tableName).toLowerCase() + ' ' + colId + ' ' + (filtered ? 1 : 0);
+        let arr = _colCache.get(key);
+        if (arr === undefined) { arr = colOf(t, colId, filtered); _colCache.set(key, arr); }
+        return arr;
+    };
+    // Lowercased view of a materialised column, cached per array. The string
+    // filter operators (contains/startswith/…) lower-case both operands on every
+    // comparison; when a condition scans the same column for every caller row
+    // that repeats `toLowerCase()` on identical values thousands of times.
+    // Lowering the whole column once (keyed on the array identity, which colCached
+    // keeps stable for the build) turns each per-row test into a bare substring
+    // check. matchCondition() was the single hottest frame before this.
+    const _loCache = new WeakMap();
+    const lower = (arr) => {
+        let lo = _loCache.get(arr);
+        if (!lo) {
+            lo = new Array(arr.length);
+            for (let i = 0; i < arr.length; i++) lo[i] = String(arr[i] ?? '').toLowerCase();
+            _loCache.set(arr, lo);
+        }
+        return lo;
+    };
+    // Numeric (Float64Array) view of a materialised column, cached per array —
+    // the summing/min/max aggregates coerce the same source column with Number()
+    // once per matched row for every caller row; coercing the whole column once
+    // makes the per-row work a plain typed-array read. NaN marks non-numeric
+    // cells (callers already treat those as 0 / skip via isNaN), matching the
+    // prior `Number(x) || 0` semantics exactly.
+    const _numCache = new WeakMap();
+    const numeric = (arr) => {
+        let nu = _numCache.get(arr);
+        if (!nu) {
+            nu = new Float64Array(arr.length);
+            for (let i = 0; i < arr.length; i++) nu[i] = Number(arr[i]);
+            _numCache.set(arr, nu);
+        }
+        return nu;
+    };
+    // Precomputed match masks, keyed by (column array identity, op, value). A
+    // conditional aggregate scans every row of the source column, so the whole
+    // per-column result of a condition is a boolean vector. Materialising it once
+    // (Uint8Array) and caching it lets identical conditions — which recur
+    // constantly, e.g. a computed column running the *same* constant filter
+    //   TABLE_SUMIFS('Ledger', …, 'Notes', 'notcontains', 'Invoice')
+    // for every caller row — be evaluated a single time instead of callerRows ×
+    // sourceRows. A per-caller-row varying condition (e.g. contains {Project #})
+    // still costs one pass, exactly as before. Keyed on the array identity
+    // (stable for the build via colCached) so it is discarded with the build.
+    const _maskCache = new WeakMap(); // arr → Map<opValKey, Uint8Array>
+    const condKey = (op, rawVal) => op + ' ' + (typeof rawVal) + ' ' + String(rawVal);
+    const maskFor = (arr, op, rawVal) => {
+        let byKey = _maskCache.get(arr);
+        if (!byKey) { byKey = new Map(); _maskCache.set(arr, byKey); }
+        const key = condKey(op, rawVal);
+        let mask = byKey.get(key);
+        if (mask) return mask;
+        const n = arr.length;
+        mask = new Uint8Array(n);
+        switch (op) {
+            case 'contains':    { const lo = lower(arr), s = String(rawVal ?? '').toLowerCase(); for (let i = 0; i < n; i++) mask[i] = lo[i].includes(s) ? 1 : 0; break; }
+            case 'notcontains': { const lo = lower(arr), s = String(rawVal ?? '').toLowerCase(); for (let i = 0; i < n; i++) mask[i] = lo[i].includes(s) ? 0 : 1; break; }
+            case 'startswith':  { const lo = lower(arr), s = String(rawVal ?? '').toLowerCase(); for (let i = 0; i < n; i++) mask[i] = lo[i].startsWith(s) ? 1 : 0; break; }
+            case 'empty':    { for (let i = 0; i < n; i++) { const v = arr[i]; mask[i] = (v == null || v === '' || v === false) ? 1 : 0; } break; }
+            case 'notempty': { for (let i = 0; i < n; i++) { const v = arr[i]; mask[i] = (v != null && v !== '' && v !== false) ? 1 : 0; } break; }
+            default:         { for (let i = 0; i < n; i++) mask[i] = matchCondition(arr[i], op, rawVal) ? 1 : 0; break; }
+        }
+        byKey.set(key, mask);
+        return mask;
+    };
+    // Compile one condition (column array + op + filter value) into a per-row
+    // predicate `(i) => boolean` backed by a cached match mask (see maskFor). A
+    // conditional aggregate scans every source row, so a condition's whole-column
+    // result is a boolean vector; masking on first touch means repeats of the same
+    // (column, op, value) — a constant filter reused across caller rows, or the
+    // same varying needle shared by two computed columns in one row — are read
+    // from the cached mask instead of rescanning callerRows × sourceRows.
+    const compileCond = (arr, op, rawVal) => {
+        const mask = maskFor(arr, op, rawVal);
+        return (i) => mask[i] === 1;
+    };
+    // Materialise + compile a flat (col, op, val, …) triplet list into a single
+    // `test(i)` predicate over all conditions, plus the row count `n`.
+    const buildConds = (t, tableName, triplets) => {
+        const preds = [];
+        let n = 0;
+        for (let i = 0; i + 2 < triplets.length; i += 3) {
+            const arr = colCached(tableName, t, t.resolveColId(String(triplets[i])), false);
+            n = arr.length;
+            preds.push(compileCond(arr, String(triplets[i + 1]), triplets[i + 2]));
+        }
+        const test = (i) => {
+            for (let c = 0; c < preds.length; c++) if (!preds[c](i)) return false;
+            return true;
+        };
+        return { test, n };
+    };
     const fns = new Map();
 
     fns.set('TABLE_GET', (tableName, rowIndex, colId, filtered = false) => {
@@ -252,28 +399,28 @@ export function buildTableFunctions(resolveTableByName) {
     });
     fns.set('TABLE_COL', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return [];
-        return colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered));
+        return colCached(tableName, t, t.resolveColId(String(colId)), wantsFiltered(filtered));
     });
     fns.set('TABLE_COUNT', (tableName, filtered = false) => {
         const t = tbl(tableName); return t ? rowCountOf(t, wantsFiltered(filtered)) : 0;
     });
     fns.set('TABLE_SUM', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        return colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).reduce((acc, v) => acc + (Number(v) || 0), 0);
+        return colCached(tableName, t, t.resolveColId(String(colId)), wantsFiltered(filtered)).reduce((acc, v) => acc + (Number(v) || 0), 0);
     });
     fns.set('TABLE_AVG', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
+        const vals = colCached(tableName, t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : 0;
     });
     fns.set('TABLE_MIN', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
+        const vals = colCached(tableName, t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? Math.min(...vals) : 0;
     });
     fns.set('TABLE_MAX', (tableName, colId, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
-        const vals = colOf(t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
+        const vals = colCached(tableName, t, t.resolveColId(String(colId)), wantsFiltered(filtered)).map(Number).filter(v => !isNaN(v));
         return vals.length ? Math.max(...vals) : 0;
     });
     // TABLE_CUMSUM intentionally uses the filtered evaluator (display-order running sum).
@@ -281,116 +428,121 @@ export function buildTableFunctions(resolveTableByName) {
         const t = tbl(tableName); if (!t) return 0;
         return t.getCumulativeSum(t.resolveColId(String(colId)), Number(upToIndex));
     });
+    // ── Conditional aggregates ────────────────────────────────────────────────
+    // All operate on the *full* (unfiltered) row set. Each materialises the
+    // columns it touches once (via colCached) and scans plain arrays, so N calls
+    // from a computed column share a single materialisation of the source table.
     fns.set('TABLE_SUMIF', (tableName, sumColId, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return 0;
-        const sId = t.resolveColId(String(sumColId)), fId = t.resolveColId(String(filterColId));
-        let sum = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) sum += Number(t.getFullValue(i, sId)) || 0;
-        return sum;
+        const sum = numeric(colCached(tableName, t, t.resolveColId(String(sumColId)), false));
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
+        let acc = 0;
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) acc += sum[i] || 0;
+        return acc;
     });
     fns.set('TABLE_SUMIFS', (tableName, sumColId, ...triplets) => {
         const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
-        const sId = t.resolveColId(String(sumColId));
-        const conds = [];
-        for (let i = 0; i + 2 < triplets.length; i += 3)
-            conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-        let sum = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (conds.every(c => matchCondition(t.getFullValue(i, c.col), c.op, c.val))) sum += Number(t.getFullValue(i, sId)) || 0;
-        return sum;
+        const sum = numeric(colCached(tableName, t, t.resolveColId(String(sumColId)), false));
+        const { test } = buildConds(t, tableName, triplets);
+        let acc = 0;
+        for (let i = 0; i < sum.length; i++)
+            if (test(i)) acc += sum[i] || 0;
+        return acc;
     });
     fns.set('TABLE_COUNTIF', (tableName, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return 0;
-        const fId = t.resolveColId(String(filterColId));
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
         let count = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) count++;
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) count++;
         return count;
     });
     fns.set('TABLE_COUNTIFS', (tableName, ...triplets) => {
         const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
-        const conds = [];
-        for (let i = 0; i + 2 < triplets.length; i += 3)
-            conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+        const { test, n } = buildConds(t, tableName, triplets);
         let count = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (conds.every(c => matchCondition(t.getFullValue(i, c.col), c.op, c.val))) count++;
+        for (let i = 0; i < n; i++)
+            if (test(i)) count++;
         return count;
     });
     fns.set('TABLE_AVGIF', (tableName, sumColId, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return 0;
-        const sId = t.resolveColId(String(sumColId)), fId = t.resolveColId(String(filterColId));
-        let sum = 0, count = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++) {
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) { sum += Number(t.getFullValue(i, sId)) || 0; count++; }
-        }
-        return count ? sum / count : 0;
+        const sum = numeric(colCached(tableName, t, t.resolveColId(String(sumColId)), false));
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
+        let acc = 0, count = 0;
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) { acc += sum[i] || 0; count++; }
+        return count ? acc / count : 0;
     });
     fns.set('TABLE_AVGIFS', (tableName, sumColId, ...triplets) => {
         const t = tbl(tableName); if (!t || triplets.length < 3) return 0;
-        const sId = t.resolveColId(String(sumColId));
-        const conds = [];
-        for (let i = 0; i + 2 < triplets.length; i += 3)
-            conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
-        let sum = 0, count = 0;
-        for (let i = 0; i < t.getFullRowCount(); i++) {
-            if (conds.every(c => matchCondition(t.getFullValue(i, c.col), c.op, c.val))) { sum += Number(t.getFullValue(i, sId)) || 0; count++; }
-        }
-        return count ? sum / count : 0;
+        const sum = numeric(colCached(tableName, t, t.resolveColId(String(sumColId)), false));
+        const { test } = buildConds(t, tableName, triplets);
+        let acc = 0, count = 0;
+        for (let i = 0; i < sum.length; i++)
+            if (test(i)) { acc += sum[i] || 0; count++; }
+        return count ? acc / count : 0;
     });
     fns.set('TABLE_MINIF', (tableName, colId, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return 0;
-        const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+        const col = numeric(colCached(tableName, t, t.resolveColId(String(colId)), false));
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
         let min = Infinity;
-        for (let i = 0; i < t.getFullRowCount(); i++) {
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) { const v = Number(t.getFullValue(i, cId)); if (!isNaN(v) && v < min) min = v; }
-        }
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) { const v = col[i]; if (!isNaN(v) && v < min) min = v; }
         return isFinite(min) ? min : 0;
     });
     fns.set('TABLE_MAXIF', (tableName, colId, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return 0;
-        const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+        const col = numeric(colCached(tableName, t, t.resolveColId(String(colId)), false));
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
         let max = -Infinity;
-        for (let i = 0; i < t.getFullRowCount(); i++) {
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) { const v = Number(t.getFullValue(i, cId)); if (!isNaN(v) && v > max) max = v; }
-        }
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) { const v = col[i]; if (!isNaN(v) && v > max) max = v; }
         return isFinite(max) ? max : 0;
     });
     fns.set('TABLE_FILTERCOL', (tableName, colId, filterColId, op, filterValue) => {
         const t = tbl(tableName); if (!t) return [];
-        const cId = t.resolveColId(String(colId)), fId = t.resolveColId(String(filterColId));
+        const col = colCached(tableName, t, t.resolveColId(String(colId)), false);
+        const flt = colCached(tableName, t, t.resolveColId(String(filterColId)), false);
+        const test = compileCond(flt, String(op), filterValue);
         const result = [];
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (matchCondition(t.getFullValue(i, fId), String(op), filterValue)) result.push(t.getFullValue(i, cId) ?? null);
+        for (let i = 0; i < flt.length; i++)
+            if (test(i)) result.push(col[i] ?? null);
         return result;
     });
     fns.set('TABLE_FILTERCOLIFS', (tableName, colId, ...triplets) => {
         const t = tbl(tableName); if (!t || triplets.length < 3) return [];
-        const cId = t.resolveColId(String(colId));
-        const conds = [];
-        for (let i = 0; i + 2 < triplets.length; i += 3)
-            conds.push({ col: t.resolveColId(String(triplets[i])), op: String(triplets[i + 1]), val: triplets[i + 2] });
+        const col = colCached(tableName, t, t.resolveColId(String(colId)), false);
+        const { test, n } = buildConds(t, tableName, triplets);
         const result = [];
-        for (let i = 0; i < t.getFullRowCount(); i++)
-            if (conds.every(c => matchCondition(t.getFullValue(i, c.col), c.op, c.val))) result.push(t.getFullValue(i, cId) ?? null);
+        for (let i = 0; i < n; i++)
+            if (test(i)) result.push(col[i] ?? null);
         return result;
     });
     fns.set('TABLE_LOOKUP', (tableName, lookupColId, lookupValue, returnColId, filtered = false) => {
         const t = tbl(tableName); if (!t) return '#N/A';
         const useFiltered = wantsFiltered(filtered);
-        const lId = t.resolveColId(String(lookupColId)), rId = t.resolveColId(String(returnColId));
-        for (let i = 0; i < rowCountOf(t, useFiltered); i++)
-            if (matchCondition(valueAt(t, i, lId, useFiltered), '=', lookupValue)) return valueAt(t, i, rId, useFiltered) ?? null;
+        const look = colCached(tableName, t, t.resolveColId(String(lookupColId)), useFiltered);
+        const ret = colCached(tableName, t, t.resolveColId(String(returnColId)), useFiltered);
+        for (let i = 0; i < look.length; i++)
+            if (matchCondition(look[i], '=', lookupValue)) return ret[i] ?? null;
         return '#N/A';
     });
     fns.set('TABLE_FILTER', (tableName, colId, op, value, filtered = false) => {
         const t = tbl(tableName); if (!t) return 0;
         const useFiltered = wantsFiltered(filtered);
-        const cId = t.resolveColId(String(colId));
+        const col = colCached(tableName, t, t.resolveColId(String(colId)), useFiltered);
+        const test = compileCond(col, String(op), value);
         let count = 0;
-        for (let i = 0; i < rowCountOf(t, useFiltered); i++)
-            if (matchCondition(valueAt(t, i, cId, useFiltered), String(op), value)) count++;
+        for (let i = 0; i < col.length; i++)
+            if (test(i)) count++;
         return count;
     });
 
@@ -407,6 +559,17 @@ export function buildTableFunctions(resolveTableByName) {
             finally { _tableEvalDepth--; }
         });
     }
+    // The materialised-column cache (_colCache, and the _loCache/_numCache/_maskCache
+    // keyed on its arrays) is valid only while the referenced tables' rows are
+    // unchanged. For a per-evaluator function map that holds automatically — the
+    // evaluator is discarded and rebuilt on any data change. But the sheet
+    // FormulaEngine registers these functions ONCE for the sheet's lifetime (see
+    // TableManager.registerFunctions), so it must drop the cache when table rows
+    // change; otherwise a grid formula like =TABLE_SUM('Ledger',…) keeps returning
+    // the pre-change result after an insert/delete/edit. Expose a clear hook for
+    // that caller. Clearing _colCache suffices: the derived WeakMaps are keyed on
+    // the cached array's identity, so fresh materialisations miss them and rebuild.
+    wrapped.clearColumnCache = () => _colCache.clear();
     return wrapped;
 }
 
@@ -414,6 +577,14 @@ export function buildTableFunctions(resolveTableByName) {
 
 const CROSS_ROW_PATTERN = /\b(PREV|NEXT|ROWVAL|WINDOW)\s*\(/i;
 const COL_REF_PATTERN   = /\{([^}]+)\}/g;
+
+// Gate for #substituteTableFunctions: true iff the expression contains a *bare*
+// row-helper / aggregate call (i.e. the substitution loop below would find a
+// match). Word-boundary anchored so TABLE_* functions — which embed SUM/COUNT/…
+// after an underscore — do NOT trigger it; a pure TABLE_SUMIFS(...) formula
+// (evaluated by the formula engine, not substituted here) skips the whole scan.
+// Same alternation as the substitution regex, non-global for .test().
+const BARE_FN_GATE = /\b(WINDOW|ROWVAL|PREV|NEXT|RUNNINGIFS|RUNNINGIF|SUMIFS|SUMIF|AVGIF|MINIF|MAXIF|COUNTIF|AVG|MIN|MAX|SUM)\s*\(/i;
 
 // Matches TABLE_<FUNC>(<firstArg>, ...) capturing the literal name (group 1/2) or
 // signalling a dynamic first arg via group 3. The name is intentionally permissive:
@@ -579,6 +750,13 @@ export class TableFormulaEvaluator {
     // Populated during #buildComputedCache(). PREV/NEXT/ROWVAL read from here.
     /** @type {Array<Map<string,any>>|null} */ #computed = null;
 
+    /** @type {boolean} Whether any column has a formula (else the computed cache is skipped). */
+    #hasForms = false;
+
+    /** @type {Set<string>} Cells currently mid-computation — lets #ensureCellComputed
+     *  break true reference cycles during lazy/on-demand evaluation. */
+    #computing = new Set();
+
     // O(1) column def lookup by id — avoids Array.find() in hot paths.
     /** @type {Map<string,object>} */ #colById = new Map();
 
@@ -586,7 +764,7 @@ export class TableFormulaEvaluator {
     #runningIfCache  = new Map();
     #runningIfDirty  = new Map();
 
-    constructor(rows, columns, cumReverse = false, tableResolver = null, sheetValueEval = null) {
+    constructor(rows, columns, cumReverse = false, tableResolver = null, sheetValueEval = null, deferBuild = false) {
         this.#rows       = rows;
         this.#cols       = columns;
         this.#cumReverse = cumReverse;
@@ -606,8 +784,22 @@ export class TableFormulaEvaluator {
         this.#cyclicCols  = plan.cyclic;
 
         // Skip the O(rows × cols) cache build when no column has a formula.
-        const hasForms = columns.some(c => c.defaultFormula || (c.isNonEntry && c.formula));
-        if (hasForms) this.#buildComputedCache();
+        this.#hasForms = columns.some(c => c.defaultFormula || (c.isNonEntry && c.formula));
+        // deferBuild lets the owning store publish this evaluator to its #eval slot
+        // *before* the (potentially re-entrant) cache build runs — see
+        // TableStore.#ensureEval. Without deferral, a table cell whose =formula
+        // resolves back through the sheet engine into this same table would recurse
+        // into a fresh full rebuild for every reference.
+        if (this.#hasForms && !deferBuild) this.#buildComputedCache();
+    }
+
+    /**
+     * Build the computed cache if it has not been built yet. Public entry point for
+     * the deferBuild construction path (see constructor). Idempotent — a no-op once
+     * #computed exists or when no column has a formula.
+     */
+    buildComputed() {
+        if (this.#hasForms && !this.#computed) this.#buildComputedCache();
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
@@ -726,47 +918,80 @@ export class TableFormulaEvaluator {
         const n = this.#rows.length;
         this.#computed = Array.from({ length: n }, () => new Map());
 
+        // Rows in order (so cross-row PREV/NEXT dependencies stay shallow), columns
+        // in topological #evalOrder. Each cell is materialised via #ensureCellComputed,
+        // which memoises + guards, so a cell a re-entrant read pulls in early is not
+        // recomputed when the loop reaches it.
         for (let i = 0; i < n; i++) {
             for (const colId of this.#evalOrder) {
-                const def = this.#colById.get(colId);
-                if (!def) continue;
-                const formula = def.defaultFormula ?? (def.isNonEntry ? def.formula : null);
-                if (!formula) {
-                    // No formula: just cache the stored value
-                    this.#computed[i].set(colId, this.#resolveMaybeFormula(this.#rows[i]?.[colId]));
-                    continue;
-                }
-                if (this.#cyclicCols.has(colId)) {
-                    this.#computed[i].set(colId, '#CYCLE');
-                    continue;
-                }
-                if (def.isNonEntry) {
-                    // Always computed
-                    const val = this.#evalFormula(formula, i, colId);
-                    this.#computed[i].set(colId, val);
-                } else {
-                    // defaultFormula: use stored value if present (override), else compute
-                    const stored = this.#rows[i]?.[colId];
-                    if (stored !== undefined && stored !== null) {
-                        this.#computed[i].set(colId, this.#resolveMaybeFormula(stored));
-                    } else {
-                        const val = this.#evalFormula(formula, i, colId);
-                        this.#computed[i].set(colId, val);
-                    }
-                }
+                if (this.#colById.has(colId)) this.#ensureCellComputed(i, colId);
             }
         }
     }
 
-    /** Read from computed cache (falls back to stored row value). */
+    /**
+     * Materialise one cell's cached value on demand and memoise it. A cell whose
+     * formula resolves — via the injected sheet evaluator — back to another cell in
+     * this table that the eager loop has not reached yet is computed here on first
+     * touch (rather than read as its raw stored value), so cross-references resolve
+     * to the same values regardless of evaluation order, while every cell is still
+     * built exactly once. The per-cell in-progress guard breaks true reference
+     * cycles by returning the raw value (uncached) instead of recursing forever.
+     */
+    #ensureCellComputed(rowIndex, colId) {
+        const rowMap = this.#computed[rowIndex];
+        const existing = rowMap.get(colId);
+        if (existing !== undefined) return existing;
+        const key = rowIndex + '\x00' + colId;
+        if (this.#computing.has(key)) {
+            return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
+        }
+        this.#computing.add(key);
+        let val;
+        try {
+            val = this.#computeRawCell(rowIndex, colId);
+        } finally {
+            this.#computing.delete(key);
+        }
+        rowMap.set(colId, val);
+        return val;
+    }
+
+    /** Raw (un-memoised) computed value for one cell — mirrors the per-branch logic
+     *  the #buildComputedCache inner loop used before it was made lazy. */
+    #computeRawCell(rowIndex, colId) {
+        const def = this.#colById.get(colId);
+        const formula = def.defaultFormula ?? (def.isNonEntry ? def.formula : null);
+        if (!formula) {
+            // No formula: just the stored value
+            return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
+        }
+        if (this.#cyclicCols.has(colId)) return '#CYCLE';
+        if (def.isNonEntry) {
+            // Always computed
+            return this.#evalFormula(formula, rowIndex, colId);
+        }
+        // defaultFormula: use stored value if present (override), else compute
+        const stored = this.#rows[rowIndex]?.[colId];
+        if (stored !== undefined && stored !== null) {
+            return this.#resolveMaybeFormula(stored);
+        }
+        return this.#evalFormula(formula, rowIndex, colId);
+    }
+
+    /** Read from computed cache, materialising the cell on demand if needed
+     *  (falls back to the stored row value when there is no cache/row). */
     #getComputed(rowIndex, colId) {
         if (!this.#computed || rowIndex < 0 || rowIndex >= this.#computed.length) {
             return this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
         }
-        const cached = this.#computed[rowIndex].get(colId);
-        return cached !== undefined
-            ? this.#resolveMaybeFormula(cached)
-            : this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
+        if (!this.#colById.has(colId)) {
+            const cached = this.#computed[rowIndex].get(colId);
+            return cached !== undefined
+                ? this.#resolveMaybeFormula(cached)
+                : this.#resolveMaybeFormula(this.#rows[rowIndex]?.[colId]);
+        }
+        return this.#resolveMaybeFormula(this.#ensureCellComputed(rowIndex, colId));
     }
 
     #resolveMaybeFormula(val) {
@@ -844,12 +1069,10 @@ export class TableFormulaEvaluator {
      * @param {boolean} isNewRow  - True when evaluating default formulas for a new row
      */
     #substituteTableFunctions(expr, rowIndex, isNewRow) {
-        // Quick exit: none of the substitutable keywords present
-        if (!expr.includes('PREV') && !expr.includes('NEXT') &&
-            !expr.includes('ROWVAL') && !expr.includes('WINDOW') &&
-            !expr.includes('SUM') && !expr.includes('AVG') &&
-            !expr.includes('MIN') && !expr.includes('MAX') &&
-            !expr.includes('COUNT') && !expr.includes('RUNNING')) return expr;
+        // Quick exit unless a *bare* row-helper/aggregate call is present. This
+        // skips the RegExp construction + scan below for pure TABLE_*(...) formulas
+        // (whose embedded SUM/COUNT/… defeated the former substring gate).
+        if (!BARE_FN_GATE.test(expr)) return expr;
 
         // New RegExp per call so recursive calls don't share `lastIndex` state.
         const RE = new RegExp(
@@ -986,7 +1209,7 @@ export class TableFormulaEvaluator {
         // are scoped errors — surface #REF! at runtime so the user sees an
         // obvious problem instead of silent 0/null. validateColumnFormula
         // catches these at edit time when the UI uses it.
-        try { return evaluate(parseFormula('=' + t), () => '#REF!', {}, this.#customFunctions); } catch { return null; }
+        try { return evaluate(cachedParseFormula('=' + t), () => '#REF!', {}, this.#customFunctions); } catch { return null; }
     }
 
     // ─── Running / conditional aggregates ────────────────────────────────────

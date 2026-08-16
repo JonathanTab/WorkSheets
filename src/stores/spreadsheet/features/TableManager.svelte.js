@@ -75,6 +75,10 @@ export class TableManager {
     /** @type {((formula: string) => any) | null} */
     #sheetFormulaEval = null;
 
+    /** @type {(() => void) | null} Clears the registered TABLE_* functions' cached
+     *  source columns; set in registerFunctions(), invoked on any table data change. */
+    #clearFormulaColumnCache = null;
+
     /**
      * @param {import('yjs').Map<any>} sheet
      * @param {import('yjs').Doc} ydoc
@@ -496,11 +500,29 @@ export class TableManager {
      * @param {import('../../../formulas/FormulaEngine.svelte.js').FormulaEngine} formulaEngine
      * @param {any} [session] SpreadsheetSession — used for cross-sheet table fallback
      */
-    registerFunctions(formulaEngine, session) {
+    registerFunctions(formulaEngine, session, { trackForInvalidation = false } = {}) {
         const byName = (name) => this.getTableByName(name) ?? session?.getCrossSheetTable(name) ?? null;
-        for (const [name, fn] of buildTableFunctions(byName)) {
+        const fns = buildTableFunctions(byName);
+        const clear = fns.clearColumnCache ?? null;
+        // The persistent engine registers these functions once for its lifetime but
+        // they cache materialised source columns; retain the cache-clear hook so table
+        // data changes can drop it (otherwise =TABLE_*() grid cells return stale
+        // results). Callers that own a longer-lived engine of their own (e.g. warmed
+        // cross-sheet engines) capture the returned hook instead of setting this flag.
+        if (trackForInvalidation) this.#clearFormulaColumnCache = clear;
+        for (const [name, fn] of fns) {
             formulaEngine.registerFunction(name, fn);
         }
+        return clear;
+    }
+
+    /**
+     * Drop the registered TABLE_* functions' cached source columns so grid formulas
+     * (=TABLE_SUM('Ledger',…) etc.) recompute against current rows. Call whenever a
+     * table's data changes — see SpreadsheetSession's onTableChange handler.
+     */
+    clearFormulaColumnCache() {
+        this.#clearFormulaColumnCache?.();
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────

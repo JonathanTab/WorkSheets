@@ -26,7 +26,6 @@ import { YKeyValue } from 'y-utility/y-keyvalue';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
 import { FormulaError } from '../../formulas/functions.js';
 import { ExternalDocManager } from './ExternalDocManager.js';
-import { makeSheetCellEvaluator } from './sheetCellEval.js';
 import {
     rewriteSheetRefsInFormula,
     rewriteTableRefsInFormula,
@@ -209,6 +208,23 @@ export class SpreadsheetSession {
     #sheetEngineCacheOrder = [];
     static #MAX_CACHED_SHEETS = 3;
 
+    /**
+     * On-demand cache of real FormulaEngines for NON-active sheets, used to resolve
+     * cross-sheet references (Sheet2!A1 in a formula, cross-sheet dropdown ranges).
+     * Each is a genuine FormulaEngine (full spill/cycle/TABLE_* parity with the active
+     * one) reading that sheet's cellValues, kept current by a formula observer. This
+     * replaces both the per-call throwaway engine in computeSheetRange and the
+     * lightweight makeSheetCellEvaluator path — one warmed engine per referenced sheet.
+     * @type {Map<string, {engine: any, clearColumnCache: (() => void)|null, cleanup: (() => void)|null}>}
+     */
+    #crossSheetEngineCache = new Map();
+    /** Insertion-order list for cross-sheet engine LRU eviction. @type {string[]} */
+    #crossSheetEngineOrder = [];
+    /** Sheets whose cross-sheet engine is mid-build (nested cross-sheet refs) — never
+     *  evicted while on the build stack. @type {Set<string>} */
+    #crossSheetBuilding = new Set();
+    static #MAX_CROSS_SHEET_ENGINES = 4;
+
     // Reactive undo/redo state (updated by observer)
     #canUndo = $state(false);
     #canRedo = $state(false);
@@ -365,19 +381,15 @@ export class SpreadsheetSession {
                 // all formulas in every active+cached engine that depend on any
                 // table (or wildcard) dirty and recalc.
                 this.tableRegistry.onTableStructureChange = () => {
-                    const dirtyEngine = (engine) => {
-                        if (!engine) return;
-                        // markTableDependentsDirty('*') hits wildcard formulas; iterate
-                        // every known table name to also catch direct-name deps.
+                    const names = this.tableRegistry?.getAllTableNames?.() ?? [];
+                    // Every live engine (active, cached, warmed cross-sheet): drop the
+                    // stale TABLE_* column cache and re-dirty wildcard + direct-name deps.
+                    this.#forEachLiveEngine((engine, clearColumnCache) => {
+                        clearColumnCache?.();
                         engine.markTableDependentsDirty('*');
-                        const names = this.tableRegistry?.getAllTableNames?.() ?? [];
                         for (const n of names) engine.markTableDependentsDirty(n);
                         engine.recalculateDirty();
-                    };
-                    dirtyEngine(this.formulaEngine);
-                    for (const [, entry] of this.#sheetEngineCache) {
-                        dirtyEngine(entry.formulaEngine);
-                    }
+                    });
                 };
 
                 this.tableRegistry.onTableChange = ({ sourceTableId, events, rowArr }) => {
@@ -391,11 +403,18 @@ export class SpreadsheetSession {
                     const { structural, cellChanges } = classifyTableRowEvents(events, rowArr);
                     if (!structural && cellChanges.length === 0) return;
 
-                    // (a) Name-based: TABLE_GET / TABLE_SUM / … referencing this table.
+                    // (a) Name-based refresh: drop each live engine's stale TABLE_*
+                    // column cache and re-dirty its =TABLE_*() formulas. Covers the
+                    // active engine, cached (inactive) sheet engines, AND warmed
+                    // cross-sheet engines — all keep their caches for their lifetime, so
+                    // without this their =TABLE_SUM('Ledger') cells keep the pre-change
+                    // value until reactivated/rebuilt.
                     const sourceStore = this.tableRegistry.getById(sourceTableId);
-                    if (sourceStore?.name) {
-                        engine.markTableDependentsDirty(sourceStore.name.toUpperCase());
-                    }
+                    const upperName = sourceStore?.name ? sourceStore.name.toUpperCase() : null;
+                    this.#forEachLiveEngine((eng, clearColumnCache) => {
+                        clearColumnCache?.();
+                        if (upperName) eng.markTableDependentsDirty(upperName);
+                    });
 
                     // (b) Coordinate-based: map to grid cells per view.
                     const dirtyCells = [];
@@ -434,8 +453,9 @@ export class SpreadsheetSession {
                     // Always flush name-based deps (TABLE_* formulas): notifyCellsChanged
                     // only calls recalculateDirty() when it finds coordinate-based dependents,
                     // so name-based dirty cells can be left pending when no grid formula
-                    // references the table by coordinate.
-                    engine.recalculateDirty();
+                    // references the table by coordinate. Flush every live engine we may
+                    // have re-dirtied (a no-op where the dirty set is empty).
+                    this.#forEachLiveEngine((eng) => eng.recalculateDirty());
                 };
 
                 // Single document-level UndoManager: tracks every sheet's Y types
@@ -552,6 +572,7 @@ export class SpreadsheetSession {
         }
 
         this.#clearSheetEngineCache();
+        this.#clearCrossSheetEngineCache();
 
         if (this.#cleanupObserver) {
             this.#cleanupObserver();
@@ -632,6 +653,16 @@ export class SpreadsheetSession {
         // Observer for document structure (Sheets list)
         const structureObserver = () => {
             this.#updateSheetsList();
+            // Recovery: if the doc's structure wasn't fully synced at load time,
+            // activeSheetStore can be left null (the initial sheets.get(firstSheetId)
+            // lookup missed because the sheet entry hadn't arrived yet). Unlike
+            // rootObserver below (which only fires when root's own top-level keys
+            // change), this fires when sheetOrder/sheets receive their delayed
+            // entries — exactly when the retry below can actually succeed.
+            if (!this.activeSheetStore && this.activeSheetId &&
+                this.root?.get('sheets')?.has(this.activeSheetId)) {
+                this.setActiveSheet(this.activeSheetId);
+            }
         };
 
         // Observer for metadata changes
@@ -844,7 +875,9 @@ export class SpreadsheetSession {
 
         // Register TABLE_* functions immediately so they are available when existing
         // formulas are evaluated below (prevents #NAME? on first load).
-        tableManager?.registerFunctions(this.formulaEngine, this);
+        // trackForInvalidation: this is the persistent engine, so its TABLE_* column
+        // cache must be dropped on table data changes (see onTableChange).
+        tableManager?.registerFunctions(this.formulaEngine, this, { trackForInvalidation: true });
 
         // Register IMPORTRANGE as a custom function, closing over the manager.
         const extMgr = this.#externalDocManager;
@@ -874,35 +907,13 @@ export class SpreadsheetSession {
             return v;
         });
 
-        // Set up cross-sheet getter — resolves SheetName!CellRef references at eval time.
-        // crossSheetCustomFns is captured once per engine init so the closure is stable.
-        const crossSheetCustomFns = extMgr ? new Map([['IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
-            if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
-            if (typeof rangeStr !== 'string') return FormulaError.VALUE;
-            return extMgr.getRange(String(fileIdOrUrl), rangeStr);
-        }]]) : null;
-
-        // Recursive cross-sheet resolver. Lookups follow the visited set across
-        // sheet hops so Sheet1→Sheet2→Sheet1 cycles surface as #CIRC! rather
-        // than infinite-looping or returning #REF.
-        const crossSheetResolver = (sheetName, row, col, visited) => {
-            const targetSheet = this.sheets.find(s => s.name === sheetName);
-            if (!targetSheet) return FormulaError.REF;
-            const sheetsMap = this.root?.get('sheets');
-            const sheetYMap = sheetsMap?.get(targetSheet.id);
-            if (!sheetYMap) return FormulaError.REF;
-            const cvArr = sheetYMap.get('cellValues');
-            if (!cvArr) return null;
-            const kv = this.#getOrCreateCrossSheetKV(targetSheet.id, cvArr);
-            const { evalCell } = makeSheetCellEvaluator(kv, crossSheetCustomFns, {
-                sheetTag: targetSheet.id,
-                crossSheetResolver,
-            });
-            return evalCell(row, col, visited);
-        };
-
+        // Set up cross-sheet getter — resolves SheetName!CellRef at eval time via a
+        // real, current FormulaEngine for the target sheet (active, cached, or warmed
+        // on demand). Multi-hop refs work because each warmed engine's own cross-sheet
+        // getter routes back here; a cross-sheet cycle terminates because a cell whose
+        // engine is mid-build reads as not-yet-computed rather than looping.
         this.formulaEngine.setCrossSheetGetter((sheetName, row, col) =>
-            crossSheetResolver(sheetName, row, col, new Set())
+            this.getCrossSheetValue(sheetName, row, col)
         );
 
         // Wire formula evaluator into all table stores so that table cell values
@@ -989,19 +1000,12 @@ export class SpreadsheetSession {
                     capturedEngine.recalculateDirty();
                 }
 
-                // Propagate this sheet's changes to any other engine (active or cached)
-                // that has cross-sheet references pointing at this sheet.
+                // Propagate this sheet's changes to every other live engine (active,
+                // cached, or warmed cross-sheet) that references this sheet.
                 if (valueChanges.length > 0 || formulasToClear.length > 0 || formulasToSet.length > 0) {
                     const sheetName = currentSheetName();
                     if (!sheetName) return;
-                    if (this.formulaEngine && this.formulaEngine !== capturedEngine) {
-                        this.formulaEngine.invalidateCrossSheetDependencies(sheetName);
-                    }
-                    for (const [, entry] of this.#sheetEngineCache) {
-                        if (entry.formulaEngine !== capturedEngine) {
-                            entry.formulaEngine.invalidateCrossSheetDependencies(sheetName);
-                        }
-                    }
+                    this.#propagateCrossSheetChange(sheetName, capturedEngine);
                 }
             };
 
@@ -1126,6 +1130,9 @@ export class SpreadsheetSession {
         }
 
         this.activeSheetId = sheetId;
+        // This sheet is now backed by the active engine; drop any warmed cross-sheet
+        // engine for it so we don't keep a duplicate observer + recompute in parallel.
+        this.#dropCrossSheetEngine(sheetId);
 
         // Refresh remote selections immediately — the awareness observer only
         // fires on awareness changes, not on local sheet switches, so stale
@@ -1234,24 +1241,11 @@ export class SpreadsheetSession {
     getCrossSheetValue(sheetName, row, col) {
         const targetSheet = this.sheets.find(s => s.name === sheetName);
         if (!targetSheet) return FormulaError.REF;
-
-        const sheetsMap = this.root?.get('sheets');
-        const sheetYMap = sheetsMap?.get(targetSheet.id);
-        if (!sheetYMap) return FormulaError.REF;
-
-        const cvArr = sheetYMap.get('cellValues');
-        if (!cvArr) return null;
-
-        const extMgr = this.#externalDocManager;
-        const customFns = extMgr ? new Map([['IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
-            if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
-            if (typeof rangeStr !== 'string') return FormulaError.VALUE;
-            return extMgr.getRange(String(fileIdOrUrl), rangeStr);
-        }]]) : null;
-
-        const kv = this.#getOrCreateCrossSheetKV(targetSheet.id, cvArr);
-        const { evalCell } = makeSheetCellEvaluator(kv, customFns, { sheetTag: targetSheet.id });
-        return evalCell(row, col, new Set());
+        // Resolve through a real, current FormulaEngine for the target sheet (active,
+        // cached, or warmed on demand) — full spill/cycle/TABLE_* parity.
+        const engine = this.#getCrossSheetEngine(targetSheet.id);
+        if (!engine) return FormulaError.REF;
+        return engine.getDisplayValue(row, col) ?? null;
     }
 
     /**
@@ -1272,6 +1266,173 @@ export class SpreadsheetSession {
         return kv;
     }
 
+    // ─── Cross-sheet engine warming ─────────────────────────────────────────────
+    // A single mechanism for cross-sheet reads: get a real, current FormulaEngine
+    // for any sheet (the active one, a recently-active cached one, or a warmed-on-
+    // demand one) and read computed values from it. Replaces both the per-call
+    // throwaway engine in computeSheetRange and the lightweight makeSheetCellEvaluator
+    // path, giving full spill/cycle/TABLE_* parity for cross-sheet references.
+
+    /** Iterate every live FormulaEngine (active + cached bundles + warmed cross-sheet)
+     *  with a hook that clears its TABLE_* column cache. */
+    #forEachLiveEngine(fn) {
+        if (this.formulaEngine) fn(this.formulaEngine, () => this.tableManager?.clearFormulaColumnCache());
+        for (const [, e] of this.#sheetEngineCache) {
+            if (e.formulaEngine) fn(e.formulaEngine, () => e.tableManager?.clearFormulaColumnCache());
+        }
+        for (const [, e] of this.#crossSheetEngineCache) {
+            if (e.engine) fn(e.engine, e.clearColumnCache);
+        }
+    }
+
+    /** Propagate a sheet's changes to every other live engine that references it
+     *  cross-sheet, so their Sheet!Ref formulas recompute. */
+    #propagateCrossSheetChange(sheetName, exceptEngine) {
+        if (!sheetName) return;
+        this.#forEachLiveEngine((engine) => {
+            if (engine !== exceptEngine) engine.invalidateCrossSheetDependencies(sheetName);
+        });
+    }
+
+    /**
+     * Return a current FormulaEngine for any sheet, building + caching one on demand.
+     * @param {string} sheetId
+     * @returns {any|null}
+     */
+    #getCrossSheetEngine(sheetId) {
+        if (!sheetId) return null;
+        if (sheetId === this.activeSheetId) return this.formulaEngine;
+        const full = this.#sheetEngineCache.get(sheetId);
+        if (full?.formulaEngine) return full.formulaEngine;
+        const existing = this.#crossSheetEngineCache.get(sheetId);
+        if (existing) return existing.engine;
+        return this.#buildCrossSheetEngine(sheetId);
+    }
+
+    /** Build, cache, and start observing a FormulaEngine for a non-active sheet. */
+    #buildCrossSheetEngine(sheetId) {
+        const sheetYMap = this.root?.get('sheets')?.get(sheetId);
+        if (!sheetYMap) return null;
+        const cvArr = sheetYMap.get('cellValues');
+        if (!cvArr) return null;
+        const cvKV = this.#getOrCreateCrossSheetKV(sheetId, cvArr);
+
+        const eng = new FormulaEngine();
+        const extMgr = this.#externalDocManager;
+        if (extMgr) {
+            eng.registerFunction('IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
+                if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
+                if (typeof rangeStr !== 'string') return FormulaError.VALUE;
+                return extMgr.getRange(String(fileIdOrUrl), rangeStr);
+            });
+        }
+        // Capture the TABLE_* cache-clear hook so table data changes can drop it.
+        const clearColumnCache = this.tableManager?.registerFunctions(eng, this) ?? null;
+        // Cross-sheet refs FROM this sheet route back through the same resolver, so
+        // multi-hop refs work and a cross-sheet cycle terminates (a cell mid-build is
+        // read as not-yet-computed rather than looping forever).
+        eng.setCrossSheetGetter((sheetName, row, col) => this.getCrossSheetValue(sheetName, row, col));
+        eng.setCellValueGetter((r, c) => {
+            const data = cvKV.get(`${r},${c}`);
+            if (!data) return null;
+            const v = data.v;
+            if (typeof v === 'string' && v.startsWith('=')) return null;
+            if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
+            return v ?? null;
+        });
+
+        // Publish BEFORE loading/recalc so a re-entrant cross-sheet ref back to this
+        // sheet finds the in-progress engine instead of building a second one.
+        const entry = { engine: eng, clearColumnCache, cleanup: null };
+        this.#crossSheetEngineCache.set(sheetId, entry);
+        this.#crossSheetEngineOrder = this.#crossSheetEngineOrder.filter(id => id !== sheetId);
+        this.#crossSheetEngineOrder.push(sheetId);
+
+        this.#crossSheetBuilding.add(sheetId);
+        try {
+            for (const [key, { val: data }] of cvKV.map) {
+                const v = data?.v;
+                if (typeof v === 'string' && v.startsWith('=')) {
+                    const [row, col] = key.split(',').map(Number);
+                    eng.registerFormula(row, col, v);
+                }
+            }
+            eng.recalculateDirty();
+        } finally {
+            this.#crossSheetBuilding.delete(sheetId);
+        }
+
+        // Keep current: on this sheet's cellValues changes, update its formulas +
+        // recalc, then propagate to any other engine that references this sheet.
+        const observer = (changes) => this.#applyCrossSheetChanges(eng, sheetId, changes);
+        cvKV.on('change', observer);
+        entry.cleanup = () => cvKV.off('change', observer);
+
+        // Evict the oldest cross-sheet engine over the cap, never one that is the
+        // active target or still mid-build (a nested cross-sheet ref could be using it).
+        const protectedIds = new Set([sheetId, ...this.#crossSheetBuilding]);
+        while (this.#crossSheetEngineCache.size > SpreadsheetSession.#MAX_CROSS_SHEET_ENGINES) {
+            const evictId = this.#crossSheetEngineOrder.find(id => !protectedIds.has(id));
+            if (!evictId) break;
+            this.#dropCrossSheetEngine(evictId);
+        }
+        return eng;
+    }
+
+    /** Formula observer body for a warmed cross-sheet engine (mirrors the active
+     *  engine's formulaObserver). */
+    #applyCrossSheetChanges(engine, sheetId, changes) {
+        const formulasToSet = [];
+        const formulasToClear = [];
+        const valueChanges = [];
+        for (const [key, change] of changes) {
+            const [row, col] = key.split(',').map(Number);
+            if (change.action === 'delete') {
+                formulasToClear.push({ row, col });
+                valueChanges.push({ row, col });
+            } else {
+                const newV = change.newValue?.v;
+                const oldV = change.oldValue?.v;
+                if (typeof newV === 'string' && newV.startsWith('=')) {
+                    formulasToSet.push({ row, col, formula: newV });
+                } else {
+                    if (typeof oldV === 'string' && oldV.startsWith('=')) formulasToClear.push({ row, col });
+                    valueChanges.push({ row, col });
+                }
+            }
+        }
+        for (const { row, col } of formulasToClear) engine.clearFormula(row, col);
+        for (const { row, col, formula } of formulasToSet) engine.setFormula(row, col, formula);
+        if (valueChanges.length > 0) engine.notifyCellsChanged(valueChanges);
+        else if (formulasToSet.length > 0 || formulasToClear.length > 0) engine.recalculateDirty();
+
+        if (valueChanges.length > 0 || formulasToSet.length > 0 || formulasToClear.length > 0) {
+            const sheetName = this.sheets.find(s => s.id === sheetId)?.name
+                ?? this.root?.get('sheets')?.get(sheetId)?.get('name') ?? '';
+            this.#propagateCrossSheetChange(sheetName, engine);
+        }
+    }
+
+    /** Tear down and remove one warmed cross-sheet engine. */
+    #dropCrossSheetEngine(sheetId) {
+        const entry = this.#crossSheetEngineCache.get(sheetId);
+        if (!entry) return;
+        entry.cleanup?.();
+        entry.engine?.clear?.();
+        this.#crossSheetEngineCache.delete(sheetId);
+        this.#crossSheetEngineOrder = this.#crossSheetEngineOrder.filter(id => id !== sheetId);
+    }
+
+    /** Tear down all warmed cross-sheet engines (doc unload / teardown). */
+    #clearCrossSheetEngineCache() {
+        for (const [, entry] of this.#crossSheetEngineCache) {
+            entry.cleanup?.();
+            entry.engine?.clear?.();
+        }
+        this.#crossSheetEngineCache.clear();
+        this.#crossSheetEngineOrder = [];
+    }
+
     /**
      * Compute values for a range on any sheet, evaluating all formulas (including
      * IMPORTRANGE) using a temporary FormulaEngine. Used for cross-sheet dropdown
@@ -1284,69 +1445,21 @@ export class SpreadsheetSession {
      * @returns {Array<any>} flat array of values in row-major order
      */
     computeSheetRange(sheetId, startRow, startCol, endRow, endCol) {
+        const out = [];
         if (sheetId === this.activeSheetId) {
-            const out = [];
             for (let r = startRow; r <= endRow; r++)
                 for (let c = startCol; c <= endCol; c++)
                     out.push(this.getCellDisplayValue(r, c));
             return out;
         }
-
-        const sheetYMap = this.root?.get('sheets')?.get(sheetId);
-        if (!sheetYMap) return [];
-        const cvArr = sheetYMap.get('cellValues');
-        if (!cvArr) return [];
-        const cvKV = this.#getOrCreateCrossSheetKV(sheetId, cvArr);
-
-        const eng = new FormulaEngine();
-        if (this.#externalDocManager) {
-            const extMgr = this.#externalDocManager;
-            eng.registerFunction('IMPORTRANGE', (fileIdOrUrl, rangeStr) => {
-                if (typeof fileIdOrUrl !== 'string' && typeof fileIdOrUrl !== 'number') return FormulaError.VALUE;
-                if (typeof rangeStr !== 'string') return FormulaError.VALUE;
-                return extMgr.getRange(String(fileIdOrUrl), rangeStr);
-            });
-        }
-        // Register TABLE_* functions so cross-sheet formulas in the target
-        // sheet that reference tables work as expected.
-        this.tableManager?.registerFunctions(eng, this);
-        // Cross-sheet getter — uses the same recursive resolver as the active
-        // engine, so multi-hop refs and cycle detection are consistent.
-        eng.setCrossSheetGetter((sheetName, row, col) =>
-            this.getCrossSheetValue(sheetName, row, col)
-        );
-        eng.setCellValueGetter((r, c) => {
-            const data = cvKV.get(`${r},${c}`);
-            if (!data) return null;
-            const v = data.v;
-            if (typeof v === 'string' && v.startsWith('=')) return null;
-            if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
-            return v ?? null;
-        });
-
-        for (const [key, { val: data }] of cvKV.map) {
-            const v = data?.v;
-            if (typeof v === 'string' && v.startsWith('=')) {
-                const [rs, cs] = key.split(',');
-                eng.setFormula(parseInt(rs), parseInt(cs), v);
-            }
-        }
-        eng.recalculateAll();
-
-        const out = [];
-        for (let r = startRow; r <= endRow; r++) {
-            for (let c = startCol; c <= endCol; c++) {
-                const key = `${r},${c}`;
-                if (key in eng.computedValues) {
-                    out.push(eng.computedValues[key]);
-                } else {
-                    const data = cvKV.get(key);
-                    const v = data?.v;
-                    if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) out.push(Number(v));
-                    else out.push(v ?? null);
-                }
-            }
-        }
+        // Non-active sheet: read from its warmed FormulaEngine (built + cached on
+        // demand, kept current). getDisplayValue surfaces spilled values just like
+        // the active engine, so this replaces the former per-call throwaway engine.
+        const engine = this.#getCrossSheetEngine(sheetId);
+        if (!engine) return [];
+        for (let r = startRow; r <= endRow; r++)
+            for (let c = startCol; c <= endCol; c++)
+                out.push(engine.getDisplayValue(r, c) ?? null);
         return out;
     }
 
@@ -1833,6 +1946,8 @@ export class SpreadsheetSession {
         // Evict the deleted sheet's cross-sheet YKeyValue wrapper so a future
         // sheet created with the same id (unlikely but harmless) starts fresh.
         this.#crossSheetKVCache.delete(sheetId);
+        // Tear down any warmed cross-sheet engine for the deleted sheet.
+        this.#dropCrossSheetEngine(sheetId);
 
         // Evict the deleted sheet from the engine cache so its dangling
         // SheetStore/formulaEngine/etc. are destroyed.
