@@ -9,6 +9,7 @@
     import DocTableInsert from './DocTableInsert.svelte';
     import PresenceIndicator from '../spreadsheet/PresenceIndicator.svelte';
     import UserMenu from '../UserMenu.svelte';
+    import { updateMenuItem } from '../../lib/ui/updateMenuItem.js';
     import {
         toggleBold, toggleItalic, toggleUnderline, toggleStrikethrough,
         toggleSuperscript, toggleSubscript,
@@ -175,7 +176,7 @@
                     </svg>
                 </button>
             {/if}
-            <UserMenu {registry} />
+            <UserMenu {registry} menuItems={[updateMenuItem]} />
         </div>
     </div>
 

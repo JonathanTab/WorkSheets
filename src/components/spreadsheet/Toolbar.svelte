@@ -5,6 +5,7 @@
     import PresenceIndicator from "./PresenceIndicator.svelte";
     import UserMenu from "../UserMenu.svelte";
     import LastEditBadge from "../history/LastEditBadge.svelte";
+    import { updateMenuItem } from "../../lib/ui/updateMenuItem.js";
     import { spreadsheetSession } from "../../stores/spreadsheetStore.svelte.js";
     import { storage } from "../../stores/storage.js";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
@@ -83,7 +84,7 @@
                     </svg>
                 </button>
             {/if}
-            <UserMenu {registry} />
+            <UserMenu {registry} menuItems={[updateMenuItem]} />
         </div>
     </div>
     <div class="toolbar-row row2">

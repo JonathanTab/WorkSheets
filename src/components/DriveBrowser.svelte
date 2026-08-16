@@ -3,6 +3,7 @@
     import { openModal, closeTopModal } from "../lib/ui/modalStore.svelte.js";
     import Button from "../lib/ui/Button.svelte";
     import UserMenu from "./UserMenu.svelte";
+    import { updateMenuItem } from "../lib/ui/updateMenuItem.js";
     import MoveFileModal from "./modals/MoveFileModal.svelte";
     import ShareFileModal from "./modals/ShareFileModal.svelte";
     import VersionHistoryModal from "./modals/VersionHistoryModal.svelte";
@@ -1834,7 +1835,7 @@
                 </div>
             </div>
             <div class="header-actions">
-                <UserMenu {registry} />
+                <UserMenu {registry} menuItems={[updateMenuItem]} />
             </div>
         </header>
 
