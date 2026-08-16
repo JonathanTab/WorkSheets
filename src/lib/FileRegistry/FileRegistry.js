@@ -212,15 +212,21 @@ class AppView {
      * @returns {Promise<import('yjs').Doc>}
      */
     async loadDoc(id) {
-        // Wait for any in-flight drive sync to finish before reading roomId.
-        // A snapshot restore on another device rotates roomId server-side; if
-        // sync() is still running, our cached descriptor may be stale.
-        if (this._r._syncPromise) await this._r._syncPromise.catch(() => {});
-        const file = this.get(id);
+        // Load from the cached descriptor immediately; only wait on the drive sync
+        // if we don't have the descriptor cached yet. Background-reconcile the
+        // roomId afterward in case a snapshot restore elsewhere rotated it.
+        // (See the drive facade's loadDoc for the full rationale.)
+        let file = this.get(id);
+        if (!file && this._r._syncPromise) {
+            await this._r._syncPromise.catch(() => {});
+            file = this.get(id);
+        }
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
         this._r._recordOpen(id);
-        return this._r._runtime.load(id, file.roomId, file.app ?? null);
+        const docPromise = this._r._runtime.load(id, file.roomId, file.app ?? null);
+        this._r._reconcileRoomIdAfterSync(id, file.roomId);
+        return docPromise;
     }
 
     /**
@@ -698,11 +704,16 @@ class DriveView {
      * @returns {Promise<import('yjs').Doc>}
      */
     async loadDoc(id, opts = {}) {
-        // Wait for any in-flight drive sync to finish before reading roomId.
-        // A snapshot restore on another device rotates roomId server-side; if
-        // sync() is still running, our cached descriptor may be stale.
-        if (this._r._syncPromise) await this._r._syncPromise.catch(() => {});
-        const file = this.getFile(id);
+        // Load from the CACHED descriptor immediately rather than blocking on the
+        // in-flight drive sync (a full file-list fetch that dominates open latency
+        // on slow networks but carries no doc data). The roomId is hydrated from
+        // local cache at init, so it's available now. Only the rare case where we
+        // have no cached descriptor at all must wait for the sync to discover it.
+        let file = this.getFile(id);
+        if (!file && this._r._syncPromise) {
+            await this._r._syncPromise.catch(() => {});
+            file = this.getFile(id);
+        }
         if (!file) throw new Error(`File not found: ${id}`);
         if (file.type !== 'yjs') throw new Error(`Not a Yjs file: ${id}`);
         if (opts.recordOpen !== false) this._r._recordOpen(id);
@@ -711,7 +722,12 @@ class DriveView {
         // runtime so it doesn't return early with an empty doc when
         // IndexedDB resolves with nothing.
         const expectExistingState = !this._r._runtime._locallyCreated.has(id);
-        return this._r._runtime.load(id, file.roomId, file.app ?? null, { expectExistingState });
+        const docPromise = this._r._runtime.load(id, file.roomId, file.app ?? null, { expectExistingState });
+        // A snapshot restore on another device rotates roomId server-side. If the
+        // drive sync is still running, it may reveal our cached roomId is stale —
+        // reconcile in the background and switch rooms then (no open-time wait).
+        this._r._reconcileRoomIdAfterSync(id, file.roomId);
+        return docPromise;
     }
 
     /** @param {string} id @returns {import('yjs').Doc|null} */
@@ -1363,12 +1379,21 @@ export class FileRegistry extends EventEmitter {
      */
     async _handleRoomRotated(docId, newRoomId) {
         const file = this._files.get(docId);
-        if (!file || file.roomId === newRoomId) return;
-        const updatedFile = { ...file, roomId: newRoomId };
-        this._files.set(docId, updatedFile);
-        await this._sharedStore?.putDriveFile(updatedFile).catch(() => {});
-        // If the doc is currently open in this tab, switch rooms.
-        if (this._runtime.activeDocs.has(docId)) {
+        if (!file) return;
+        // Decide off the LIVE room (the room the doc is actually loaded under), not
+        // just the descriptor — the background roomId reconcile updates the
+        // descriptor first, so a descriptor-equality guard would wrongly no-op
+        // while the live doc is still on the stale room.
+        const liveRoom = this._runtime.activeDocs.get(docId)?.provider?.roomname;
+        if (file.roomId === newRoomId && (liveRoom === undefined || liveRoom === newRoomId)) return;
+
+        if (file.roomId !== newRoomId) {
+            const updatedFile = { ...file, roomId: newRoomId };
+            this._files.set(docId, updatedFile);
+            await this._sharedStore?.putDriveFile(updatedFile).catch(() => {});
+        }
+        // If the doc is currently open in this tab under a different room, switch.
+        if (this._runtime.activeDocs.has(docId) && liveRoom !== newRoomId) {
             await this._runtime.clearAndSwitchRoom(docId, newRoomId).catch(() => {});
         }
         // Notify other tabs.
@@ -1378,6 +1403,26 @@ export class FileRegistry extends EventEmitter {
             newRoomId,
         });
         this.emit('change');
+    }
+
+    /**
+     * After a doc is opened from its cached descriptor, the drive sync may still
+     * be in flight. If it completes and reveals the cached roomId was stale (a
+     * snapshot restore on another device rotated it since our cache was written),
+     * switch the live doc to the authoritative room — routing through the same
+     * rotation handler the server WS push and cross-tab broadcast use.
+     * @param {string} docId
+     * @param {string} loadedRoomId  the cached roomId we just loaded under
+     */
+    _reconcileRoomIdAfterSync(docId, loadedRoomId) {
+        const p = this._syncPromise;
+        if (!p) return; // no sync in flight — cached descriptor is as fresh as it gets
+        p.then(() => {
+            const file = this._files.get(docId);
+            if (file && file.roomId !== loadedRoomId) {
+                this._handleRoomRotated(docId, file.roomId).catch(() => {});
+            }
+        }).catch(() => {});
     }
 
     async shutdown() {
