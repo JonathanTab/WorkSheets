@@ -314,7 +314,12 @@ async function route(req, res) {
 
         if (useNames) {
             const tables = client.listTables(ydoc, sheetId);
-            const table = tables.find(t => t.id === tableId);
+            // getTableRowsWithFormulas/getTableRows resolve tableId by name OR id
+            // (see ops/tableRead.js resolveTable) — match the same way here, or a
+            // name-addressed request silently gets un-translated column-id keys.
+            const wantedLower = String(tableId).trim().toLowerCase();
+            const table = tables.find(t =>
+                t.id === tableId || String(t.name ?? '').trim().toLowerCase() === wantedLower);
             const idToName = table
                 ? new Map(table.columns.map(c => [c.id, c.name]))
                 : new Map();
