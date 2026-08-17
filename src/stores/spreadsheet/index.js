@@ -48,7 +48,6 @@ export {
     initializeSpreadsheet,
     getStorage,
     getAllDocuments,
-    createDocument,
     deleteDocument,
     renameDocument,
     loadDocument,

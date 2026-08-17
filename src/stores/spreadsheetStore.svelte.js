@@ -112,7 +112,6 @@ export {
     initializeSpreadsheet,
     getDocManager,
     getAllDocuments,
-    createDocument,
     deleteDocument,
     renameDocument,
     loadDocument,

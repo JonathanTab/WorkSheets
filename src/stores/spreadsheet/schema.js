@@ -266,8 +266,9 @@ export const spreadsheetSchema = {
      *
      * IMPORTANT: This must never create the root `sheets` structure. If `sheets`
      * is missing it means either:
-     *   (a) the doc is a brand-new file (which is initialized exclusively by
-     *       createDocument() via initializeDocument()), or
+     *   (a) the doc is a brand-new file (initialized exclusively by
+     *       DriveBrowser's "+ New Spreadsheet" via createAndInitializeFile's
+     *       initializer, which calls initializeDocument()), or
      *   (b) the local copy hasn't synced the structure yet from the server.
      *
      * In case (b), creating a default Sheet 1 here would race with the
