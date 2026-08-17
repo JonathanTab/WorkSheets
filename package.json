@@ -15,6 +15,8 @@
     "deploy:servers": "bash scripts/deploy.sh servers",
     "deploy:servers:full": "bash scripts/deploy.sh servers:full",
     "api": "node spreadsheet-api/server.js",
+    "mcp": "node spreadsheet-api/mcp-server.js",
+    "verify": "node scripts/verify-ops.mjs",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix"
   },

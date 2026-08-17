@@ -31,6 +31,8 @@ import path from 'node:path';
 import { SpreadsheetClient } from './SpreadsheetClient.js';
 import { parseFormula } from '../src/formulas/parser.js';
 import { evaluate } from '../src/formulas/evaluator.js';
+import * as ops from '../src/stores/spreadsheet/ops/index.js';
+import { OpError } from '../src/stores/spreadsheet/ops/context.js';
 
 // ─── Load .env ──────────────────────────────────────────────────────────────
 
@@ -105,7 +107,18 @@ const server = http.createServer(async (req, res) => {
         await route(req, res);
     } catch (err) {
         console.error(`[${req.method} ${req.url}]`, err.message);
-        json(res, 500, { error: err.message });
+        // OpError carries a machine-readable code so callers can branch on the
+        // failure instead of parsing prose; map the known ones onto HTTP status.
+        if (err instanceof OpError) {
+            const status = {
+                SHEET_NOT_FOUND: 404, TABLE_NOT_FOUND: 404, ROW_NOT_FOUND: 404,
+                NOT_A_SPREADSHEET: 404, SCHEMA_TOO_NEW: 409, MERGE_OVERLAP: 409,
+                DUPLICATE_SHEET: 409, DUPLICATE_TABLE: 409, DUPLICATE_COLUMN: 409,
+                VALIDATION_FAILED: 422, RANGE_TOO_LARGE: 413,
+            }[err.code] ?? 400;
+            return json(res, status, { error: err.code, message: err.message, ...err.details });
+        }
+        json(res, 500, { error: 'INTERNAL', message: err.message });
     }
 });
 
@@ -345,6 +358,53 @@ async function route(req, res) {
         const ydoc = await openDoc(client, fileId, apiKey);
         client.setCell(ydoc, sheetId, Number(row), Number(col), value, props ?? {});
         return json(res, 200, { ok: true });
+    }
+
+    // ── A1-addressed surface (shares src/stores/spreadsheet/ops with the client) ──
+
+    // GET /file/:fileId/describe[?sample=N]
+    if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/describe$/))) {
+        const ydoc = await openDoc(client, m[1], apiKey);
+        const sample = url.searchParams.has('sample') ? Number(url.searchParams.get('sample')) : undefined;
+        return json(res, 200, ops.describeDocument(ydoc, { sample }));
+    }
+
+    // GET /file/:fileId/inspect[?sheet=NAME]
+    if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/inspect$/))) {
+        const ydoc = await openDoc(client, m[1], apiKey);
+        return json(res, 200, ops.inspectDocument(ydoc, { sheet: url.searchParams.get('sheet') ?? undefined }));
+    }
+
+    // GET /file/:fileId/sheet/:sheetId/range/:a1
+    if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/range\/([^/]+)$/))) {
+        const ydoc = await openDoc(client, m[1], apiKey);
+        return json(res, 200, ops.getRange(ydoc, decodeURIComponent(m[2]), decodeURIComponent(m[3]), {
+            includeFormulas: url.searchParams.get('formulas') === '1',
+            includeStyles:   url.searchParams.get('styles') === '1',
+            evaluate:        url.searchParams.get('evaluate') !== '0',
+        }));
+    }
+
+    // POST /file/:fileId/sheet/:sheetId/range/:a1   { values?, style? }
+    if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/range\/([^/]+)$/))) {
+        const body = await readJsonBody(req);
+        const ydoc = await openDoc(client, m[1], apiKey);
+        const sheet = decodeURIComponent(m[2]);
+        const ref = decodeURIComponent(m[3]);
+        const out = {};
+        if (body.values) out.written = ops.setRange(ydoc, sheet, ref.split(':')[0], body.values, body.props ?? {});
+        if (body.style) out.formatted = ops.formatRange(ydoc, sheet, ref, body.style);
+        await client.flush(600);
+        return json(res, 200, out);
+    }
+
+    // POST /file/:fileId/batch   { operations: [...] }  — atomic, rolls back on failure
+    if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/batch$/))) {
+        const body = await readJsonBody(req);
+        const ydoc = await openDoc(client, m[1], apiKey);
+        const result = ops.applyBatch(ydoc, body.operations ?? []);
+        await client.flush(600);
+        return json(res, 200, result);
     }
 
     // POST /blobs  (raw binary body; Content-Type, X-Filename, X-Parent-Id headers)

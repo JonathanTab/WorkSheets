@@ -21,6 +21,7 @@
 import * as Y from "yjs";
 import { TableStore } from "./TableStore.svelte.js";
 import { buildTableFunctions } from "./tableFormulaEval.js";
+import { createTableWithView } from "./tableCreate.js";
 import { CELL_TYPE } from "./SheetRenderContext.svelte.js";
 import { perfMon } from "../perf/PerfMonitor.js";
 
@@ -380,57 +381,19 @@ export class TableManager {
      */
     createTable(opts) {
         if (!this.#tablesYMap) return { sourceId: '', viewId: '' };
-        const sourceId = `table-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const viewId   = `view-${Date.now() + 1}-${Math.random().toString(36).slice(2, 7)}`;
 
         const tableDataMap = this.#root?.get('tableData') ?? this.#registry?.getTableDataMap() ?? this.#tablesYMap;
 
-        this.#ydoc.transact(() => {
-            // ── Source table in root.tableData (data + schema, not rendered on any grid) ──
-            const src = new Y.Map();
-            src.set("id", sourceId);
-            src.set("name", opts.name ?? "Table");
-            src.set("sortColId", null);
-            src.set("sortDir", "asc");
-            src.set("insertSortColId", null);
-            src.set("insertSortDir", "asc");
-
-            const defsMap = new Y.Map();
-            const orderArr = new Y.Array();
-            for (const c of opts.columns ?? []) {
-                const cm = new Y.Map();
-                cm.set("id", c.id);
-                cm.set("name", c.name);
-                cm.set("type", c.type ?? "text");
-                cm.set("required", c.required ?? false);
-                if (c.hAlign)         cm.set("hAlign", c.hAlign);
-                if (c.isNonEntry)     cm.set("isNonEntry", true);
-                if (c.defaultFormula) cm.set("defaultFormula", c.defaultFormula);
-                defsMap.set(c.id, cm);
-                orderArr.push([c.id]);
-            }
-            src.set("columnDefs", defsMap);
-            src.set("columnOrder", orderArr);
-            src.set("rows", new Y.Array());
-            src.set("filters", new Y.Map());
-            tableDataMap.set(sourceId, src);
-
-            // ── View entry in sheet.tableViews (position + column subset) ────────
-            const vm = new Y.Map();
-            vm.set("id", viewId);
-            vm.set("name", opts.name ?? "Table");
-            vm.set("mode", "inline");
-            vm.set("startRow", opts.startRow);
-            vm.set("startCol", opts.startCol);
-            vm.set("sortColId", null);
-            vm.set("sortDir", "asc");
-            vm.set("tableId", sourceId);
-            vm.set("visibleColumns", new Y.Array()); // [] = show all columns
-            vm.set("persistedFilters", new Y.Map());
-            this.#tablesYMap.set(viewId, vm);
+        // Structure is built by the shared builder so the Node API creates
+        // byte-identical tables (see features/tableCreate.js).
+        return createTableWithView(this.#ydoc, {
+            tableDataMap,
+            viewsMap: this.#tablesYMap,
+            name: opts.name ?? 'Table',
+            columns: opts.columns ?? [],
+            startRow: opts.startRow,
+            startCol: opts.startCol,
         });
-
-        return { sourceId, viewId };
     }
 
     /**

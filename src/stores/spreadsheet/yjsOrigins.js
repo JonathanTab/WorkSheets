@@ -23,4 +23,10 @@ export const YJS_ORIGIN = Object.freeze({
     RESTORE:   'restore',
     /** Remote sync applied by the Yjs CRDT — not undoable. */
     REMOTE:    'remote',
+    /**
+     * Write from the Node API / MCP server (script or AI agent), not a human
+     * at the keyboard. Kept distinct from UI so agent edits are attributable in
+     * history and can be filtered separately from a user's own undo stack.
+     */
+    API:       'api',
 });

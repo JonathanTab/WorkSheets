@@ -24,6 +24,8 @@ import {
 } from './constants.js';
 import { buildCellRenderObject } from './cells/CellShape.js';
 import { StylePalette, canonicalize } from './cells/StylePalette.js';
+import { attachStylePalette, readCellStyle, writeCellStyle } from './cells/styleAccess.js';
+import { STRIP_FALSE_STYLE_KEYS, compactBorderStyle } from './cells/styleNormalize.js';
 import { MergeEngine } from './features/MergeEngine.svelte.js';
 import {
     adjustByOffset,
@@ -53,25 +55,9 @@ function valuesEqual(a, b) {
     return false;
 }
 
-// Style keys whose default is `false`. Storing `false` is redundant — readers
-// treat missing keys as false — so we strip them on write to keep the document
-// from accumulating zero-information entries.
-const STRIP_FALSE_STYLE_KEYS = new Set(['bold', 'italic', 'underline', 'strikethrough', 'wrapText']);
-
-/**
- * Strip default style/width from a border descriptor. Readers fall back to
- * style:'solid' and width:1 via normalizeBorderStyle, so storing them is
- * redundant. Color is always preserved — without it the entry would degrade
- * to a default-black border on read, which is a different look.
- * @param {{ style?: string, width?: number, color?: string } | null | undefined} style
- */
-function compactBorderStyle(style) {
-    if (!style || typeof style !== 'object') return style ?? null;
-    const out = { ...style };
-    if (out.style === 'solid') delete out.style;
-    if (out.width === 1) delete out.width;
-    return out;
-}
+// Storage-shaping rules live in cells/styleNormalize.js so the Node API writes
+// byte-identical style objects — the palette is content-addressed, so any drift
+// mints a second sid for the same appearance and defeats dedupe.
 
 export class SheetStore {
     /** @type {Y.Map} */
@@ -179,17 +165,10 @@ export class SheetStore {
 
         // Doc-level style palette (content-addressed dedupe of cell styles).
         // Lives at the document root so duplicated/copied sheets share refs.
-        // Normally created by the v9 migration before any SheetStore is built;
-        // the lazy-create here is a safety net for fresh/test docs.
-        const root = ydoc.getMap('spreadsheet');
-        let palArr = root.get('stylePalette');
-        if (!(palArr instanceof Y.Array)) {
-            ydoc.transact(() => {
-                palArr = new Y.Array();
-                root.set('stylePalette', palArr);
-            }, YJS_ORIGIN.MIGRATION);
-        }
-        this.#stylePalette = new StylePalette(new YKeyValue(palArr));
+        // Shared with the Node API via cells/styleAccess.js so both sides
+        // intern and resolve styles identically; this instance is owned here
+        // and torn down in unload().
+        this.#stylePalette = attachStylePalette(ydoc);
 
         // 1. Synchronous initial sync
         this.#syncSheetProps();
@@ -274,23 +253,14 @@ export class SheetStore {
     /** Resolve a cell's stored style entry (a `{ s }` palette ref, or a legacy
      *  inline style on un-migrated docs) to its plain style object, or null. */
     #readStyle(key) {
-        if (!this.#cellStylesKV) return null;
-        return this.#stylePalette.resolve(this.#cellStylesKV.get(key));
+        return readCellStyle(this.#stylePalette, this.#cellStylesKV, key);
     }
 
     /** Intern a plain style object and store the cell's `{ s }` ref, or delete the
      *  entry when the style is empty. Skips the write when the ref is unchanged so
      *  re-applying the same style doesn't churn the CRDT (tombstone growth). */
     #writeStyle(key, style) {
-        if (!this.#cellStylesKV) return;
-        if (!style || Object.keys(style).length === 0) {
-            if (this.#cellStylesKV.has(key)) this.#cellStylesKV.delete(key);
-            return;
-        }
-        const sid = this.#stylePalette.intern(style);
-        const cur = this.#cellStylesKV.get(key);
-        if (cur && cur.s === sid) return;
-        this.#cellStylesKV.set(key, { s: sid });
+        writeCellStyle(this.#stylePalette, this.#cellStylesKV, key, style);
     }
 
     /** Merge cellValues + cellStyles into a single plain render object for key "row,col". */
