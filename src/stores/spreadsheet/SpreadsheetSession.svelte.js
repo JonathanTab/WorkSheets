@@ -22,6 +22,7 @@ import { SheetStore } from './SheetStore.svelte.js';
 import { spreadsheetSchema, spreadsheetAppSchema, createSheetYMap, initializeDocument } from './schema.js';
 import { prepareDocForUse } from '../../lib/FileRegistry/yjsDocLifecycle.js';
 import { SCHEMA_VERSION, META_KEYS, CELL_KEYS } from './constants.js';
+import { APP_SHEETS } from '../../lib/appTypes.js';
 import { YKeyValue } from 'y-utility/y-keyvalue';
 import { FormulaEngine } from '../../formulas/FormulaEngine.svelte.js';
 import { FormulaError } from '../../formulas/functions.js';
@@ -2321,11 +2322,19 @@ export function getAllDocuments() {
  * Create a new spreadsheet document
  * Explicitly initializes the Yjs document structure at creation time,
  * preventing race conditions with offline clients.
+ *
+ * Tags app: APP_SHEETS explicitly, matching DriveBrowser's "+ New Spreadsheet"
+ * button (the actual live creation path) — without it, router.svelte.js#openFile
+ * still resolves the file correctly via DEFAULT_APP, but anything that lists
+ * files by app id (e.g. spreadsheet-api's file listing) would miss it. This
+ * function has no current call sites but is exported through the public
+ * barrel, so it's worth keeping correct rather than a latent gap.
  * @param {string} title
  */
 export async function createDocument(title) {
     return storage.drive.createAndInitializeFile({
         title,
+        app: APP_SHEETS,
         initializer: (ydoc) => {
             initializeDocument(ydoc);
         }
