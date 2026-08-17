@@ -638,24 +638,40 @@ async function handleRequest(msg) {
 
 const rl = createInterface({ input: process.stdin, terminal: false });
 
-rl.on('line', async (line) => {
+/**
+ * Serialize request handling behind one promise chain.
+ *
+ * `readline`'s 'line' event does not wait for an async listener to resolve
+ * before firing the next one — so without this, a client that pipelines
+ * requests (sends the next call before awaiting the previous response) gets
+ * concurrent execution instead of the request order it sent. That is a real
+ * hazard here: a write immediately followed by a read of the same cell can
+ * race, with the read returning the pre-write value. Chaining every request
+ * onto `queue` makes handling strictly sequential regardless of how the
+ * client paces its sends.
+ */
+let queue = Promise.resolve();
+
+rl.on('line', (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
 
-    let msg;
-    try {
-        msg = JSON.parse(trimmed);
-    } catch {
-        respondError(null, -32700, 'Parse error');
-        return;
-    }
+    queue = queue.then(async () => {
+        let msg;
+        try {
+            msg = JSON.parse(trimmed);
+        } catch {
+            respondError(null, -32700, 'Parse error');
+            return;
+        }
 
-    try {
-        await handleRequest(msg);
-    } catch (err) {
-        log('unhandled:', err);
-        if (msg?.id !== undefined) respondError(msg.id, -32603, String(err?.message ?? err));
-    }
+        try {
+            await handleRequest(msg);
+        } catch (err) {
+            log('unhandled:', err);
+            if (msg?.id !== undefined) respondError(msg.id, -32603, String(err?.message ?? err));
+        }
+    });
 });
 
 rl.on('close', async () => {
