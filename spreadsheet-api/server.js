@@ -246,7 +246,7 @@ async function route(req, res) {
     // GET /files
     if (method === 'GET' && p === '/files') {
         await client.init(); // refresh file list
-        const files = client.listFiles();
+        const files = client.listSpreadsheets();
         return json(res, 200, files.map(f => ({ id: f.id, title: f.title, roomId: f.roomId })));
     }
 

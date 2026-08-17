@@ -84,7 +84,7 @@ async function openDoc(fileRef) {
     }
     if (!file) {
         throw new OpError('FILE_NOT_FOUND', `No spreadsheet named or identified by "${fileRef}"`, {
-            available: c.listFiles().map(f => f.title).slice(0, 50),
+            available: c.listSpreadsheets().map(f => f.title).slice(0, 50),
         });
     }
 
@@ -126,7 +126,7 @@ const TOOLS = {
         handler: async () => {
             const c = await getClient();
             await c.init();
-            return c.listFiles().map(f => ({ id: f.id, title: f.title }));
+            return c.listSpreadsheets().map(f => ({ id: f.id, title: f.title }));
         },
     },
 

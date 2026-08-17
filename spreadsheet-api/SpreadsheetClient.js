@@ -87,14 +87,39 @@ export class SpreadsheetClient {
     // ─── File list ──────────────────────────────────────────────────────────
 
     /**
-     * All app files (scope=app, app=scriptorium).
-     * Requires init() to have been called first.
+     * All app-scoped files (scope=app, app=scriptorium) — files an automation
+     * created and owns for its own bookkeeping, not the user's personal
+     * documents. Kept for existing integrations that create/manage files this
+     * way. Requires init() to have been called first.
      * @returns {object[]}
      */
     listFiles() {
         return [...this._files.values()].filter(
             f => !f.deleted && f.type === 'yjs' && f.scope === 'app' && f.app === 'scriptorium'
         );
+    }
+
+    /**
+     * Every spreadsheet the user can actually see and open in Scriptorium:
+     * their own Drive documents (scope=drive, the normal "New Spreadsheet"
+     * path — see SpreadsheetSession.createDocument) plus any app-scoped
+     * scriptorium files from listFiles(). Use this for "what spreadsheets does
+     * this account have" — listFiles() alone only sees app-owned bookkeeping
+     * files and will never find a document the user created themselves.
+     * Requires init() to have been called first.
+     * @returns {object[]}
+     */
+    listSpreadsheets() {
+        const seen = new Set();
+        const out = [];
+        for (const f of this._files.values()) {
+            if (f.deleted || f.type !== 'yjs') continue;
+            if (f.scope !== 'drive' && !(f.scope === 'app' && f.app === 'scriptorium')) continue;
+            if (seen.has(f.id)) continue;
+            seen.add(f.id);
+            out.push(f);
+        }
+        return out;
     }
 
     /**
