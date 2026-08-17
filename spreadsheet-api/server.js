@@ -450,11 +450,20 @@ function extractBearer(req) {
  * Open a doc, re-initializing the file list once if the fileId is unknown.
  * This handles files created after the server started.
  * Resets the 15-second idle timer so the doc is released after inactivity.
+ *
+ * Decodes fileId here rather than at each of the ~11 call sites: every route
+ * extracts it from a URL path segment via regex, and Node's URL#pathname
+ * never percent-decodes those — this is the single choke point every route
+ * already passes through, so it's the one place that needs to know that.
+ * fileIds are server-generated and normally plain alphanumeric, so this is a
+ * no-op in practice, but a route that DID need it would otherwise fail the
+ * same silent way sheet/table names did (see server.js commit 106c894e).
  */
 async function openDoc(client, fileId, apiKey) {
-    if (!client.getFile(fileId)) await client.init();
-    const ydoc = await client.openDoc(fileId);
-    touchDoc(apiKey, fileId, client);
+    const decodedId = decodeURIComponent(fileId);
+    if (!client.getFile(decodedId)) await client.init();
+    const ydoc = await client.openDoc(decodedId);
+    touchDoc(apiKey, decodedId, client);
     return ydoc;
 }
 
