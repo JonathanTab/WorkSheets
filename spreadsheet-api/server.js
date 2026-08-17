@@ -259,13 +259,15 @@ async function route(req, res) {
     // GET /file/:fileId/sheet/:sheetId/tables
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/tables$/))) {
         const ydoc = await openDoc(client, m[1], apiKey);
-        const tables = client.listTables(ydoc, m[2]);
+        const tables = client.listTables(ydoc, decodeURIComponent(m[2]));
         return json(res, 200, tables.map(t => ({ id: t.id, name: t.name, mode: t.mode })));
     }
 
     // GET /file/:fileId/sheet/:sheetId/table/:tableId/schema
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/schema$/))) {
-        const [, fileId, sheetId, tableId] = m;
+        const [, fileId, sheetIdRaw, tableIdRaw] = m;
+        const sheetId = decodeURIComponent(sheetIdRaw);
+        const tableId = decodeURIComponent(tableIdRaw);
         const ydoc = await openDoc(client, fileId, apiKey);
         const tables = client.listTables(ydoc, sheetId);
         const table = tables.find(t => t.id === tableId);
@@ -302,7 +304,9 @@ async function route(req, res) {
 
     // GET /file/:fileId/sheet/:sheetId/table/:tableId/rows[?colNames=1&formulas=1]
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
-        const [, fileId, sheetId, tableId] = m;
+        const [, fileId, sheetIdRaw, tableIdRaw] = m;
+        const sheetId = decodeURIComponent(sheetIdRaw);
+        const tableId = decodeURIComponent(tableIdRaw);
         const useNames = url.searchParams.get('colNames') === '1';
         const withFormulas = url.searchParams.get('formulas') !== '0'; // default on
         const ydoc = await openDoc(client, fileId, apiKey);
@@ -334,7 +338,9 @@ async function route(req, res) {
 
     // POST /file/:fileId/sheet/:sheetId/table/:tableId/rows
     if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/table\/([^/]+)\/rows$/))) {
-        const [, fileId, sheetId, tableId] = m;
+        const [, fileId, sheetIdRaw, tableIdRaw] = m;
+        const sheetId = decodeURIComponent(sheetIdRaw);
+        const tableId = decodeURIComponent(tableIdRaw);
         const body = await readJsonBody(req);
         const ydoc = await openDoc(client, fileId, apiKey);
         const resolved = client.resolveColumnNames(ydoc, sheetId, tableId, body);
@@ -344,7 +350,8 @@ async function route(req, res) {
 
     // GET /file/:fileId/sheet/:sheetId/cell?row=R&col=C
     if (method === 'GET' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/cell$/))) {
-        const [, fileId, sheetId] = m;
+        const [, fileId, sheetIdRaw] = m;
+        const sheetId = decodeURIComponent(sheetIdRaw);
         const row = Number(url.searchParams.get('row'));
         const col = Number(url.searchParams.get('col'));
         if (isNaN(row) || isNaN(col)) return json(res, 400, { error: 'row and col query params required' });
@@ -355,7 +362,8 @@ async function route(req, res) {
 
     // POST /file/:fileId/sheet/:sheetId/cell
     if (method === 'POST' && (m = p.match(/^\/file\/([^/]+)\/sheet\/([^/]+)\/cell$/))) {
-        const [, fileId, sheetId] = m;
+        const [, fileId, sheetIdRaw] = m;
+        const sheetId = decodeURIComponent(sheetIdRaw);
         const body = await readJsonBody(req);
         const { row, col, value, props } = body;
         if (row == null || col == null || value === undefined)
