@@ -25,6 +25,7 @@
 import { StorageAPI } from '../src/lib/FileRegistry/api/StorageAPI.js';
 import { NodeYjsRuntime } from './runtime.js';
 import * as ops from './operations.js';
+import { APP_DOCS, APP_SVG, APP_FILE } from '../src/lib/appTypes.js';
 
 const DEFAULTS = {
     baseUrl: 'https://instrumenta.cc/api/storage.php',
@@ -100,21 +101,32 @@ export class SpreadsheetClient {
     }
 
     /**
-     * Every spreadsheet the user can actually see and open in Scriptorium:
-     * their own Drive documents (scope=drive, the normal "New Spreadsheet"
-     * path — see SpreadsheetSession.createDocument) plus any app-scoped
-     * scriptorium files from listFiles(). Use this for "what spreadsheets does
-     * this account have" — listFiles() alone only sees app-owned bookkeeping
-     * files and will never find a document the user created themselves.
+     * Every spreadsheet the user can actually see and open in Scriptorium.
+     *
+     * "Spreadsheet" is determined the same way router.svelte.js#openFile picks
+     * a workspace: a drive-scope yjs file is a spreadsheet unless its `app`
+     * tag says otherwise (APP_SHEETS is DEFAULT_APP — see src/lib/appTypes.js
+     * — so most spreadsheets carry no `app` tag at all, not 'scriptorium' as
+     * an earlier version of this method assumed). Excludes Docs and Drawing
+     * files explicitly rather than allow-listing an app id, since a
+     * spreadsheet's `app` field is normally absent.
+     *
+     * Also includes app-scoped scriptorium files (listFiles()) — bookkeeping
+     * documents an automation created for itself, which have no Drive
+     * presence but are still real spreadsheets a caller may need to reach.
+     *
      * Requires init() to have been called first.
      * @returns {object[]}
      */
     listSpreadsheets() {
+        const NOT_A_SHEET = new Set([APP_DOCS, APP_SVG, APP_FILE]);
         const seen = new Set();
         const out = [];
         for (const f of this._files.values()) {
             if (f.deleted || f.type !== 'yjs') continue;
-            if (f.scope !== 'drive' && !(f.scope === 'app' && f.app === 'scriptorium')) continue;
+            const isDriveSheet = f.scope === 'drive' && !NOT_A_SHEET.has(f.app);
+            const isAppBookkeeping = f.scope === 'app' && f.app === 'scriptorium';
+            if (!isDriveSheet && !isAppBookkeeping) continue;
             if (seen.has(f.id)) continue;
             seen.add(f.id);
             out.push(f);
