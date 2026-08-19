@@ -18,8 +18,15 @@ import { perfMon } from "../../../stores/spreadsheet/perf/PerfMonitor.js";
  * triggers, and the paint functions (performPaint, performScrollPaint,
  * performSelectionPaint).
  *
- * Grid.svelte creates one instance and keeps the input fields up-to-date via
- * `$effect(() => { paintCoord.X = X; })`.
+ * Grid.svelte creates one instance and passes ACCESSOR FUNCTIONS for every input.
+ *
+ * Inputs are deliberately not mirrored `$state` fields fed by
+ * `$effect(() => { paintCoord.X = X; })`. This constructor's effects are created
+ * during Grid's init, so they run BEFORE such mirroring effects have populated
+ * anything: the first run sees nulls and bails, and correctness then depends on
+ * the mirror writes re-running it. Reading through accessors instead makes these
+ * effects depend directly on Grid's own $state/$derived, which removes the
+ * ordering hazard entirely.
  *
  * `renderScheduler` and `selectionScheduler` are `$state` so that Grid.svelte
  * can derive local references:
@@ -28,16 +35,18 @@ import { perfMon } from "../../../stores/spreadsheet/perf/PerfMonitor.js";
  * unchanged while the scheduler is actually owned here.
  */
 export class GridPaintCoordinator {
-    // ─── Inputs (set by Grid.svelte) ─────────────────────────────────────────
-    canvasEl = $state(null);
-    selectCanvasEl = $state(null);
-    virtualizer = $state(null);
-    renderContext = $state(null);
-    sheetStore = $state(null);
-    showGridlines = $state(true);
-    showFormulas = $state(false);
-    tableGripHoverRow = $state(-1);
-    tableRowDrag = $state(null);
+    // ─── Inputs (read live from Grid.svelte via accessors) ───────────────────
+    #in;
+
+    get canvasEl()          { return this.#in.canvasEl?.() ?? null; }
+    get selectCanvasEl()    { return this.#in.selectCanvasEl?.() ?? null; }
+    get virtualizer()       { return this.#in.virtualizer?.() ?? null; }
+    get renderContext()     { return this.#in.renderContext?.() ?? null; }
+    get sheetStore()        { return this.#in.sheetStore?.() ?? null; }
+    get showGridlines()     { return this.#in.showGridlines?.() ?? true; }
+    get showFormulas()      { return this.#in.showFormulas?.() ?? false; }
+    get tableGripHoverRow() { return this.#in.tableGripHoverRow?.() ?? -1; }
+    get tableRowDrag()      { return this.#in.tableRowDrag?.() ?? null; }
 
     // ─── Outputs (read by Grid.svelte) ───────────────────────────────────────
     renderScheduler = $state(null);
@@ -55,7 +64,24 @@ export class GridPaintCoordinator {
     #selRendererCanvasEl = null;
     #hasLoggedZeroViewportWarning = false;
 
-    constructor() {
+    /**
+     * @param {{
+     *   canvasEl?: () => HTMLCanvasElement|null,
+     *   selectCanvasEl?: () => HTMLCanvasElement|null,
+     *   virtualizer?: () => any,
+     *   renderContext?: () => any,
+     *   sheetStore?: () => any,
+     *   showGridlines?: () => boolean,
+     *   showFormulas?: () => boolean,
+     *   tableGripHoverRow?: () => number,
+     *   tableRowDrag?: () => any,
+     * }} inputs  Accessors evaluated inside this class's effects. They are only
+     *   ever called after Grid's init has completed, so capturing `let` bindings
+     *   declared further down that file is safe.
+     */
+    constructor(inputs = {}) {
+        this.#in = inputs;
+
         // ── Data canvas setup & resize ─────────────────────────────────────────
         $effect(() => {
             const _sheet = this.sheetStore;

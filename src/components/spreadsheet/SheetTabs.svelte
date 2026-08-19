@@ -1,4 +1,5 @@
 <script>
+    import { onDestroy } from "svelte";
     import { openModal } from "../../lib/ui/modalStore.svelte.js";
     import ConfirmModal from "../modals/ConfirmModal.svelte";
     import SelectionStats from "./SelectionStats.svelte";
@@ -104,10 +105,27 @@
         onAddSheet(name);
     }
 
+    /**
+     * Switch surface before blur fires so handleEditBlur skips its commit guard —
+     * prevents a formula edit from being committed when the user navigates to
+     * another sheet to pick a reference.
+     */
+    function releaseFormulaSurface() {
+        if (editSessionState.isFormulaMode) {
+            editSessionState.switchSurface("formulaBar", { focus: false });
+        }
+    }
+
     function handleTabClick(sheetId) {
         if (sheetId !== activeSheetId) {
             onSheetChange(sheetId);
         }
+    }
+
+    /** Click path — skipped when touchend already handled this tap. */
+    function handleTabClickEvent(sheetId) {
+        if (tabTouchHandled) return;
+        handleTabClick(sheetId);
     }
 
     function handleTabDoubleClick(sheetId) {
@@ -176,26 +194,82 @@
         }
     }
 
-    // ─── Mobile long-press tab menu ────────────────────────────────────────────
+    // ─── Mobile tab tap / long-press ───────────────────────────────────────────
+    // Taps are resolved from the touch events rather than from the synthesized
+    // click. The tab strip is a horizontal scroller (touch-action: pan-x), and a
+    // tap that drifts a pixel — or one that lands while the soft keyboard is
+    // dismissing and the strip reflows under the finger — gets reinterpreted as
+    // a pan, so the click never arrives and the switch appears to need a second
+    // tap. touchend always fires, so drive the switch from there and suppress the
+    // synthetic click that may follow (re-activating the current sheet is not a
+    // no-op in the session — it tears down and rebuilds the sheet store).
+    const TAB_TAP_MOVE_PX = 10;
+    const TAB_LONG_PRESS_MS = 500;
+    const SYNTHETIC_CLICK_WINDOW_MS = 600;
+
     let tabLongPressTimer = null;
     let tabMenuSheetId = $state(null);
+    let tabTouchStart = null; // { x, y } — null once the tap is disqualified
+    let tabLongPressFired = false;
+    let tabTouchHandled = false; // suppresses the synthetic click after a touch tap
+    let tabTouchHandledTimer = null;
 
     function handleTabTouchStart(sheetId, e) {
-        if (e.touches.length !== 1) return;
+        if (e.touches.length !== 1) {
+            clearTimeout(tabLongPressTimer);
+            tabTouchStart = null;
+            return;
+        }
+        tabTouchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        tabLongPressFired = false;
         tabLongPressTimer = setTimeout(() => {
+            tabLongPressFired = true;
+            tabTouchStart = null;
             tabMenuSheetId = sheetId;
-        }, 500);
+        }, TAB_LONG_PRESS_MS);
     }
 
-    function handleTabTouchMove() {
-        clearTimeout(tabLongPressTimer);
+    function handleTabTouchMove(e) {
+        if (!tabTouchStart || e.touches.length !== 1) return;
+        const dx = e.touches[0].clientX - tabTouchStart.x;
+        const dy = e.touches[0].clientY - tabTouchStart.y;
+        if (Math.sqrt(dx * dx + dy * dy) > TAB_TAP_MOVE_PX) {
+            // Scrolling the strip, not tapping a tab.
+            clearTimeout(tabLongPressTimer);
+            tabTouchStart = null;
+        }
     }
 
-    function handleTabTouchEnd() {
+    function handleTabTouchEnd(sheetId) {
         clearTimeout(tabLongPressTimer);
+        if (tabLongPressFired || !tabTouchStart) {
+            tabTouchStart = null;
+            return;
+        }
+        tabTouchStart = null;
+        if (renamingSheetId === sheetId) return; // let the input handle its own taps
+
+        tabTouchHandled = true;
+        clearTimeout(tabTouchHandledTimer);
+        tabTouchHandledTimer = setTimeout(() => {
+            tabTouchHandled = false;
+        }, SYNTHETIC_CLICK_WINDOW_MS);
+
+        releaseFormulaSurface();
+        handleTabClick(sheetId);
+    }
+
+    function handleTabTouchCancel() {
+        clearTimeout(tabLongPressTimer);
+        tabTouchStart = null;
     }
 
     let tabMenuSheet = $derived(sheets.find((s) => s.id === tabMenuSheetId) ?? null);
+
+    onDestroy(() => {
+        clearTimeout(tabLongPressTimer);
+        clearTimeout(tabTouchHandledTimer);
+    });
 </script>
 
 <div class="sheet-tabs">
@@ -211,16 +285,9 @@
                 class="tab"
                 class:active={sheet.id === activeSheetId}
                 class:dragging={draggedSheetId === sheet.id}
-                draggable={renamingSheetId !== sheet.id}
-                onmousedown={() => {
-                    // Switch surface to formulaBar before blur fires so handleEditBlur
-                    // skips its commit guard — prevents formula edit from being committed
-                    // when the user navigates to another sheet to pick a reference.
-                    if (editSessionState.isFormulaMode) {
-                        editSessionState.switchSurface("formulaBar", { focus: false });
-                    }
-                }}
-                onclick={() => handleTabClick(sheet.id)}
+                draggable={!mobileState.isMobile && renamingSheetId !== sheet.id}
+                onmousedown={releaseFormulaSurface}
+                onclick={() => handleTabClickEvent(sheet.id)}
                 ondblclick={() => handleTabDoubleClick(sheet.id)}
                 oncontextmenu={(e) => handleTabContextMenu(sheet.id, e)}
                 ondragstart={(e) => handleDragStart(sheet.id, e)}
@@ -229,7 +296,8 @@
                 ondragend={handleDragEnd}
                 ontouchstart={mobileState.isMobile ? (e) => handleTabTouchStart(sheet.id, e) : undefined}
                 ontouchmove={mobileState.isMobile ? handleTabTouchMove : undefined}
-                ontouchend={mobileState.isMobile ? handleTabTouchEnd : undefined}
+                ontouchend={mobileState.isMobile ? () => handleTabTouchEnd(sheet.id) : undefined}
+                ontouchcancel={mobileState.isMobile ? handleTabTouchCancel : undefined}
             >
                 {#if renamingSheetId === sheet.id}
                     <input
@@ -338,9 +406,20 @@
         transition: color 0.15s, background 0.15s, border-color 0.15s;
         box-sizing: border-box;
         flex-shrink: 0;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
     }
 
-    .tab:hover {
+    /* Hover must not apply on touch: it sticks after a tap, so the previously
+       tapped tab keeps a highlight and reads as still-selected next to the tab
+       that actually is. Same reason .add-sheet-btn:hover is gated below. */
+    @media (hover: hover) {
+        .tab:hover {
+            background: var(--hover-bg, #e2e8f0);
+        }
+    }
+
+    .tab:active {
         background: var(--hover-bg, #e2e8f0);
     }
 
@@ -405,9 +484,18 @@
         cursor: pointer;
         font-size: 1.125rem;
         color: var(--text-muted, #64748b);
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
     }
 
-    .add-sheet-btn:hover {
+    @media (hover: hover) {
+        .add-sheet-btn:hover {
+            background: var(--hover-bg, #e2e8f0);
+            color: var(--text-color, #1e293b);
+        }
+    }
+
+    .add-sheet-btn:active {
         background: var(--hover-bg, #e2e8f0);
         color: var(--text-color, #1e293b);
     }

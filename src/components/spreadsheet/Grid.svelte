@@ -107,7 +107,20 @@
     const kbCtrl = new GridKeyboardController();
 
     // ─── Paint coordinator ────────────────────────────────────────────────────
-    const paintCoord = new GridPaintCoordinator();
+    // Accessors, not mirrored fields — see GridPaintCoordinator for why. These
+    // close over bindings declared later in this file; they are only invoked from
+    // effects, which run after init, so the TDZ is never hit.
+    const paintCoord = new GridPaintCoordinator({
+        canvasEl: () => canvasEl,
+        selectCanvasEl: () => selectCanvasEl,
+        virtualizer: () => virtualizer,
+        renderContext: () => renderContext,
+        sheetStore: () => sheetStore,
+        showGridlines: () => showGridlines,
+        showFormulas: () => showFormulas,
+        tableGripHoverRow: () => tableGripHoverRow,
+        tableRowDrag: () => tableRowDrag,
+    });
 
 
     // ─── Canvas rendering — owned by GridPaintCoordinator ────────────────────
@@ -159,6 +172,8 @@
     let onPageVisibleHandler = null; // re-arms the deferred re-measure burst on foreground
     /** @type {Map<string, {scrollTop: number, scrollLeft: number}>} */
     const sheetScrollPositions = new Map();
+    /** @type {Map<string, any>} Per-sheet selection snapshots, mirroring sheetScrollPositions */
+    const sheetSelections = new Map();
 
     // ─── Page break overlay ───────────────────────────────────────────────────
     /**
@@ -462,16 +477,8 @@
         };
     });
 
-    // Keep paint coordinator deps in sync
-    $effect(() => { paintCoord.canvasEl = canvasEl; });
-    $effect(() => { paintCoord.selectCanvasEl = selectCanvasEl; });
-    $effect(() => { paintCoord.virtualizer = virtualizer; });
-    $effect(() => { paintCoord.renderContext = renderContext; });
-    $effect(() => { paintCoord.sheetStore = sheetStore; });
-    $effect(() => { paintCoord.showGridlines = showGridlines; });
-    $effect(() => { paintCoord.showFormulas = showFormulas; });
-    $effect(() => { paintCoord.tableGripHoverRow = tableGripHoverRow; });
-    $effect(() => { paintCoord.tableRowDrag = tableRowDrag; });
+    // Paint coordinator deps need no mirroring effects — it reads them live
+    // through the accessors passed to its constructor.
 
     /**
      * Map from grid row → Y offset within the sticky table header band.
@@ -581,12 +588,17 @@
 
         untrack(() => {
             if (!virtualizer || virtualizerSheetId !== sheetId) {
+                // True sheet switch (as opposed to first-ever virtualizer setup).
+                const isSwitch = virtualizerSheetId !== null;
                 if (virtualizer) {
                     sheetScrollPositions.set(virtualizerSheetId, {
                         scrollTop: virtualizer.scrollTop,
                         scrollLeft: virtualizer.scrollLeft,
                     });
                     virtualizer.destroy();
+                }
+                if (isSwitch) {
+                    sheetSelections.set(virtualizerSheetId, selectionState.snapshot());
                 }
                 virtualizer = new GridVirtualizer({
                     defaultRowHeight: defaultRowHeight ?? ROW_HEIGHT,
@@ -605,6 +617,17 @@
                 if (scrollEl) {
                     scrollEl.scrollTop = restoredTop;
                     scrollEl.scrollLeft = restoredLeft;
+                }
+                // Selection is document-wide but sheet-specific in meaning —
+                // give the incoming sheet its own cursor back (or A1 the first
+                // time we see it) instead of the outgoing sheet's coordinates,
+                // which may not even exist here.
+                if (isSwitch) {
+                    selectionState.restore(
+                        sheetSelections.get(sheetId),
+                        rowCount,
+                        colCount,
+                    );
                 }
             }
 
@@ -2931,7 +2954,6 @@
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
-    let resizeTicking = false;
     let latestResizeW = 0;
     let latestResizeH = 0;
 
@@ -3006,31 +3028,21 @@
         refreshOnDprChange(); // set up initial DPR change listener
 
         if (containerEl) {
-            // ResizeObserver stores the latest dimensions and always uses them
-            // in the RAF callback. The resizeTicking flag ensures at most one
-            // RAF is queued, but intermediate entries update latestResize* so
-            // the RAF never uses stale values.
+            // Apply the new size SYNCHRONOUSLY. This used to defer into a RAF
+            // behind a `resizeTicking` latch, which is unsafe: if that RAF is
+            // never served (a starved cold launch, a backgrounded tab), the latch
+            // stays true and every later resize is dropped for good.
+            //
+            // setContainerSize only writes two $state values and self-dedups on
+            // unchanged input, so there is nothing here worth batching, and the
+            // browser already coalesces ResizeObserver delivery.
             resizeObserver = new ResizeObserver((entries) => {
                 const last = entries[entries.length - 1];
                 const { width, height } = last.contentRect;
                 if (width <= 0 || height <= 0) return;
                 latestResizeW = width;
                 latestResizeH = height;
-                if (!resizeTicking) {
-                    resizeTicking = true;
-                    requestAnimationFrame(() => {
-                        if (
-                            virtualizer &&
-                            latestResizeW > 0 &&
-                            latestResizeH > 0
-                        )
-                            virtualizer.setContainerSize(
-                                latestResizeW,
-                                latestResizeH,
-                            );
-                        resizeTicking = false;
-                    });
-                }
+                if (virtualizer) virtualizer.setContainerSize(width, height);
             });
             resizeObserver.observe(containerEl);
 
@@ -3071,20 +3083,11 @@
             selectionState.endSelection();
         }
 
-        // Deferred re-measure: on mobile the grid frequently mounts before the
+        // Deferred re-measure: on mobile the grid can mount before the
         // viewport/flex layout has settled, so the initial getBoundingClientRect()
-        // and the ResizeObserver's first callback can report height 0. When that
-        // happens the paint effect bails (w/h <= 0) and the grid stays blank until
-        // some later layout change (e.g. opening a menu) finally triggers a resize.
-        // Force a fresh measure across the next few frames so the first valid size
-        // reaches the virtualizer and the grid paints without user interaction.
-        //
-        // Separately, on a cold-launched iOS standalone PWA the size is often
-        // already correct from the first frame, but WebKit has painted the canvas
-        // without ever flushing it to the screen — setContainerSize's change-dedup
-        // means no further resize-driven repaint will happen to mask that. Force
-        // an unconditional repaint on every retry (not just when the size
-        // changes) so a dropped first compositor flush gets a second chance.
+        // and the ResizeObserver's first callback can report height 0. Force a
+        // fresh measure across the next few frames so the first valid size reaches
+        // the virtualizer without user interaction.
         let remeasureFrame = 0;
         const remeasure = () => {
             if (!containerEl || !virtualizer) return;
@@ -3096,16 +3099,14 @@
                 selectionScheduler?.invalidateAll();
                 selectionScheduler?.flush();
             }
-            // Keep retrying for a short window in case layout/compositing is still settling.
+            // Keep retrying for a short window in case layout is still settling.
             if (remeasureFrame++ < 6)
                 remeasureRAF = requestAnimationFrame(remeasure);
         };
         remeasureRAF = requestAnimationFrame(remeasure);
 
-        // A cold-launched iOS standalone PWA can still be settling its
-        // visibility/layout state well after this point — re-arm the same burst
-        // once the page is actually foregrounded, so the grid self-heals instead
-        // of staying blank until the user happens to open a menu.
+        // Re-arm the burst once the page is actually foregrounded, so a launch
+        // that settled while backgrounded still ends up correctly sized.
         onPageVisibleHandler = () => {
             if (document.visibilityState !== "visible") return;
             if (remeasureRAF !== null) cancelAnimationFrame(remeasureRAF);

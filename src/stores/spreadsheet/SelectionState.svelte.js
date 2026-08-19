@@ -653,6 +653,78 @@ export class SelectionState {
         }
     }
 
+    // ── Snapshot / restore ────────────────────────────────────────────────────
+    // Selection is a single document-wide object, but it means different things
+    // on different sheets: row 400 on a long sheet is off the end of a short one.
+    // Grid.svelte snapshots the selection per sheet on switch (alongside scroll
+    // position) so each sheet keeps its own cursor instead of inheriting a
+    // stale, possibly out-of-bounds one from whichever sheet was last active.
+
+    /** Capture the full selection as a plain, detached object. */
+    snapshot() {
+        return {
+            anchor: this.anchor ? { ...this.anchor } : null,
+            focus: this.focus ? { ...this.focus } : null,
+            primaryCell: this.primaryCell ? { ...this.primaryCell } : null,
+            selectionMode: this.selectionMode,
+            selectedRows: this.selectedRows ? { ...this.selectedRows } : null,
+            selectedCols: this.selectedCols ? { ...this.selectedCols } : null,
+            extraRanges: this.extraRanges.map(r => ({ ...r })),
+            extraRowRanges: this.extraRowRanges.map(r => ({ ...r })),
+            extraColRanges: this.extraColRanges.map(r => ({ ...r })),
+            rowAnchor: this.#rowAnchor,
+            colAnchor: this.#colAnchor,
+        };
+    }
+
+    /**
+     * Restore a snapshot(), clamped to the target sheet's dimensions so a
+     * selection captured on a larger sheet can't point past the end of a
+     * smaller one. Never leaves the selection empty: an anchor that clamps
+     * away entirely falls back to A1.
+     * @param {ReturnType<SelectionState['snapshot']>} snap
+     * @param {number} rowCount
+     * @param {number} colCount
+     */
+    restore(snap, rowCount, colCount) {
+        if (!snap) {
+            this.clear();
+            this.startSelection(0, 0);
+            this.endSelection();
+            return;
+        }
+        const maxRow = Math.max(0, rowCount - 1);
+        const maxCol = Math.max(0, colCount - 1);
+        const clampPoint = (p) => p && {
+            row: Math.min(Math.max(0, p.row), maxRow),
+            col: Math.min(Math.max(0, p.col), maxCol),
+        };
+        const clampRange = (r) => r && {
+            startRow: Math.min(Math.max(0, r.startRow), maxRow),
+            endRow:   Math.min(Math.max(0, r.endRow),   maxRow),
+            startCol: Math.min(Math.max(0, r.startCol), maxCol),
+            endCol:   Math.min(Math.max(0, r.endCol),   maxCol),
+        };
+        const clampAxis = (r, max) => r && {
+            start: Math.min(Math.max(0, r.start), max),
+            end:   Math.min(Math.max(0, r.end),   max),
+        };
+        const clampCoord = (c, max) => c == null ? c : Math.min(Math.max(0, c), max);
+
+        this.selectionMode = snap.selectionMode ?? 'range';
+        this.anchor = clampPoint(snap.anchor) ?? { row: 0, col: 0 };
+        this.focus = clampPoint(snap.focus) ?? { ...this.anchor };
+        this.primaryCell = clampPoint(snap.primaryCell);
+        this.selectedRows = clampAxis(snap.selectedRows, maxRow);
+        this.selectedCols = clampAxis(snap.selectedCols, maxCol);
+        this.extraRanges = (snap.extraRanges ?? []).map(clampRange);
+        this.extraRowRanges = (snap.extraRowRanges ?? []).map(r => clampAxis(r, maxRow));
+        this.extraColRanges = (snap.extraColRanges ?? []).map(r => clampAxis(r, maxCol));
+        this.#rowAnchor = clampCoord(snap.rowAnchor, maxRow);
+        this.#colAnchor = clampCoord(snap.colAnchor, maxCol);
+        this.isSelecting = false;
+    }
+
     /** Clear all selection state. */
     clear() {
         this.anchor = null;

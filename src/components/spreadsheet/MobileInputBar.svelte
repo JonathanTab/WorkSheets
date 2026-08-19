@@ -1,6 +1,7 @@
 <script>
     import { spreadsheetSession, selectionState } from "../../stores/spreadsheetStore.svelte.js";
     import { editSessionState } from "../../stores/spreadsheet/index.js";
+    import { CELL_TYPE } from "../../stores/spreadsheet/features/SheetRenderContext.svelte.js";
     import { mobileState } from "../../stores/mobileState.svelte.js";
     import { toCellRef } from "../../formulas/refCoords.js";
     import { applyFormatting } from "../../stores/spreadsheet/cellFormattingCommands.js";
