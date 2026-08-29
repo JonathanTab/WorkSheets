@@ -29,12 +29,17 @@ export const dropdownType = {
         const isListSource = !config?.source || config.source === 'list';
         if (config?.allowCustom === false && isListSource &&
             Array.isArray(config?.options) && config.options.length > 0) {
-            const match = config.options.find(
-                o => String(o).toLowerCase() === String(inputString).toLowerCase()
-            );
+            const match = config.options.find(o => {
+                const optVal = typeof o === 'string' ? o : o?.value ?? String(o);
+                return optVal.toLowerCase() === String(inputString).toLowerCase();
+            });
             // allowCustom:false means only listed options are valid — reject a
             // non-matching value rather than silently storing it.
-            return match !== undefined ? match : null;
+            // Extract value if match is an object, otherwise return as-is.
+            if (match !== undefined) {
+                return typeof match === 'string' ? match : match?.value ?? String(match);
+            }
+            return null;
         }
         return inputString;
     },

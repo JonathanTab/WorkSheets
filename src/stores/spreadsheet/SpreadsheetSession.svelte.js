@@ -1551,6 +1551,37 @@ export class SpreadsheetSession {
     }
 
     /**
+     * Get table column values with their colors for dropdown rendering.
+     * Returns objects with value and backgroundColor properties.
+     * @param {string} tableName
+     * @param {string} columnId
+     * @returns {Array<{value:string, backgroundColor?:string}>}
+     */
+    getTableColumnOptionsWithColors(tableName, columnId) {
+        const store = this.getCrossSheetTable(tableName);
+        if (!store) return [];
+        const colId = store.resolveColId(String(columnId));
+        const seen = new Set();
+        const opts = [];
+        const rows = store.sortedFilteredRows;
+        for (let i = 0; i < rows.length; i++) {
+            const val = rows[i]?.[colId];
+            if (val != null && val !== '') {
+                const strVal = String(val);
+                if (!seen.has(strVal)) {
+                    seen.add(strVal);
+                    const fmt = store.getEffectiveCellFormatting(i, colId);
+                    opts.push({
+                        value: strVal,
+                        backgroundColor: fmt?.backgroundColor ?? undefined,
+                    });
+                }
+            }
+        }
+        return opts;
+    }
+
+    /**
      * Return a live TableStore for any named table across all sheets.
      * Uses DocumentTableRegistry when available — no create/destroy per call.
      * @param {string} tableName

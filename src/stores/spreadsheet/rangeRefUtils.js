@@ -54,3 +54,48 @@ export function resolveRangeValues(spreadsheetSession, rangeStr) {
     }
     return opts;
 }
+
+/**
+ * Resolve a range string to options with colors. Returns objects with value and
+ * backgroundColor properties for dropdown rendering.
+ * @param {import('./SpreadsheetSession.svelte.js').SpreadsheetSession} spreadsheetSession
+ * @param {string} rangeStr
+ * @returns {Array<{value:string, backgroundColor?:string}>}
+ */
+export function resolveRangeOptions(spreadsheetSession, rangeStr) {
+    if (!spreadsheetSession) return [];
+    let targetSheetId = null;
+    let cellRange = String(rangeStr ?? '').trim();
+    const sheetRefMatch = cellRange.match(/^(?:'((?:[^']|'')*)'|([^'!][^!]*?))!(.+)$/);
+    if (sheetRefMatch) {
+        const sheetName = (sheetRefMatch[1] ?? sheetRefMatch[2]).replace(/''/g, "'");
+        cellRange = sheetRefMatch[3];
+        const entry = spreadsheetSession.sheets.find(s => s.name === sheetName);
+        if (entry) targetSheetId = entry.id;
+    }
+    const parts = cellRange.trim().toUpperCase().split(':');
+    const start = parseCellRef(parts[0]);
+    const end = parts[1] ? parseCellRef(parts[1]) : start;
+    if (!start || !end) return [];
+
+    const opts = [];
+    if (!targetSheetId || targetSheetId === spreadsheetSession.activeSheetId) {
+        for (let r = start.row; r <= end.row; r++)
+            for (let c = start.col; c <= end.col; c++) {
+                const v = spreadsheetSession.getCellDisplayValue(r, c);
+                if (v != null && v !== '') {
+                    const cell = spreadsheetSession.getCell(r, c);
+                    opts.push({
+                        value: String(v),
+                        backgroundColor: cell?.style?.backgroundColor ?? undefined,
+                    });
+                }
+            }
+    } else {
+        const values = spreadsheetSession.computeSheetRange(targetSheetId, start.row, start.col, end.row, end.col);
+        for (const v of values)
+            if (v != null && v !== '' && !(v instanceof Object))
+                opts.push({ value: String(v) });
+    }
+    return opts;
+}

@@ -74,7 +74,7 @@
     import PluginOverlay from "./plugins/PluginOverlay.svelte";
     import EntryForgeOverlay from "./plugins/entryForge/EntryForgeOverlay.svelte";
     import SplitOverlay from "./plugins/entryForge/SplitOverlay.svelte";
-    import { resolveRangeValues } from "../../stores/spreadsheet/rangeRefUtils.js";
+    import { resolveRangeValues, resolveRangeOptions as resolveRangeOptionsUtils } from "../../stores/spreadsheet/rangeRefUtils.js";
     import "../../stores/spreadsheet/plugins/horam/registerHoramPlugin.js";
     import "../../stores/spreadsheet/plugins/entryForge/registerEntryForgePlugin.js";
 
@@ -2169,11 +2169,11 @@
     // ─── Dropdown range / table resolver helpers ─────────────────────────────
     function resolveRangeOptions(rangeStr) {
         if (!sheetStore) return [];
-        return resolveRangeValues(spreadsheetSession, rangeStr);
+        return resolveRangeOptionsUtils(spreadsheetSession, rangeStr);
     }
 
     function resolveTableColumnOptions(tableName, columnId) {
-        return spreadsheetSession.getTableColumnValues(tableName, columnId);
+        return spreadsheetSession.getTableColumnOptionsWithColors(tableName, columnId);
     }
 
     // ─── Editing ──────────────────────────────────────────────────────────────
@@ -3416,9 +3416,10 @@
 
             <!-- Dropdown cell overlay -->
             {#if kbCtrl.focusedDropdownCell}
+                {@const getOptValue = (o) => (typeof o === 'string' ? o : o?.value ?? String(o))}
                 {@const filteredOpts = kbCtrl.dropdownFilter
                     ? kbCtrl.focusedDropdownCell.options.filter((o) =>
-                          String(o)
+                          getOptValue(o)
                               .toLowerCase()
                               .includes(kbCtrl.dropdownFilter.toLowerCase()),
                       )
@@ -3438,20 +3439,22 @@
                             if (e.key === "Enter") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
+                                    const val = getOptValue(filteredOpts[0]);
                                     if (kbCtrl.focusedDropdownCell.onCommit) {
-                                        kbCtrl.focusedDropdownCell.onCommit(filteredOpts[0]);
+                                        kbCtrl.focusedDropdownCell.onCommit(val);
                                     } else {
-                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, filteredOpts[0]);
+                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, val);
                                     }
                                     kbCtrl.focusedDropdownCell = null;
                                 }
                             } else if (e.key === "Tab") {
                                 e.preventDefault();
                                 if (filteredOpts.length > 0) {
+                                    const val = getOptValue(filteredOpts[0]);
                                     if (kbCtrl.focusedDropdownCell.onCommit) {
-                                        kbCtrl.focusedDropdownCell.onCommit(filteredOpts[0]);
+                                        kbCtrl.focusedDropdownCell.onCommit(val);
                                     } else {
-                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, filteredOpts[0]);
+                                        sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, val);
                                     }
                                 }
                                 kbCtrl.focusedDropdownCell = null;
@@ -3463,18 +3466,25 @@
                         }}
                     />
                     {#each filteredOpts as opt}
+                        {@const optValue = getOptValue(opt)}
+                        {@const optColor = typeof opt === 'string' ? undefined : opt?.backgroundColor}
                         <button
                             class="dropdown-option"
                             onmousedown={(e) => {
                                 e.preventDefault();
                                 if (kbCtrl.focusedDropdownCell.onCommit) {
-                                    kbCtrl.focusedDropdownCell.onCommit(opt);
+                                    kbCtrl.focusedDropdownCell.onCommit(optValue);
                                 } else {
-                                    sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, opt);
+                                    sheetStore?.setCellValue(kbCtrl.focusedDropdownCell.row, kbCtrl.focusedDropdownCell.col, optValue);
                                 }
                                 kbCtrl.focusedDropdownCell = null;
-                            }}>{opt}</button
+                            }}
                         >
+                            {#if optColor}
+                                <span class="dropdown-option-color" style="background-color:{optColor};"></span>
+                            {/if}
+                            {optValue}
+                        </button>
                     {/each}
                     {#if filteredOpts.length === 0}
                         <div class="dropdown-no-match">No matches</div>
@@ -4152,6 +4162,17 @@
         font-size: 0.8125rem;
         color: var(--text-color, #1e293b);
         white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .dropdown-option-color {
+        flex-shrink: 0;
+        width: 12px;
+        height: 12px;
+        border-radius: 2px;
+        border: 1px solid rgba(0, 0, 0, 0.1);
     }
 
     .dropdown-option:last-child {
