@@ -1551,11 +1551,11 @@ export class SpreadsheetSession {
     }
 
     /**
-     * Get table column values with their colors for dropdown rendering.
-     * Returns objects with value and backgroundColor properties.
+     * Get table column values with their styling for dropdown rendering.
+     * Returns objects with value, backgroundColor, and color properties.
      * @param {string} tableName
      * @param {string} columnId
-     * @returns {Array<{value:string, backgroundColor?:string}>}
+     * @returns {Array<{value:string, backgroundColor?:string, color?:string}>}
      */
     getTableColumnOptionsWithColors(tableName, columnId) {
         const store = this.getCrossSheetTable(tableName);
@@ -1574,6 +1574,7 @@ export class SpreadsheetSession {
                     opts.push({
                         value: strVal,
                         backgroundColor: fmt?.backgroundColor ?? undefined,
+                        color: fmt?.color ?? undefined,
                     });
                 }
             }

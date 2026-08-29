@@ -289,8 +289,13 @@ async function route(req, res) {
                     const tc = typeof col.typeConfig === 'string' ? JSON.parse(col.typeConfig) : col.typeConfig;
                     if (tc.source === 'range' && tc.range) {
                         base.options = resolveRangeOptions(ydoc, sheetId, tc.range, sheets, client);
+                        base.optionsSource = 'range';
+                        base.optionsSourceRange = tc.range;
                     } else if (tc.source === 'table' && tc.tableName && tc.columnId) {
                         base.options = resolveTableColumnOptions(ydoc, tc.tableName, tc.columnId, client);
+                        base.optionsSource = 'table';
+                        base.optionsSourceTable = tc.tableName;
+                        base.optionsSourceColumn = tc.columnId;
                     } else if (Array.isArray(tc.options)) {
                         base.options = tc.options;
                     }

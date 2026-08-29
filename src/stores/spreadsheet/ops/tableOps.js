@@ -142,6 +142,12 @@ export function getTableSchema(ydoc, tableRef) {
         if (options) {
             out.options = options;
             out.allowCustom = col.typeConfig?.allowCustom ?? false;
+            if (col.typeConfig?.source === 'table' || col.typeConfig?.source === 'range') {
+                out.optionsSource = col.typeConfig.source;
+                if (col.typeConfig.tableName) out.optionsSourceTable = col.typeConfig.tableName;
+                if (col.typeConfig.columnId) out.optionsSourceColumn = col.typeConfig.columnId;
+                if (col.typeConfig.range) out.optionsSourceRange = col.typeConfig.range;
+            }
         }
         return out;
     });

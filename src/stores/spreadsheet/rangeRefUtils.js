@@ -56,11 +56,11 @@ export function resolveRangeValues(spreadsheetSession, rangeStr) {
 }
 
 /**
- * Resolve a range string to options with colors. Returns objects with value and
- * backgroundColor properties for dropdown rendering.
+ * Resolve a range string to options with styling (background + text colors).
+ * Returns objects with value, backgroundColor, and color properties.
  * @param {import('./SpreadsheetSession.svelte.js').SpreadsheetSession} spreadsheetSession
  * @param {string} rangeStr
- * @returns {Array<{value:string, backgroundColor?:string}>}
+ * @returns {Array<{value:string, backgroundColor?:string, color?:string}>}
  */
 export function resolveRangeOptions(spreadsheetSession, rangeStr) {
     if (!spreadsheetSession) return [];
@@ -88,6 +88,7 @@ export function resolveRangeOptions(spreadsheetSession, rangeStr) {
                     opts.push({
                         value: String(v),
                         backgroundColor: cell?.style?.backgroundColor ?? undefined,
+                        color: cell?.style?.color ?? undefined,
                     });
                 }
             }

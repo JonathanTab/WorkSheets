@@ -3467,9 +3467,11 @@
                     />
                     {#each filteredOpts as opt}
                         {@const optValue = getOptValue(opt)}
-                        {@const optColor = typeof opt === 'string' ? undefined : opt?.backgroundColor}
+                        {@const optBg = typeof opt === 'string' ? undefined : opt?.backgroundColor}
+                        {@const optColor = typeof opt === 'string' ? undefined : opt?.color}
                         <button
                             class="dropdown-option"
+                            style={optBg ? `background-color:${optBg}; color:${optColor || '#1e293b'};` : ''}
                             onmousedown={(e) => {
                                 e.preventDefault();
                                 if (kbCtrl.focusedDropdownCell.onCommit) {
@@ -3480,9 +3482,6 @@
                                 kbCtrl.focusedDropdownCell = null;
                             }}
                         >
-                            {#if optColor}
-                                <span class="dropdown-option-color" style="background-color:{optColor};"></span>
-                            {/if}
                             {optValue}
                         </button>
                     {/each}
@@ -4162,25 +4161,13 @@
         font-size: 0.8125rem;
         color: var(--text-color, #1e293b);
         white-space: nowrap;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    .dropdown-option-color {
-        flex-shrink: 0;
-        width: 12px;
-        height: 12px;
-        border-radius: 2px;
-        border: 1px solid rgba(0, 0, 0, 0.1);
     }
 
     .dropdown-option:last-child {
         border-bottom: none;
     }
     .dropdown-option:hover {
-        background: var(--cell-hover, #f1f5f9);
-        color: var(--text-color, #1e293b);
+        opacity: 0.85;
     }
 
     .dropdown-filter-input {

@@ -8,6 +8,18 @@
     let { options, onUpdate } = $props();
 
     let dropdownOptionInput = $state('');
+    let colorPickerOpen = $state(null);
+
+    const PRESET_COLORS = [
+        ["#e6e6e6", "#3d3d3d"],
+        ["#ffcfc9", "#b10202"],
+        ["#ffc8aa", "#753800"],
+        ["#ffe5a0", "#473822"],
+        ["#d4edbc", "#11734b"],
+        ["#bfe1f6", "#0a53a8"],
+        ["#c6dbe1", "#215a6c"],
+        ["#e6cff2", "#5a3286"]
+    ];
 
     let availableTables = $derived(() => spreadsheetSession.getAllTableDescriptors());
 
@@ -28,6 +40,18 @@
         onUpdate({ type: 'dropdown', ...options, tableName, columnId });
     }
 
+    function getOptValue(opt) {
+        return typeof opt === 'string' ? opt : opt?.value ?? String(opt);
+    }
+
+    function getOptBg(opt) {
+        return typeof opt === 'string' ? undefined : opt?.backgroundColor;
+    }
+
+    function getOptColor(opt) {
+        return typeof opt === 'string' ? undefined : opt?.color;
+    }
+
     function addOption() {
         const val = dropdownOptionInput.trim();
         if (!val) return;
@@ -39,6 +63,24 @@
         const list = [...(options.options || [])];
         list.splice(idx, 1);
         onUpdate({ type: 'dropdown', ...options, options: list });
+    }
+
+    function setOptionColor(idx, bgColor, fgColor) {
+        const list = [...(options.options || [])];
+        const opt = list[idx];
+        const value = getOptValue(opt);
+        list[idx] = { value, backgroundColor: bgColor, color: fgColor };
+        onUpdate({ type: 'dropdown', ...options, options: list });
+        colorPickerOpen = null;
+    }
+
+    function clearOptionColor(idx) {
+        const list = [...(options.options || [])];
+        const opt = list[idx];
+        const value = getOptValue(opt);
+        list[idx] = value;
+        onUpdate({ type: 'dropdown', ...options, options: list });
+        colorPickerOpen = null;
     }
 
     function useSelectionAsRange() {
@@ -118,9 +160,37 @@
         <div class="dropdown-list-label">Options</div>
         <div class="dropdown-options">
             {#each (options.options || []) as opt, idx}
+                {@const optValue = getOptValue(opt)}
+                {@const optBg = getOptBg(opt)}
+                {@const optColor = getOptColor(opt)}
                 <div class="dropdown-option-row">
-                    <span class="opt-label">{opt}</span>
-                    <button class="opt-del" onclick={() => removeOption(idx)}>✕</button>
+                    <span class="opt-label" style={optBg ? `background-color:${optBg}; color:${optColor || '#1e293b'}; padding:2px 4px; border-radius:2px;` : ''}>{optValue}</span>
+                    <div class="opt-controls">
+                        <button
+                            class="opt-color-btn"
+                            style={optBg ? `background-color:${optBg}; border-color:${optColor || '#1e293b'};` : ''}
+                            onclick={() => colorPickerOpen = colorPickerOpen === idx ? null : idx}
+                            title="Set color"
+                        >🎨</button>
+                        <button class="opt-del" onclick={() => removeOption(idx)}>✕</button>
+                    </div>
+                    {#if colorPickerOpen === idx}
+                        <div class="color-picker-popup">
+                            {#if optBg}
+                                <button class="clear-color-btn" onclick={() => clearOptionColor(idx)}>Clear color</button>
+                            {/if}
+                            <div class="preset-colors">
+                                {#each PRESET_COLORS as [bgColor, fgColor]}
+                                    <button
+                                        class="color-preset"
+                                        style="background-color:{bgColor}; color:{fgColor};"
+                                        onclick={() => setOptionColor(idx, bgColor, fgColor)}
+                                        title="Apply color"
+                                    >A</button>
+                                {/each}
+                            </div>
+                        </div>
+                    {/if}
                 </div>
             {/each}
             {#if !(options.options?.length)}
@@ -150,7 +220,7 @@
 
 <style>
     .options-panel {
-        margin-top: 8px;
+        margin: 8px;
         padding-top: 8px;
         border-top: 1px solid #e2e8f0;
     }
@@ -250,14 +320,34 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 6px;
         padding: 3px 6px;
         border-bottom: 1px solid #f1f5f9;
         font-size: 0.8125rem;
+        position: relative;
     }
 
     .dropdown-option-row:last-child { border-bottom: none; }
 
     .opt-label { flex: 1; color: #374151; }
+
+    .opt-controls {
+        display: flex;
+        gap: 2px;
+        align-items: center;
+    }
+
+    .opt-color-btn {
+        background: #f1f5f9;
+        border: 1px solid #cbd5e1;
+        padding: 2px 6px;
+        border-radius: 2px;
+        cursor: pointer;
+        font-size: 0.75rem;
+        line-height: 1;
+    }
+
+    .opt-color-btn:hover { background: #e2e8f0; }
 
     .opt-del {
         background: none;
@@ -267,6 +357,54 @@
         padding: 0 2px;
         font-size: 0.75rem;
     }
+
+    .color-picker-popup {
+        position: absolute;
+        top: 100%;
+        right: 0;
+        background: white;
+        border: 1px solid #cbd5e1;
+        border-radius: 3px;
+        padding: 4px;
+        margin-top: 2px;
+        z-index: 10;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .preset-colors {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 2px;
+    }
+
+    .color-preset {
+        width: 24px;
+        height: 24px;
+        border: 2px solid transparent;
+        border-radius: 2px;
+        cursor: pointer;
+        font-weight: bold;
+        font-size: 0.7rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .color-preset:hover { border-color: #333; }
+
+    .clear-color-btn {
+        width: 100%;
+        padding: 2px 4px;
+        margin-bottom: 4px;
+        background: #f1f5f9;
+        border: 1px solid #cbd5e1;
+        border-radius: 2px;
+        cursor: pointer;
+        font-size: 0.7rem;
+        color: #64748b;
+    }
+
+    .clear-color-btn:hover { background: #e2e8f0; }
 
     .opt-empty {
         padding: 6px 8px;
