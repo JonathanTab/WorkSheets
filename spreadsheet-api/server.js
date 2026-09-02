@@ -449,10 +449,30 @@ async function route(req, res) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Resolve a credential from the request: an Authorization header, or a
+ * session_token/device_token cookie.
+ *
+ * The cookie path exists for browser callers of /api/sheets/* (the ledger
+ * PWAs) that authenticate to the rest of the site via the session cookie and
+ * hold no API key. It works with no other change anywhere in this file: a
+ * session or device token is just as valid a Bearer credential downstream as
+ * an API key — PHP's itoken_resolve() and yjs-server's validator treat all
+ * three kinds identically — so the cookie's value is used exactly like an
+ * apiKey from here on.
+ */
 function extractBearer(req) {
     const auth = req.headers.authorization ?? '';
     const m = auth.match(/^Bearer (.+)$/);
-    return m ? m[1] : null;
+    if (m) return m[1];
+
+    const cookie = req.headers.cookie;
+    if (cookie) {
+        const cm = cookie.match(/(?:^|;\s*)(?:session_token|device_token)=([a-f0-9]{64})/i);
+        if (cm) return cm[1];
+    }
+
+    return null;
 }
 
 /**
