@@ -652,7 +652,7 @@ async function handleHttp(req, res, url) {
     }
 
     const token = _getToken(req, url);
-    const auth = validateToken(token);
+    const auth = await validateToken(token);
     if (!auth) return _json(res, 401, { error: 'Unauthorized' });
 
     // GET /api/stats — server-wide metrics + per-room live summaries.
@@ -826,7 +826,7 @@ wss.on('connection', (ws, _req, name, fileId, username, appType) => {
     });
 });
 
-server.on('upgrade', (req, socket, head) => {
+server.on('upgrade', async (req, socket, head) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
     const name = url.pathname.slice(1).split('/')[0];
     if (!name) {
@@ -837,12 +837,25 @@ server.on('upgrade', (req, socket, head) => {
 
     let token = url.searchParams.get('auth') ?? null;
 
+    if (!token) {
+        const wsAuthHeader = req.headers['authorization'];
+        if (wsAuthHeader?.startsWith('Bearer ')) token = wsAuthHeader.slice(7);
+    }
+
     if (!token && req.headers.cookie) {
-        const cookieMatch = req.headers.cookie.match(/session_token=([a-f0-9]{64})/i);
+        // Either cookie is a valid credential: session_token for a signed-in
+        // browser tab, device_token for an installed PWA mirroring its stored
+        // token. Both are resolved by the same PHP validator.
+        const cookieMatch = req.headers.cookie.match(/(?:^|;\s*)(?:session_token|device_token)=([a-f0-9]{64})/i);
         if (cookieMatch) token = cookieMatch[1];
     }
 
-    const auth = validateToken(token);
+    let auth = null;
+    try {
+        auth = await validateToken(token);
+    } catch (err) {
+        console.error('[auth] WS validation threw:', err.message);
+    }
     if (!auth) {
         console.warn(`[auth] Rejected WS connection to room ${name} (bad token)`);
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');

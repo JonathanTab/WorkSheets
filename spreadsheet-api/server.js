@@ -48,6 +48,10 @@ try {
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT ?? 3456);
+// Loopback only: Caddy reverse-proxies /api/sheets here, so nothing outside the
+// box should reach this port directly. ufw blocks it too, but binding narrowly
+// means a firewall change cannot quietly expose it.
+const HOST = process.env.HOST ?? '127.0.0.1';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '*').split(',').map(s => s.trim());
 const BASE_URL = process.env.STORAGE_BASE_URL ?? 'https://instrumenta.cc/api/storage.php';
 const BLOB_URL = process.env.BLOB_STORAGE_URL ?? 'https://instrumenta.cc/api/blob-storage.php';
@@ -122,7 +126,7 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-server.listen(PORT, () => console.log(`spreadsheet-api listening on :${PORT}`));
+server.listen(PORT, HOST, () => console.log(`spreadsheet-api listening on ${HOST}:${PORT}`));
 
 // ─── Table-column dropdown resolver ──────────────────────────────────────────
 

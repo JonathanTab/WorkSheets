@@ -345,8 +345,9 @@ export class StorageAPI {
             ? new URL(this.blobUrl)
             : new URL(this.blobUrl, window.location.origin);
         url.searchParams.set('id', fileId);
-        const key = this.getApiKey();
-        if (key) url.searchParams.set('apikey', key); // needed for img/video src
+        // No credential in the URL: subresource requests authenticate with the
+        // session_token cookie, or the device_token cookie an installed PWA
+        // mirrors from its stored device token.
         return url.toString();
     }
 
@@ -363,8 +364,6 @@ export class StorageAPI {
             : new URL(this.blobUrl, window.location.origin);
         url.searchParams.set('id', fileId);
         url.searchParams.set('action', 'stream');
-        const key = this.getApiKey();
-        if (key) url.searchParams.set('apikey', key);
         return url.toString();
     }
 
@@ -381,8 +380,6 @@ export class StorageAPI {
                 : new URL(this.blobUrl, window.location.origin);
             url.searchParams.set('id', fileId);
             url.searchParams.set('action', 'info');
-            const key = this.getApiKey();
-            if (key) url.searchParams.set('apikey', key);
             const res = await fetch(url.toString(), { credentials: 'same-origin', headers: this._authHeaders() });
             if (!res.ok) return null;
             const data = await res.json();
@@ -446,8 +443,6 @@ export class StorageAPI {
             : new URL(this.blobUrl, window.location.origin);
         url.searchParams.set('id', fileId);
         url.searchParams.set('action', 'thumbnail');
-        const key = this.getApiKey();
-        if (key) url.searchParams.set('apikey', key);
         return url.toString();
     }
 

@@ -1,122 +1,121 @@
-import fs from 'fs';
-import path from 'path';
+/**
+ * auth.js — credential validation for the Yjs server.
+ *
+ * This used to be a private re-implementation: it read token files straight
+ * out of the session-token directory and checked `expires` itself. That meant
+ * two copies of the rules, and they disagreed — the PHP side rotates tokens
+ * and marks the predecessor `superseded_by`, which this file knew nothing
+ * about, so a token PHP considered perfectly valid was rejected here.
+ *
+ * It now asks the PHP validator (api/validate.php) over the loopback vhost, so
+ * there is exactly one implementation of "is this credential good" and the
+ * on-disk token format is free to change without silently breaking realtime
+ * sync.
+ *
+ * Accepts all three credential kinds: session cookies, PWA device tokens, and
+ * API keys — resolving which is which is the validator's job, not ours.
+ */
 
-const TOKEN_DIR = process.env.TOKEN_DIR || '/var/www/instrumenta/data/session_tokens/';
-const USERS_FILE = process.env.USERS_FILE || '/var/www/users.json';
+const VALIDATE_URL = process.env.VALIDATE_URL || 'http://127.0.0.1/api/validate.php';
 const ALLOW_ANONYMOUS = process.env.ALLOW_ANONYMOUS === 'true';
 
-// Cache for users.json to avoid repeated file reads
-let usersCache = null;
-let usersCacheTime = 0;
-const USERS_CACHE_TTL = 5000; // 5 seconds
+/** Cache hits briefly: a reconnect storm should not become a PHP request storm. */
+const POSITIVE_TTL_MS = 60_000;
+/** Cache misses too, so a client looping on a dead token cannot amplify load. */
+const NEGATIVE_TTL_MS = 10_000;
+/** Bound the cache so a flood of junk tokens cannot grow it without limit. */
+const MAX_CACHE_ENTRIES = 5000;
 
-/**
- * Read users.json with caching.
- * @returns {Object|null}
- */
-function getUsers() {
-    const now = Date.now();
-    if (usersCache && (now - usersCacheTime) < USERS_CACHE_TTL) {
-        return usersCache;
+/** @type {Map<string, {value: object|null, expires: number}>} */
+const cache = new Map();
+
+function cacheGet(token) {
+    const hit = cache.get(token);
+    if (!hit) return undefined;
+    if (hit.expires < Date.now()) {
+        cache.delete(token);
+        return undefined;
     }
-    try {
-        const raw = fs.readFileSync(USERS_FILE, 'utf8');
-        usersCache = JSON.parse(raw);
-        usersCacheTime = now;
-        return usersCache;
-    } catch {
-        return null;
+    return hit.value;
+}
+
+function cacheSet(token, value) {
+    if (cache.size >= MAX_CACHE_ENTRIES) {
+        // Cheap eviction: drop the oldest insertion. Map preserves insert order.
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
     }
+    cache.set(token, {
+        value,
+        expires: Date.now() + (value ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS),
+    });
 }
 
 /**
- * Validate an API key against users.json.
- * API keys are stored in users.json under each user's 'api_key' field.
+ * Drop a token from the cache. Call after an explicit revocation so a revoked
+ * credential stops working immediately rather than at the end of its TTL.
  * @param {string} token
- * @returns {{ username: string }|null}
  */
-function validateApiKey(token) {
-    const users = getUsers();
-    if (!users) return null;
-
-    for (const [username, userData] of Object.entries(users)) {
-        if (userData.api_key && hashEquals(userData.api_key, token)) {
-            return { username };
-        }
-    }
-    return null;
+export function invalidateToken(token) {
+    cache.delete(token);
 }
 
 /**
- * Constant-time string comparison to prevent timing attacks.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function hashEquals(a, b) {
-    if (typeof a !== 'string' || typeof b !== 'string') return false;
-    if (a.length !== b.length) return false;
-    let result = 0;
-    for (let i = 0; i < a.length; i++) {
-        result |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    }
-    return result === 0;
-}
-
-/**
- * Validate a session token file.
- * Reads the token file from TOKEN_DIR/{token} which contains JSON: { username, expires }
- * @param {string} token
- * @returns {{ username: string }|null}
- */
-function validateSessionToken(token) {
-    try {
-        const filePath = path.join(TOKEN_DIR, token);
-        const raw = fs.readFileSync(filePath, 'utf8');
-        const data = JSON.parse(raw);
-
-        if (!data.username || !data.expires) return null;
-
-        // Check expiry (PHP stores as Unix seconds)
-        if (data.expires < Math.floor(Date.now() / 1000)) {
-            console.warn(`[auth] Token for ${data.username} expired`);
-            return null;
-        }
-
-        return { username: data.username };
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Validate a Bearer token.
- * Supports both session tokens and API keys.
+ * Validate a credential.
  *
- * Priority:
- * 1. Session token (file in TOKEN_DIR)
- * 2. API key (stored in users.json)
+ * Fails closed: if the validator cannot be reached we reject rather than
+ * guess. Because auth is only checked at connection setup, and successes are
+ * cached, a brief php-fpm hiccup does not disturb established sessions.
  *
  * @param {string|null} token
- * @returns {{ username: string }|null}
+ * @returns {Promise<{username: string, kind?: string, isAdmin?: boolean, invitedApps?: string[]}|null>}
  */
-export function validateToken(token) {
+export async function validateToken(token) {
     if (!token || typeof token !== 'string') {
         return ALLOW_ANONYMOUS ? { username: 'anonymous' } : null;
     }
 
-    // Sanitize — token must be a hex string (64 chars)
+    // Shape check before spending a round trip. Session and device tokens are
+    // 64 hex chars; so are API keys, which are generated the same way.
     if (!/^[a-f0-9]{64}$/i.test(token)) {
         return ALLOW_ANONYMOUS ? { username: 'anonymous' } : null;
     }
 
-    // 1. Try session token first
-    const sessionResult = validateSessionToken(token);
-    if (sessionResult) return sessionResult;
+    const cached = cacheGet(token);
+    if (cached !== undefined) {
+        return cached ?? (ALLOW_ANONYMOUS ? { username: 'anonymous' } : null);
+    }
 
-    // 2. Try API key
-    const apiKeyResult = validateApiKey(token);
-    if (apiKeyResult) return apiKeyResult;
+    let result = null;
+    try {
+        const res = await fetch(VALIDATE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
+            signal: AbortSignal.timeout(5000),
+        });
 
-    return ALLOW_ANONYMOUS ? { username: 'anonymous' } : null;
+        if (res.ok) {
+            const body = await res.json();
+            if (body?.valid && body.username) {
+                result = {
+                    username: body.username,
+                    kind: body.kind,
+                    isAdmin: !!body.is_admin,
+                    invitedApps: body.invited_apps ?? [],
+                };
+            }
+        } else if (res.status !== 401) {
+            // 401 is a normal "bad token". Anything else is a real fault, and
+            // caching it as a miss would extend the outage past its cause.
+            console.error(`[auth] validator returned HTTP ${res.status}`);
+            return null;
+        }
+    } catch (err) {
+        console.error('[auth] validator unreachable:', err.message);
+        return null;
+    }
+
+    cacheSet(token, result);
+    return result ?? (ALLOW_ANONYMOUS ? { username: 'anonymous' } : null);
 }
