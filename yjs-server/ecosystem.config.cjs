@@ -19,7 +19,6 @@ module.exports = {
             GC: 'true',
             SNAPSHOT_MIN_INTERVAL: '600000',
             SNAPSHOT_MAX_INTERVAL: '3600000',
-            ALLOW_ANONYMOUS: 'false',
             // Used by storage.php to proxy snapshot API calls
             // Set this in the PHP environment (e.g. apache/nginx SetEnv), not here
             // YJS_SERVER_URL: 'http://localhost:1889'

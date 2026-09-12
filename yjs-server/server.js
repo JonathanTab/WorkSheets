@@ -17,6 +17,7 @@ try {
 
 import WebSocket, { WebSocketServer } from 'ws';
 import http from 'http';
+import crypto from 'crypto';
 import * as Y from 'yjs';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -24,7 +25,7 @@ import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import * as map from 'lib0/map';
 
-import { validateToken } from './auth.js';
+import { validateRequest, statusFor, matchesRoom, checkPublicFileAccess } from './auth.js';
 import {
     initDb,
     bindDocState,
@@ -386,8 +387,12 @@ const closeConn = (doc, conn) => {
  * @param {string|null} fileId
  * @param {string} username
  * @param {string|null} appType
+ * @param {boolean} [readOnly] - true for an anonymous link-sharing viewer on a
+ *   file without public_write. The connection still receives full sync and
+ *   awareness (so it renders the live doc and sees presence), but any
+ *   doc-mutating message it sends is silently dropped rather than applied.
  */
-const setupWSConnection = async (conn, name, fileId, username, appType) => {
+const setupWSConnection = async (conn, name, fileId, username, appType, readOnly = false) => {
     conn.binaryType = 'arraybuffer';
 
     // Buffer messages that arrive before LevelDB state has loaded. The client
@@ -422,7 +427,20 @@ const setupWSConnection = async (conn, name, fileId, username, appType) => {
             switch (messageType) {
                 case messageSync:
                     encoding.writeVarUint(encoder, messageSync);
-                    syncProtocol.readSyncMessage(decoder, encoder, docRef, conn);
+                    if (readOnly) {
+                        // Peek the sync sub-type ourselves instead of calling
+                        // readSyncMessage: SyncStep1 (a state-vector request) is
+                        // harmless and must still be answered so a read-only
+                        // viewer gets the doc's content, but SyncStep2/Update
+                        // both call Y.applyUpdate — exactly the write this
+                        // connection is not allowed to make. Drop those.
+                        const syncMessageType = decoding.readVarUint(decoder);
+                        if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
+                            syncProtocol.readSyncStep1(decoder, encoder, docRef);
+                        }
+                    } else {
+                        syncProtocol.readSyncMessage(decoder, encoder, docRef, conn);
+                    }
                     if (encoding.length(encoder) > 1) {
                         send(docRef, conn, encoding.toUint8Array(encoder));
                     }
@@ -599,12 +617,6 @@ function _readBody(req) {
     });
 }
 
-function _getToken(req, url) {
-    const authHeader = req.headers['authorization'];
-    if (authHeader?.startsWith('Bearer ')) return authHeader.slice(7);
-    return url.searchParams.get('auth') ?? null;
-}
-
 /**
  * Build a live metrics summary for a single in-memory room.
  * `stateSize` is the current in-memory logical size (encoded update bytes);
@@ -651,9 +663,18 @@ async function handleHttp(req, res, url) {
         return res.end('Not found');
     }
 
-    const token = _getToken(req, url);
-    const auth = await validateToken(token);
-    if (!auth) return _json(res, 401, { error: 'Unauthorized' });
+    // Bearer, ?token=/?auth=, or either cookie — extracted by the shared client
+    // so the precedence here is the one iauth.php uses. Answering 503 rather
+    // than 401 when the validator cannot be reached matters: a client that reads
+    // "ask again" as "your credential is bad" discards a token that was fine.
+    const { outcome } = await validateRequest(req, url);
+    const status = statusFor(outcome);
+    if (status !== 200) {
+        return _json(res, status, {
+            error: status === 503 ? 'validator unavailable' : 'Unauthorized',
+        });
+    }
+    const auth = outcome;
 
     // GET /api/stats — server-wide metrics + per-room live summaries.
     // Surfaces total connection count, over-the-wire byte totals, active rooms,
@@ -819,8 +840,8 @@ async function handleHttp(req, res, url) {
 // ---------------------------------------------------------------------------
 // WebSocket upgrade — authenticate then hand off to setupWSConnection
 // ---------------------------------------------------------------------------
-wss.on('connection', (ws, _req, name, fileId, username, appType) => {
-    setupWSConnection(ws, name, fileId, username, appType).catch(err => {
+wss.on('connection', (ws, _req, name, fileId, username, appType, readOnly) => {
+    setupWSConnection(ws, name, fileId, username, appType, readOnly).catch(err => {
         console.error(`[ws] setupWSConnection failed for ${name}:`, err?.message ?? err);
         try { ws.close(1011, 'Internal server error'); } catch { }
     });
@@ -835,38 +856,48 @@ server.on('upgrade', async (req, socket, head) => {
         return;
     }
 
-    let token = url.searchParams.get('auth') ?? null;
+    // Bearer, ?auth=/?token=, or either cookie. The extraction used to be
+    // hand-rolled here, and its cookie regex took whichever of
+    // session_token/device_token appeared first in the header — where
+    // iauth.php resolves device_token ahead of session_token. PHP and the
+    // realtime layer could therefore disagree about which credential a
+    // connection was using.
+    const { outcome } = await validateRequest(req, url);
+    const status = statusFor(outcome);
+    let auth = status === 200 ? outcome : null;
 
-    if (!token) {
-        const wsAuthHeader = req.headers['authorization'];
-        if (wsAuthHeader?.startsWith('Bearer ')) token = wsAuthHeader.slice(7);
+    const fileId = url.searchParams.get('fileId') ?? null;
+    const appType = url.searchParams.get('appType') ?? null;
+    let readOnly = false;
+
+    // No valid credential — this may still be a legitimate anonymous visitor
+    // to a link-shared document. Admit them (read-only unless the file also
+    // has public_write), but only for the room that file actually owns: a
+    // public fileId can't be used to walk into an unrelated room name.
+    if (!auth && fileId) {
+        const granted = matchesRoom(await checkPublicFileAccess(fileId), name);
+        if (granted) {
+            auth = { username: `guest-${crypto.randomBytes(4).toString('hex')}` };
+            readOnly = granted.readOnly;
+        }
     }
 
-    if (!token && req.headers.cookie) {
-        // Either cookie is a valid credential: session_token for a signed-in
-        // browser tab, device_token for an installed PWA mirroring its stored
-        // token. Both are resolved by the same PHP validator.
-        const cookieMatch = req.headers.cookie.match(/(?:^|;\s*)(?:session_token|device_token)=([a-f0-9]{64})/i);
-        if (cookieMatch) token = cookieMatch[1];
-    }
-
-    let auth = null;
-    try {
-        auth = await validateToken(token);
-    } catch (err) {
-        console.error('[auth] WS validation threw:', err.message);
-    }
     if (!auth) {
-        console.warn(`[auth] Rejected WS connection to room ${name} (bad token)`);
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        // 503 when the validator itself could not answer, so the refusal is
+        // honest about which of the two it is. The browser WebSocket API does
+        // not expose the handshake status to onclose, so a client cannot act on
+        // the difference — but answering accurately costs nothing and keeps
+        // this consistent with the HTTP path above.
+        if (status === 503) console.error('[auth] WS validator unavailable:', outcome.reason);
+        console.warn(`[auth] Rejected WS connection to room ${name} (${status})`);
+        const text = status === 503 ? 'Service Unavailable' : 'Unauthorized';
+        socket.write(`HTTP/1.1 ${status} ${text}\r\n\r\n`);
         socket.destroy();
         return;
     }
 
-    const fileId = url.searchParams.get('fileId') ?? null;
-    const appType = url.searchParams.get('appType') ?? null;
     wss.handleUpgrade(req, socket, head, ws => {
-        wss.emit('connection', ws, req, name, fileId, auth.username, appType);
+        wss.emit('connection', ws, req, name, fileId, auth.username, appType, readOnly);
     });
 });
 

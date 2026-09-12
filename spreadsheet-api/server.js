@@ -5,10 +5,11 @@
  * Any app can call this API with a Bearer token to read/write spreadsheet
  * tables, cells, and blob files without needing to run Yjs directly.
  *
- * Auth: the caller's  Authorization: Bearer <token>  is forwarded directly
- * to Scriptorium. The server has no API key of its own — any valid Scriptorium
- * API key works. SpreadsheetClient instances are cached per token so each
- * unique caller keeps a persistent WebSocket connection.
+ * Auth: the caller's  Authorization: Bearer <token>  is forwarded directly to
+ * Scriptorium, as is a session_token/device_token cookie for browser callers.
+ * The server has no API key of its own — any valid Scriptorium credential
+ * works. SpreadsheetClient instances are cached per token so each unique caller
+ * keeps a persistent WebSocket connection.
  *
  * Endpoints:
  *   GET  /files
@@ -25,25 +26,17 @@
  */
 
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import { SpreadsheetClient } from './SpreadsheetClient.js';
+// Side-effect import: loads spreadsheet-api/.env. It must evaluate before the
+// config block below, which is why it is a module rather than an inline block —
+// auth.js reads INSTRUMENTA_AUTH_LIB at module scope too, and the loader used
+// to live in this file's body, i.e. after both of them had already run.
+import './env.js';
+import { extractToken } from './auth.js';
 import { parseFormula } from '../src/formulas/parser.js';
 import { evaluate } from '../src/formulas/evaluator.js';
 import * as ops from '../src/stores/spreadsheet/ops/index.js';
 import { OpError } from '../src/stores/spreadsheet/ops/context.js';
-
-// ─── Load .env ──────────────────────────────────────────────────────────────
-
-const __dir = path.dirname(fileURLToPath(import.meta.url));
-try {
-    const envText = readFileSync(path.join(__dir, '.env'), 'utf8');
-    for (const line of envText.split('\n')) {
-        const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
-        if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
-    }
-} catch { /* .env is optional */ }
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -233,7 +226,9 @@ function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 async function route(req, res) {
-    const apiKey = extractBearer(req);
+    // Named apiKey because that is what it becomes downstream — a credential of
+    // any of the three kinds, offered as a bearer or as a cookie.
+    const apiKey = extractToken(req);
     if (!apiKey) return json(res, 401, { error: 'Unauthorized' });
     let client;
     try {
@@ -448,32 +443,6 @@ async function route(req, res) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Resolve a credential from the request: an Authorization header, or a
- * session_token/device_token cookie.
- *
- * The cookie path exists for browser callers of /api/sheets/* (the ledger
- * PWAs) that authenticate to the rest of the site via the session cookie and
- * hold no API key. It works with no other change anywhere in this file: a
- * session or device token is just as valid a Bearer credential downstream as
- * an API key — PHP's itoken_resolve() and yjs-server's validator treat all
- * three kinds identically — so the cookie's value is used exactly like an
- * apiKey from here on.
- */
-function extractBearer(req) {
-    const auth = req.headers.authorization ?? '';
-    const m = auth.match(/^Bearer (.+)$/);
-    if (m) return m[1];
-
-    const cookie = req.headers.cookie;
-    if (cookie) {
-        const cm = cookie.match(/(?:^|;\s*)(?:session_token|device_token)=([a-f0-9]{64})/i);
-        if (cm) return cm[1];
-    }
-
-    return null;
-}
 
 /**
  * Open a doc, re-initializing the file list once if the fileId is unknown.
