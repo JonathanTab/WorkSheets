@@ -858,10 +858,9 @@ server.on('upgrade', async (req, socket, head) => {
 
     // Bearer, ?auth=/?token=, or either cookie. The extraction used to be
     // hand-rolled here, and its cookie regex took whichever of
-    // session_token/device_token appeared first in the header — where
-    // iauth.php resolves device_token ahead of session_token. PHP and the
-    // realtime layer could therefore disagree about which credential a
-    // connection was using.
+    // session_token/device_token appeared first in the header — so the answer
+    // depended on header order, not on a rule. PHP and the realtime layer could
+    // therefore disagree about which credential a connection was using.
     const { outcome } = await validateRequest(req, url);
     const status = statusFor(outcome);
     let auth = status === 200 ? outcome : null;

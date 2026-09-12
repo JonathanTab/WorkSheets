@@ -32,7 +32,7 @@ import { SpreadsheetClient } from './SpreadsheetClient.js';
 // auth.js reads INSTRUMENTA_AUTH_LIB at module scope too, and the loader used
 // to live in this file's body, i.e. after both of them had already run.
 import './env.js';
-import { extractToken } from './auth.js';
+import { extractTokens, firstAccepted } from './auth.js';
 import { parseFormula } from '../src/formulas/parser.js';
 import { evaluate } from '../src/formulas/evaluator.js';
 import * as ops from '../src/stores/spreadsheet/ops/index.js';
@@ -226,16 +226,27 @@ function resolveRangeOptions(ydoc, defaultSheetId, rangeStr, sheets, client) {
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 async function route(req, res) {
-    // Named apiKey because that is what it becomes downstream — a credential of
-    // any of the three kinds, offered as a bearer or as a cookie.
-    const apiKey = extractToken(req);
-    if (!apiKey) return json(res, 401, { error: 'Unauthorized' });
-    let client;
-    try {
-        client = await getClient(apiKey);
-    } catch (err) {
-        return json(res, 401, { error: `Scriptorium auth failed: ${err.message}` });
+    // A browser can offer two credentials at once — its session_token cookie and
+    // its device_token cookie — and either may be the stale one. Scriptorium is
+    // the only thing that can say whether a credential is good, so rather than
+    // pick one here and forward its rejection as the request's verdict, try them
+    // in precedence order and stop at the first Scriptorium accepts. This is the
+    // same skip-and-continue iauth.php does (AUTH.md §3); taking only the first
+    // is how a ledger PWA with a lapsed device cookie got signed out while its
+    // session was perfectly good.
+    const credentials = extractTokens(req);
+    if (credentials.length === 0) return json(res, 401, { error: 'Unauthorized' });
+
+    // getClient only caches after init() resolves, so a credential that failed
+    // here has left nothing behind to poison the next attempt.
+    const accepted = await firstAccepted(credentials, getClient);
+    if (!accepted.value) {
+        return json(res, 401, { error: `Scriptorium auth failed: ${accepted.error?.message ?? 'unknown'}` });
     }
+    // Named apiKey because that is what it became downstream — a credential of
+    // any of the three kinds, offered as a bearer or as a cookie.
+    const client = accepted.value;
+    const apiKey = accepted.credential;
 
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;

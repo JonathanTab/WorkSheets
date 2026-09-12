@@ -13,9 +13,10 @@
  * credential extraction, its own outcome cache, and its own copy of the
  * link-sharing check. The extraction had the same precedence bug colloquium's
  * did: it took whichever of session_token/device_token appeared first in the
- * Cookie header, while iauth.php resolves device_token ahead of session_token,
- * so PHP and the realtime layer could disagree about which credential a
- * connection was even using.
+ * Cookie header, so the answer depended on header order rather than on any
+ * rule — and it kept only that one, where iauth.php ranks the two and skips
+ * whichever is dead. PHP and the realtime layer could therefore disagree about
+ * which credential a connection was even using.
  *
  * All of that now comes from the shared library the site serves (AUTH.md 11).
  * This service runs on the same box as the site, so the "dependency" is a path

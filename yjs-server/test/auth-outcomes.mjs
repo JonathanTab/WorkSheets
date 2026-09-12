@@ -3,10 +3,12 @@
 // visitor may still be admitted to a link-shared document.
 //
 // The extraction used to be hand-rolled here, and its cookie regex took
-// whichever of session_token/device_token appeared first in the header — where
-// iauth.php resolves device_token ahead of session_token. PHP and the realtime
-// layer could therefore disagree about which credential a connection was even
-// using. That is the regression this covers.
+// whichever of session_token/device_token appeared first in the header — so the
+// answer depended on header order, which is not a rule. It then kept only that
+// one, where iauth.php ranks the two and skips whichever turns out to be dead.
+// PHP and the realtime layer could therefore disagree about which credential a
+// connection was even using, and a stale cookie beside a live one failed the
+// connection outright. Those are the regressions this covers.
 //
 // Run: node test/auth-outcomes.mjs
 import http from 'node:http';
@@ -17,6 +19,7 @@ const SESSION = 'a'.repeat(64);
 const DEVICE  = 'b'.repeat(64);
 const GOOD    = 'c'.repeat(64);
 const OUTAGE  = '1'.repeat(64);
+const DEAD    = 'f'.repeat(64);  // no ANSWERS entry, so {valid:false}
 
 const ANSWERS = {
   [SESSION]: { valid: true, username: 'cookie-session-user', kind: 'session' },
@@ -74,27 +77,47 @@ const check = (name, actual, expected) => {
 
 check('no credential at all', await decide(req()), 401);
 check('valid bearer', await decide(req({ authorization: `Bearer ${GOOD}` })), 200);
-check('dead token', await decide(req({ authorization: `Bearer ${'f'.repeat(64)}` })), 401);
+check('dead token', await decide(req({ authorization: `Bearer ${DEAD}` })), 401);
 check('malformed token', await decide(req({ authorization: 'Bearer nope' })), 401);
 
-// The regression: session_token precedes device_token in the header, but
-// iauth.php resolves device first, so this server must too. The old regex took
-// whichever came first — i.e. the session token here.
+// The regression: session_token precedes device_token in the header, and the
+// old regex took whichever came first — so the answer depended on header order.
+// iauth.php ranks session ahead of device, so this server must too.
 check(
-  'cookie precedence: device wins over session',
+  'cookie precedence: session wins over device',
   await decide(req({ cookie: `session_token=${SESSION}; device_token=${DEVICE}` })),
   200,
 );
 check(
-  'cookie precedence: device is the one validated',
+  'cookie precedence: session is the one validated',
   (await validateRequest(req({ cookie: `session_token=${SESSION}; device_token=${DEVICE}` }), null))
     .outcome.username,
+  'cookie-session-user',
+);
+// The other half: a dead session must not fail the connection while a live
+// device token is sitting right there. Ranking session first is only safe
+// because both are tried.
+check(
+  'cookie fallback: a dead session falls through to the device',
+  (await validateRequest(req({ cookie: `session_token=${DEAD}; device_token=${DEVICE}` }), null))
+    .outcome.username,
   'cookie-device-user',
+);
+check(
+  'cookie fallback: a dead device does not reject a live session',
+  (await validateRequest(req({ cookie: `device_token=${DEAD}; session_token=${SESSION}` }), null))
+    .outcome.username,
+  'cookie-session-user',
 );
 check(
   'session cookie alone still works',
   (await validateRequest(req({ cookie: `session_token=${SESSION}` }), null)).outcome.username,
   'cookie-session-user',
+);
+check(
+  'device cookie alone still works',
+  (await validateRequest(req({ cookie: `device_token=${DEVICE}` }), null)).outcome.username,
+  'cookie-device-user',
 );
 
 // ?auth= is what native clients use; ?token= is what the colloquium WS uses.
