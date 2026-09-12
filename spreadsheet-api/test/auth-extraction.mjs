@@ -24,7 +24,7 @@ const DEVICE  = 'b'.repeat(64);
 process.env.INSTRUMENTA_AUTH_LIB =
     new URL('../../../instrumenta-auth/src/server/index.js', import.meta.url).href;
 
-const { extractToken, extractTokens, firstAccepted, AUTH_EXPIRED } = await import('../auth.js');
+const { extractToken, extractTokens, firstAccepted, authFailure, AUTH_EXPIRED } = await import('../auth.js');
 
 const req = ({ authorization, cookie } = {}) => ({
     headers: { ...(authorization ? { authorization } : {}), ...(cookie ? { cookie } : {}) },
@@ -166,6 +166,28 @@ check('and is not reported as a rejection', fault.error?.message, 'HTTP_500');
 const none = await firstAccepted([], accepting(SESSION));
 check('nothing offered means nothing tried', none.tried, 0);
 check('and no error to report', none.error, null);
+
+// --- the status that goes back on the wire ---------------------------------
+//
+// The walk decides why no credential worked; this decides what the caller is
+// told. Only a rejection may be a 401 — the rule the whole system runs on
+// (AUTH.md §6). Every failed walk used to return 401, and the ledger apps sign
+// the user out on 401, so Scriptorium returning a 500 destroyed a credential
+// that was still perfectly good.
+
+const rejected = authFailure(all.error);
+check('a rejection is a 401', rejected.status, 401);
+check('  with a body the shared client reads as Unauthorized', rejected.message, 'Unauthorized');
+check('  and nothing to retry against', rejected.retryAfter, null);
+
+const faulted = authFailure(fault.error);
+check('a fault is a 503, not a 401', faulted.status, 503);
+check('  naming the upstream reason', faulted.message, 'Scriptorium unavailable: HTTP_500');
+check('  with a Retry-After so retries are not immediate', faulted.retryAfter, 5);
+
+// firstAccepted() reports null when there was nothing to try at all. That is
+// still "we could not check", never "your credential is bad".
+check('no error at all is still not a rejection', authFailure(none.error).status, 503);
 
 // The end-to-end shape of the ledger failure: a dead session cookie sitting
 // beside a good device cookie. Extraction offers both, the walk rejects the

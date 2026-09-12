@@ -124,4 +124,33 @@ export async function firstAccepted(credentials, attempt) {
     return { credential: null, value: null, error: lastError, tried };
 }
 
+/**
+ * Map a failed credential walk to the response route() should send.
+ *
+ * Only a rejection is a 401. Everything else firstAccepted() can hand back —
+ * upstream 5xx, timeout, refused connection — is a fault, and a fault is a 503
+ * (AUTH.md §6). Dressing one as the other is not a cosmetic difference: the
+ * ledger apps sign the user out on 401, so reporting "Scriptorium is unwell"
+ * as "your credential is bad" destroyed a working credential.
+ *
+ * Kept here rather than inline in route() for the same reason firstAccepted()
+ * is: so the distinction can be tested without an HTTP server or an upstream
+ * connection to fail.
+ *
+ * @param {Error|null} error  Whatever firstAccepted() stopped on.
+ * @returns {{status: number, message: string, retryAfter: number|null}}
+ */
+export function authFailure(error) {
+    if (error?.message === AUTH_EXPIRED) {
+        return { status: 401, message: 'Unauthorized', retryAfter: null };
+    }
+    return {
+        status: 503,
+        message: `Scriptorium unavailable: ${error?.message ?? 'unknown'}`,
+        // Without this a client that just got a 503 retries immediately, and
+        // several of them retrying is how a blip becomes an outage.
+        retryAfter: 5,
+    };
+}
+
 export { AUTH_EXPIRED };

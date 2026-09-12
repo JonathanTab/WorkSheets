@@ -32,7 +32,7 @@ import { SpreadsheetClient } from './SpreadsheetClient.js';
 // auth.js reads INSTRUMENTA_AUTH_LIB at module scope too, and the loader used
 // to live in this file's body, i.e. after both of them had already run.
 import './env.js';
-import { extractTokens, firstAccepted } from './auth.js';
+import { extractTokens, firstAccepted, authFailure } from './auth.js';
 import { parseFormula } from '../src/formulas/parser.js';
 import { evaluate } from '../src/formulas/evaluator.js';
 import * as ops from '../src/stores/spreadsheet/ops/index.js';
@@ -241,7 +241,13 @@ async function route(req, res) {
     // here has left nothing behind to poison the next attempt.
     const accepted = await firstAccepted(credentials, getClient);
     if (!accepted.value) {
-        return json(res, 401, { error: `Scriptorium auth failed: ${accepted.error?.message ?? 'unknown'}` });
+        // firstAccepted() walks past a rejection and stops at anything else,
+        // because a fault would meet every remaining credential too. So the
+        // error already carries the distinction the status code must preserve;
+        // authFailure() is that mapping, and it is tested on its own.
+        const { status, message, retryAfter } = authFailure(accepted.error);
+        if (retryAfter) res.setHeader('Retry-After', String(retryAfter));
+        return json(res, status, { error: message });
     }
     // Named apiKey because that is what it became downstream — a credential of
     // any of the three kinds, offered as a bearer or as a cookie.
